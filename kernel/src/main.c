@@ -8,6 +8,8 @@
 #include "panic.h"
 #include "idt.h"
 #include "console.h"
+#include "pic.h"
+#include "pit.h"
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -55,15 +57,12 @@ int memcmp(const void *s1, const void *s2, size_t n) {
     return 0;
 }
 
-__attribute__((noreturn))
-static void hcf(void) { for (;;) __asm__ __volatile__("hlt"); }
 
 static void pic_mask_all(void) {
     outb(0x21, 0xFF);
     outb(0xA1, 0xFF);
 }
 
-__attribute__((noreturn))
 void kmain(void) {
     __asm__ __volatile__("cli");
 
@@ -95,22 +94,37 @@ void kmain(void) {
 
     serial_write("FiFi OS: calling idt_init...\n");
     idt_init();
+    serial_write("FiFi OS: remapping PIC...\n");
+    pic_remap(0x20, 0x28);
+
+    /* Mask everything, then allow only IRQ0 (timer) */
+    pic_disable();
+    pic_clear_mask(0);
+
+    serial_write("FiFi OS: init PIT 100Hz...\n");
+    pit_init(100);
+
+    serial_write("FiFi OS: enabling interrupts (sti)\n");
+    __asm__ volatile ("sti");
+
+
     serial_write("FiFi OS: IDT loaded\n");
     console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
 
-    /* TEMP test: remove after confirmed */
-    serial_write("FiFi OS: IDT loaded\n");
-    console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
+    serial_write("FiFi OS: entering idle loop (hlt)\n");
 
-    console_write("Scrolling test:\n");
-    for (int i = 1; i <= 80; i++) {
-        console_write("Line ");
-        /* super simple number print (two digits max for now) */
-        if (i >= 10) console_putc('0' + (i / 10));
-        console_putc('0' + (i % 10));
-        console_write(" - FiFi OS boot log on screen\n");
+    uint64_t start = pit_ticks();
+    while ((pit_ticks() - start) < 100) {
+        __asm__ volatile ("hlt");
+    }
+    serial_write("FiFi OS: timer confirmed\n");
+
+    for (;;) {
+        __asm__ volatile ("hlt");
+        (void)pit_ticks();
     }
 
-    hcf();
+
+
 }
 

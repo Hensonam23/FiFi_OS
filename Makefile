@@ -25,7 +25,10 @@ OBJS := \
 	$(BUILD)/main.o \
 	$(BUILD)/serial.o \
 	$(BUILD)/panic.o \
+        $(BUILD)/kprintf.o \
 	$(BUILD)/console.o \
+	$(BUILD)/pic.o \
+	$(BUILD)/pit.o \
 	$(BUILD)/idt.o \
 	$(BUILD)/isr.o \
 	$(BUILD)/isr_asm.o
@@ -93,3 +96,12 @@ run: iso
 
 clean:
 	rm -rf $(BUILD)
+
+$(BUILD)/pic.o: kernel/src/pic.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/pit.o: kernel/src/pit.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/kprintf.o: kernel/src/kprintf.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@

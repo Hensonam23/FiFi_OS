@@ -29,3 +29,30 @@ void serial_write(const char *s) {
         serial_write_char(s[i]);
     }
 }
+
+/* Debug helpers (used by early boot / IDT init) */
+static const char fifi_hexdigits[] = "0123456789ABCDEF";
+
+void print_hex_u16(uint16_t v) {
+    char buf[2 + 4 + 1];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 4; i++) {
+        int shift = (3 - i) * 4;
+        buf[2 + i] = fifi_hexdigits[(v >> shift) & 0xF];
+    }
+    buf[6] = '\0';
+    serial_write(buf);
+}
+
+void print_hex_u64(uint64_t v) {
+    char buf[2 + 16 + 1];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        int shift = (15 - i) * 4;
+        buf[2 + i] = fifi_hexdigits[(v >> shift) & 0xF];
+    }
+    buf[18] = '\0';
+    serial_write(buf);
+}
