@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <limine.h>
 #include "serial.h"
+#include "panic.h"
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -61,14 +62,12 @@ void kmain(void) {
     serial_write("FiFi OS: serial online\n");
 
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
-        serial_write("FiFi OS: limine base revision not supported\n");
-        hcf();
+        panic("limine base revision not supported");
     }
 
     if (!framebuffer_request.response ||
         framebuffer_request.response->framebuffer_count < 1) {
-        serial_write("FiFi OS: no framebuffer\n");
-        hcf();
+        panic("no framebuffer available");
     }
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];

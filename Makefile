@@ -18,7 +18,7 @@ CFLAGS := \
 
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
-OBJS := $(BUILD)/main.o $(BUILD)/serial.o
+OBJS := $(BUILD)/main.o $(BUILD)/serial.o $(BUILD)/panic.o
 
 .PHONY: all kernel iso clean run
 
@@ -31,6 +31,9 @@ $(BUILD)/main.o: kernel/src/main.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/panic.o: kernel/src/panic.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 kernel: $(KERNEL)
