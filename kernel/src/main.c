@@ -7,6 +7,7 @@
 #include "serial.h"
 #include "panic.h"
 #include "idt.h"
+#include "console.h"
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -86,28 +87,16 @@ void kmain(void) {
     }
     serial_write("FiFi OS: framebuffer OK\n");
 
+    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    console_init(fb);
+    console_write("FiFi OS framebuffer console online\n");
+    console_write("Next: real font + scrolling + colors\n\n");
+
     serial_write("FiFi OS: calling idt_init...\n");
     idt_init();
     serial_write("FiFi OS: IDT loaded\n");
+    console_write("IDT loaded. Exceptions will panic cleanly.\n");
 
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-    volatile uint32_t *pix = (volatile uint32_t *)fb->address;
-    uint64_t pitch32 = fb->pitch / 4;
-    uint64_t w = fb->width;
-    uint64_t h = fb->height;
-
-    for (uint64_t y = 0; y < h; y++)
-        for (uint64_t x = 0; x < w; x++)
-            pix[y * pitch32 + x] = 0x00202020;
-
-    uint64_t box = 240;
-    uint64_t sx = (w > box) ? (w - box) / 2 : 0;
-    uint64_t sy = (h > box) ? (h - box) / 2 : 0;
-
-    for (uint64_t y = 0; y < box && (sy + y) < h; y++)
-        for (uint64_t x = 0; x < box && (sx + x) < w; x++)
-            pix[(sy + y) * pitch32 + (sx + x)] = 0x00FF00FF;
-
-    serial_write("FiFi OS: framebuffer test drawn\n");
+    /* keep running */
     hcf();
 }
