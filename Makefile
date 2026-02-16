@@ -18,7 +18,7 @@ CFLAGS := \
 
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
-OBJS := $(BUILD)/main.o
+OBJS := $(BUILD)/main.o $(BUILD)/serial.o
 
 .PHONY: all kernel iso clean run
 
@@ -28,6 +28,9 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/main.o: kernel/src/main.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 kernel: $(KERNEL)
@@ -44,10 +47,10 @@ $(ISO): $(KERNEL) limine.conf
 	cp $(KERNEL) $(ISO_ROOT)/boot/$(OUTPUT)
 	cp limine.conf $(ISO_ROOT)/limine.conf
 
-	cp $(LIMINE_DIR)/limine-bios.sys     $(ISO_ROOT)/
-	cp $(LIMINE_DIR)/limine-bios-cd.bin  $(ISO_ROOT)/
-	cp $(LIMINE_DIR)/limine-uefi-cd.bin  $(ISO_ROOT)/
-	cp $(LIMINE_DIR)/BOOTX64.EFI         $(ISO_ROOT)/EFI/BOOT/
+	cp $(LIMINE_DIR)/limine-bios.sys      $(ISO_ROOT)/
+	cp $(LIMINE_DIR)/limine-bios-cd.bin   $(ISO_ROOT)/
+	cp $(LIMINE_DIR)/limine-uefi-cd.bin   $(ISO_ROOT)/
+	cp $(LIMINE_DIR)/BOOTX64.EFI          $(ISO_ROOT)/EFI/BOOT/
 
 	xorriso -as mkisofs -R -r -J \
 		-b limine-bios-cd.bin \
@@ -61,6 +64,7 @@ $(ISO): $(KERNEL) limine.conf
 	limine bios-install $(ISO)
 
 run: iso
-	qemu-system-x86_64 -m 1024 -cdrom $(ISO)
+	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial stdio
+
 clean:
 	rm -rf $(BUILD)
