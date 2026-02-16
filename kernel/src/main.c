@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <limine.h>
-
+#include "kprintf.h"
 #include "io.h"
 #include "serial.h"
 #include "panic.h"
@@ -27,7 +27,7 @@ static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
-/* Minimal libc bits */
+/* Minimal libc bits (temporary; we will move these into their own file soon) */
 void *memcpy(void *restrict dest, const void *restrict src, size_t n) {
     uint8_t *restrict d = (uint8_t *)dest;
     const uint8_t *restrict s = (const uint8_t *)src;
@@ -70,7 +70,6 @@ void kmain(void) {
     serial_init();
     serial_write("FiFi OS: serial online\n");
     serial_write("FiFi OS: interrupts disabled (cli)\n");
-
     pic_mask_all();
     serial_write("FiFi OS: PIC masked (no hardware IRQs)\n");
 
@@ -89,14 +88,29 @@ void kmain(void) {
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     console_init(fb);
+    kprintf("kprintf test: num=%d hex=%x ptr=%p str=%s char=%c\n",
+        -123, 0xBEEF, (void*)0xFFFFFFFF80000000ULL, "ok", '!');
     console_write("FiFi OS framebuffer console online\n");
-    console_write("Next: real font + scrolling + colors\n\n");
+    console_write("Real font enabled. Scrolling enabled.\n\n");
 
     serial_write("FiFi OS: calling idt_init...\n");
     idt_init();
     serial_write("FiFi OS: IDT loaded\n");
-    console_write("IDT loaded. Exceptions will panic cleanly.\n");
+    console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
 
-    /* keep running */
+    /* TEMP test: remove after confirmed */
+    serial_write("FiFi OS: IDT loaded\n");
+    console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
+
+    console_write("Scrolling test:\n");
+    for (int i = 1; i <= 80; i++) {
+        console_write("Line ");
+        /* super simple number print (two digits max for now) */
+        if (i >= 10) console_putc('0' + (i / 10));
+        console_putc('0' + (i % 10));
+        console_write(" - FiFi OS boot log on screen\n");
+    }
+
     hcf();
 }
+
