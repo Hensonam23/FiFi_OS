@@ -13,12 +13,22 @@ CFLAGS := \
 	-std=c11 -O2 -pipe -Wall -Wextra \
 	-ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin \
 	-mno-red-zone -mcmodel=kernel \
-	--target=x86_64-elf \
-	-Ikernel/include
+        -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize \
+        --target=x86_64-elf \
+	-Ikernel/include \
+	-Ikernel/arch/x86_64/idt
+
+ASFLAGS := --target=x86_64-elf
 
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
-OBJS := $(BUILD)/main.o $(BUILD)/serial.o $(BUILD)/panic.o
+OBJS := \
+	$(BUILD)/main.o \
+	$(BUILD)/serial.o \
+	$(BUILD)/panic.o \
+	$(BUILD)/idt.o \
+	$(BUILD)/isr.o \
+	$(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
 
@@ -35,6 +45,15 @@ $(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
 
 $(BUILD)/panic.o: kernel/src/panic.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/idt.o: kernel/arch/x86_64/idt/idt.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/isr.o: kernel/arch/x86_64/idt/isr.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/isr_asm.o: kernel/arch/x86_64/idt/isr.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
 
 kernel: $(KERNEL)
 
@@ -67,7 +86,7 @@ $(ISO): $(KERNEL) limine.conf
 	limine bios-install $(ISO)
 
 run: iso
-	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial stdio
+	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial stdio -no-reboot -no-shutdown
 
 clean:
 	rm -rf $(BUILD)

@@ -1,40 +1,56 @@
-OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(kmain)
 
-PHDRS {
-    limine_requests PT_LOAD;
-    text            PT_LOAD;
-    rodata          PT_LOAD;
-    data            PT_LOAD;
+PHDRS
+{
+  all PT_LOAD FLAGS(7); /* R + W + X (temporary bring-up) */
 }
 
-SECTIONS {
-    . = 0xffffffff80000000;
+SECTIONS
+{
+  . = 0xffffffff80000000;
 
-    .limine_requests : {
-        KEEP(*(.limine_requests_start))
-        KEEP(*(.limine_requests))
-        KEEP(*(.limine_requests_end))
-    } :limine_requests
+  .text : ALIGN(0x1000)
+  {
+    *(.text .text.*)
+  } :all
 
-    . = ALIGN(CONSTANT(MAXPAGESIZE));
-    .text : { *(.text .text.*) } :text
+  .rodata : ALIGN(0x1000)
+  {
+    *(.rodata .rodata.*)
+  } :all
 
-    . = ALIGN(CONSTANT(MAXPAGESIZE));
-    .rodata : { *(.rodata .rodata.*) } :rodata
+  /* Keep Limine request sections intact */
+  .limine_requests_start : ALIGN(8)
+  {
+    KEEP(*(.limine_requests_start))
+  } :all
 
-    .note.gnu.build-id : { *(.note.gnu.build-id) } :rodata
+  .limine_requests : ALIGN(8)
+  {
+    KEEP(*(.limine_requests))
+    KEEP(*(.limine_requests.*))
+  } :all
 
-    . = ALIGN(CONSTANT(MAXPAGESIZE));
-    .data : { *(.data .data.*) } :data
+  .limine_requests_end : ALIGN(8)
+  {
+    KEEP(*(.limine_requests_end))
+  } :all
 
-    .bss : {
-        *(.bss .bss.*)
-        *(COMMON)
-    } :data
+  .data : ALIGN(0x1000)
+  {
+    *(.data .data.*)
+  } :all
 
-    /DISCARD/ : {
-        *(.eh_frame*)
-        *(.note .note.*)
-    }
+  .bss : ALIGN(0x1000)
+  {
+    *(COMMON)
+    *(.bss .bss.*)
+  } :all
+
+  /DISCARD/ :
+  {
+    *(.eh_frame*)
+    *(.note .note.*)
+    *(.comment)
+  }
 }
