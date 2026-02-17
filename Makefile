@@ -22,16 +22,17 @@ ASFLAGS := --target=x86_64-elf
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
 OBJS := \
-	$(BUILD)/main.o \
-	$(BUILD)/serial.o \
-	$(BUILD)/panic.o \
-        $(BUILD)/kprintf.o \
-	$(BUILD)/console.o \
-	$(BUILD)/pic.o \
-	$(BUILD)/pit.o \
-	$(BUILD)/idt.o \
-	$(BUILD)/isr.o \
-	$(BUILD)/isr_asm.o
+     $(BUILD)/main.o \
+     $(BUILD)/serial.o \
+     $(BUILD)/keyboard.o \
+     $(BUILD)/panic.o \
+     $(BUILD)/kprintf.o \
+     $(BUILD)/console.o \
+     $(BUILD)/pic.o \
+     $(BUILD)/pit.o \
+     $(BUILD)/idt.o \
+     $(BUILD)/isr.o \
+     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
 
@@ -44,6 +45,10 @@ $(BUILD)/main.o: kernel/src/main.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+
+$(BUILD)/keyboard.o: kernel/src/keyboard.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/panic.o: kernel/src/panic.c | $(BUILD)

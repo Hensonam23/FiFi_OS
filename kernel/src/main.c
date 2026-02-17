@@ -100,6 +100,7 @@ void kmain(void) {
     /* Mask everything, then allow only IRQ0 (timer) */
     pic_disable();
     pic_clear_mask(0);
+    pic_clear_mask(1);
 
     serial_write("FiFi OS: init PIT 100Hz...\n");
     pit_init(100);
