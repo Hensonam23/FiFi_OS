@@ -25,6 +25,9 @@ OBJS := \
      $(BUILD)/main.o \
      $(BUILD)/serial.o \
      $(BUILD)/keyboard.o \
+     $(BUILD)/pmm.o \
+     $(BUILD)/heap.o \
+     $(BUILD)/vmm.o \
      $(BUILD)/panic.o \
      $(BUILD)/kprintf.o \
      $(BUILD)/console.o \
@@ -49,6 +52,15 @@ $(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
 
 
 $(BUILD)/keyboard.o: kernel/src/keyboard.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/pmm.o: kernel/src/pmm.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/heap.o: kernel/src/heap.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/vmm.o: kernel/src/vmm.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/panic.o: kernel/src/panic.c | $(BUILD)

@@ -11,6 +11,9 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "pmm.h"
+#include "heap.h"
+#include "vmm.h"
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -27,6 +30,14 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0
+};
+
+
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_hhdm_request hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST_ID,
     .revision = 0
 };
 
@@ -121,6 +132,55 @@ void kmain(void) {
         -123, 0xBEEF, (void*)0xFFFFFFFF80000000ULL, "ok", '!');
     console_write("FiFi OS framebuffer console online\n");
     console_write("Real font enabled. Scrolling enabled.\n\n");
+
+    /* FiFi OS: hhdm offset */
+    serial_write("FiFi OS: hhdm offset...\n");
+    if (!hhdm_request.response) {
+        serial_write("FiFi OS: hhdm missing\n");
+    } else {
+        uint64_t off = hhdm_request.response->offset;
+        kprintf("HHDM offset: %p\n", (void*)(uintptr_t)off);
+    }
+
+    /* FiFi OS: init PMM (simple bump allocator) */
+    uint64_t hhdm_off = 0;
+    if (hhdm_request.response) {
+        hhdm_off = hhdm_request.response->offset;
+    }
+    pmm_init(memmap_request.response, hhdm_off);
+
+    heap_init();
+    vmm_init(hhdm_off);
+    /* VMM map test */
+    uint64_t test_phys = pmm_alloc_page();
+    uint64_t test_virt = 0xFFFF900000000000ULL;
+    if (!test_phys) {
+        serial_write("FiFi OS: VMM test alloc failed\n");
+    } else {
+        bool ok = vmm_map_page(test_virt, test_phys, (1ULL<<1)); /* RW */
+        if (!ok) {
+            serial_write("FiFi OS: VMM map failed\n");
+        } else {
+            volatile uint64_t *x = (volatile uint64_t*)test_virt;
+            *x = 0x1122334455667788ULL;
+            kprintf("VMM test: virt=%p phys=%p val=%p\n", (void*)test_virt, (void*)test_phys, (void*)(*x));
+            uint64_t back = vmm_virt_to_phys(test_virt);
+            kprintf("VMM translate: %p -> %p\n", (void*)test_virt, (void*)back);
+        }
+    }
+
+    void *a = kmalloc(32);
+    void *b = kmalloc_aligned(64, 64);
+    void *c = kzalloc(128);
+    kprintf("Heap test: a=%p b=%p c=%p\n", a, b, c);
+
+    uint64_t page = pmm_alloc_page();
+    void *vpage = pmm_phys_to_virt(page);
+    kprintf("PMM alloc: phys=%p virt=%p\n", (void*)page, vpage);
+    if (vpage) {
+        *(volatile uint64_t*)vpage = 0x1122334455667788ULL;
+        kprintf("PMM write test: %p\n", (void*)(uintptr_t)*(volatile uint64_t*)vpage);
+    }
 
     serial_write("FiFi OS: calling idt_init...\n");
     idt_init();
