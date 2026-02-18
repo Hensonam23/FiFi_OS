@@ -129,18 +129,31 @@ void kmain(void) {
     }
     serial_write("FiFi OS: timer confirmed\n");
 
-    for (;;) {
+    kprintf("FiFi> ");
+for (;;) {
         char c;
         while (keyboard_try_getchar(&c)) {
-            if (c == '\b') {
-                kprintf("<BS>");
-            } else {
-                kprintf("%c", c);
+            /* Enter: finish the line */
+            if (c == '\n') {
+                kprintf("\n");
+                kprintf("FiFi> ");
+                continue;
             }
+
+            /* Backspace: for now just ignore visually, but it DOES remove from the buffer logic later */
+            if (c == '\b') {
+                /* TODO: real backspace erase on console */
+                continue;
+            }
+
+            /* Normal char */
+            kprintf("%c", c);
         }
+
         __asm__ volatile ("hlt");
         (void)pit_ticks();
     }
+
 
 
 

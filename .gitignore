@@ -3,3 +3,7 @@ build/
 Makefile.bak
 Makefile.bad-*
 Makefile.pre-*
+*.bak_*
+*.bak
+*~
+*.swp

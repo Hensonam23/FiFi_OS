@@ -3,41 +3,46 @@
 
 #include "keyboard.h"
 
-static bool shift_down = false;
+/* --- ring buffer for cooked chars (ASCII) --- */
+#define KBD_BUF_SIZE 256u
+#define KBD_MASK     (KBD_BUF_SIZE - 1u)
 
-/* tiny ring buffer for chars (IRQ writes, main reads) */
-static volatile char kbd_buf[256];
-static volatile uint8_t kbd_head = 0;
-static volatile uint8_t kbd_tail = 0;
+static volatile uint32_t head = 0;
+static volatile uint32_t tail = 0;
+static char buf[KBD_BUF_SIZE];
 
 static inline void kbd_push(char c) {
-    uint8_t next = (uint8_t)(kbd_head + 1);
-    if (next == kbd_tail) {
-        /* full, drop */
+    uint32_t h = head;
+    uint32_t next = (h + 1u) & KBD_MASK;
+    if (next == tail) {
+        /* buffer full: drop */
         return;
     }
-    kbd_buf[kbd_head] = c;
-    kbd_head = next;
+    buf[h] = c;
+    head = next;
 }
 
-int keyboard_try_getchar(char *out) {
-    if (!out) return 0;
+bool keyboard_try_getchar(char *out) {
+    if (!out) return false;
 
-    /* prevent IRQ from modifying head/tail mid-pop */
+    /* protect against IRQ writing head while we pop */
     __asm__ volatile ("cli");
-    if (kbd_tail == kbd_head) {
-        __asm__ volatile ("sti");
-        return 0;
-    }
-    char c = kbd_buf[kbd_tail];
-    kbd_tail = (uint8_t)(kbd_tail + 1);
-    __asm__ volatile ("sti");
 
-    *out = c;
-    return 1;
+    if (tail == head) {
+        __asm__ volatile ("sti");
+        return false;
+    }
+
+    *out = buf[tail];
+    tail = (tail + 1u) & KBD_MASK;
+
+    __asm__ volatile ("sti");
+    return true;
 }
 
-/* Scancode Set 1 -> ASCII (US QWERTY) */
+/* --- state + keymaps (Set 1, US QWERTY) --- */
+static bool shift_down = false;
+
 static const char keymap[128] = {
     [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
     [0x06] = '5', [0x07] = '6', [0x08] = '7', [0x09] = '8',
@@ -85,6 +90,7 @@ static const char keymap_shift[128] = {
 };
 
 void keyboard_on_scancode(uint8_t sc) {
+    /* ignore extended prefixes for now */
     if (sc == 0xE0 || sc == 0xE1) return;
 
     /* shift press/release */
@@ -97,5 +103,6 @@ void keyboard_on_scancode(uint8_t sc) {
     char c = shift_down ? keymap_shift[sc] : keymap[sc];
     if (!c) return;
 
+    /* push cooked char for main loop to print */
     kbd_push(c);
 }
