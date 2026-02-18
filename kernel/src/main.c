@@ -10,6 +10,7 @@
 #include "console.h"
 #include "pic.h"
 #include "pit.h"
+#include "keyboard.h"
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -116,11 +117,27 @@ void kmain(void) {
 
     uint64_t start = pit_ticks();
     while ((pit_ticks() - start) < 100) {
+        char c;
+        while (keyboard_try_getchar(&c)) {
+            if (c == '\b') {
+                kprintf("<BS>");
+            } else {
+                kprintf("%c", c);
+            }
+        }
         __asm__ volatile ("hlt");
     }
     serial_write("FiFi OS: timer confirmed\n");
 
     for (;;) {
+        char c;
+        while (keyboard_try_getchar(&c)) {
+            if (c == '\b') {
+                kprintf("<BS>");
+            } else {
+                kprintf("%c", c);
+            }
+        }
         __asm__ volatile ("hlt");
         (void)pit_ticks();
     }
