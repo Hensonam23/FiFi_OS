@@ -49,6 +49,27 @@ static const char *exc_names[32] = {
 };
 
 void isr_common_handler(isr_ctx_t *ctx) {
+    /* Step 8: Page fault (#PF) decoder */
+    if (ctx->vector == 14) {
+        uint64_t cr2 = 0;
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+        uint64_t err = ctx->error;
+
+        kprintf("\nFiFi OS: PAGE FAULT\n");
+        kprintf("CR2=%p err=%p\n", (void*)cr2, (void*)err);
+        kprintf("cause: %s %s %s %s %s\n",
+            (err & 1) ? "PROT"  : "NP",
+            (err & 2) ? "WRITE" : "READ",
+            (err & 4) ? "USER"  : "KERN",
+            (err & 8) ? "RSVD"  : "-",
+            (err & 16)? "INSTR" : "-"
+        );
+
+        panic("page fault");
+    }
+
+
     uint64_t vec = ctx->vector;
 
     /* IRQs after PIC remap live at vectors 32-47 */

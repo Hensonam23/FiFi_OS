@@ -7,3 +7,7 @@ Makefile.pre-*
 *.bak
 *~
 *.swp
+
+# local backup files
+*.bak
+*.bak_*

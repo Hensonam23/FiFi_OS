@@ -111,3 +111,34 @@ uint64_t vmm_virt_to_phys(uint64_t virt) {
     uint64_t phys = (e4 & ~0xFFFULL) | (virt & 0xFFFULL);
     return phys;
 }
+
+void vmm_invlpg(uint64_t virt) {
+    __asm__ volatile ("invlpg (%0)" :: "r"((void*)virt) : "memory");
+}
+
+void vmm_flush_tlb(void) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
+}
+
+bool vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
+    const uint64_t PAGE = 0x1000;
+    uint64_t off = 0;
+
+    /* align down */
+    uint64_t v = virt & ~(PAGE - 1);
+    uint64_t paddr = phys & ~(PAGE - 1);
+
+    /* round size up to pages */
+    uint64_t end = (size + (PAGE - 1)) & ~(PAGE - 1);
+
+    while (off < end) {
+        if (!vmm_map_page(v + off, paddr + off, flags)) {
+            return 0;
+        }
+        off += PAGE;
+    }
+
+    return 1;
+}

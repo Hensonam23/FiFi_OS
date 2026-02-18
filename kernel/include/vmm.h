@@ -9,3 +9,8 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 /* Translate a virtual address to physical. Returns 0 if unmapped. */
 uint64_t vmm_virt_to_phys(uint64_t virt);
+/* Step 8 helpers */
+void vmm_invlpg(uint64_t virt);
+void vmm_flush_tlb(void);
+bool vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
+
