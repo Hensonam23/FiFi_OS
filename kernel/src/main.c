@@ -23,6 +23,13 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 0
 };
 
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_memmap_request memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0
+};
+
 /* Required request markers */
 __attribute__((used, section(".limine_requests_start")))
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
@@ -86,8 +93,30 @@ void kmain(void) {
     }
     serial_write("FiFi OS: framebuffer OK\n");
 
+
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     console_init(fb);
+
+    /* FiFi OS: memmap summary (after console_init so kprintf works) */
+    console_write("\nFiFi OS: memmap summary...\n");
+    if (!memmap_request.response) {
+        console_write("FiFi OS: memmap missing\n");
+    } else {
+        uint64_t usable = 0;
+        uint64_t count = memmap_request.response->entry_count;
+
+        for (uint64_t i = 0; i < count; i++) {
+            struct limine_memmap_entry *e = memmap_request.response->entries[i];
+            if (e->type == LIMINE_MEMMAP_USABLE) {
+                usable += e->length;
+            }
+        }
+
+        kprintf("Memory usable: %p MiB (entries=%p)\n",
+                (void*)(usable / (1024 * 1024)),
+                (void*)count);
+    }
+
     kprintf("kprintf test: num=%d hex=%x ptr=%p str=%s char=%c\n",
         -123, 0xBEEF, (void*)0xFFFFFFFF80000000ULL, "ok", '!');
     console_write("FiFi OS framebuffer console online\n");
@@ -112,50 +141,18 @@ void kmain(void) {
 
     serial_write("FiFi OS: IDT loaded\n");
     console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
+    kprintf("FiFi> ");
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");
 
     uint64_t start = pit_ticks();
-    while ((pit_ticks() - start) < 100) {
-        char c;
-        while (keyboard_try_getchar(&c)) {
-            if (c == '\b') {
-                kprintf("<BS>");
-            } else {
-                kprintf("%c", c);
-            }
-        }
+    while ((pit_ticks() - start) < 100) {        }
         __asm__ volatile ("hlt");
-    }
+    
     serial_write("FiFi OS: timer confirmed\n");
-
-    kprintf("FiFi> ");
-for (;;) {
-        char c;
-        while (keyboard_try_getchar(&c)) {
-            /* Enter: finish the line */
-            if (c == '\n') {
-                kprintf("\n");
-                kprintf("FiFi> ");
-                continue;
-            }
-
-            /* Backspace: for now just ignore visually, but it DOES remove from the buffer logic later */
-            if (c == '\b') {
-                /* TODO: real backspace erase on console */
-                continue;
-            }
-
-            /* Normal char */
-            kprintf("%c", c);
-        }
-
+    serial_write("FiFi OS: entering idle loop (hlt)\n");
+    for (;;) {
         __asm__ volatile ("hlt");
         (void)pit_ticks();
     }
-
-
-
-
 }
-

@@ -2,45 +2,8 @@
 #include <stdbool.h>
 
 #include "keyboard.h"
+#include "kprintf.h"
 
-/* --- ring buffer for cooked chars (ASCII) --- */
-#define KBD_BUF_SIZE 256u
-#define KBD_MASK     (KBD_BUF_SIZE - 1u)
-
-static volatile uint32_t head = 0;
-static volatile uint32_t tail = 0;
-static char buf[KBD_BUF_SIZE];
-
-static inline void kbd_push(char c) {
-    uint32_t h = head;
-    uint32_t next = (h + 1u) & KBD_MASK;
-    if (next == tail) {
-        /* buffer full: drop */
-        return;
-    }
-    buf[h] = c;
-    head = next;
-}
-
-bool keyboard_try_getchar(char *out) {
-    if (!out) return false;
-
-    /* protect against IRQ writing head while we pop */
-    __asm__ volatile ("cli");
-
-    if (tail == head) {
-        __asm__ volatile ("sti");
-        return false;
-    }
-
-    *out = buf[tail];
-    tail = (tail + 1u) & KBD_MASK;
-
-    __asm__ volatile ("sti");
-    return true;
-}
-
-/* --- state + keymaps (Set 1, US QWERTY) --- */
 static bool shift_down = false;
 
 static const char keymap[128] = {
@@ -90,19 +53,31 @@ static const char keymap_shift[128] = {
 };
 
 void keyboard_on_scancode(uint8_t sc) {
-    /* ignore extended prefixes for now */
     if (sc == 0xE0 || sc == 0xE1) return;
 
-    /* shift press/release */
     if (sc == 0x2A || sc == 0x36) { shift_down = true;  return; }
     if (sc == 0xAA || sc == 0xB6) { shift_down = false; return; }
 
-    /* ignore releases */
-    if (sc & 0x80) return;
+    if (sc & 0x80) return; /* ignore releases */
 
     char c = shift_down ? keymap_shift[sc] : keymap[sc];
     if (!c) return;
 
-    /* push cooked char for main loop to print */
-    kbd_push(c);
+    /* Backspace later. For now: ignore or show tag. */
+    if (c == '\b') { kprintf("<BS>"); return; }
+
+    if (c == '\n') {
+
+
+        kprintf("\nFiFi> ");
+
+
+        return;
+
+
+    }
+
+
+
+    kprintf("%c", c);
 }
