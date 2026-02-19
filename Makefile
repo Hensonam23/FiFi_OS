@@ -132,3 +132,18 @@ endif
 ifeq ($(VMM_TEST),1)
 CFLAGS += -DFIFI_VMM_API_TEST=1
 endif
+
+# Optional heap tests (off by default)
+ifeq ($(HEAP_TEST),1)
+CFLAGS += -DFIFI_HEAP_TEST=1
+endif
+
+# Optional heap overflow/guard-page fault test (requires HEAP_TEST=1)
+ifeq ($(HEAP_OVF),1)
+CFLAGS += -DFIFI_HEAP_OVF_TEST=1
+endif
+
+# Optional heap poisoning (debug)
+ifeq ($(HEAP_POISON),1)
+CFLAGS += -DFIFI_HEAP_POISON=1
+endif
