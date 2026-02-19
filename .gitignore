@@ -15,3 +15,21 @@ Makefile.pre-*
 # local backups
 *.bak
 *.bak_*
+
+# local backup / scratch files
+*.bak
+*.bak_*
+*.swp
+*.swo
+
+# ---- FiFi OS build outputs ----
+build/
+*.iso
+
+# generated initrd archive (keep the source files in initrd/rootfs/)
+initrd/initrd.cpio
+
+# local safety backups created by scripts
+*.bak
+*.bak_*
+*.orig

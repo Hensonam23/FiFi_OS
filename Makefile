@@ -35,6 +35,7 @@ OBJS := \
      $(BUILD)/pit.o \
      $(BUILD)/idt.o \
      $(BUILD)/isr.o \
+	build/initrd.o \
      $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -97,6 +98,8 @@ $(ISO): $(KERNEL) limine.conf
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin   $(ISO_ROOT)/
 	cp $(LIMINE_DIR)/BOOTX64.EFI          $(ISO_ROOT)/EFI/BOOT/
 
+	python3 tools/mkcpio.py initrd/rootfs initrd/initrd.cpio
+	cp initrd/initrd.cpio $(ISO_ROOT)/boot/initrd.cpio
 	xorriso -as mkisofs -R -r -J \
 		-b limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
@@ -147,3 +150,7 @@ endif
 ifeq ($(HEAP_POISON),1)
 CFLAGS += -DFIFI_HEAP_POISON=1
 endif
+
+# initrd module object
+build/initrd.o: kernel/src/initrd.c
+	$(CC) $(CFLAGS) -c $< -o $@

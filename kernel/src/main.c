@@ -14,6 +14,9 @@
 #include "pmm.h"
 #include "heap.h"
 #include "vmm.h"
+#include "initrd.h"
+
+static void shell_run(void);
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -103,6 +106,9 @@ void kmain(void) {
         panic("no framebuffer available");
     }
     serial_write("FiFi OS: framebuffer OK\n");
+    initrd_init();
+    initrd_ls();
+    initrd_cat("hello.txt");
 
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
@@ -209,7 +215,10 @@ void kmain(void) {
     (void)x;
 #endif
 
-    kprintf("FiFi> ");
+    initrd_init();
+    initrd_ls();
+    initrd_cat("hello.txt");
+    shell_run();
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");
 
@@ -222,5 +231,163 @@ void kmain(void) {
     for (;;) {
         __asm__ volatile ("hlt");
         (void)pit_ticks();
+    }
+}
+
+
+// -------------------- Simple FiFi shell --------------------
+int keyboard_try_getchar(void); // from keyboard.c
+
+static inline void cpu_hlt(void) {
+    __asm__ __volatile__("hlt");
+}
+
+static inline void cpu_cli(void) {
+    __asm__ __volatile__("cli");
+}
+
+
+static void shell_print_prompt(void) {
+    kprintf("FiFi> ");
+}
+
+static int streq_simple(const char *a, const char *b) {
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return (*a == 0 && *b == 0);
+}
+
+static void shell_help(void) {
+    kprintf("\nCommands:\n");
+    kprintf("  help             show this list\n");
+    kprintf("  clear            clear screen (fallback: prints newlines)\n");
+    kprintf("  ls               list initrd files\n");
+    kprintf("  cat <file>       print an initrd file\n");
+    kprintf("  motd             show motd.txt from initrd\n");
+    kprintf("  modules          list limine modules (includes initrd)\n");
+    kprintf("  reboot           reboot (port 0x64)\n");
+    kprintf("  halt             stop CPU\n");
+    kprintf("\n");
+}
+
+
+static void shell_exec(char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line == 0) return;
+
+    // tokenize by spaces/tabs
+    char *argv[8];
+    int argc = 0;
+
+    char *p = line;
+    while (*p && argc < 8) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        if (*p) { *p = 0; p++; }
+    }
+
+    if (argc == 0) return;
+
+    if (streq_simple(argv[0], "help")) {
+        shell_help();
+        return;
+    }
+
+    if (streq_simple(argv[0], "clear")) {
+        // If you later add a real console_clear(), swap this out.
+        for (int i = 0; i < 60; i++) kprintf("\n");
+        return;
+    }
+
+    if (streq_simple(argv[0], "modules")) {
+        initrd_dump_modules();
+        return;
+    }
+
+    if (streq_simple(argv[0], "ls")) {
+        initrd_ls();
+        return;
+    }
+
+    if (streq_simple(argv[0], "cat")) {
+        if (argc < 2) {
+            kprintf("Usage: cat <file>\n");
+            return;
+        }
+        initrd_cat(argv[1]);
+        return;
+    }
+
+    if (streq_simple(argv[0], "motd")) {
+        initrd_cat("motd.txt");
+        return;
+    }
+
+    if (streq_simple(argv[0], "reboot")) {
+        kprintf("FiFi OS: rebooting...\n");
+        outb(0x64, 0xFE);
+        cpu_cli();
+        for (;;) cpu_hlt();
+    }
+
+    if (streq_simple(argv[0], "halt")) {
+        kprintf("FiFi OS: halted.\n");
+        cpu_cli();
+        for (;;) cpu_hlt();
+    }
+
+    kprintf("Unknown command: %s\n", argv[0]);
+    kprintf("Type: help\n");
+}
+
+
+static void shell_run(void) {
+    char line[128];
+    unsigned long len = 0;
+
+    kprintf("\nFiFi OS shell online. Type 'help'.\n");
+    shell_print_prompt();
+
+    for (;;) {
+        int ch = keyboard_try_getchar();
+        if (ch < 0) {
+            cpu_hlt();
+            continue;
+        }
+
+        char c = (char)ch;
+
+        if (c == '\r') continue;
+
+        // echo typed chars so it feels normal
+        if (c != '\n' && c != '\b' && c != 127) {
+            kprintf("%c", c);
+        }
+
+        if (c == '\n') {
+            kprintf("\n");
+            line[len] = 0;
+            shell_exec(line);
+            len = 0;
+            shell_print_prompt();
+            continue;
+        }
+
+        if (c == '\b' || c == 127) {
+            if (len > 0) {
+                len--;
+                // simple visual backspace: move left, overwrite, move left
+                kprintf("\b \b");
+            }
+            continue;
+        }
+
+        if (len < (sizeof(line) - 1)) {
+            line[len++] = c;
+        }
     }
 }
