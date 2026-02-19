@@ -76,6 +76,44 @@ void vmm_init(uint64_t hhdm_offset) {
 
     uint64_t pml4_phys = read_cr3_phys();
     kprintf("VMM init: CR3=%p\n", (void*)pml4_phys);
+
+#ifdef FIFI_VMM_API_TEST
+    kprintf("VMM test: starting API self-test...\n");
+
+    uint64_t phys = pmm_alloc_page();
+    if (!phys) {
+        kprintf("VMM test: pmm_alloc_page failed\n");
+    } else {
+        uint64_t test_virt = 0xffff900000000000ULL;
+
+        uint64_t before = vmm_translate(test_virt);
+        kprintf("VMM test: translate(before)=%p\n", (void*)before);
+
+        if (before != 0) {
+            kprintf("VMM test: warning: test_virt already mapped\n");
+        } else if (!vmm_map_page(test_virt, phys, VMM_WRITE)) {
+            kprintf("VMM test: vmm_map_page failed\n");
+        } else {
+            volatile uint64_t *v = (volatile uint64_t*)test_virt;
+            *v = 0x1122334455667788ULL;
+
+            uint64_t got_phys = vmm_translate(test_virt);
+            kprintf("VMM test: translate(after)=%p expected=%p\n", (void*)got_phys, (void*)phys);
+
+            volatile uint64_t *h = (volatile uint64_t*)pmm_phys_to_virt(phys);
+            kprintf("VMM test: read via HHDM=%p read via virt=%p\n", (void*)*h, (void*)*v);
+
+            if (!vmm_unmap_page(test_virt)) {
+                kprintf("VMM test: vmm_unmap_page failed\n");
+            } else {
+                uint64_t after = vmm_translate(test_virt);
+                kprintf("VMM test: translate(unmapped)=%p (expected 0)\n", (void*)after);
+            }
+        }
+    }
+    kprintf("VMM test: done\n");
+#endif
+
 }
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, vmm_flags_t flags) {

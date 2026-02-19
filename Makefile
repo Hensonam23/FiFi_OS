@@ -127,3 +127,8 @@ $(BUILD)/kprintf.o: kernel/src/kprintf.c | $(BUILD)
 ifeq ($(PF_TEST),1)
 CFLAGS += -DFIFI_PF_TEST=1
 endif
+
+# Optional VMM API self-test (off by default)
+ifeq ($(VMM_TEST),1)
+CFLAGS += -DFIFI_VMM_API_TEST=1
+endif
