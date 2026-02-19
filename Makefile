@@ -122,3 +122,8 @@ $(BUILD)/pit.o: kernel/src/pit.c | $(BUILD)
 
 $(BUILD)/kprintf.o: kernel/src/kprintf.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Optional page fault test (off by default)
+ifeq ($(PF_TEST),1)
+CFLAGS += -DFIFI_PF_TEST=1
+endif

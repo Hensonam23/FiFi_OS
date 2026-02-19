@@ -201,6 +201,14 @@ void kmain(void) {
 
     serial_write("FiFi OS: IDT loaded\n");
     console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
+
+#ifdef FIFI_PF_TEST
+    kprintf("PF test enabled: intentionally reading from NULL...\n");
+    volatile uint64_t *p = (volatile uint64_t*)0x0;
+    volatile uint64_t x = *p;
+    (void)x;
+#endif
+
     kprintf("FiFi> ");
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");

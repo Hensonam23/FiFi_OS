@@ -49,25 +49,43 @@ static const char *exc_names[32] = {
 };
 
 void isr_common_handler(isr_ctx_t *ctx) {
-    /* Step 8: Page fault (#PF) decoder */
+    
+    /* Step 9: Page fault (#PF) diagnostics */
     if (ctx->vector == 14) {
         uint64_t cr2 = 0;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
         uint64_t err = ctx->error;
 
-        kprintf("\nFiFi OS: PAGE FAULT\n");
-        kprintf("CR2=%p err=%p\n", (void*)cr2, (void*)err);
-        kprintf("cause: %s %s %s %s %s\n",
-            (err & 1) ? "PROT"  : "NP",
-            (err & 2) ? "WRITE" : "READ",
-            (err & 4) ? "USER"  : "KERN",
-            (err & 8) ? "RSVD"  : "-",
-            (err & 16)? "INSTR" : "-"
+        int p    = (int)((err >> 0) & 1); /* present (1=protection, 0=non-present) */
+        int wr   = (int)((err >> 1) & 1); /* 1=write, 0=read */
+        int us   = (int)((err >> 2) & 1); /* 1=user, 0=kernel */
+        int rsvd = (int)((err >> 3) & 1); /* reserved-bit violation */
+        int id   = (int)((err >> 4) & 1); /* instruction fetch */
+        int cpl  = (int)(ctx->cs & 3);
+
+        kprintf("\n=== FiFi OS PAGE FAULT (#PF) ===\n");
+        kprintf("CR2=%p\n", (void*)cr2);
+        kprintf("RIP=%p  CS=%p (CPL=%d)  RFLAGS=%p\n",
+                (void*)ctx->rip, (void*)ctx->cs, cpl, (void*)ctx->rflags);
+
+        kprintf("ERR=%p  bits: P=%d WR=%d US=%d RSVD=%d ID=%d\n",
+                (void*)err, p, wr, us, rsvd, id);
+
+        kprintf("meaning: %s %s %s %s %s\n",
+            p    ? "PROT"  : "NP",
+            wr   ? "WRITE" : "READ",
+            us   ? "USER"  : "KERN",
+            rsvd ? "RSVD"  : "-",
+            id   ? "INSTR" : "-"
         );
 
         panic("page fault");
     }
+
+
+
+
 
 
     uint64_t vec = ctx->vector;
