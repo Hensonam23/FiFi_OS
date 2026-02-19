@@ -11,3 +11,7 @@ Makefile.pre-*
 # local backup files
 *.bak
 *.bak_*
+
+# local backups
+*.bak
+*.bak_*
