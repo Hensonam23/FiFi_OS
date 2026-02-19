@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "vmm.h"
 #include "pmm.h"
@@ -10,12 +11,10 @@
 /* x86_64 page entry flags */
 #define PTE_P   (1ULL << 0)   /* present */
 #define PTE_RW  (1ULL << 1)   /* writable */
-#define PTE_US  (1ULL << 2)   /* user (not using yet) */
-
-static uint64_t g_hhdm = 0;
+#define PTE_US  (1ULL << 2)   /* user */
+#define PTE_NX  (1ULL << 63)  /* no-execute (if supported) */
 
 static inline void *phys_to_virt(uint64_t phys) {
-    /* If you already have pmm_phys_to_virt(), use that */
     return pmm_phys_to_virt(phys);
 }
 
@@ -31,6 +30,10 @@ static inline void invlpg(uint64_t virt) {
 
 static inline uint64_t align_down(uint64_t x) {
     return x & ~0xFFFULL;
+}
+
+static inline uint64_t align_up(uint64_t x) {
+    return (x + 0xFFFULL) & ~0xFFFULL;
 }
 
 static inline uint16_t idx_pml4(uint64_t v) { return (v >> 39) & 0x1FF; }
@@ -58,15 +61,24 @@ static uint64_t *ensure_table(uint64_t *parent, uint16_t index) {
     return child;
 }
 
+static inline uint64_t make_pte_flags(vmm_flags_t flags) {
+    uint64_t f = PTE_P; /* map_page always creates a present mapping */
+
+    if (flags & VMM_WRITE) f |= PTE_RW;
+    if (flags & VMM_USER)  f |= PTE_US;
+    if (flags & VMM_NX)    f |= PTE_NX;
+
+    return f;
+}
+
 void vmm_init(uint64_t hhdm_offset) {
-    g_hhdm = hhdm_offset;
-    (void)g_hhdm;
+    (void)hhdm_offset;
 
     uint64_t pml4_phys = read_cr3_phys();
     kprintf("VMM init: CR3=%p\n", (void*)pml4_phys);
 }
 
-bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
+bool vmm_map_page(uint64_t virt, uint64_t phys, vmm_flags_t flags) {
     virt = align_down(virt);
     phys = align_down(phys);
 
@@ -83,13 +95,40 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     if (!pt) return false;
 
     uint16_t i = idx_pt(virt);
-    pt[i] = (phys & ~0xFFFULL) | PTE_P | (flags & 0xFFFULL);
+    pt[i] = (phys & ~0xFFFULL) | make_pte_flags(flags);
 
     invlpg(virt);
     return true;
 }
 
-uint64_t vmm_virt_to_phys(uint64_t virt) {
+bool vmm_unmap_page(uint64_t virt) {
+    uint64_t v = align_down(virt);
+
+    uint64_t pml4_phys = read_cr3_phys();
+    uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
+
+    uint64_t e1 = pml4[idx_pml4(v)];
+    if (!(e1 & PTE_P)) return false;
+
+    uint64_t *pdpt = (uint64_t*)phys_to_virt(e1 & ~0xFFFULL);
+    uint64_t e2 = pdpt[idx_pdpt(v)];
+    if (!(e2 & PTE_P)) return false;
+
+    uint64_t *pd = (uint64_t*)phys_to_virt(e2 & ~0xFFFULL);
+    uint64_t e3 = pd[idx_pd(v)];
+    if (!(e3 & PTE_P)) return false;
+
+    uint64_t *pt = (uint64_t*)phys_to_virt(e3 & ~0xFFFULL);
+    uint16_t i = idx_pt(v);
+
+    if (!(pt[i] & PTE_P)) return false;
+
+    pt[i] = 0;
+    invlpg(v);
+    return true;
+}
+
+uint64_t vmm_translate(uint64_t virt) {
     uint64_t pml4_phys = read_cr3_phys();
     uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
 
@@ -108,8 +147,12 @@ uint64_t vmm_virt_to_phys(uint64_t virt) {
     uint64_t e4 = pt[idx_pt(virt)];
     if (!(e4 & PTE_P)) return 0;
 
-    uint64_t phys = (e4 & ~0xFFFULL) | (virt & 0xFFFULL);
-    return phys;
+    return (e4 & ~0xFFFULL) | (virt & 0xFFFULL);
+}
+
+/* legacy name kept for compatibility */
+uint64_t vmm_virt_to_phys(uint64_t virt) {
+    return vmm_translate(virt);
 }
 
 void vmm_invlpg(uint64_t virt) {
@@ -122,23 +165,29 @@ void vmm_flush_tlb(void) {
     __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
 }
 
-bool vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
-    const uint64_t PAGE = 0x1000;
-    uint64_t off = 0;
+bool vmm_map_range(uint64_t virt, uint64_t phys, size_t size, vmm_flags_t flags) {
+    uint64_t v0 = align_down(virt);
+    uint64_t p0 = align_down(phys);
 
-    /* align down */
-    uint64_t v = virt & ~(PAGE - 1);
-    uint64_t paddr = phys & ~(PAGE - 1);
+    uint64_t lead = virt - v0;
+    uint64_t bytes = align_up((uint64_t)size + lead);
 
-    /* round size up to pages */
-    uint64_t end = (size + (PAGE - 1)) & ~(PAGE - 1);
-
-    while (off < end) {
-        if (!vmm_map_page(v + off, paddr + off, flags)) {
-            return 0;
+    for (uint64_t off = 0; off < bytes; off += PAGE_SIZE) {
+        if (!vmm_map_page(v0 + off, p0 + off, flags)) {
+            return false;
         }
-        off += PAGE;
     }
+    return true;
+}
 
-    return 1;
+bool vmm_unmap_range(uint64_t virt, size_t size) {
+    uint64_t v0 = align_down(virt);
+
+    uint64_t lead = virt - v0;
+    uint64_t bytes = align_up((uint64_t)size + lead);
+
+    for (uint64_t off = 0; off < bytes; off += PAGE_SIZE) {
+        (void)vmm_unmap_page(v0 + off);
+    }
+    return true;
 }
