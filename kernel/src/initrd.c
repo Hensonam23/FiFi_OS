@@ -242,3 +242,92 @@ void initrd_dump_modules(void) {
 }
 }
 
+
+
+// -------------------- CPIO "newc" parser (initrd.cpio) --------------------
+// We treat the first Limine module as our initrd (since cmdline isn't exposed).
+
+static const uint8_t *g_initrd_base = 0;
+static uint64_t g_initrd_size = 0;
+
+const void *initrd_get_base(void) { return g_initrd_base; }
+uint64_t initrd_get_size(void) { return g_initrd_size; }
+
+static uint32_t hex8(const char *p) {
+    uint32_t v = 0;
+    for (int i = 0; i < 8; i++) {
+        char c = p[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+        else return 0;
+    }
+    return v;
+}
+
+struct cpio_newc_hdr {
+    char magic[6];      // "070701"
+    char ino[8];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char nlink[8];
+    char mtime[8];
+    char filesize[8];   // hex bytes
+    char devmajor[8];
+    char devminor[8];
+    char rdevmajor[8];
+    char rdevminor[8];
+    char namesize[8];   // hex bytes, includes NUL
+    char check[8];
+};
+
+static int streq0(const char *a, const char *b) {
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return (*a == 0 && *b == 0);
+}
+
+const void *initrd_find(const char *name, uint64_t *out_size) {
+    if (!g_initrd_base || g_initrd_size < sizeof(struct cpio_newc_hdr)) return 0;
+
+    const uint8_t *p = g_initrd_base;
+    const uint8_t *end = g_initrd_base + g_initrd_size;
+
+    while (p + sizeof(struct cpio_newc_hdr) <= end) {
+        const struct cpio_newc_hdr *h = (const struct cpio_newc_hdr*)p;
+
+        // magic check
+        if (!(h->magic[0]=='0' && h->magic[1]=='7' && h->magic[2]=='0' &&
+              h->magic[3]=='7' && h->magic[4]=='0' && h->magic[5]=='1')) {
+            return 0;
+        }
+
+        uint32_t namesz = hex8(h->namesize);
+        uint32_t filesz = hex8(h->filesize);
+
+        const uint8_t *namep = p + sizeof(struct cpio_newc_hdr);
+        if (namep + namesz > end) return 0;
+
+        const char *fname = (const char*)namep;
+
+        const uint8_t *filep = namep + align4_u64(namesz);
+        if (filep + filesz > end) return 0;
+
+        // end marker
+        if (streq0(fname, "TRAILER!!!")) return 0;
+
+        if (streq0(fname, name)) {
+            if (out_size) *out_size = filesz;
+            return filep;
+        }
+
+        // advance
+        p = filep + align4_u64(filesz);
+    }
+
+    return 0;
+}

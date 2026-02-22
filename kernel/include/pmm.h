@@ -15,3 +15,8 @@ uint64_t pmm_alloc_pages(size_t count);
 /* Helpers using HHDM */
 void *pmm_phys_to_virt(uint64_t phys);
 uint64_t pmm_virt_to_phys(void *virt);
+
+// PMM stats
+uint64_t pmm_get_total_pages(void);
+uint64_t pmm_get_free_pages(void);
+uint64_t pmm_get_used_pages(void);

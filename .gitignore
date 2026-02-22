@@ -33,3 +33,5 @@ initrd/initrd.cpio
 *.bak
 *.bak_*
 *.orig
+
+# --- generated build artifacts ---

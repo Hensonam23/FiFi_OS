@@ -5,6 +5,9 @@
 #include "kprintf.h"
 #include "serial.h"
 
+static uint64_t g_pmm_total_pages = 0;
+static uint64_t g_pmm_free_pages = 0;
+
 #define PAGE_SIZE 4096ULL
 #define MIN_PHYS  (16ULL * 1024 * 1024) /* skip low memory to be safe for now */
 
@@ -65,7 +68,12 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm_offset) {
             (void*)g_cursor,
             (void*)g_end,
             (void*)(best_len / 1024));
+
+    // PMM stats (coarse): pages managed by the main usable region
+    g_pmm_total_pages = (best_len / PAGE_SIZE);
+    g_pmm_free_pages  = g_pmm_total_pages;
 }
+
 
 uint64_t pmm_alloc_page(void) {
     if (!g_cursor) return 0;
@@ -73,6 +81,7 @@ uint64_t pmm_alloc_page(void) {
 
     uint64_t p = g_cursor;
     g_cursor += PAGE_SIZE;
+    if (g_pmm_free_pages) g_pmm_free_pages--;
     return p;
 }
 
@@ -85,6 +94,8 @@ uint64_t pmm_alloc_pages(size_t count) {
 
     uint64_t p = g_cursor;
     g_cursor += bytes;
+    if (g_pmm_free_pages >= count) g_pmm_free_pages -= count;
+    else g_pmm_free_pages = 0;
     return p;
 }
 
@@ -96,4 +107,10 @@ void *pmm_phys_to_virt(uint64_t phys) {
 uint64_t pmm_virt_to_phys(void *virt) {
     if (!virt) return 0;
     return (uint64_t)(uintptr_t)virt - g_hhdm;
+}
+
+uint64_t pmm_get_total_pages(void) { return g_pmm_total_pages; }
+uint64_t pmm_get_free_pages(void)  { return g_pmm_free_pages; }
+uint64_t pmm_get_used_pages(void)  {
+    return (g_pmm_total_pages >= g_pmm_free_pages) ? (g_pmm_total_pages - g_pmm_free_pages) : 0;
 }

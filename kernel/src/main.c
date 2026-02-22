@@ -107,11 +107,8 @@ void kmain(void) {
     }
     serial_write("FiFi OS: framebuffer OK\n");
     initrd_init();
-    initrd_ls();
-    initrd_cat("hello.txt");
-
-
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    initrd_cat("motd.txt");
+struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     console_init(fb);
 
     /* FiFi OS: memmap summary (after console_init so kprintf works) */
@@ -216,9 +213,8 @@ void kmain(void) {
 #endif
 
     initrd_init();
-    initrd_ls();
-    initrd_cat("hello.txt");
-    shell_run();
+    initrd_cat("motd.txt");
+shell_run();
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");
 
@@ -262,10 +258,13 @@ static int streq_simple(const char *a, const char *b) {
 static void shell_help(void) {
     kprintf("\nCommands:\n");
     kprintf("  help             show this list\n");
-    kprintf("  clear            clear screen (fallback: prints newlines)\n");
+    kprintf("  clear            clear screen (prints newlines for now)\n");
     kprintf("  ls               list initrd files\n");
     kprintf("  cat <file>       print an initrd file\n");
     kprintf("  motd             show motd.txt from initrd\n");
+    kprintf("  uptime           show uptime (PIT ticks)\n");
+    kprintf("  mem              show memory stats (PMM + heap)\n");
+    kprintf("  ai               placeholder for local AI agent\n");
     kprintf("  modules          list limine modules (includes initrd)\n");
     kprintf("  reboot           reboot (port 0x64)\n");
     kprintf("  halt             stop CPU\n");
@@ -273,7 +272,9 @@ static void shell_help(void) {
 }
 
 
+
 static void shell_exec(char *line) {
+    // trim leading spaces
     while (*line == ' ' || *line == '\t') line++;
     if (*line == 0) return;
 
@@ -298,8 +299,7 @@ static void shell_exec(char *line) {
     }
 
     if (streq_simple(argv[0], "clear")) {
-        // If you later add a real console_clear(), swap this out.
-        for (int i = 0; i < 60; i++) kprintf("\n");
+        console_clear();
         return;
     }
 
@@ -327,6 +327,45 @@ static void shell_exec(char *line) {
         return;
     }
 
+
+    if (streq_simple(argv[0], "uptime")) {
+        uint64_t ticks = pit_get_ticks();
+        uint32_t hz = pit_get_hz();
+        uint64_t sec = (hz ? (ticks / hz) : 0);
+        kprintf("Uptime: ticks=%p hz=%d sec=%p\n", (void*)ticks, (int)hz, (void*)sec);
+        return;
+    }
+
+    if (streq_simple(argv[0], "ai")) {
+        kprintf("AI agent: not installed yet.\n");
+        kprintf("Plan: docs/ai-agent-plan.md\n");
+        return;
+    }
+
+
+    if (streq_simple(argv[0], "mem")) {
+        uint64_t total = pmm_get_total_pages();
+        uint64_t freep = pmm_get_free_pages();
+        uint64_t used  = pmm_get_used_pages();
+
+        void *hpage = heap_get_cur_page();
+        uint64_t hoff = heap_get_offset();
+
+        kprintf("PMM: total=%p free=%p used=%p pages (4KiB)\n",
+                (void*)total, (void*)freep, (void*)used);
+
+        if (total) {
+            uint64_t total_kib = total * 4;
+            uint64_t free_kib  = freep * 4;
+            uint64_t used_kib  = used * 4;
+            kprintf("PMM: total=%p KiB free=%p KiB used=%p KiB\n",
+                    (void*)total_kib, (void*)free_kib, (void*)used_kib);
+        }
+
+        kprintf("Heap: cur_page=%p offset=%p bytes\n", hpage, (void*)hoff);
+        return;
+    }
+
     if (streq_simple(argv[0], "reboot")) {
         kprintf("FiFi OS: rebooting...\n");
         outb(0x64, 0xFE);
@@ -343,6 +382,7 @@ static void shell_exec(char *line) {
     kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
+
 
 
 static void shell_run(void) {

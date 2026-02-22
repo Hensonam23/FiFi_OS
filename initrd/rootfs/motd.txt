@@ -1,7 +1,9 @@
 FiFi OS (pre-alpha)
+
 Type: help
 
 Useful:
   ls
   cat hello.txt
   motd
+  modules

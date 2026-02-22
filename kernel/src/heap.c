@@ -215,3 +215,15 @@ void *kzalloc(size_t size) {
     if (p) memzero(p, size);
     return p;
 }
+
+
+
+
+// ---- Heap stats (for shell 'mem' command) ----
+void *heap_get_cur_page(void) {
+    return (void*)(uintptr_t)cur_page_virt;
+}
+
+uint64_t heap_get_offset(void) {
+    return (uint64_t)cur_off;
+}
