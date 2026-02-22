@@ -15,6 +15,7 @@
 #include "heap.h"
 #include "vmm.h"
 #include "initrd.h"
+#include "vfs.h"
 
 static void shell_run(void);
 
@@ -305,7 +306,9 @@ static void shell_exec(char *line) {
 
     if (streq_simple(argv[0], "modules")) {
         initrd_dump_modules();
-        return;
+        
+    vfs_init();
+return;
     }
 
     if (streq_simple(argv[0], "ls")) {

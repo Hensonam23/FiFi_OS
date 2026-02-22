@@ -36,6 +36,7 @@ OBJS := \
      $(BUILD)/idt.o \
      $(BUILD)/isr.o \
 	build/initrd.o \
+	build/vfs.o \
      $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -153,4 +154,8 @@ endif
 
 # initrd module object
 build/initrd.o: kernel/src/initrd.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# vfs object
+build/vfs.o: kernel/src/vfs.c
 	$(CC) $(CFLAGS) -c $< -o $@
