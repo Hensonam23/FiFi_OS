@@ -3,7 +3,7 @@
 #include "keyboard.h"
 
 /*
-  Simple PS/2 Set 1 keyboard:
+  PS/2 Set 1 keyboard:
   - IRQ handler calls keyboard_on_scancode(sc)
   - We decode -> ASCII and enqueue into a ring buffer
   - Shell pulls via keyboard_try_getchar()
@@ -16,22 +16,20 @@ static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 
 static bool shift_down = false;
+static bool ext_e0 = false;
 
-static void kbd_push(char c) {
+static void kbd_push_byte(uint8_t b) {
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
-    if (next == kbd_tail) {
-        // buffer full: drop char
-        return;
-    }
-    kbd_buf[kbd_head] = c;
+    if (next == kbd_tail) return; // full
+    kbd_buf[kbd_head] = (char)b;  // keep raw byte, even if >= 0x80
     kbd_head = next;
 }
 
 int keyboard_try_getchar(void) {
     if (kbd_tail == kbd_head) return -1;
-    char c = kbd_buf[kbd_tail];
+    uint8_t b = (uint8_t)kbd_buf[kbd_tail];
     kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
-    return (unsigned char)c;
+    return (int)b;
 }
 
 /* US layout (subset) */
@@ -52,17 +50,41 @@ static const char map_shift[128] = {
 };
 
 void keyboard_on_scancode(uint8_t sc) {
-    // Extended scancodes ignored for now
-    if (sc == 0xE0) return;
-
-    // Key release
-    if (sc & 0x80) {
-        uint8_t code = sc & 0x7F;
-        if (code == 0x2A || code == 0x36) shift_down = false; // shift up
+    // extended prefix
+    if (sc == 0xE0) {
+        ext_e0 = true;
         return;
     }
 
-    // Shift press
+    // key release
+    if (sc & 0x80) {
+        uint8_t code = sc & 0x7F;
+
+        // shift release (non-extended)
+        if (!ext_e0 && (code == 0x2A || code == 0x36)) shift_down = false;
+
+        // end extended sequence
+        ext_e0 = false;
+        return;
+    }
+
+    // handle extended keys (arrows, delete, home, end)
+    if (ext_e0) {
+        ext_e0 = false;
+
+        switch (sc) {
+            case 0x4B: kbd_push_byte(KEY_LEFT);   return; // left
+            case 0x4D: kbd_push_byte(KEY_RIGHT);  return; // right
+            case 0x48: kbd_push_byte(KEY_UP);     return; // up
+            case 0x50: kbd_push_byte(KEY_DOWN);   return; // down
+            case 0x53: kbd_push_byte(KEY_DELETE); return; // delete
+            case 0x47: kbd_push_byte(KEY_HOME);   return; // home
+            case 0x4F: kbd_push_byte(KEY_END);    return; // end
+            default: return;
+        }
+    }
+
+    // shift press
     if (sc == 0x2A || sc == 0x36) {
         shift_down = true;
         return;
@@ -71,5 +93,5 @@ void keyboard_on_scancode(uint8_t sc) {
     char c = shift_down ? map_shift[sc] : map_norm[sc];
     if (!c) return;
 
-    kbd_push(c);
+    kbd_push_byte((uint8_t)c);
 }

@@ -16,8 +16,14 @@
 #include "vmm.h"
 #include "initrd.h"
 #include "vfs.h"
+#include "elf.h"
+#include "acpi.h"
 
 static void shell_run(void);
+
+static void shell_print_hex_byte(uint8_t b);
+static void shell_hexdump(const uint8_t *buf, uint64_t size);
+
 
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
@@ -152,8 +158,9 @@ struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
         hhdm_off = hhdm_request.response->offset;
     }
     pmm_init(memmap_request.response, hhdm_off);
-
-    heap_init();
+        kprintf("FiFi OS: ACPI autoinit disabled (boot is stable).\n");
+        kprintf("FiFi OS: (Re-enable later after ACPI uses HHDM-safe pointers.)\n");
+heap_init();
     vmm_init(hhdm_off);
     /* VMM map test */
     uint64_t test_phys = pmm_alloc_page();
@@ -233,16 +240,26 @@ shell_run();
 
 
 // -------------------- Simple FiFi shell --------------------
-int keyboard_try_getchar(void); // from keyboard.c
+#include "keyboard.h"
+#include "console.h"
+#include "initrd.h"
+#include "vfs.h"
+#include "elf.h"
+#include "pmm.h"
+#include "heap.h"
+#include "io.h"
 
-static inline void cpu_hlt(void) {
+// NOTE:
+// We redraw the input line using '\r' + reprint prompt.
+// This avoids needing backspace support in the framebuffer console.
+
+static inline void shell_cpu_hlt(void) {
     __asm__ __volatile__("hlt");
 }
 
-static inline void cpu_cli(void) {
+static inline void shell_cpu_cli(void) {
     __asm__ __volatile__("cli");
 }
-
 
 static void shell_print_prompt(void) {
     kprintf("FiFi> ");
@@ -259,39 +276,124 @@ static int streq_simple(const char *a, const char *b) {
 static void shell_help(void) {
     kprintf("\nCommands:\n");
     kprintf("  help             show this list\n");
-    kprintf("  clear            clear screen (prints newlines for now)\n");
+    kprintf("  clear            clear screen\n");
     kprintf("  ls               list initrd files\n");
-    kprintf("  cat <file>       print an initrd file\n");
+    kprintf("  cat <file>       print initrd file\n");
     kprintf("  motd             show motd.txt from initrd\n");
-    kprintf("  uptime           show uptime (PIT ticks)\n");
+    kprintf("  stat <file>      show file info (size + type)\n");
+    kprintf("  hexdump <file>   hex dump first 256 bytes\n");
+    kprintf("  version          show build info\n");
+    kprintf("  elf <file>       dump ELF64 header + segments\n");
     kprintf("  mem              show memory stats (PMM + heap)\n");
-    kprintf("  ai               placeholder for local AI agent\n");
     kprintf("  modules          list limine modules (includes initrd)\n");
+    kprintf("  ai               placeholder for local AI agent\n");
     kprintf("  reboot           reboot (port 0x64)\n");
     kprintf("  halt             stop CPU\n");
+    kprintf("\nEditing:\n");
+    kprintf("  left/right/home/end, backspace, delete\n");
     kprintf("\n");
 }
 
+// ---- shell helpers ----
+static void shell_print_hex_byte(uint8_t b) {
+    static const char *hex = "0123456789abcdef";
+    kprintf("%c%c", hex[(b >> 4) & 0xF], hex[b & 0xF]);
+}
 
-
-static void shell_exec(char *line) {
-    // trim leading spaces
-    while (*line == ' ' || *line == '\t') line++;
-    if (*line == 0) return;
-
-    // tokenize by spaces/tabs
-    char *argv[8];
-    int argc = 0;
-
-    char *p = line;
-    while (*p && argc < 8) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
-        argv[argc++] = p;
-        while (*p && *p != ' ' && *p != '\t') p++;
-        if (*p) { *p = 0; p++; }
+static void shell_hexdump(const uint8_t *buf, uint64_t size) {
+    if (!buf || size == 0) {
+        kprintf("(empty)\n");
+        return;
     }
 
+    uint64_t n = size;
+    if (n > 256) n = 256;
+
+    for (uint64_t i = 0; i < n; i += 16) {
+        kprintf("%p: ", (void*)i);
+
+        for (uint64_t j = 0; j < 16; j++) {
+            uint64_t k = i + j;
+            if (k < n) {
+                shell_print_hex_byte(buf[k]);
+                kprintf(" ");
+            } else {
+                kprintf("   ");
+            }
+        }
+
+        kprintf(" |");
+        for (uint64_t j = 0; j < 16; j++) {
+            uint64_t k = i + j;
+            if (k < n) {
+                uint8_t c = buf[k];
+                if (c >= 32 && c <= 126) kprintf("%c", c);
+                else kprintf(".");
+            } else {
+                kprintf(" ");
+            }
+        }
+        kprintf("|\n");
+    }
+
+    if (size > n) {
+        kprintf("(truncated: showing first %p bytes)\n", (void*)n);
+    }
+}
+
+// Redraw the current input line safely:
+// 1) CR, prompt, full line, clear leftovers
+// 2) CR, prompt, print up to cursor position (so cursor moves)
+static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *last_len) {
+    uint64_t old = *last_len;
+
+    kprintf("\r");
+    shell_print_prompt();
+
+    for (uint64_t i = 0; i < len; i++) {
+        kprintf("%c", line[i]);
+    }
+
+    if (old > len) {
+        for (uint64_t i = 0; i < (old - len); i++) {
+            kprintf(" ");
+        }
+    }
+
+    // move cursor back to the right spot
+    kprintf("\r");
+    shell_print_prompt();
+    for (uint64_t i = 0; i < pos; i++) {
+        kprintf("%c", line[i]);
+    }
+
+    *last_len = len;
+}
+
+// simple argv split in-place
+static int shell_split(char *line, char **argv, int maxv) {
+    int argc = 0;
+
+    while (*line) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line) break;
+
+        if (argc >= maxv) break;
+        argv[argc++] = line;
+
+        while (*line && *line != ' ' && *line != '\t') line++;
+        if (*line) {
+            *line = 0;
+            line++;
+        }
+    }
+
+    return argc;
+}
+
+static void shell_exec(char *line) {
+    char *argv[8] = {0};
+    int argc = shell_split(line, argv, 8);
     if (argc == 0) return;
 
     if (streq_simple(argv[0], "help")) {
@@ -304,23 +406,13 @@ static void shell_exec(char *line) {
         return;
     }
 
-    if (streq_simple(argv[0], "modules")) {
-        initrd_dump_modules();
-        
-    vfs_init();
-return;
-    }
-
     if (streq_simple(argv[0], "ls")) {
         initrd_ls();
         return;
     }
 
     if (streq_simple(argv[0], "cat")) {
-        if (argc < 2) {
-            kprintf("Usage: cat <file>\n");
-            return;
-        }
+        if (argc < 2) { kprintf("usage: cat <file>\n"); return; }
         initrd_cat(argv[1]);
         return;
     }
@@ -330,21 +422,71 @@ return;
         return;
     }
 
-
-    if (streq_simple(argv[0], "uptime")) {
-        uint64_t ticks = pit_get_ticks();
-        uint32_t hz = pit_get_hz();
-        uint64_t sec = (hz ? (ticks / hz) : 0);
-        kprintf("Uptime: ticks=%p hz=%d sec=%p\n", (void*)ticks, (int)hz, (void*)sec);
+    if (streq_simple(argv[0], "modules")) {
+        initrd_dump_modules();
         return;
     }
 
-    if (streq_simple(argv[0], "ai")) {
-        kprintf("AI agent: not installed yet.\n");
-        kprintf("Plan: docs/ai-agent-plan.md\n");
+    if (streq_simple(argv[0], "version")) {
+        kprintf("FiFi OS (pre-alpha) build %s %s\n", __DATE__, __TIME__);
         return;
     }
 
+    if (streq_simple(argv[0], "stat")) {
+        if (argc < 2) { kprintf("usage: stat <file>\n"); return; }
+
+        const void *data = 0;
+        uint64_t size = 0;
+
+        if (vfs_read(argv[1], &data, &size) != 0) {
+            kprintf("stat: not found: %s\n", argv[1]);
+            return;
+        }
+
+        kprintf("stat: %s size=%p bytes\n", argv[1], (void*)size);
+
+        if (size >= 4) {
+            const uint8_t *b = (const uint8_t*)data;
+            if (b[0] == 0x7F && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+                kprintf("type: ELF\n");
+            } else {
+                kprintf("type: data/text\n");
+            }
+        }
+        return;
+    }
+
+    if (streq_simple(argv[0], "hexdump")) {
+        if (argc < 2) { kprintf("usage: hexdump <file>\n"); return; }
+
+        const void *data = 0;
+        uint64_t size = 0;
+
+        if (vfs_read(argv[1], &data, &size) != 0) {
+            kprintf("hexdump: not found: %s\n", argv[1]);
+            return;
+        }
+
+        kprintf("hexdump: %s size=%p\n", argv[1], (void*)size);
+        shell_hexdump((const uint8_t*)data, size);
+        return;
+    }
+
+    if (streq_simple(argv[0], "elf")) {
+        if (argc < 2) { kprintf("usage: elf <file>\n"); return; }
+
+        const void *data = 0;
+        uint64_t size = 0;
+
+        if (vfs_read(argv[1], &data, &size) != 0) {
+            kprintf("elf: not found: %s\n", argv[1]);
+            return;
+        }
+
+        kprintf("elf: %s size=%p\n", argv[1], (void*)size);
+        elf_dump(data, size);
+        return;
+    }
 
     if (streq_simple(argv[0], "mem")) {
         uint64_t total = pmm_get_total_pages();
@@ -369,68 +511,135 @@ return;
         return;
     }
 
+    if (streq_simple(argv[0], "ai")) {
+        kprintf("AI agent: not installed yet.\n");
+        kprintf("Plan: docs/ai-agent-plan.md\n");
+        return;
+    }
+
     if (streq_simple(argv[0], "reboot")) {
         kprintf("FiFi OS: rebooting...\n");
         outb(0x64, 0xFE);
-        cpu_cli();
-        for (;;) cpu_hlt();
+        shell_cpu_cli();
+        for (;;) shell_cpu_hlt();
     }
 
     if (streq_simple(argv[0], "halt")) {
         kprintf("FiFi OS: halted.\n");
-        cpu_cli();
-        for (;;) cpu_hlt();
+        shell_cpu_cli();
+        for (;;) shell_cpu_hlt();
     }
 
     kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
 
-
-
 static void shell_run(void) {
     char line[128];
-    unsigned long len = 0;
+    uint64_t len = 0;
+    uint64_t pos = 0;
+    uint64_t last_len = 0;
+
+    for (uint64_t i = 0; i < sizeof(line); i++) line[i] = 0;
 
     kprintf("\nFiFi OS shell online. Type 'help'.\n");
-    shell_print_prompt();
+
+    // draw initial prompt
+    shell_redraw_line(line, len, pos, &last_len);
 
     for (;;) {
-        int ch = keyboard_try_getchar();
-        if (ch < 0) {
-            cpu_hlt();
+        int key = keyboard_try_getchar();
+        if (key < 0) {
+            shell_cpu_hlt();
             continue;
         }
 
-        char c = (char)ch;
+        // ignore CR
+        if (key == '\r') continue;
 
-        if (c == '\r') continue;
-
-        // echo typed chars so it feels normal
-        if (c != '\n' && c != '\b' && c != 127) {
-            kprintf("%c", c);
-        }
-
-        if (c == '\n') {
+        // ENTER
+        if (key == '\n') {
             kprintf("\n");
             line[len] = 0;
             shell_exec(line);
+
+            // reset line state
             len = 0;
-            shell_print_prompt();
+            pos = 0;
+            last_len = 0;
+            line[0] = 0;
+
+            shell_redraw_line(line, len, pos, &last_len);
             continue;
         }
 
-        if (c == '\b' || c == 127) {
-            if (len > 0) {
+        // LEFT / RIGHT / HOME / END
+        if (key == KEY_LEFT) {
+            if (pos > 0) pos--;
+            shell_redraw_line(line, len, pos, &last_len);
+            continue;
+        }
+        if (key == KEY_RIGHT) {
+            if (pos < len) pos++;
+            shell_redraw_line(line, len, pos, &last_len);
+            continue;
+        }
+        if (key == KEY_HOME) {
+            pos = 0;
+            shell_redraw_line(line, len, pos, &last_len);
+            continue;
+        }
+        if (key == KEY_END) {
+            pos = len;
+            shell_redraw_line(line, len, pos, &last_len);
+            continue;
+        }
+
+        // UP/DOWN: history later (ignore for now)
+        if (key == KEY_UP || key == KEY_DOWN) {
+            continue;
+        }
+
+        // BACKSPACE (8 or 127): delete BEFORE cursor
+        if (key == 8 || key == 127) {
+            if (pos > 0) {
+                for (uint64_t i = pos - 1; i + 1 < len; i++) {
+                    line[i] = line[i + 1];
+                }
                 len--;
-                // simple visual backspace: move left, overwrite, move left
-                kprintf("\b \b");
+                pos--;
+                line[len] = 0;
+                shell_redraw_line(line, len, pos, &last_len);
             }
             continue;
         }
 
+        // DELETE: delete AT cursor
+        if (key == KEY_DELETE) {
+            if (pos < len) {
+                for (uint64_t i = pos; i + 1 < len; i++) {
+                    line[i] = line[i + 1];
+                }
+                len--;
+                line[len] = 0;
+                shell_redraw_line(line, len, pos, &last_len);
+            }
+            continue;
+        }
+
+        // Printable ASCII only
+        if (key < 32 || key > 126) continue;
+
+        // Insert character at cursor
         if (len < (sizeof(line) - 1)) {
-            line[len++] = c;
+            for (uint64_t i = len; i > pos; i--) {
+                line[i] = line[i - 1];
+            }
+            line[pos] = (char)key;
+            len++;
+            pos++;
+            line[len] = 0;
+            shell_redraw_line(line, len, pos, &last_len);
         }
     }
 }

@@ -252,6 +252,21 @@ void console_init(struct limine_framebuffer *fb) {
 void console_putc(char c) {
     if (!con.initialized) return;
 
+    // backspace: move cursor left (erase is done by printing " ")
+    if (c == '') {
+        if (con.cx > 0) con.cx--;
+        return;
+    }
+
+    if (c == '\b') {
+        // Move cursor left (no erase). Shell can erase with "\b \b".
+        if (con.cx > 0) {
+            con.cx--;
+        }
+        return;
+    }
+
+
     if (c == '\n') {
         con.cx = 0;
         con.cy++;

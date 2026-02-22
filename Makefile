@@ -36,7 +36,9 @@ OBJS := \
      $(BUILD)/idt.o \
      $(BUILD)/isr.o \
 	build/initrd.o \
+    build/acpi.o \
 	build/vfs.o \
+	build/elf.o \
      $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -157,5 +159,14 @@ build/initrd.o: kernel/src/initrd.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # vfs object
+
+# acpi object
+build/acpi.o: kernel/src/acpi.c
+		$(CC) $(CFLAGS) -c $< -o $@
+
 build/vfs.o: kernel/src/vfs.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# elf object
+build/elf.o: kernel/src/elf.c
 	$(CC) $(CFLAGS) -c $< -o $@
