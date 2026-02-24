@@ -7,12 +7,6 @@
 #include "pit.h"
 #include "keyboard.h"
 
-static inline uint8_t inb(uint16_t port) {
-    uint8_t v;
-    __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port));
-    return v;
-}
-
 static const char *exc_names[32] = {
     "Divide-by-zero",
     "Debug",
@@ -94,17 +88,15 @@ void isr_common_handler(isr_ctx_t *ctx) {
     if (vec >= 32 && vec < 48) {
         uint8_t irq = (uint8_t)(vec - 32);
 
+        if (irq == 0) pit_on_irq0();
+        if (irq == 1) keyboard_irq_handler();
+
         /* Timer tick (IRQ0) */
         if (irq == 0) {
             pit_on_tick();
         }
 
         /* Keyboard (IRQ1) */
-        if (irq == 1) {
-            uint8_t sc = inb(0x60);
-            keyboard_on_scancode(sc);
-        }
-
         pic_send_eoi(irq);
         return;
     }

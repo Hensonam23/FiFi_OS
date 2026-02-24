@@ -10,36 +10,39 @@ CC := clang
 LD := ld.lld
 
 CFLAGS := \
-	-std=c11 -O2 -pipe -Wall -Wextra \
-	-ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin \
-	-mno-red-zone -mcmodel=kernel \
-	-mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize \
-	--target=x86_64-elf \
-	-Ikernel/include \
-	-Ikernel/arch/x86_64/idt
+    -std=c11 -O2 -pipe -Wall -Wextra \
+    -ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin \
+    -mno-red-zone -mcmodel=kernel \
+    -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize \
+    --target=x86_64-elf \
+    -Ikernel/include \
+    -Ikernel/arch/x86_64/idt
 
 ASFLAGS := --target=x86_64-elf
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
 OBJS := \
-     $(BUILD)/main.o \
-     $(BUILD)/serial.o \
-     $(BUILD)/keyboard.o \
-     $(BUILD)/pmm.o \
-     $(BUILD)/heap.o \
-     $(BUILD)/vmm.o \
-     $(BUILD)/panic.o \
-     $(BUILD)/kprintf.o \
-     $(BUILD)/console.o \
-     $(BUILD)/pic.o \
-     $(BUILD)/pit.o \
-     $(BUILD)/idt.o \
-     $(BUILD)/isr.o \
-	build/initrd.o \
-    build/acpi.o \
-	build/vfs.o \
-	build/elf.o \
-     $(BUILD)/isr_asm.o
+    $(BUILD)/shell.o \
+    $(BUILD)/workqueue.o \
+    $(BUILD)/timer.o \
+    $(BUILD)/elf.o \
+    $(BUILD)/main.o \
+    $(BUILD)/serial.o \
+    $(BUILD)/keyboard.o \
+    $(BUILD)/pmm.o \
+    $(BUILD)/heap.o \
+    $(BUILD)/vmm.o \
+    $(BUILD)/panic.o \
+    $(BUILD)/kprintf.o \
+    $(BUILD)/console.o \
+    $(BUILD)/pic.o \
+    $(BUILD)/pit.o \
+    $(BUILD)/idt.o \
+    $(BUILD)/isr.o \
+    $(BUILD)/initrd.o \
+    $(BUILD)/acpi.o \
+    $(BUILD)/vfs.o \
+    $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
 
@@ -49,6 +52,9 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/main.o: kernel/src/main.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/timer.o: kernel/src/timer.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: kernel/src/serial.c | $(BUILD)
@@ -95,7 +101,6 @@ $(ISO): $(KERNEL) limine.conf
 
 	cp $(KERNEL) $(ISO_ROOT)/boot/$(OUTPUT)
 	cp limine.conf $(ISO_ROOT)/limine.conf
-
 	cp $(LIMINE_DIR)/limine-bios.sys      $(ISO_ROOT)/
 	cp $(LIMINE_DIR)/limine-bios-cd.bin   $(ISO_ROOT)/
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin   $(ISO_ROOT)/
@@ -103,14 +108,15 @@ $(ISO): $(KERNEL) limine.conf
 
 	python3 tools/mkcpio.py initrd/rootfs initrd/initrd.cpio
 	cp initrd/initrd.cpio $(ISO_ROOT)/boot/initrd.cpio
+
 	xorriso -as mkisofs -R -r -J \
-		-b limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
-		-apm-block-size 2048 \
-		--efi-boot limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		-o $(ISO) \
-		$(ISO_ROOT)
+	    -b limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
+	    -apm-block-size 2048 \
+	    --efi-boot limine-uefi-cd.bin \
+	    -efi-boot-part --efi-boot-image --protective-msdos-label \
+	    -o $(ISO) \
+	    $(ISO_ROOT)
 
 	limine bios-install $(ISO)
 
@@ -155,18 +161,23 @@ CFLAGS += -DFIFI_HEAP_POISON=1
 endif
 
 # initrd module object
-build/initrd.o: kernel/src/initrd.c
+$(BUILD)/initrd.o: kernel/src/initrd.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # vfs object
 
 # acpi object
-build/acpi.o: kernel/src/acpi.c
+$(BUILD)/acpi.o: kernel/src/acpi.c | $(BUILD)
 		$(CC) $(CFLAGS) -c $< -o $@
-
-build/vfs.o: kernel/src/vfs.c
+$(BUILD)/vfs.o: kernel/src/vfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # elf object
-build/elf.o: kernel/src/elf.c
+$(BUILD)/elf.o: kernel/src/elf.c | $(BUILD)
+# shell object
+$(BUILD)/shell.o: kernel/src/shell.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+build/%.o: kernel/src/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+

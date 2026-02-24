@@ -11,3 +11,6 @@ void console_clear(void);
 
 void console_putc(char c);
 void console_write(const char *s);
+
+void console_get_cursor(uint32_t *x, uint32_t *y);
+void console_set_cursor(uint32_t x, uint32_t y);

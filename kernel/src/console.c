@@ -295,3 +295,25 @@ void console_putc(char c) {
 void console_write(const char *s) {
     for (size_t i = 0; s[i]; i++) console_putc(s[i]);
 }
+
+
+void console_get_cursor(uint32_t *x, uint32_t *y) {
+    if (x) *x = con.cx;
+    if (y) *y = con.cy;
+}
+
+void console_set_cursor(uint32_t x, uint32_t y) {
+    // clamp a bit (character cells)
+    uint32_t cols = con.w / 8;
+    uint32_t rows = con.h / 16;
+
+    if (cols == 0) cols = 1;
+    if (rows == 0) rows = 1;
+
+    if (x >= cols) x = cols - 1;
+    if (y >= rows) y = rows - 1;
+
+    con.cx = x;
+    con.cy = y;
+    ensure_cursor_visible();
+}

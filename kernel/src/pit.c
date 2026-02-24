@@ -37,4 +37,7 @@ void pit_init(uint32_t hz) {
 
 uint64_t pit_get_ticks(void) { return g_pit_ticks; }
 uint32_t pit_get_hz(void) { return g_pit_hz ? g_pit_hz : 100; }
+void pit_on_irq0(void) {
+    g_pit_ticks++;
+}
 

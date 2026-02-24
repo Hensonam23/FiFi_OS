@@ -8,3 +8,4 @@ uint64_t pit_ticks(void);
 
 uint64_t pit_get_ticks(void);
 uint32_t pit_get_hz(void);
+void pit_on_irq0(void);

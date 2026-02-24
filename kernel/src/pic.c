@@ -72,3 +72,24 @@ void pic_remap(uint8_t offset1, uint8_t offset2) {
     outb(PIC1_DATA, a1);
     outb(PIC2_DATA, a2);
 }
+
+
+void pic_mask_irq(uint8_t irq) {
+    uint16_t port = (irq < 8) ? 0x21 : 0xA1;
+    uint8_t bit = (irq < 8) ? irq : (irq - 8);
+
+    uint8_t mask;
+    __asm__ __volatile__("inb %1, %0" : "=a"(mask) : "Nd"(port));
+    mask |= (1u << bit);
+    __asm__ __volatile__("outb %0, %1" : : "a"(mask), "Nd"(port));
+}
+
+void pic_unmask_irq(uint8_t irq) {
+    uint16_t port = (irq < 8) ? 0x21 : 0xA1;
+    uint8_t bit = (irq < 8) ? irq : (irq - 8);
+
+    uint8_t mask;
+    __asm__ __volatile__("inb %1, %0" : "=a"(mask) : "Nd"(port));
+    mask &= ~(1u << bit);
+    __asm__ __volatile__("outb %0, %1" : : "a"(mask), "Nd"(port));
+}
