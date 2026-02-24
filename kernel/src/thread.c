@@ -23,6 +23,8 @@ typedef enum {
 typedef struct {
     uint64_t rsp;
     thread_state_t state;
+    uint8_t prio;
+    uint32_t tid;
     uint64_t wake_tick;
     uint64_t cpu_ticks;
     uint64_t last_start_tick;
@@ -39,6 +41,7 @@ static thread_t g_threads[THREAD_MAX];
 static int g_cur_idx = 0;
 static volatile int g_need_resched = 0;
 static uint64_t g_boot_tick = 0;
+static uint32_t g_next_tid = 1;
 
 static volatile int g_preempt_enabled = 1;
 
@@ -90,11 +93,13 @@ void thread_init(void) {
     g_cur_idx = 0;
     g_cur = &g_threads[0];
     g_cur->state = T_RUNNING;
+    g_cur->prio = 1;
     name_copy(g_cur->name, "main");
 
     g_boot_tick = pit_get_ticks();
     g_cur->cpu_ticks = 0;
     g_cur->last_start_tick = g_boot_tick;
+    g_cur->tid = g_next_tid++;
     kprintf("FiFi OS: thread_init OK (main thread)\n");
 }
 
@@ -135,6 +140,8 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
 
     t->rsp = (uint64_t)(uintptr_t)sp;
     t->state = T_READY;
+    t->tid = g_next_tid++;
+    t->prio = 1;
     t->entry = entry;
     t->arg = arg;
     t->stack_base = stack;
@@ -158,15 +165,34 @@ static int thread_wake_ready(void) {
     return woke;
 }
 
+
+static int highest_ready_prio(void) {
+    int best = -1;
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_READY) {
+            int p = (int)g_threads[i].prio;
+            if (p > best) best = p;
+        }
+    }
+    return best;
+}
+
 static int pick_next_ready(void) {
     if (!g_cur) return 0;
 
+    int best = highest_ready_prio();
+    if (best < 0) return -1;
+
+    // round-robin among threads at the best priority
     for (int step = 1; step <= THREAD_MAX; step++) {
         int i = (g_cur_idx + step) % THREAD_MAX;
-        if (g_threads[i].state == T_READY) return i;
+        if (g_threads[i].state == T_READY && (int)g_threads[i].prio == best) {
+            return i;
+        }
     }
     return -1;
 }
+
 
 void thread_yield(void) {
     if (!g_cur) return;
@@ -258,6 +284,8 @@ static const char *state_str(thread_state_t s) {
 }
 
 
+
+
 void thread_dump(void) {
     uint64_t now = pit_get_ticks();
     uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
@@ -267,19 +295,22 @@ void thread_dump(void) {
         if (g_threads[i].state == T_UNUSED) continue;
 
         uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
-        unsigned cpu = (unsigned)(ct & 0xffffffffu);
+        unsigned long long cpu = (unsigned long long)ct;
         unsigned pct = 0;
         if (total != 0) pct = (unsigned)((ct * 100) / total);
 
-        kprintf("  %d: %-8s %-10s cpu=%u pct=%u rsp=%p\n",
+        kprintf("  slot=%d tid=%u %-8s %-10s p=%u cpu=%llu pct=%u\n",
             i,
+            (unsigned)g_threads[i].tid,
             state_str(g_threads[i].state),
             g_threads[i].name,
+            (unsigned)g_threads[i].prio,
             cpu,
-            pct,
-            (void*)(uintptr_t)g_threads[i].rsp);
+            pct);
     }
 }
+
+
 
 
 
@@ -333,6 +364,8 @@ void thread_cpu_reset(void) {
     kprintf("cpu: reset\n");
 }
 
+
+
 void thread_top(void) {
     uint64_t now = pit_get_ticks();
     uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
@@ -343,7 +376,6 @@ void thread_top(void) {
         if (g_threads[i].state != T_UNUSED) idx[n++] = i;
     }
 
-    // simple bubble sort by effective cpu ticks desc (small n)
     for (int a = 0; a < n; a++) {
         for (int b = 0; b + 1 < n; b++) {
             uint64_t ca = thread_effective_cpu_ticks(&g_threads[idx[b]]);
@@ -360,17 +392,57 @@ void thread_top(void) {
     for (int k = 0; k < n; k++) {
         int i = idx[k];
         uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
-        unsigned cpu = (unsigned)(ct & 0xffffffffu);
+        unsigned long long cpu = (unsigned long long)ct;
         unsigned pct = 0;
         if (total != 0) pct = (unsigned)((ct * 100) / total);
 
-        kprintf("  %d: %-8s %-10s cpu=%u pct=%u\n",
+        kprintf("  slot=%d tid=%u %-8s %-10s p=%u cpu=%llu pct=%u\n",
             i,
+            (unsigned)g_threads[i].tid,
             state_str(g_threads[i].state),
             g_threads[i].name,
+            (unsigned)g_threads[i].prio,
             cpu,
             pct);
     }
+}
+
+
+
+
+int thread_set_prio(int id, int prio) {
+    if (prio < 0) return -1;
+    if (prio > 3) return -1;
+    if (id < 0 || id >= THREAD_MAX) return -1;
+    if (g_threads[id].state == T_UNUSED) return -1;
+    g_threads[id].prio = (uint8_t)(prio & 0xff);
+    return 0;
+}
+
+int thread_get_prio(int id) {
+    if (id < 0 || id >= THREAD_MAX) return -1;
+    if (g_threads[id].state == T_UNUSED) return -1;
+    return (int)g_threads[id].prio;
+}
+
+
+static void spin_fn(void *arg) {
+    (void)arg;
+    for (;;) {
+        // burn a little CPU, then yield cooperatively
+        for (volatile uint64_t j = 0; j < 3000000; j++) { }
+        thread_yield();
+    }
+}
+
+int thread_spawn_spin(void) {
+    int id = thread_create("spin", spin_fn, 0);
+    if (id >= 0) {
+        kprintf("\n[thread] spawned spin as id=%d\n", id);
+    } else {
+        kprintf("\n[thread] spawn spin FAILED\n");
+    }
+    return id;
 }
 
 /* ===== demo thread so we can prove switching works ===== */
