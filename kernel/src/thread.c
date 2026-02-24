@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "pit.h"
 
 extern void ctx_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 
@@ -15,12 +16,14 @@ typedef enum {
     T_UNUSED = 0,
     T_READY,
     T_RUNNING,
+    T_SLEEPING,
     T_DEAD
 } thread_state_t;
 
 typedef struct {
     uint64_t rsp;
     thread_state_t state;
+    uint64_t wake_tick;
 
     char name[THREAD_NAME_MAX];
 
@@ -70,6 +73,7 @@ static void thread_trampoline(void) {
 void thread_init(void) {
     for (int i = 0; i < THREAD_MAX; i++) {
         g_threads[i].state = T_UNUSED;
+        g_threads[i].wake_tick = 0;
         g_threads[i].rsp = 0;
         g_threads[i].entry = 0;
         g_threads[i].arg = 0;
@@ -131,6 +135,15 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     return idx;
 }
 
+
+static void thread_wake_ready(void) {
+    uint64_t now = pit_get_ticks();
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_SLEEPING && g_threads[i].wake_tick <= now) {
+            g_threads[i].state = T_READY;
+        }
+    }
+}
 static int pick_next_ready(void) {
     if (!g_cur) return 0;
 
@@ -173,6 +186,7 @@ void thread_request_resched(void) {
 }
 
 void thread_check_resched(void) {
+    thread_wake_ready();
     if (!g_need_resched) return;
     g_need_resched = 0;
     thread_yield();
@@ -200,6 +214,7 @@ static const char *state_str(thread_state_t s) {
         case T_UNUSED:  return "UNUSED";
         case T_READY:   return "READY";
         case T_RUNNING: return "RUNNING";
+        case T_SLEEPING: return "SLEEPING";
         case T_DEAD:    return "DEAD";
         default:        return "?";
     }
@@ -217,6 +232,24 @@ void thread_dump(void) {
     }
 }
 
+
+void thread_sleep_ms(uint64_t ms) {
+    /* PIT is 100Hz right now (10ms/tick). ms->ticks rounding up */
+    uint64_t ticks = (ms + 9) / 10;
+    if (ticks == 0) ticks = 1;
+
+    k_cli();
+
+    uint64_t now = pit_get_ticks();
+    g_cur->wake_tick = now + ticks;
+    g_cur->state = T_SLEEPING;
+
+    /* request resched and switch */
+    g_need_resched = 1;
+    k_sti();
+    thread_yield();
+}
+
 /* ===== demo thread so we can prove switching works ===== */
 
 static void demo_fn(void *arg) {
@@ -224,8 +257,7 @@ static void demo_fn(void *arg) {
     for (int i = 0; i < 5; i++) {
         kprintf("\n[demo] i=%d\n", i);
         /* cheap delay so it doesn't spam instantly */
-        for (volatile uint64_t j = 0; j < 8000000; j++) { }
-        thread_yield();
+        thread_sleep_ms(250);thread_yield();
     }
     kprintf("\n[demo] done\n");
 }
