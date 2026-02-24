@@ -550,7 +550,7 @@ if (streq_simple(argv[0], "clear")) {
         kprintf("sleep: %p ms (", (void*)ms);
         shell_print_u64_dec(ms);
         kprintf(")\n");
-        timer_sleep_ms(ms);
+        thread_sleep_ms(ms);
         kprintf("sleep: done\n");
         return;
     }
@@ -743,6 +743,12 @@ if (streq_simple(argv[0], "clear")) {
         shell_cpu_cli();
         for (;;) shell_cpu_hlt();
     }
+    else if (streq_simple(argv[0], "preempt")) {
+            int cur = thread_preempt_get();
+            thread_preempt_set(!cur);
+            kprintf("preempt: %s\n", (!cur) ? "on" : "off");
+            return;
+        }
 
     kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");

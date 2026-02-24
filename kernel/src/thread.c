@@ -36,6 +36,7 @@ typedef struct {
 static thread_t g_threads[THREAD_MAX];
 static int g_cur_idx = 0;
 static volatile int g_need_resched = 0;
+static volatile int g_preempt_enabled = 1;
 
 static thread_t *g_cur = 0;
 
@@ -136,14 +137,18 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
 }
 
 
-static void thread_wake_ready(void) {
+static int thread_wake_ready(void) {
+    int woke = 0;
     uint64_t now = pit_get_ticks();
     for (int i = 0; i < THREAD_MAX; i++) {
         if (g_threads[i].state == T_SLEEPING && g_threads[i].wake_tick <= now) {
             g_threads[i].state = T_READY;
+            woke = 1;
         }
     }
+    return woke;
 }
+
 static int pick_next_ready(void) {
     if (!g_cur) return 0;
 
@@ -182,11 +187,13 @@ void thread_yield(void) {
 }
 
 void thread_request_resched(void) {
+    if (!g_preempt_enabled) return;
     g_need_resched = 1;
 }
 
 void thread_check_resched(void) {
-    thread_wake_ready();
+    int woke_any = thread_wake_ready();
+    if (woke_any) g_need_resched = 1;
     if (!g_need_resched) return;
     g_need_resched = 0;
     thread_yield();
@@ -248,6 +255,15 @@ void thread_sleep_ms(uint64_t ms) {
     g_need_resched = 1;
     k_sti();
     thread_yield();
+}
+
+
+int thread_preempt_get(void) {
+    return g_preempt_enabled ? 1 : 0;
+}
+
+void thread_preempt_set(int on) {
+    g_preempt_enabled = on ? 1 : 0;
 }
 
 /* ===== demo thread so we can prove switching works ===== */

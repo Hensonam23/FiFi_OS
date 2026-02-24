@@ -15,3 +15,7 @@ int thread_spawn_demo(void);
 void thread_request_resched(void);
 void thread_check_resched(void);
 
+int  thread_preempt_get(void);
+void thread_preempt_set(int on);
+
+void thread_sleep_ms(uint64_t ms);
