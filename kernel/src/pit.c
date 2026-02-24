@@ -15,7 +15,6 @@ uint64_t pit_ticks(void) {
 
 /* This will be called by the IRQ0 handler */
 void pit_on_tick(void) {
-    g_pit_ticks++;
 
     g_ticks++;
 }

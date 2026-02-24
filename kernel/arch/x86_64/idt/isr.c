@@ -87,12 +87,11 @@ void isr_common_handler(isr_ctx_t *ctx) {
     /* IRQs after PIC remap live at vectors 32-47 */
     if (vec >= 32 && vec < 48) {
         uint8_t irq = (uint8_t)(vec - 32);
-
-        if (irq == 0) pit_on_irq0();
         if (irq == 1) keyboard_irq_handler();
 
         /* Timer tick (IRQ0) */
         if (irq == 0) {
+            pit_on_irq0();
             pit_on_tick();
         }
 
