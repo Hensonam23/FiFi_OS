@@ -181,3 +181,14 @@ $(BUILD)/shell.o: kernel/src/shell.c | $(BUILD)
 build/%.o: kernel/src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+
+	clang --target=x86_64-elf -c kernel/arch/x86_64/ctx_switch.S -o build/ctx_switch.o
+	clang -std=c11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize --target=x86_64-elf -Ikernel/include -Ikernel/arch/x86_64/idt -c kernel/src/thread.c -o build/thread.o
+
+
+# === FiFi override: link all build objects ===
+# We override ONLY the recipe for build/fifi. The original prerequisites still apply.
+# This guarantees new objects (thread.o, ctx_switch.o, etc) always get linked.
+build/fifi:
+	ld.lld -T kernel/linker.lds -nostdlib $(wildcard build/*.o) -o $@
+# === end override ===

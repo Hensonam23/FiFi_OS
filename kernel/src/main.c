@@ -20,6 +20,7 @@
 #include "elf.h"
 #include "acpi.h"
 #include "shell.h"
+#include "thread.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -88,6 +89,8 @@ static void pic_mask_all(void) {
 }
 
 void kmain(void) {
+    uint64_t hhdm_off = 0;
+
     __asm__ __volatile__("cli");
 
     serial_init();
@@ -108,6 +111,15 @@ void kmain(void) {
         panic("no framebuffer available");
     }
     serial_write("FiFi OS: framebuffer OK\n");
+    {
+        struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+        kprintf("FiFi OS: fb addr=%p %ux%u pitch=%u bpp=%u\n",
+            fb->address,
+            (unsigned)fb->width,
+            (unsigned)fb->height,
+            (unsigned)fb->pitch,
+            (unsigned)fb->bpp);
+    }
     initrd_init();
     initrd_cat("motd.txt");
 struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
@@ -143,12 +155,10 @@ struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     if (!hhdm_request.response) {
         serial_write("FiFi OS: hhdm missing\n");
     } else {
-
-        kprintf("FiFi OS: hhdm offset=0x%llx\n", (unsigned long long)hhdm_request.response->offset);
-    }
+        kprintf("FiFi OS: hhdm offset=%p\n", (void*)(uintptr_t)hhdm_request.response->offset);
+}
 
     /* FiFi OS: init PMM (simple bump allocator) */
-    uint64_t hhdm_off = 0;
     if (hhdm_request.response) {
         hhdm_off = hhdm_request.response->offset;
     }
@@ -222,6 +232,7 @@ heap_init();
 
     initrd_init();
     initrd_cat("motd.txt");
+    thread_init();
 shell_run();
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");

@@ -6,6 +6,7 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "thread.h"
 
 static const char *exc_names[32] = {
     "Divide-by-zero",
@@ -92,6 +93,7 @@ void isr_common_handler(isr_ctx_t *ctx) {
         /* Timer tick (IRQ0) */
         if (irq == 0) {
             pit_on_irq0();
+            thread_request_resched();
             pit_on_tick();
         }
 
