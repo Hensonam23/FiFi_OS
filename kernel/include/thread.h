@@ -21,3 +21,6 @@ void thread_preempt_set(int on);
 void thread_sleep_ms(uint64_t ms);
 
 int thread_resched_pending(void);
+
+void thread_top(void);
+void thread_cpu_reset(void);

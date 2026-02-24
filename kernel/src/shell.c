@@ -759,6 +759,16 @@ if (streq_simple(argv[0], "clear")) {
         return;
     }
 
+
+    else if (streq_simple(argv[0], "top")) {
+        thread_top();
+        return;
+    }
+    else if (streq_simple(argv[0], "cpu_reset")) {
+        thread_cpu_reset();
+        return;
+    }
+
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }

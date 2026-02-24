@@ -24,6 +24,8 @@ typedef struct {
     uint64_t rsp;
     thread_state_t state;
     uint64_t wake_tick;
+    uint64_t cpu_ticks;
+    uint64_t last_start_tick;
 
     char name[THREAD_NAME_MAX];
 
@@ -36,6 +38,8 @@ typedef struct {
 static thread_t g_threads[THREAD_MAX];
 static int g_cur_idx = 0;
 static volatile int g_need_resched = 0;
+static uint64_t g_boot_tick = 0;
+
 static volatile int g_preempt_enabled = 1;
 
 static thread_t *g_cur = 0;
@@ -88,6 +92,9 @@ void thread_init(void) {
     g_cur->state = T_RUNNING;
     name_copy(g_cur->name, "main");
 
+    g_boot_tick = pit_get_ticks();
+    g_cur->cpu_ticks = 0;
+    g_cur->last_start_tick = g_boot_tick;
     kprintf("FiFi OS: thread_init OK (main thread)\n");
 }
 
@@ -131,6 +138,8 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->entry = entry;
     t->arg = arg;
     t->stack_base = stack;
+    t->cpu_ticks = 0;
+    t->last_start_tick = 0;
     name_copy(t->name, name);
 
     return idx;
@@ -179,6 +188,11 @@ void thread_yield(void) {
     g_cur_idx = next_idx;
     g_cur = next;
 
+    uint64_t now = pit_get_ticks();
+    if (prev->last_start_tick != 0 && now >= prev->last_start_tick) {
+        prev->cpu_ticks += (now - prev->last_start_tick);
+    }
+    next->last_start_tick = now;
     ctx_switch(&prev->rsp, &next->rsp);
 
     /* For existing threads, ctx_switch returns to the yield() callsite.
@@ -205,6 +219,10 @@ void thread_exit(void) {
     k_cli();
 
     if (g_cur) {
+        uint64_t now = pit_get_ticks();
+        if (g_cur->last_start_tick != 0 && now >= g_cur->last_start_tick) {
+            g_cur->cpu_ticks += (now - g_cur->last_start_tick);
+        }
         g_cur->state = T_DEAD;
         kprintf("\n[thread] exit: %s\n", g_cur->name);
     }
@@ -214,6 +232,18 @@ void thread_exit(void) {
         thread_yield();
         __asm__ volatile("hlt");
     }
+}
+
+
+static uint64_t thread_effective_cpu_ticks(thread_t *t) {
+    uint64_t base = t->cpu_ticks;
+    if (t->state == T_RUNNING) {
+        uint64_t now = pit_get_ticks();
+        if (t->last_start_tick != 0 && now >= t->last_start_tick) {
+            base += (now - t->last_start_tick);
+        }
+    }
+    return base;
 }
 
 static const char *state_str(thread_state_t s) {
@@ -227,17 +257,30 @@ static const char *state_str(thread_state_t s) {
     }
 }
 
+
 void thread_dump(void) {
+    uint64_t now = pit_get_ticks();
+    uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
+
     kprintf("\n[threads]\n");
     for (int i = 0; i < THREAD_MAX; i++) {
         if (g_threads[i].state == T_UNUSED) continue;
-        kprintf("  %d: %-7s  %-10s  rsp=%p\n",
+
+        uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
+        unsigned cpu = (unsigned)(ct & 0xffffffffu);
+        unsigned pct = 0;
+        if (total != 0) pct = (unsigned)((ct * 100) / total);
+
+        kprintf("  %d: %-8s %-10s cpu=%u pct=%u rsp=%p\n",
             i,
             state_str(g_threads[i].state),
             g_threads[i].name,
+            cpu,
+            pct,
             (void*)(uintptr_t)g_threads[i].rsp);
     }
 }
+
 
 
 void thread_sleep_ms(uint64_t ms) {
@@ -248,6 +291,10 @@ void thread_sleep_ms(uint64_t ms) {
     k_cli();
 
     uint64_t now = pit_get_ticks();
+    if (g_cur->last_start_tick != 0 && now >= g_cur->last_start_tick) {
+        g_cur->cpu_ticks += (now - g_cur->last_start_tick);
+    }
+
     g_cur->wake_tick = now + ticks;
     g_cur->state = T_SLEEPING;
 
@@ -269,6 +316,61 @@ int thread_preempt_get(void) {
 
 void thread_preempt_set(int on) {
     g_preempt_enabled = on ? 1 : 0;
+}
+
+
+void thread_cpu_reset(void) {
+    k_cli();
+    uint64_t now = pit_get_ticks();
+    g_boot_tick = now;
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_UNUSED) continue;
+        g_threads[i].cpu_ticks = 0;
+        if (g_threads[i].state == T_RUNNING) g_threads[i].last_start_tick = now;
+        else g_threads[i].last_start_tick = 0;
+    }
+    k_sti();
+    kprintf("cpu: reset\n");
+}
+
+void thread_top(void) {
+    uint64_t now = pit_get_ticks();
+    uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
+
+    int idx[THREAD_MAX];
+    int n = 0;
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state != T_UNUSED) idx[n++] = i;
+    }
+
+    // simple bubble sort by effective cpu ticks desc (small n)
+    for (int a = 0; a < n; a++) {
+        for (int b = 0; b + 1 < n; b++) {
+            uint64_t ca = thread_effective_cpu_ticks(&g_threads[idx[b]]);
+            uint64_t cb = thread_effective_cpu_ticks(&g_threads[idx[b+1]]);
+            if (cb > ca) {
+                int tmp = idx[b];
+                idx[b] = idx[b+1];
+                idx[b+1] = tmp;
+            }
+        }
+    }
+
+    kprintf("\n[top] total_ticks=%u\n", (unsigned)(total & 0xffffffffu));
+    for (int k = 0; k < n; k++) {
+        int i = idx[k];
+        uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
+        unsigned cpu = (unsigned)(ct & 0xffffffffu);
+        unsigned pct = 0;
+        if (total != 0) pct = (unsigned)((ct * 100) / total);
+
+        kprintf("  %d: %-8s %-10s cpu=%u pct=%u\n",
+            i,
+            state_str(g_threads[i].state),
+            g_threads[i].name,
+            cpu,
+            pct);
+    }
 }
 
 /* ===== demo thread so we can prove switching works ===== */
