@@ -122,6 +122,121 @@ static uint64_t parse_u64(const char *s) {
 
 
 #define SHELL_PROMPT "FiFi> "
+/* === FiFi shell history (single system) === */
+#ifndef SHELL_LINE_MAX
+#define SHELL_LINE_MAX 128
+#endif
+
+#ifndef SHELL_HIST_MAX
+#define SHELL_HIST_MAX 32
+#endif
+
+typedef struct {
+    char entries[SHELL_HIST_MAX][SHELL_LINE_MAX];
+    uint32_t count;   /* number of valid entries (<= SHELL_HIST_MAX) */
+    uint32_t head;    /* next insert slot (ring) */
+    uint32_t nav;     /* 0 = not navigating; 1..count = how far back from newest */
+    bool stash_valid;
+    char stash[SHELL_LINE_MAX];
+    uint32_t stash_len;
+    uint32_t stash_pos;
+} shell_history_t;
+
+static shell_history_t g_shell_hist;
+
+static bool shell_is_space(char c) {
+    return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
+static bool shell_line_has_nonspace(const char *s) {
+    if (!s) return false;
+    for (uint32_t i = 0; s[i]; i++) {
+        if (!shell_is_space(s[i])) return true;
+    }
+    return false;
+}
+
+static uint32_t shell_strnlen_u32(const char *s, uint32_t cap) {
+    if (!s) return 0;
+    uint32_t i = 0;
+    while (i < cap && s[i]) i++;
+    return i;
+}
+
+static bool shell_streq(const char *a, const char *b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    uint32_t i = 0;
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) return false;
+        i++;
+    }
+    return a[i] == b[i];
+}
+
+static uint32_t shell_hist_index_from_nav(uint32_t nav) {
+    /* nav: 1..count; 1=newest */
+    uint32_t newest = (g_shell_hist.head + SHELL_HIST_MAX - 1) % SHELL_HIST_MAX;
+    uint32_t idx = (newest + SHELL_HIST_MAX - (nav - 1)) % SHELL_HIST_MAX;
+    return idx;
+}
+
+static const char* shell_hist_get(uint32_t nav) {
+    if (nav == 0 || nav > g_shell_hist.count) return "";
+    return g_shell_hist.entries[shell_hist_index_from_nav(nav)];
+}
+
+static void shell_hist_reset_nav(void) {
+    g_shell_hist.nav = 0;
+    g_shell_hist.stash_valid = false;
+}
+
+static void shell_hist_stash_current(const char *line, uint64_t len, uint64_t pos) {
+    uint32_t copy = (uint32_t)len;
+    if (copy >= SHELL_LINE_MAX) copy = SHELL_LINE_MAX - 1;
+    for (uint32_t i = 0; i < copy; i++) g_shell_hist.stash[i] = line[i];
+    g_shell_hist.stash[copy] = 0;
+    g_shell_hist.stash_len = copy;
+    g_shell_hist.stash_pos = (uint32_t)pos;
+    g_shell_hist.stash_valid = true;
+}
+
+static void shell_hist_load_line(const char *src, char *line, uint64_t *len, uint64_t *pos) {
+    uint32_t n = shell_strnlen_u32(src, SHELL_LINE_MAX - 1);
+    for (uint32_t i = 0; i < n; i++) line[i] = src[i];
+    line[n] = 0;
+    if (len) *len = (uint64_t)n;
+    if (pos) *pos = (uint64_t)n; /* typical: cursor at end when recalling */
+}
+
+static void shell_hist_commit(const char *line) {
+    if (!shell_line_has_nonspace(line)) {
+        shell_hist_reset_nav();
+        return;
+    }
+
+    /* avoid storing exact duplicate of newest */
+    if (g_shell_hist.count > 0) {
+        const char *newest = shell_hist_get(1);
+        if (shell_streq(newest, line)) {
+            shell_hist_reset_nav();
+            return;
+        }
+    }
+
+    uint32_t slot = g_shell_hist.head;
+    uint32_t n = shell_strnlen_u32(line, SHELL_LINE_MAX - 1);
+    for (uint32_t i = 0; i < n; i++) g_shell_hist.entries[slot][i] = line[i];
+    g_shell_hist.entries[slot][n] = 0;
+
+    g_shell_hist.head = (g_shell_hist.head + 1) % SHELL_HIST_MAX;
+    if (g_shell_hist.count < SHELL_HIST_MAX) g_shell_hist.count++;
+
+    shell_hist_reset_nav();
+}
+/* === end history helpers === */
+
+
 
 
 // ---- command history ----
@@ -230,29 +345,34 @@ static void shell_hexdump(const uint8_t *buf, uint64_t size) {
 // 1) CR, prompt, full line, clear leftovers
 // 2) CR, prompt, print up to cursor position (so cursor moves)
 static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *last_len) {
-    const char *prompt = SHELL_PROMPT;
+    if (!line) return;
+    if (pos > len) pos = len;
 
-    // Go back to start of the current line, then redraw prompt + line
-    kprintf("\r%s", prompt);
+    /* 1) CR + prompt + full render with '|' marker inserted */
+    kprintf("\r");
+    kprintf("%s", SHELL_PROMPT);
 
-    // Print the line with a visible cursor marker at the insert position
+    /* Print: line[0..pos-1] + '|' + line[pos..len-1] */
     for (uint64_t i = 0; i <= len; i++) {
-        if (i == pos) {
-            kprintf("|");
-        }
-        if (i < len) {
-            kprintf("%c", line[i]);
-        }
+        if (i == pos) kprintf("|");
+        if (i < len)  kprintf("%c", line[i]);
     }
 
-    // Clear leftovers from the previous render
-    uint64_t render_len = len + 1; // +1 for '|'
+    /* 2) Clear leftovers from previous render (line+cursor only; prompt is constant) */
+    uint64_t render_len = len + 1; /* +1 for '|' */
     if (last_len && *last_len > render_len) {
         uint64_t extra = *last_len - render_len;
         for (uint64_t i = 0; i < extra; i++) kprintf(" ");
     }
-
     if (last_len) *last_len = render_len;
+
+    /* 3) Put the real cursor on the visible '|' marker */
+    kprintf("\r");
+    kprintf("%s", SHELL_PROMPT);
+    for (uint64_t i = 0; i < pos && i < len; i++) {
+        kprintf("%c", line[i]);
+    }
+    kprintf("|");
 }
 
 
@@ -614,11 +734,6 @@ void shell_run(void) {
     static char hist[HMAX][128];
     static uint64_t hist_count = 0; // <= HMAX
     static uint64_t hist_head  = 0; // next insert slot
-    static int hist_nav = -1;       // -1 = not navigating, else 0=newest, 1=older...
-
-    static char saved[128];
-    static uint64_t saved_len = 0;
-    static uint64_t saved_pos = 0;
 
     // helpers (inline style)
     // (C doesn't have real local functions; we do comparisons inline below.)
@@ -642,7 +757,6 @@ void shell_run(void) {
             len = 0;
             pos = 0;
             last_len = 0;
-            hist_nav = -1;
             kprintf("%s", prompt);
             continue;
         }
@@ -654,7 +768,6 @@ void shell_run(void) {
             len = 0;
             pos = 0;
             last_len = 0;
-            hist_nav = -1;
             kprintf("%s", prompt);
             continue;
         }
@@ -664,7 +777,9 @@ void shell_run(void) {
             kprintf("\n");
             line[len] = 0;
 
-            // push into history (ignore empty + ignore duplicate of newest)
+            
+            shell_hist_commit(line);
+// push into history (ignore empty + ignore duplicate of newest)
             if (len > 0) {
                 int is_dup = 0;
                 if (hist_count > 0) {
@@ -694,7 +809,6 @@ void shell_run(void) {
             len = 0;
             pos = 0;
             last_len = 0;
-            hist_nav = -1;
 
             kprintf("%s", prompt);
             continue;
@@ -724,60 +838,51 @@ void shell_run(void) {
 
         // History Up/Down
         if (key == KEY_UP) {
-            if (hist_count == 0) continue;
-
-            if (hist_nav == -1) {
-                // save current edit line
-                for (uint64_t i = 0; i < sizeof(saved); i++) {
-                    saved[i] = line[i];
-                    if (line[i] == 0) break;
-                }
-                saved_len = len;
-                saved_pos = pos;
-                hist_nav = 0; // newest
-            } else {
-                if ((uint64_t)hist_nav + 1 < hist_count) hist_nav++;
+            if (g_shell_hist.count == 0) {
+                /* nothing to recall */
+                continue;
             }
 
-            uint64_t newest = (hist_head + HMAX - 1) % HMAX;
-            uint64_t idx = (newest + HMAX - (uint64_t)hist_nav) % HMAX;
+            if (g_shell_hist.nav == 0) {
+                /* first time entering history nav: stash current edit line */
+                shell_hist_stash_current(line, len, pos);
+                g_shell_hist.nav = 1;
+            } else {
+                if (g_shell_hist.nav < g_shell_hist.count) g_shell_hist.nav++;
+            }
 
-            // load history line
-            uint64_t i = 0;
-            for (; i < sizeof(line) - 1 && hist[idx][i]; i++) line[i] = hist[idx][i];
-            line[i] = 0;
-            len = i;
-            pos = len;
+            const char *h = shell_hist_get(g_shell_hist.nav);
+            shell_hist_load_line(h, line, &len, &pos);
             shell_redraw_line(line, len, pos, &last_len);
             continue;
         }
 
         if (key == KEY_DOWN) {
-            if (hist_nav == -1) continue;
-
-            if (hist_nav > 0) {
-                hist_nav--;
-
-                uint64_t newest = (hist_head + HMAX - 1) % HMAX;
-                uint64_t idx = (newest + HMAX - (uint64_t)hist_nav) % HMAX;
-
-                uint64_t i = 0;
-                for (; i < sizeof(line) - 1 && hist[idx][i]; i++) line[i] = hist[idx][i];
-                line[i] = 0;
-                len = i;
-                pos = len;
-                shell_redraw_line(line, len, pos, &last_len);
-            } else {
-                // restore saved and exit history mode
-                for (uint64_t i = 0; i < sizeof(line); i++) {
-                    line[i] = saved[i];
-                    if (saved[i] == 0) break;
-                }
-                len = saved_len;
-                pos = saved_pos;
-                hist_nav = -1;
-                shell_redraw_line(line, len, pos, &last_len);
+            if (g_shell_hist.count == 0 || g_shell_hist.nav == 0) {
+                /* nothing / not currently navigating */
+                continue;
             }
+
+            if (g_shell_hist.nav > 0) g_shell_hist.nav--;
+
+            if (g_shell_hist.nav == 0) {
+                /* return to the stashed edit line (what you were typing before history nav) */
+                if (g_shell_hist.stash_valid) {
+                    shell_hist_load_line(g_shell_hist.stash, line, &len, &pos);
+                    /* restore stash cursor if it was within bounds */
+                    if ((uint64_t)g_shell_hist.stash_pos <= len) pos = (uint64_t)g_shell_hist.stash_pos;
+                } else {
+                    line[0] = 0;
+                    len = 0;
+                    pos = 0;
+                }
+                g_shell_hist.stash_valid = false;
+            } else {
+                const char *h = shell_hist_get(g_shell_hist.nav);
+                shell_hist_load_line(h, line, &len, &pos);
+            }
+
+            shell_redraw_line(line, len, pos, &last_len);
             continue;
         }
 
