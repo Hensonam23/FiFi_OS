@@ -35,3 +35,6 @@ initrd/initrd.cpio
 *.orig
 
 # --- generated build artifacts ---
+
+# local patch scripts
+/tools/*.py
