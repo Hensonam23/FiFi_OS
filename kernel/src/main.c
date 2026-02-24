@@ -143,8 +143,8 @@ struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     if (!hhdm_request.response) {
         serial_write("FiFi OS: hhdm missing\n");
     } else {
-        uint64_t off = hhdm_request.response->offset;
-        kprintf("HHDM offset: %p\n", (void*)(uintptr_t)off);
+
+        kprintf("FiFi OS: hhdm offset=0x%llx\n", (unsigned long long)hhdm_request.response->offset);
     }
 
     /* FiFi OS: init PMM (simple bump allocator) */
