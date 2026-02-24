@@ -19,3 +19,5 @@ int  thread_preempt_get(void);
 void thread_preempt_set(int on);
 
 void thread_sleep_ms(uint64_t ms);
+
+int thread_resched_pending(void);

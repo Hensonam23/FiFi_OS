@@ -84,6 +84,7 @@ static void every_work(void *arg) {
     kprintf("%s\n", tmp);
 
     shell_exec(tmp);
+    thread_check_resched();
 
     // Reschedule
     timer_call_in_ms(j->interval_ms, every_work, j);
@@ -750,7 +751,15 @@ if (streq_simple(argv[0], "clear")) {
             return;
         }
 
-    kprintf("Unknown command: %s\n", argv[0]);
+    
+    else if (streq_simple(argv[0], "resched")) {
+        kprintf("resched: pending=%d preempt=%s\n",
+            thread_resched_pending(),
+            thread_preempt_get() ? "on" : "off");
+        return;
+    }
+
+kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
 void shell_run(void) {
@@ -837,6 +846,7 @@ void shell_run(void) {
 
             // execute
             shell_exec(line);
+            thread_check_resched();
 
             // reset editor
             line[0] = 0;
@@ -852,21 +862,25 @@ void shell_run(void) {
         if (key == KEY_LEFT) {
             if (pos > 0) pos--;
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
         if (key == KEY_RIGHT) {
             if (pos < len) pos++;
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
         if (key == KEY_HOME) {
             pos = 0;
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
         if (key == KEY_END) {
             pos = len;
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
 
@@ -888,6 +902,7 @@ void shell_run(void) {
             const char *h = shell_hist_get(g_shell_hist.nav);
             shell_hist_load_line(h, line, &len, &pos);
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
 
@@ -917,6 +932,7 @@ void shell_run(void) {
             }
 
             shell_redraw_line(line, len, pos, &last_len);
+            thread_check_resched();
             continue;
         }
 
@@ -931,6 +947,7 @@ void shell_run(void) {
                 pos--;
                 line[len] = 0;
                 shell_redraw_line(line, len, pos, &last_len);
+                thread_check_resched();
             }
             continue;
         }
@@ -945,6 +962,7 @@ void shell_run(void) {
                 len--;
                 line[len] = 0;
                 shell_redraw_line(line, len, pos, &last_len);
+                thread_check_resched();
             }
             continue;
         }
@@ -961,6 +979,7 @@ void shell_run(void) {
                 pos++;
                 line[len] = 0;
                 shell_redraw_line(line, len, pos, &last_len);
+                thread_check_resched();
             }
             continue;
         }

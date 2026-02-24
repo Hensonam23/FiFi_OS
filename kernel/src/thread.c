@@ -258,6 +258,11 @@ void thread_sleep_ms(uint64_t ms) {
 }
 
 
+
+int thread_resched_pending(void) {
+    return g_need_resched ? 1 : 0;
+}
+
 int thread_preempt_get(void) {
     return g_preempt_enabled ? 1 : 0;
 }
