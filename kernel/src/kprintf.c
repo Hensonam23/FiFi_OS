@@ -1,6 +1,30 @@
 #include "kprintf.h"
 #include "console.h"
 #include <stdint.h>
+#include "spinlock.h"
+
+static spinlock_t g_kprintf_lock = {0};
+
+
+/* === print-state tracking (for clean shell prompt redraw) === */
+static volatile int g_print_input_active = 0;
+static volatile int g_print_dirty = 0;
+static volatile int g_print_suppress_dirty = 0;
+
+void print_set_input_active(int on) {
+    __atomic_store_n(&g_print_input_active, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+void print_set_suppress_dirty(int on) {
+    __atomic_store_n(&g_print_suppress_dirty, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+int print_take_dirty(void) {
+    int d = __atomic_exchange_n(&g_print_dirty, 0, __ATOMIC_ACQ_REL);
+    return d ? 1 : 0;
+}
+/* === end print-state === */
+
 
 static void putc_(char c) {
     console_putc(c);
@@ -103,8 +127,14 @@ void kvprintf(const char *fmt, va_list args) {
 }
 
 void kprintf(const char *fmt, ...) {
+    uint64_t __kpf = spin_lock_irqsave(&g_kprintf_lock);
     va_list args;
     va_start(args, fmt);
     kvprintf(fmt, args);
     va_end(args);
+        if (__atomic_load_n(&g_print_input_active, __ATOMIC_RELAXED) &&
+        !__atomic_load_n(&g_print_suppress_dirty, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g_print_dirty, 1, __ATOMIC_RELAXED);
+    }
+spin_unlock_irqrestore(&g_kprintf_lock, __kpf);
 }

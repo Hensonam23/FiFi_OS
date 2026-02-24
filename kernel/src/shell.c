@@ -27,6 +27,8 @@
 #include "pmm.h"
 #include "heap.h"
 #include "io.h"
+#include "thread.h"
+#include "print_state.h"
 
 static void shell_print_u64_dec(uint64_t v) {
     char buf[32];
@@ -345,6 +347,7 @@ static void shell_hexdump(const uint8_t *buf, uint64_t size) {
 // 1) CR, prompt, full line, clear leftovers
 // 2) CR, prompt, print up to cursor position (so cursor moves)
 static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *last_len) {
+    print_set_suppress_dirty(1);
     if (!line) return;
     if (pos > len) pos = len;
 
@@ -352,7 +355,8 @@ static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *
     kprintf("\r");
     kprintf("%s", SHELL_PROMPT);
 
-    /* Print: line[0..pos-1] + '|' + line[pos..len-1] */
+    
+    print_set_input_active(1);/* Print: line[0..pos-1] + '|' + line[pos..len-1] */
     for (uint64_t i = 0; i <= len; i++) {
         if (i == pos) kprintf("|");
         if (i < len)  kprintf("%c", line[i]);
@@ -373,6 +377,7 @@ static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *
         kprintf("%c", line[i]);
     }
     kprintf("|");
+    print_set_suppress_dirty(0);
 }
 
 
@@ -409,7 +414,28 @@ static void shell_exec(char *line) {
         return;
     }
 
-    if (streq_simple(argv[0], "clear")) {
+    else if (streq_simple(argv[0], "threads")) {
+
+        thread_dump();
+
+        return;
+    }
+
+    else if (streq_simple(argv[0], "spawn")) {
+
+        thread_spawn_demo();
+
+        return;
+    }
+
+    else if (streq_simple(argv[0], "yield")) {
+
+        thread_yield();
+
+        return;
+    }
+
+if (streq_simple(argv[0], "clear")) {
         console_clear();
         return;
     }
@@ -746,6 +772,8 @@ void shell_run(void) {
         if (key < 0) {
             timer_poll();
             workqueue_run();
+            thread_check_resched();
+            if (print_take_dirty()) { shell_redraw_line(line, len, pos, &last_len); }
             __asm__ __volatile__("hlt");
             continue;
         }
@@ -888,6 +916,7 @@ void shell_run(void) {
 
         // Backspace (8 or 127)
         if (key == 8 || key == 127) {
+            if (g_shell_hist.nav != 0) { shell_hist_reset_nav(); }
             if (pos > 0) {
                 for (uint64_t i = pos - 1; i + 1 < len; i++) {
                     line[i] = line[i + 1];
@@ -902,6 +931,7 @@ void shell_run(void) {
 
         // Delete (forward)
         if (key == KEY_DELETE) {
+            if (g_shell_hist.nav != 0) { shell_hist_reset_nav(); }
             if (pos < len) {
                 for (uint64_t i = pos; i + 1 < len; i++) {
                     line[i] = line[i + 1];
@@ -915,6 +945,7 @@ void shell_run(void) {
 
         // Printable ASCII insert
         if (key >= 32 && key <= 126) {
+            if (g_shell_hist.nav != 0) { shell_hist_reset_nav(); }
             if (len < (sizeof(line) - 1)) {
                 for (uint64_t i = len; i > pos; i--) {
                     line[i] = line[i - 1];
