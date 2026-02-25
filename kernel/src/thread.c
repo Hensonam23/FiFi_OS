@@ -623,6 +623,22 @@ void thread_reap_dead(void) {
     }
 }
 
+
+void thread_jobs(void) {
+    kprintf("\n[jobs]\n");
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_UNUSED) continue;
+        if (g_threads[i].state == T_DEAD) continue;
+
+        kprintf("slot=%d tid=%d state=%s name=%s prio=%d\n",
+            i,
+            (int)g_threads[i].tid,
+            state_str(g_threads[i].state),
+            g_threads[i].name,
+            (int)g_threads[i].prio);
+    }
+}
+
 /* ===== demo thread so we can prove switching works ===== */
 
 static void demo_fn(void *arg) {
