@@ -36,3 +36,5 @@ int thread_spawn_talk(uint64_t period_ms, uint32_t count);
 int thread_stop_talk(void);
 
 int thread_kill(int slot);
+void thread_reap_dead(void);
+void thread_jobs(void);

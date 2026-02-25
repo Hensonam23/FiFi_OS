@@ -262,6 +262,7 @@ void thread_request_resched(void) {
 
 
 void thread_check_resched(void) {
+    thread_reap_dead();
     int woke_any = thread_wake_ready();
     if (woke_any) g_need_resched = 1;
     if (!g_need_resched) return;
@@ -598,6 +599,28 @@ int thread_kill(int slot) {
     g_need_resched = 1;
     k_sti();
     return 0;
+}
+
+
+void thread_reap_dead(void) {
+    // Safe reaping of DEAD threads: turn them into UNUSED slots.
+    // Never reap slot 0 (main) and never reap the currently running thread.
+    for (int i = 1; i < THREAD_MAX; i++) {
+        if (g_threads[i].state != T_DEAD) continue;
+        if (&g_threads[i] == g_cur) continue;
+
+        // clear minimal fields
+        g_threads[i].state = T_UNUSED;
+        g_threads[i].rsp = 0;
+        g_threads[i].stack_base = 0;
+        g_threads[i].wake_tick = 0;
+        g_threads[i].cpu_ticks = 0;
+        g_threads[i].last_start_tick = 0;
+        g_threads[i].wait_ticks = 0;
+        g_threads[i].prio = 0;
+        g_threads[i].tid = 0;
+        g_threads[i].name[0] = 0;
+    }
 }
 
 /* ===== demo thread so we can prove switching works ===== */
