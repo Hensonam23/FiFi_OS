@@ -25,6 +25,7 @@ typedef struct {
     thread_state_t state;
     uint8_t prio;
     uint32_t tid;
+    uint32_t wait_ticks;
     uint64_t wake_tick;
     uint64_t cpu_ticks;
     uint64_t last_start_tick;
@@ -44,6 +45,10 @@ static uint64_t g_boot_tick = 0;
 static uint32_t g_next_tid = 1;
 
 static volatile int g_preempt_enabled = 1;
+static volatile int g_aging_enabled = 1;
+static volatile int g_timeslice_ticks = 3; // 100Hz ticks (~30ms)
+static volatile int g_slice_left = 3;
+
 
 static thread_t *g_cur = 0;
 
@@ -100,6 +105,8 @@ void thread_init(void) {
     g_cur->cpu_ticks = 0;
     g_cur->last_start_tick = g_boot_tick;
     g_cur->tid = g_next_tid++;
+    g_cur->wait_ticks = 0;
+    g_slice_left = g_timeslice_ticks;
     kprintf("FiFi OS: thread_init OK (main thread)\n");
 }
 
@@ -141,6 +148,7 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->rsp = (uint64_t)(uintptr_t)sp;
     t->state = T_READY;
     t->tid = g_next_tid++;
+    t->wait_ticks = 0;
     t->prio = 1;
     t->entry = entry;
     t->arg = arg;
@@ -164,34 +172,37 @@ static int thread_wake_ready(void) {
     }
     return woke;
 }
+static int eff_prio(thread_t *t);
 
 
-static int highest_ready_prio(void) {
+
+static int highest_ready_eff_prio(void) {
     int best = -1;
     for (int i = 0; i < THREAD_MAX; i++) {
         if (g_threads[i].state == T_READY) {
-            int p = (int)g_threads[i].prio;
-            if (p > best) best = p;
+            int ep = eff_prio(&g_threads[i]);
+            if (ep > best) best = ep;
         }
     }
     return best;
 }
 
+
 static int pick_next_ready(void) {
     if (!g_cur) return 0;
 
-    int best = highest_ready_prio();
+    int best = highest_ready_eff_prio();
     if (best < 0) return -1;
 
-    // round-robin among threads at the best priority
     for (int step = 1; step <= THREAD_MAX; step++) {
         int i = (g_cur_idx + step) % THREAD_MAX;
-        if (g_threads[i].state == T_READY && (int)g_threads[i].prio == best) {
+        if (g_threads[i].state == T_READY && eff_prio(&g_threads[i]) == best) {
             return i;
         }
     }
     return -1;
 }
+
 
 
 void thread_yield(void) {
@@ -219,6 +230,8 @@ void thread_yield(void) {
         prev->cpu_ticks += (now - prev->last_start_tick);
     }
     next->last_start_tick = now;
+    next->wait_ticks = 0;
+    g_slice_left = g_timeslice_ticks;
     ctx_switch(&prev->rsp, &next->rsp);
 
     /* For existing threads, ctx_switch returns to the yield() callsite.
@@ -226,10 +239,27 @@ void thread_yield(void) {
     k_sti();
 }
 
+
 void thread_request_resched(void) {
-    if (!g_preempt_enabled) return;
-    g_need_resched = 1;
+    // called from IRQ0 (timer tick). Do NOT print here.
+
+    // Aging: increment wait time for READY threads
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_READY) {
+            if (g_threads[i].wait_ticks < 1000000u) g_threads[i].wait_ticks++;
+        }
+    }
+
+    // Timeslice: count down current running slice
+    if (g_slice_left > 0) g_slice_left--;
+    if (g_slice_left <= 0) {
+        g_slice_left = g_timeslice_ticks;
+        if (g_preempt_enabled) {
+            g_need_resched = 1;
+        }
+    }
 }
+
 
 void thread_check_resched(void) {
     int woke_any = thread_wake_ready();
@@ -272,6 +302,20 @@ static uint64_t thread_effective_cpu_ticks(thread_t *t) {
     return base;
 }
 
+
+static int eff_prio(thread_t *t) {
+    int p = (int)t->prio;
+    if (!g_aging_enabled) return p;
+
+    // Boost based on how long it's been READY
+    const int AGING_QUANTUM = 10; // ticks (~100ms)
+    const int MAX_BOOST = 3;
+
+    int boost = (int)(t->wait_ticks / (uint32_t)AGING_QUANTUM);
+    if (boost > MAX_BOOST) boost = MAX_BOOST;
+    return p + boost;
+}
+
 static const char *state_str(thread_state_t s) {
     switch (s) {
         case T_UNUSED:  return "UNUSED";
@@ -286,6 +330,7 @@ static const char *state_str(thread_state_t s) {
 
 
 
+
 void thread_dump(void) {
     uint64_t now = pit_get_ticks();
     uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
@@ -295,20 +340,21 @@ void thread_dump(void) {
         if (g_threads[i].state == T_UNUSED) continue;
 
         uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
-        unsigned long long cpu = (unsigned long long)ct;
-        unsigned pct = 0;
-        if (total != 0) pct = (unsigned)((ct * 100) / total);
+        int cpu = (int)ct;  // PIT ticks are small; keep it simple for our kprintf
+        int pct = 0;
+        if (total != 0) pct = (int)((ct * 100) / total);
 
-        kprintf("  slot=%d tid=%u %-8s %-10s p=%u cpu=%llu pct=%u\n",
+        kprintf("slot=%d tid=%d state=%s name=%s prio=%d cpu=%d pct=%d\n",
             i,
-            (unsigned)g_threads[i].tid,
+            (int)g_threads[i].tid,
             state_str(g_threads[i].state),
             g_threads[i].name,
-            (unsigned)g_threads[i].prio,
+            (int)g_threads[i].prio,
             cpu,
             pct);
     }
 }
+
 
 
 
@@ -341,6 +387,26 @@ int thread_resched_pending(void) {
     return g_need_resched ? 1 : 0;
 }
 
+
+int thread_aging_get(void) {
+    return g_aging_enabled ? 1 : 0;
+}
+
+void thread_aging_set(int on) {
+    g_aging_enabled = on ? 1 : 0;
+}
+
+int thread_timeslice_get(void) {
+    return g_timeslice_ticks;
+}
+
+void thread_timeslice_set(int ticks) {
+    if (ticks < 1) ticks = 1;
+    if (ticks > 50) ticks = 50; // keep sane
+    g_timeslice_ticks = ticks;
+    if (g_slice_left > g_timeslice_ticks) g_slice_left = g_timeslice_ticks;
+}
+
 int thread_preempt_get(void) {
     return g_preempt_enabled ? 1 : 0;
 }
@@ -366,6 +432,7 @@ void thread_cpu_reset(void) {
 
 
 
+
 void thread_top(void) {
     uint64_t now = pit_get_ticks();
     uint64_t total = (now >= g_boot_tick) ? (now - g_boot_tick) : 0;
@@ -388,24 +455,25 @@ void thread_top(void) {
         }
     }
 
-    kprintf("\n[top] total_ticks=%u\n", (unsigned)(total & 0xffffffffu));
+    kprintf("\n[top] total_ticks=%d\n", (int)total);
     for (int k = 0; k < n; k++) {
         int i = idx[k];
         uint64_t ct = thread_effective_cpu_ticks(&g_threads[i]);
-        unsigned long long cpu = (unsigned long long)ct;
-        unsigned pct = 0;
-        if (total != 0) pct = (unsigned)((ct * 100) / total);
+        int cpu = (int)ct;
+        int pct = 0;
+        if (total != 0) pct = (int)((ct * 100) / total);
 
-        kprintf("  slot=%d tid=%u %-8s %-10s p=%u cpu=%llu pct=%u\n",
+        kprintf("slot=%d tid=%d state=%s name=%s prio=%d cpu=%d pct=%d\n",
             i,
-            (unsigned)g_threads[i].tid,
+            (int)g_threads[i].tid,
             state_str(g_threads[i].state),
             g_threads[i].name,
-            (unsigned)g_threads[i].prio,
+            (int)g_threads[i].prio,
             cpu,
             pct);
     }
 }
+
 
 
 
@@ -443,6 +511,93 @@ int thread_spawn_spin(void) {
         kprintf("\n[thread] spawn spin FAILED\n");
     }
     return id;
+}
+
+
+
+static int thread_find_by_name(const char *name) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].state == T_UNUSED) continue;
+        if (g_threads[i].name[0] == 0) continue;
+        // exact match
+        const char *a = g_threads[i].name;
+        const char *b = name;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return i;
+    }
+    return -1;
+}
+
+int thread_stop_talk(void) {
+    int slot = thread_find_by_name("talk");
+    if (slot < 0) return -1;
+    return thread_kill(slot);
+}
+
+static void talk_fn(void *arg) {
+    uint64_t packed = (uint64_t)(uintptr_t)arg;
+    uint32_t ms = (uint32_t)(packed & 0xffffffffu);
+    uint32_t count = (uint32_t)((packed >> 32) & 0xffffffffu);
+
+    if (ms < 10) ms = 250;
+
+    // count==0 means "run forever" (backwards compatible)
+    if (count == 0) {
+        int i = 0;
+        for (;;) {
+            kprintf("\n[talk] i=%d\n", i++);
+            thread_sleep_ms(ms);
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        kprintf("\n[talk] i=%d\n", (int)i);
+        thread_sleep_ms(ms);
+    }
+
+    kprintf("\n[talk] done\n");
+    thread_exit();
+}
+
+
+
+int thread_spawn_talk(uint64_t period_ms, uint32_t count) {
+    // If a previous talk exists, stop it first
+    thread_stop_talk();
+    uint64_t packed = ((uint64_t)count << 32) | ((uint64_t)(uint32_t)period_ms);
+
+    int id = thread_create("talk", talk_fn, (void*)(uintptr_t)packed);
+    if (id >= 0) {
+        kprintf("\n[thread] spawned talk as id=%d\n", id);
+    } else {
+        kprintf("\n[thread] spawn talk FAILED\n");
+    }
+    return id;
+}
+
+
+
+
+
+int thread_kill(int slot) {
+    if (slot <= 0 || slot >= THREAD_MAX) return -1; // don't kill main (slot 0)
+    if (g_threads[slot].state == T_UNUSED) return -1;
+    if (g_threads[slot].state == T_DEAD) return 0;
+
+    k_cli();
+    g_threads[slot].state = T_DEAD;
+
+    // If we're killing the currently running thread, switch away now.
+    if (&g_threads[slot] == g_cur) {
+        k_sti();
+        thread_yield();
+        return 0;
+    }
+
+    // Ask scheduler to run soon so the dead thread won't run again.
+    g_need_resched = 1;
+    k_sti();
+    return 0;
 }
 
 /* ===== demo thread so we can prove switching works ===== */

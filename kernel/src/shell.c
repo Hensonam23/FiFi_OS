@@ -258,6 +258,7 @@ static uint64_t g_hist_head __attribute__((unused)) = 0; // next write slot
 // This avoids needing backspace support in the framebuffer console.
 
 static inline void shell_cpu_hlt(void) {
+    thread_check_resched();
     __asm__ __volatile__("hlt");
 }
 
@@ -766,6 +767,137 @@ if (streq_simple(argv[0], "clear")) {
     }
     else if (streq_simple(argv[0], "cpu_reset")) {
         thread_cpu_reset();
+        return;
+    }
+
+
+    else if (streq_simple(argv[0], "spin")) {
+        thread_spawn_spin();
+        return;
+    }
+    else if (streq_simple(argv[0], "prio")) {
+        if (argc == 1) {
+            kprintf("usage: prio <id> [0-3]\n");
+            return;
+        }
+
+        // parse id
+        int id = 0;
+        const char *s_id = argv[1];
+        if (!s_id || !*s_id) { kprintf("prio: bad id\n"); return; }
+        for (const char *p = s_id; *p; p++) {
+            if (*p < '0' || *p > '9') { kprintf("prio: bad id\n"); return; }
+            id = id * 10 + (*p - '0');
+        }
+
+        if (argc == 2) {
+            int pr = thread_get_prio(id);
+            kprintf("prio: id=%d prio=%d\n", id, pr);
+            return;
+        }
+
+        // parse prio
+        int pr = 0;
+        const char *s_pr = argv[2];
+        if (!s_pr || !*s_pr) { kprintf("prio: bad prio\n"); return; }
+        for (const char *p = s_pr; *p; p++) {
+            if (*p < '0' || *p > '9') { kprintf("prio: bad prio\n"); return; }
+            pr = pr * 10 + (*p - '0');
+        }
+
+        if (pr < 0 || pr > 3) {
+            kprintf("prio: must be 0-3\n");
+            return;
+        }
+
+        if (thread_set_prio(id, pr) != 0) {
+            kprintf("prio: set failed\n");
+        } else {
+            kprintf("prio: id=%d -> %d\n", id, pr);
+        }
+        return;
+    }
+
+
+    else if (streq_simple(argv[0], "sched")) {
+        kprintf("sched: preempt=%s pending=%d aging=%s slice=%d\n",
+            thread_preempt_get() ? "on" : "off",
+            thread_resched_pending(),
+            thread_aging_get() ? "on" : "off",
+            thread_timeslice_get());
+        return;
+    }
+    else if (streq_simple(argv[0], "aging")) {
+        if (argc < 2) { kprintf("usage: aging on|off\n"); return; }
+        if (streq_simple(argv[1], "on"))  thread_aging_set(1);
+        else if (streq_simple(argv[1], "off")) thread_aging_set(0);
+        else { kprintf("usage: aging on|off\n"); return; }
+        kprintf("aging: %s\n", thread_aging_get() ? "on" : "off");
+        return;
+    }
+    else if (streq_simple(argv[0], "slice")) {
+        if (argc < 2) { kprintf("usage: slice <ticks>\n"); return; }
+        int t = 0;
+        for (const char *p = argv[1]; *p; p++) {
+            if (*p < '0' || *p > '9') { kprintf("slice: bad number\n"); return; }
+            t = t * 10 + (*p - '0');
+        }
+        thread_timeslice_set(t);
+        kprintf("slice: %d\n", thread_timeslice_get());
+        return;
+    }
+
+
+    
+    else if (streq_simple(argv[0], "talk")) {
+        if (argc < 2) {
+            kprintf("usage: talk <ms> <count>\n");
+            kprintf("note: if <count> is omitted, talk runs forever\n");
+            return;
+        }
+
+        if (streq_simple(argv[1], "stop")) {
+            if (thread_stop_talk() != 0) kprintf("talk: none\n");
+            else kprintf("talk: stopped\n");
+            return;
+        }
+
+
+        uint64_t ms = 0;
+        for (const char *p = argv[1]; *p; p++) {
+            if (*p < '0' || *p > '9') { kprintf("talk: bad ms\n"); return; }
+            ms = ms * 10 + (uint64_t)(*p - '0');
+        }
+
+        uint32_t count = 0; // 0 = forever
+        if (argc >= 3) {
+            uint64_t c = 0;
+            for (const char *p = argv[2]; *p; p++) {
+                if (*p < '0' || *p > '9') { kprintf("talk: bad count\n"); return; }
+                c = c * 10 + (uint64_t)(*p - '0');
+            }
+            if (c > 0xffffffffu) c = 0xffffffffu;
+            count = (uint32_t)c;
+        }
+
+        thread_spawn_talk(ms, count);
+        return;
+    }
+
+
+
+    else if (streq_simple(argv[0], "kill")) {
+        if (argc < 2) { kprintf("usage: kill <slot>\n"); return; }
+        int id = 0;
+        for (const char *p = argv[1]; *p; p++) {
+            if (*p < '0' || *p > '9') { kprintf("kill: bad number\n"); return; }
+            id = id * 10 + (*p - '0');
+        }
+        if (thread_kill(id) != 0) {
+            kprintf("kill: failed\n");
+        } else {
+            kprintf("kill: slot=%d\n", id);
+        }
         return;
     }
 

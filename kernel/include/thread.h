@@ -24,3 +24,15 @@ int thread_resched_pending(void);
 
 void thread_top(void);
 void thread_cpu_reset(void);
+int  thread_set_prio(int id, int prio);
+int  thread_get_prio(int id);
+int  thread_spawn_spin(void);
+int  thread_aging_get(void);
+void thread_aging_set(int on);
+int  thread_timeslice_get(void);
+void thread_timeslice_set(int ticks);
+
+int thread_spawn_talk(uint64_t period_ms, uint32_t count);
+int thread_stop_talk(void);
+
+int thread_kill(int slot);
