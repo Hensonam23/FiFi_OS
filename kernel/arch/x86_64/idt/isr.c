@@ -7,6 +7,40 @@
 #include "pit.h"
 #include "keyboard.h"
 #include "thread.h"
+#include "syscall.h"
+#include "serial.h"
+
+
+/* ---- exception debug helpers (auto-generated) ---- */
+static inline unsigned long long read_cr2_ull(void) {
+    unsigned long long v;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(v));
+    return v;
+}
+
+static void isr_print_exception_dump(unsigned int vec, const void *ctx_void) {
+    const isr_ctx_t *ctx = (const isr_ctx_t*)ctx_void;
+
+    /* Your last run detected fields: rip, cs, rflags. err/rsp/ss may not exist in your ctx. */
+    unsigned long long err    = 0ULL;
+    unsigned long long rip    = (unsigned long long)ctx->rip;
+    unsigned long long cs     = (unsigned long long)ctx->cs;
+    unsigned long long rflags = (unsigned long long)ctx->rflags;
+
+    serial_write("\n[EXC] vec=");    print_hex_u64((uint64_t)vec);
+    serial_write(" err=");          print_hex_u64((uint64_t)err);
+    serial_write(" rip=");          print_hex_u64((uint64_t)rip);
+    serial_write(" cs=");           print_hex_u64((uint64_t)cs);
+    serial_write(" rflags=");       print_hex_u64((uint64_t)rflags);
+    serial_write("\n");
+
+    if (vec == 14) {
+        serial_write("[EXC] cr2="); print_hex_u64((uint64_t)read_cr2_ull());
+        serial_write("\n");
+    }
+}
+/* ---- end helpers ---- */
+
 
 static const char *exc_names[32] = {
     "Divide-by-zero",
@@ -84,6 +118,17 @@ void isr_common_handler(isr_ctx_t *ctx) {
 
 
     uint64_t vec = ctx->vector;
+    // Syscall vector (int 0x80)
+    if (vec == 0x80) {
+        syscall_dispatch(ctx);
+        return;
+    }
+    // syscall (int 0x80)
+    if (vec == 0x80) {
+        syscall_dispatch(ctx);
+        return;
+    }
+
 
     /* IRQs after PIC remap live at vectors 32-47 */
     if (vec >= 32 && vec < 48) {
@@ -105,6 +150,8 @@ void isr_common_handler(isr_ctx_t *ctx) {
     /* CPU exceptions */
     const char *name = "(unknown)";
     if (vec < 32) {
+
+        isr_print_exception_dump(vec, ctx);
         name = exc_names[(uint32_t)vec];
     }
 

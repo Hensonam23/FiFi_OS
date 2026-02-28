@@ -126,6 +126,8 @@ ISR_NOERR 45
 ISR_NOERR 46
 ISR_NOERR 47
 
+ISR_NOERR 128
+
 .section .rodata
 .global isr_stub_table
 isr_stub_table:
@@ -135,4 +137,12 @@ isr_stub_table:
     .quad isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
     .quad isr32, isr33, isr34, isr35, isr36, isr37, isr38, isr39
     .quad isr40, isr41, isr42, isr43, isr44, isr45, isr46, isr47
+
+.globl isr_stub_128
+isr_stub_128:
+    push 0
+
+    push 128
+
+    jmp isr_common_stub
 

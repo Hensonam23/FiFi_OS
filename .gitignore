@@ -38,3 +38,15 @@ initrd/initrd.cpio
 
 # local patch scripts
 /tools/*.py
+
+# --- generated patch helpers / scratch ---
+tools/patch_*.py
+tools/fix_*.py
+tools/repair_*.py
+tools/ensure_*.py
+tools/override_*.py
+tools/normalize_*.py
+tools/audit_*.sh
+tools/*bak*
+Makefile.bak_*
+kernel/**/*.bak_*

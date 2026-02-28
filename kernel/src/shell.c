@@ -29,6 +29,9 @@
 #include "io.h"
 #include "thread.h"
 #include "print_state.h"
+#include "syscall.h"
+#include "gdt.h"
+#include "userdemo.h"
 
 static void shell_print_u64_dec(uint64_t v) {
     char buf[32];
@@ -422,6 +425,73 @@ static void shell_exec(char *line) {
 
         return;
     }
+    else if (streq_simple(argv[0], "userdemo")) {
+        userdemo_spawn();
+        return;
+    }
+
+
+
+    else if (streq_simple(argv[0], "tss")) {
+
+        kprintf("tss: loaded=%d rsp0=0x%llx\n", gdt_tss_loaded(), (unsigned long long)gdt_tss_rsp0());
+
+        return;
+}
+    else if (streq_simple(argv[0], "int80")) {
+        unsigned long long ret = 0;
+        __asm__ volatile (
+            "mov $0, %%rax\n"
+            "int $0x80\n"
+            "mov %%rax, %0\n"
+            : "=r"(ret)
+            :
+            : "rax", "memory"
+        );
+        kprintf("int80: rax=%p\n", (void*)(uintptr_t)ret);
+        return;
+    }
+
+    else if (streq_simple(argv[0], "sys")) {
+        if (argc < 2) {
+            kprintf("usage: sys <nop|uptime|yield|log> [message]\n");
+            return;
+        }
+
+        if (streq_simple(argv[1], "nop")) {
+            long r = sys_call0(SYS_NOP);
+            kprintf("sys nop -> %ld\n", r);
+            return;
+        }
+
+        if (streq_simple(argv[1], "uptime")) {
+            long t = sys_call0(SYS_UPTIME);
+            kprintf("sys uptime -> ticks=%p\n", (void*)(uintptr_t)t);
+            return;
+        }
+
+        if (streq_simple(argv[1], "yield")) {
+            (void)sys_call0(SYS_YIELD);
+            kprintf("sys yield -> ok\n");
+            return;
+        }
+
+        if (streq_simple(argv[1], "log")) {
+            if (argc < 3) {
+                kprintf("usage: sys log <message>\n");
+                return;
+            }
+            (void)sys_call1(SYS_LOG, (long)(uintptr_t)argv[2]);
+            kprintf("sys log -> sent\n");
+            return;
+        }
+
+        kprintf("unknown sys subcommand: %s\n", argv[1]);
+        return;
+    }
+
+
+
 
     else if (streq_simple(argv[0], "spawn")) {
 
@@ -898,6 +968,37 @@ if (streq_simple(argv[0], "clear")) {
         } else {
             kprintf("kill: slot=%d\n", id);
         }
+        return;
+    }
+
+
+    else if (streq_simple(argv[0], "sc")) {
+        if (argc < 2) { kprintf("usage: sc uptime|yield|nop\n"); return; }
+
+        if (streq_simple(argv[1], "uptime")) {
+            long t = sys_call0(SYS_UPTIME);
+            kprintf("sc uptime: %d\n", (int)t);
+            return;
+        }
+        if (streq_simple(argv[1], "yield")) {
+            sys_call0(SYS_YIELD);
+            kprintf("sc yield: ok\n");
+            return;
+        }
+        if (streq_simple(argv[1], "nop")) {
+            sys_call0(SYS_NOP);
+            kprintf("sc nop: ok\n");
+            return;
+        }
+        
+        if (streq_simple(argv[1], "log")) {
+            if (argc < 3) { kprintf("usage: sc log <msg>\n"); return; }
+            sys_call1(SYS_LOG, (long)(uintptr_t)argv[2]);
+            kprintf("sc log: ok\n");
+            return;
+        }
+
+kprintf("usage: sc uptime|yield|nop\n");
         return;
     }
 

@@ -21,7 +21,15 @@ CFLAGS := \
 ASFLAGS := --target=x86_64-elf
 LDFLAGS := -T kernel/linker.lds -nostdlib
 
+
+build/.dir:
+	mkdir -p build
+	touch $@
+
+
 OBJS := \
+    build/userdemo.o \
+    build/gdt.o \
     $(BUILD)/shell.o \
     $(BUILD)/workqueue.o \
     $(BUILD)/timer.o \
@@ -91,7 +99,7 @@ $(BUILD)/isr_asm.o: kernel/arch/x86_64/idt/isr.S | $(BUILD)
 kernel: $(KERNEL)
 
 $(KERNEL): $(OBJS)
-	$(LD) $(LDFLAGS) $(OBJS) build/thread.o build/ctx_switch.o -o $(KERNEL)
+	$(LD) $(LDFLAGS) $(OBJS) build/thread.o build/ctx_switch.o build/syscall.o -o $(KERNEL)
 
 iso: $(ISO)
 
@@ -178,11 +186,15 @@ $(BUILD)/elf.o: kernel/src/elf.c | $(BUILD)
 $(BUILD)/shell.o: kernel/src/shell.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/%.o: kernel/src/%.c
+build/%.o: kernel/src/%.c build/.dir
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
 	clang --target=x86_64-elf -c kernel/arch/x86_64/ctx_switch.S -o build/ctx_switch.o
 	clang -std=c11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize --target=x86_64-elf -Ikernel/include -Ikernel/arch/x86_64/idt -c kernel/src/thread.c -o build/thread.o
+	clang -std=c11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize --target=x86_64-elf -Ikernel/include -Ikernel/arch/x86_64/idt -c kernel/src/userdemo.c -o build/userdemo.o
+	clang -std=c11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -fno-builtin -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-vectorize -fno-slp-vectorize --target=x86_64-elf -Ikernel/include -Ikernel/arch/x86_64/idt -c kernel/src/syscall.c -o build/syscall.o
 
+build/ctx_switch.o: kernel/arch/x86_64/ctx_switch.S
+	clang --target=x86_64-elf -c $< -o $@
 

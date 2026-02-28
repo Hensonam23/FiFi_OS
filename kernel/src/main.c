@@ -21,6 +21,7 @@
 #include "acpi.h"
 #include "shell.h"
 #include "thread.h"
+#include "gdt.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -222,6 +223,9 @@ heap_init();
 
     serial_write("FiFi OS: IDT loaded\n");
     console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
+    kprintf("FiFi OS: calling gdt_init...\n");
+    gdt_init();
+    kprintf("FiFi OS: gdt_init returned\n");
 
 #ifdef FIFI_PF_TEST
     kprintf("PF test enabled: intentionally reading from NULL...\n");

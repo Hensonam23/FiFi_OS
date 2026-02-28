@@ -40,9 +40,10 @@ static inline uint16_t idx_pml4(uint64_t v) { return (v >> 39) & 0x1FF; }
 static inline uint16_t idx_pdpt(uint64_t v) { return (v >> 30) & 0x1FF; }
 static inline uint16_t idx_pd  (uint64_t v) { return (v >> 21) & 0x1FF; }
 static inline uint16_t idx_pt  (uint64_t v) { return (v >> 12) & 0x1FF; }
-
-static uint64_t *ensure_table(uint64_t *parent, uint16_t index) {
+static uint64_t *ensure_table(uint64_t *parent, uint16_t index, bool user) {
     uint64_t e = parent[index];
+    if ((e & PTE_P) && user) { parent[index] |= PTE_US; }
+
 
     if (e & PTE_P) {
         uint64_t child_phys = e & ~0xFFFULL;
@@ -57,7 +58,7 @@ static uint64_t *ensure_table(uint64_t *parent, uint16_t index) {
     /* zero page table */
     for (int i = 0; i < 512; i++) child[i] = 0;
 
-    parent[index] = (new_phys & ~0xFFFULL) | PTE_P | PTE_RW;
+    parent[index] = (new_phys & ~0xFFFULL) | PTE_P | PTE_RW | (user ? PTE_US : 0);
     return child;
 }
 
@@ -117,19 +118,20 @@ void vmm_init(uint64_t hhdm_offset) {
 }
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, vmm_flags_t flags) {
+    bool user = (flags & VMM_USER) != 0;
     virt = align_down(virt);
     phys = align_down(phys);
 
     uint64_t pml4_phys = read_cr3_phys();
     uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
 
-    uint64_t *pdpt = ensure_table(pml4, idx_pml4(virt));
+    uint64_t *pdpt = ensure_table(pml4, idx_pml4(virt), user);
     if (!pdpt) return false;
 
-    uint64_t *pd = ensure_table(pdpt, idx_pdpt(virt));
+    uint64_t *pd = ensure_table(pdpt, idx_pdpt(virt), user);
     if (!pd) return false;
 
-    uint64_t *pt = ensure_table(pd, idx_pd(virt));
+    uint64_t *pt = ensure_table(pd, idx_pd(virt), user);
     if (!pt) return false;
 
     uint16_t i = idx_pt(virt);
