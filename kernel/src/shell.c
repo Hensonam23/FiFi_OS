@@ -262,6 +262,13 @@ static int streq(const char *a, const char *b) {
     }
     return (*a == 0 && *b == 0);
 }
+
+static int cmd_jobs(int argc, char **argv) {
+    (void)argc; (void)argv;
+    thread_jobs();
+    return 0;
+}
+
 #include "shell.h"
 #include "kprintf.h"
 #include "keyboard.h"
@@ -1273,6 +1280,8 @@ if (streq(argv[0], "sysnums")) {
     kprintf("SYS_EXIT=%d\n", (int)SYS_EXIT);
     return;
 }
+
+    if (streq(argv[0], "jobs")) { (void)cmd_jobs(argc, argv); return; }
 
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
