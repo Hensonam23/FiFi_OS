@@ -22,11 +22,11 @@
 
 // A 4K trampoline page we ALWAYS map for user tasks.
 // On user exception, we redirect RIP here so it can do SYS_EXIT safely.
-#define FIFI_USER_TRAMPOLINE_VA (FIFI_USERDEMO_STACK_TOP - 0x20ULL)
+#define FIFI_USER_TRAMPOLINE_VA (FIFI_USER_TOP - 0x1000ULL)
 
 // User stack lives directly below the trampoline page.
 #define FIFI_USER_STACK_PAGES   8ULL
-#define FIFI_USER_STACK_TOP     (FIFI_USERDEMO_STACK_TOP)
+#define FIFI_USER_STACK_TOP     (FIFI_USER_TRAMPOLINE_VA)
 #define FIFI_USER_STACK_BASE    (FIFI_USER_STACK_TOP - (FIFI_USER_STACK_PAGES * 0x1000ULL))
 
 // The trampoline code is tiny:

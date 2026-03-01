@@ -19,20 +19,13 @@ static inline uint64_t read_rflags(void) {
     __asm__ volatile ("pushfq; pop %0" : "=r"(r));
     return r;
 }
-
-static inline uint64_t read_rsp(void) {
-    uint64_t r;
-    __asm__ volatile ("mov %%rsp, %0" : "=r"(r));
-    return r;
-}
-
 __attribute__((noreturn))
 static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint16_t user_cs, uint16_t user_ds) {
+    (void)user_cs;
+    (void)user_ds;
     uint64_t rflags = read_rflags() | (1ULL << 9); // IF=1
 
     // Make sure TSS rsp0 is current kernel stack for privilege transitions
-    gdt_tss_set_rsp0(read_rsp());
-
     __asm__ volatile (
         "cli\n"
         "mov %0, %%ds\n"
@@ -46,10 +39,10 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint16_t user_
         "pushq %4\n"        // RIP
         "iretq\n"
         :
-        : "r"((uint64_t)user_ds),
+        : "r"((uint64_t)(uint16_t)FIFI_USER_DS),
           "r"(user_rsp),
           "r"(rflags),
-          "r"((uint64_t)user_cs),
+          "r"((uint64_t)(uint16_t)FIFI_USER_CS),
           "r"(user_rip)
         : "memory"
     );
@@ -82,45 +75,46 @@ static void userdemo_thread_fn(void *arg) {
 
     // Build tiny ring3 code: SYS_LOG("hello from ring3") once, then infinite loop.
     // ABI assumption: syscall number in RAX, arg1 in RDI (matches your sys_call1 usage).
+    // Build ring3 program at USER_CODE_VA:
+    //   SYS_LOG("hello from ring3")
+    //   SYS_EXIT(0)
     uint8_t *code = (uint8_t *)(uintptr_t)USER_CODE_VA;
+    const char msg[] = "hello from ring3";
+    uintptr_t msg_va = (uintptr_t)USER_CODE_VA + 0x200;
 
-    const char *msg = "hello from ring3";
-    uintptr_t msg_va = USER_CODE_VA + 0x200;
-    // Copy message into the user code page
-    char *dst = (char *)(uintptr_t)msg_va;
-    for (size_t i = 0; msg[i]; i++) dst[i] = msg[i];
-    dst[16] = 0;
+    // copy string into user memory (same mapped page as code)
+    memcpy((void*)(uintptr_t)msg_va, msg, sizeof(msg));
 
     size_t o = 0;
 
-    // movabs rdi, imm64
-    code[o++] = 0x48; code[o++] = 0xBF;
-    *(uint64_t *)(code + o) = (uint64_t)msg_va; o += 8;
-
-    // mov eax, imm32 (SYS_LOG)
+    // mov eax, SYS_LOG
     code[o++] = 0xB8;
-    *(uint32_t *)(code + o) = (uint32_t)SYS_LOG; o += 4;
+    { uint32_t n = (uint32_t)SYS_LOG; memcpy(&code[o], &n, 4); o += 4; }
+
+    // mov rdi, msg_va
+    code[o++] = 0x48; code[o++] = 0xBF;
+    { uint64_t a = (uint64_t)msg_va; memcpy(&code[o], &a, 8); o += 8; }
 
     // int 0x80
     code[o++] = 0xCD; code[o++] = 0x80;
 
-    // jmp $
+    // mov eax, SYS_EXIT
+    code[o++] = 0xB8;
+    { uint32_t n = (uint32_t)SYS_EXIT; memcpy(&code[o], &n, 4); o += 4; }
+
+    // xor edi, edi   (exit code 0)
+    code[o++] = 0x31; code[o++] = 0xFF;
+
+    // int 0x80
+    code[o++] = 0xCD; code[o++] = 0x80;
+
+    // jmp $ (should never run if SYS_EXIT works)
     code[o++] = 0xEB; code[o++] = 0xFE;
 
-    uint16_t user_cs = gdt_user_cs();
-    uint16_t user_ds = gdt_user_ds();
-
-    
-    // FiFi OS: place a tiny user trampoline on the user stack page.
-    // ISR redirects ring3 faults to this VA, which repeatedly calls SYS_EXIT.
-    memcpy((void*)(uintptr_t)FIFI_USER_TRAMPOLINE_VA,
-           FIFI_USER_TRAMPOLINE_CODE,
-           sizeof(FIFI_USER_TRAMPOLINE_CODE));
-
 kprintf("[userdemo] entering ring3 cs=0x%x ds=0x%x rip=%p rsp=%p\n",
-            user_cs, user_ds, (void*)USER_CODE_VA, (void*)USER_STACK_TOP);
+            (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS, (void*)USER_CODE_VA, (void*)USER_STACK_TOP);
 
-    enter_user_mode(USER_CODE_VA, USER_STACK_TOP - 0x10, user_cs, user_ds);
+    enter_user_mode(USER_CODE_VA, USER_STACK_TOP - 0x10, (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS);
 }
  
 void userdemo_spawn(void) {

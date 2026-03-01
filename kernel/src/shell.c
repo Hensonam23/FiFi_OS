@@ -1,7 +1,238 @@
+/* --- FiFi OS: run-elf prerequisites --- */
+#include <stdint.h>
+#include <stddef.h>
+
+#include "kprintf.h"
+#include "thread.h"
+#include "vfs.h"
+#include "vmm.h"
+#include "pmm.h"
+#include "usermode.h"
+
+/* ---- minimal ELF64 defs (needed early because run_thread_fn may appear before other defs) ---- */
+#define EI_NIDENT 16
+typedef struct {
+    unsigned char e_ident[EI_NIDENT];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} Elf64_Ehdr;
+
+typedef struct {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} Elf64_Phdr;
+
+#define ELFMAG0 0x7f
+#define ELFMAG1 'E'
+#define ELFMAG2 'L'
+#define ELFMAG3 'F'
+#define ELFCLASS64 2
+#define ELFDATA2LSB 1
+#define EM_X86_64 62
+
+#define PT_LOAD 1
+#define PF_X 1
+#define PF_W 2
+#define PF_R 4
+/* ---- end ELF64 defs ---- */
+
+/* --- end prerequisites --- */
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "vmm.h"
+#include "usermode.h"
 
+
+static inline uint64_t align_down_4k(uint64_t x) { return x & ~0xFFFULL; }
+static inline uint64_t align_up_4k(uint64_t x)   { return (x + 0xFFFULL) & ~0xFFFULL; }
+
+static void memzero_u8(void *dst, uint64_t n) {
+    uint8_t *d = (uint8_t*)dst;
+    for (uint64_t i = 0; i < n; i++) d[i] = 0;
+}
+
+static void memcpy_u8(void *dst, const void *src, uint64_t n) {
+    uint8_t *d = (uint8_t*)dst;
+    const uint8_t *s = (const uint8_t*)src;
+    for (uint64_t i = 0; i < n; i++) d[i] = s[i];
+}
+
+// Enter ring3 via iretq. (Runs in the spawned "run" thread, not the shell thread.)
+__attribute__((noreturn))
+static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp) {
+    // Hardcode selectors to avoid inline-asm operand size issues.
+    // Your working GDT layout:
+    //   user ds = 0x3B, user cs = 0x43
+    __asm__ volatile (
+        "cli\n"
+        // load user data selector into segment regs
+        "movw $0x3B, %%ax\n"
+        "movw %%ax, %%ds\n"
+        "movw %%ax, %%es\n"
+        "movw %%ax, %%fs\n"
+        "movw %%ax, %%gs\n"
+
+        // iret frame: SS, RSP, RFLAGS, CS, RIP
+        "pushq $0x3B\n"
+        "pushq %[rsp]\n"
+        "pushfq\n"
+        "popq %%rax\n"
+        "orq $0x200, %%rax\n"   // IF=1
+        "pushq %%rax\n"
+        "pushq $0x43\n"
+        "pushq %[rip]\n"
+        "iretq\n"
+        :
+        : [rip]"r"(user_rip), [rsp]"r"(user_rsp)
+        : "rax", "memory"
+    );
+
+    __builtin_unreachable();
+}
+
+
+static int map_user_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
+    uint64_t start = align_down_4k(va);
+    uint64_t end   = align_up_4k(va + size);
+
+    for (uint64_t v = start; v < end; v += 0x1000ULL) {
+        // unmap any prior mapping (ignore failure)
+        (void)vmm_unmap_page(v);
+
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) return -1;
+
+        if (!vmm_map_page(v, phys, flags)) return -1;
+
+        // zero the page via its virtual address
+        memzero_u8((void*)(uintptr_t)v, 0x1000ULL);
+    }
+    return 0;
+}
+
+static char g_run_path[256];
+
+static void run_thread_fn(void *arg) {
+    const char *path = (const char*)arg;
+
+    const void *data = 0;
+    uint64_t size = 0;
+    int rc = vfs_read(path, &data, &size);
+    if (rc < 0 || !data || size < sizeof(Elf64_Ehdr)) {
+        kprintf("run: read failed: %s\n", path);
+        thread_exit();
+    }
+
+    const uint8_t *buf = (const uint8_t*)data;
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr*)buf;
+
+    // Validate ELF header (same checks as Phase1)
+    if (eh->e_ident[0] != ELFMAG0 || eh->e_ident[1] != ELFMAG1 ||
+        eh->e_ident[2] != ELFMAG2 || eh->e_ident[3] != ELFMAG3 ||
+        eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB ||
+        eh->e_machine != EM_X86_64 || eh->e_phoff == 0 || eh->e_phnum == 0) {
+        kprintf("run: invalid ELF: %s\n", path);
+        thread_exit();
+    }
+
+    uint64_t ph_end = eh->e_phoff + (uint64_t)eh->e_phnum * (uint64_t)eh->e_phentsize;
+    if (ph_end > size || eh->e_phentsize < sizeof(Elf64_Phdr)) {
+        kprintf("run: phdr table invalid\n");
+        thread_exit();
+    }
+
+    kprintf("run: loading %s entry=%p\n", path, (void*)eh->e_entry);
+
+    // 1) Map and load PT_LOAD segments
+    const uint8_t *phbase = buf + (size_t)eh->e_phoff;
+
+    for (unsigned i = 0; i < (unsigned)eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr*)(phbase + (size_t)i * (size_t)eh->e_phentsize);
+        if (ph->p_type != PT_LOAD) continue;
+
+        uint64_t file_end = ph->p_offset + ph->p_filesz;
+        if (file_end > size) {
+            kprintf("run: LOAD[%u] out of range\n", i);
+            thread_exit();
+        }
+
+        // For now: always map writable (so we can copy), set NX if not executable.
+        vmm_flags_t flags = VMM_USER | VMM_WRITE;
+        if ((ph->p_flags & PF_X) == 0) flags |= VMM_NX;
+
+        if (map_user_pages(ph->p_vaddr, ph->p_memsz, flags) < 0) {
+            kprintf("run: LOAD[%u] map failed\n", i);
+            thread_exit();
+        }
+
+        // Copy file bytes
+        memcpy_u8((void*)(uintptr_t)ph->p_vaddr, buf + (size_t)ph->p_offset, ph->p_filesz);
+
+        // Zero BSS
+        if (ph->p_memsz > ph->p_filesz) {
+            memzero_u8((void*)(uintptr_t)(ph->p_vaddr + ph->p_filesz), ph->p_memsz - ph->p_filesz);
+        }
+
+        kprintf("run: LOAD[%u] mapped vaddr=%p memsz=%p\n", i, (void*)ph->p_vaddr, (void*)ph->p_memsz);
+    }
+
+        // 2) Map trampoline + stack in canonical high user VA space
+    const uint64_t tramp_va   = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
+    const uint64_t tramp_page = align_down_4k(tramp_va);
+
+    const uint64_t stack_top  = (uint64_t)FIFI_USER_STACK_TOP;
+    const uint64_t stack_base = (uint64_t)FIFI_USER_STACK_BASE;
+
+    // Map trampoline page (RW for write; we keep it executable so int80 can run)
+    if (map_user_pages(tramp_page, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
+        kprintf("run: trampoline map failed\n");
+        thread_exit();
+    }
+    memcpy_u8((void*)(uintptr_t)tramp_va, FIFI_USER_TRAMPOLINE_CODE, (uint64_t)sizeof(FIFI_USER_TRAMPOLINE_CODE));
+
+    // Map user stack (RW, NX)
+    if (map_user_pages(stack_base, stack_top - stack_base, VMM_USER | VMM_WRITE | VMM_NX) < 0) {
+        kprintf("run: stack map failed\n");
+        thread_exit();
+    }
+
+kprintf("run: entering ring3 rip=%p rsp=%p\n", (void*)eh->e_entry, (void*)(stack_top - 0x10ULL));
+
+    // 3) Enter user mode (never returns)
+    enter_user_mode(eh->e_entry, stack_top - 0x10ULL);
+}
+
+
+
+static int cmd_run(int argc, char **argv);
+
+static int streq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return (*a == 0 && *b == 0);
+}
 #include "shell.h"
 #include "kprintf.h"
 #include "keyboard.h"
@@ -1002,6 +1233,18 @@ kprintf("usage: sc uptime|yield|nop\n");
         return;
     }
 
+// run <elf> (Phase 1: parse/plan)
+    if (streq(argv[0], "run")) {
+        (void)cmd_run(argc, argv);
+        return;
+    }
+// Print syscall numbers (debug / userland build help)
+if (streq(argv[0], "sysnums")) {
+    kprintf("SYS_LOG=%d\n", (int)SYS_LOG);
+    kprintf("SYS_EXIT=%d\n", (int)SYS_EXIT);
+    return;
+}
+
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
@@ -1229,6 +1472,26 @@ void shell_run(void) {
 
         // ignore everything else
     }
+}
+static int cmd_run(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("usage: run <path>\n");
+        return -1;
+    }
+
+    // Copy path into a stable buffer (argv points into the input line buffer)
+    const char *in = argv[1];
+    size_t n = 0;
+    while (in[n] && n < sizeof(g_run_path) - 1) { g_run_path[n] = in[n]; n++; }
+    g_run_path[n] = 0;
+
+    int tid = thread_create("run", run_thread_fn, (void*)g_run_path);
+    if (tid < 0) {
+        kprintf("run: failed to spawn thread\n");
+        return -1;
+    }
+    kprintf("run: spawned thread slot=%d (%s)\n", tid, g_run_path);
+    return 0;
 }
 
 

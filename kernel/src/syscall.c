@@ -30,18 +30,14 @@ void syscall_dispatch(isr_ctx_t *ctx) {
             return;
         case SYS_EXIT: {
             unsigned long long code = (unsigned long long)ctx->rdi;
-            kprintf("[syscall] exit code=%llu\n", code);
-            // Never return to user. Keep yielding so other threads (shell) run.
-            for (;;) {
-                thread_request_resched();
-                thread_yield();
-            }
+            kprintf("[syscall] exit code=%p\n", (void*)code);
+            thread_exit();
         }
 
-
         default:
-            kprintf("[syscall] unknown n=%llu\n", (unsigned long long)n);
+            kprintf("[syscall] unknown n=%p (ctx->rax=%p)\n", (void*)n, (void*)ctx->rax);
             ctx->rax = (uint64_t)-1;
             return;
+
     }
 }
