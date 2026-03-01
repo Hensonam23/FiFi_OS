@@ -1,4 +1,7 @@
 #include <stdint.h>
+static inline uint64_t align_down_4k(uint64_t x) { return x & ~0xFFFULL; }
+static inline uint64_t align_up_4k(uint64_t x) { return (x + 0xFFFULL) & ~0xFFFULL; }
+
 #include <stddef.h>
 #include "usermode.h"
 #include <string.h>
@@ -12,7 +15,7 @@
 
 // Low-half user addresses
 #define USER_CODE_VA   0x0000000000400000ULL
-#define USER_STACK_TOP 0x0000000000500000ULL
+#define USER_STACK_TOP ((uint64_t)FIFI_USER_STACK_TOP)
 
 static inline uint64_t read_rflags(void) {
     uint64_t r;
@@ -51,70 +54,110 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint16_t user_
 }
 
 // This runs in a kernel thread, then jumps to ring3 and never returns.
-__attribute__((noreturn))
+static int user_map_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
+    uint64_t start = align_down_4k(va);
+    uint64_t end   = align_up_4k(va + size);
+
+    for (uint64_t v = start; v < end; v += 0x1000ULL) {
+        (void)vmm_unmap_page(v);
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) return -1;
+        if (!vmm_map_page(v, phys, flags)) return -1;
+
+        // zero page
+        uint8_t *p = (uint8_t*)(uintptr_t)v;
+        for (uint64_t i = 0; i < 0x1000ULL; i++) p[i] = 0;
+    }
+    return 0;
+}
+
 static void userdemo_thread_fn(void *arg) {
-    (void)arg;
+    // Map canonical trampoline + stack
+    if (user_map_pages((uint64_t)FIFI_USER_TRAMPOLINE_VA, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
+        kprintf("[userdemo] trampoline map failed\n");
+        thread_exit();
+    }
+    // write trampoline code at the trampoline VA
+    for (size_t i = 0; i < sizeof(FIFI_USER_TRAMPOLINE_CODE); i++) {
+        ((volatile uint8_t*)(uintptr_t)FIFI_USER_TRAMPOLINE_VA)[i] = FIFI_USER_TRAMPOLINE_CODE[i];
+    }
 
-    // Allocate phys pages
-    uint64_t code_phys  = pmm_alloc_page();
-    uint64_t stack_phys = pmm_alloc_page();
-    if (!code_phys || !stack_phys) {
-        kprintf("[userdemo] pmm_alloc_page failed\n");
+    if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE, (uint64_t)(FIFI_USER_STACK_TOP - FIFI_USER_STACK_BASE),
+                       VMM_USER | VMM_WRITE | VMM_NX) < 0) {
+        kprintf("[userdemo] stack map failed\n");
         thread_exit();
     }
 
-    // Map user pages (IMPORTANT: VMM must propagate PTE_US at all levels)
-    if (!vmm_map_page(USER_CODE_VA, code_phys, VMM_USER | VMM_WRITE)) {
-        kprintf("[userdemo] vmm_map_page(code) failed\n");
-        thread_exit();
-    }
-    if (!vmm_map_page(USER_STACK_TOP - 0x1000, stack_phys, VMM_USER | VMM_WRITE)) {
-        kprintf("[userdemo] vmm_map_page(stack) failed\n");
+    // Map one code page at 0x400000
+    const uint64_t user_rip = 0x0000000000400000ULL;
+    if (user_map_pages(user_rip, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
+        kprintf("[userdemo] code map failed\n");
         thread_exit();
     }
 
-    // Build tiny ring3 code: SYS_LOG("hello from ring3") once, then infinite loop.
-    // ABI assumption: syscall number in RAX, arg1 in RDI (matches your sys_call1 usage).
-    // Build ring3 program at USER_CODE_VA:
-    //   SYS_LOG("hello from ring3")
-    //   SYS_EXIT(0)
-    uint8_t *code = (uint8_t *)(uintptr_t)USER_CODE_VA;
+    // Put message in user memory
+    const uint64_t msg_va = user_rip + 0x200ULL;
     const char msg[] = "hello from ring3";
-    uintptr_t msg_va = (uintptr_t)USER_CODE_VA + 0x200;
+    for (size_t i = 0; i < sizeof(msg); i++) {
+        ((volatile uint8_t*)(uintptr_t)msg_va)[i] = (uint8_t)msg[i];
+    }
 
-    // copy string into user memory (same mapped page as code)
-    memcpy((void*)(uintptr_t)msg_va, msg, sizeof(msg));
-
-    size_t o = 0;
+    // Build ring3 program: SYS_LOG(msg) ; SYS_EXIT(0)
+    uint8_t *code = (uint8_t *)(uintptr_t)user_rip;
+    size_t ud_o = 0;
 
     // mov eax, SYS_LOG
-    code[o++] = 0xB8;
-    { uint32_t n = (uint32_t)SYS_LOG; memcpy(&code[o], &n, 4); o += 4; }
+    code[ud_o++] = 0xB8;
+    code[ud_o++] = (uint8_t)((uint32_t)SYS_LOG & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_LOG >> 8) & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_LOG >> 16) & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_LOG >> 24) & 0xFF);
 
     // mov rdi, msg_va
-    code[o++] = 0x48; code[o++] = 0xBF;
-    { uint64_t a = (uint64_t)msg_va; memcpy(&code[o], &a, 8); o += 8; }
+    code[ud_o++] = 0x48; code[ud_o++] = 0xBF;
+    for (int i = 0; i < 8; i++) {
+        code[ud_o++] = (uint8_t)(((uint64_t)msg_va >> (8*i)) & 0xFF);
+    }
 
     // int 0x80
-    code[o++] = 0xCD; code[o++] = 0x80;
+    code[ud_o++] = 0xCD; code[ud_o++] = 0x80;
 
     // mov eax, SYS_EXIT
-    code[o++] = 0xB8;
-    { uint32_t n = (uint32_t)SYS_EXIT; memcpy(&code[o], &n, 4); o += 4; }
+    code[ud_o++] = 0xB8;
+    code[ud_o++] = (uint8_t)((uint32_t)SYS_EXIT & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_EXIT >> 8) & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_EXIT >> 16) & 0xFF);
+    code[ud_o++] = (uint8_t)(((uint32_t)SYS_EXIT >> 24) & 0xFF);
 
-    // xor edi, edi   (exit code 0)
-    code[o++] = 0x31; code[o++] = 0xFF;
+    // xor edi, edi
+    code[ud_o++] = 0x31; code[ud_o++] = 0xFF;
 
     // int 0x80
-    code[o++] = 0xCD; code[o++] = 0x80;
+    code[ud_o++] = 0xCD; code[ud_o++] = 0x80;
 
-    // jmp $ (should never run if SYS_EXIT works)
-    code[o++] = 0xEB; code[o++] = 0xFE;
+    // jmp $
+    code[ud_o++] = 0xEB; code[ud_o++] = 0xFE;
+
+    // DEBUG: dump first 32 bytes of user code so we can verify immediates
+    kprintf("[userdemo] code bytes:");
+    for (int i = 0; i < 32; i++) {
+        uint8_t b = ((uint8_t*)(uintptr_t)user_rip)[i];
+        kprintf(" %p", (void*)(uint64_t)b);
+    }
+    kprintf("\n");
+    kprintf("[userdemo] msg_va=%p\n", (void*)(uint64_t)msg_va);
+
+
+    (void)arg;
 
 kprintf("[userdemo] entering ring3 cs=0x%x ds=0x%x rip=%p rsp=%p\n",
-            (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS, (void*)USER_CODE_VA, (void*)USER_STACK_TOP);
+            (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS, (void*)USER_CODE_VA, (void*)(uint64_t)FIFI_USER_STACK_TOP);
+    // Set TSS.rsp0 for this thread so interrupts/syscalls from ring3 use the right kernel stack
+    uint64_t ktop = thread_current_kstack_top();
+    if (ktop) gdt_tss_set_rsp0(ktop);
 
-    enter_user_mode(USER_CODE_VA, USER_STACK_TOP - 0x10, (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS);
+
+    enter_user_mode(USER_CODE_VA, (uint64_t)FIFI_USER_STACK_TOP - 0x10ULL, (uint16_t)FIFI_USER_CS, (uint16_t)FIFI_USER_DS);
 }
  
 void userdemo_spawn(void) {

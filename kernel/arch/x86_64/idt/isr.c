@@ -10,6 +10,7 @@
 #include "thread.h"
 #include "syscall.h"
 #include "serial.h"
+#include "vmm.h"
 
 
 /* ---- exception debug helpers (auto-generated) ---- */
@@ -109,6 +110,33 @@ void isr_common_handler(isr_ctx_t *ctx) {
 
                   if (cpl == 3) {
               kprintf("[EXC] user page fault -> redirect to SYS_EXIT\n");
+
+              // DEBUG: dump bytes at RIP + some regs so we can see what user is executing
+              {
+                  uint64_t rip = (uint64_t)ctx->rip;
+                  uint64_t phys = vmm_translate(rip);
+
+                  serial_write("[EXC] user RIP="); print_hex_u64(rip);
+                  serial_write(" phys=");          print_hex_u64(phys);
+                  serial_write("\n");
+
+                  // These regs exist because syscalls use ctx->rax/ctx->rdi
+                  serial_write("[EXC] user RAX="); print_hex_u64((uint64_t)ctx->rax);
+                  serial_write(" RDI=");           print_hex_u64((uint64_t)ctx->rdi);
+                  serial_write("\n");
+
+                  if (phys) {
+                      serial_write("[EXC] RIP bytes:");
+                      volatile uint8_t *ip = (volatile uint8_t*)(uintptr_t)rip;
+                      for (int i = 0; i < 16; i++) {
+                          serial_write(" ");
+                          print_hex_u64((uint64_t)ip[i]);
+                      }
+                      serial_write("\n");
+                  } else {
+                      serial_write("[EXC] RIP not mapped (translate=0)\n");
+                  }
+              }
               ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
               ctx->rax = (uint64_t)SYS_EXIT;
               ctx->rdi = (((uint64_t)ctx->vector) << 32) | (uint64_t)ctx->error;

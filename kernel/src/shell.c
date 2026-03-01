@@ -8,6 +8,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "usermode.h"
+#include "gdt.h"
 
 /* ---- minimal ELF64 defs (needed early because run_thread_fn may appear before other defs) ---- */
 #define EI_NIDENT 16
@@ -218,6 +219,10 @@ static void run_thread_fn(void *arg) {
 kprintf("run: entering ring3 rip=%p rsp=%p\n", (void*)eh->e_entry, (void*)(stack_top - 0x10ULL));
 
     // 3) Enter user mode (never returns)
+        // Set TSS.rsp0 for this thread so interrupts/syscalls from ring3 use the right kernel stack
+    uint64_t ktop = thread_current_kstack_top();
+    if (ktop) gdt_tss_set_rsp0(ktop);
+
     enter_user_mode(eh->e_entry, stack_top - 0x10ULL);
 }
 

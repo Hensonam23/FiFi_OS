@@ -48,6 +48,21 @@ typedef struct {
 } thread_t;
 
 static thread_t g_threads[THREAD_MAX];
+static thread_t *g_cur = 0;
+
+// Kernel stack top for the currently running thread (for TSS.rsp0)
+uint64_t thread_current_kstack_top(void) {
+    // Prefer tracked per-thread value if present
+    if (g_cur && g_cur->kstack_top) return g_cur->kstack_top;
+
+    // Fallback: compute from allocated stack_base
+    if (g_cur && g_cur->stack_base) {
+        return (uint64_t)(uintptr_t)g_cur->stack_base + (uint64_t)THREAD_STACK_SIZE;
+    }
+
+    return 0;
+}
+
 static int g_cur_idx = 0;
 static volatile int g_need_resched = 0;
 static uint64_t g_boot_tick = 0;
@@ -57,10 +72,6 @@ static volatile int g_preempt_enabled = 1;
 static volatile int g_aging_enabled = 1;
 static volatile int g_timeslice_ticks = 3; // 100Hz ticks (~30ms)
 static volatile int g_slice_left = 3;
-
-
-static thread_t *g_cur = 0;
-
 static inline void k_cli(void) { __asm__ volatile("cli" ::: "memory"); }
 static inline void k_sti(void) { __asm__ volatile("sti" ::: "memory"); }
 
@@ -106,6 +117,8 @@ void thread_init(void) {
     /* slot 0 = "main" thread (current context) */
     g_cur_idx = 0;
     g_cur = &g_threads[0];
+
+
     g_cur->state = T_RUNNING;
     g_cur->prio = 1;
     name_copy(g_cur->name, "main");
@@ -121,6 +134,8 @@ void thread_init(void) {
     // FiFi OS: bootstrap thread (slot 0) kernel stack top for TSS.rsp0
     // This is a safe fallback until boot stack is modeled explicitly.
     g_threads[0].kstack_top = read_rsp_u64();
+    gdt_tss_set_rsp0(g_threads[0].kstack_top);
+
 }
 
 static int find_free_slot(void) {
@@ -168,6 +183,8 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->entry = entry;
     t->arg = arg;
     t->stack_base = stack;
+    t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
+
     t->cpu_ticks = 0;
     t->last_start_tick = 0;
     name_copy(t->name, name);
@@ -248,7 +265,11 @@ void thread_yield(void) {
     next->wait_ticks = 0;
     g_slice_left = g_timeslice_ticks;
     // FiFi OS: per-thread kernel stack for ring3->ring0 transitions
-    gdt_tss_set_rsp0(next->kstack_top ? next->kstack_top : next->rsp);
+    // Update TSS.rsp0 so ring3->ring0 transitions use the NEXT thread's kernel stack
+    uint64_t ktop = next->kstack_top;
+    if (!ktop && next->stack_base) ktop = (uint64_t)(uintptr_t)next->stack_base + (uint64_t)THREAD_STACK_SIZE;
+    if (ktop) gdt_tss_set_rsp0(ktop);
+
     ctx_switch(&prev->rsp, &next->rsp);
 
     /* For existing threads, ctx_switch returns to the yield() callsite.

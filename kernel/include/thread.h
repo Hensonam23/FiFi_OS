@@ -38,3 +38,6 @@ int thread_stop_talk(void);
 int thread_kill(int slot);
 void thread_reap_dead(void);
 void thread_jobs(void);
+
+// Kernel stack top for the currently running thread (for TSS.rsp0)
+uint64_t thread_current_kstack_top(void);
