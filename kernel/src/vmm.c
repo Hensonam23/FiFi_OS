@@ -190,6 +190,49 @@ uint64_t vmm_translate(uint64_t virt) {
     return (e4 & ~0xFFFULL) | (virt & 0xFFFULL);
 }
 
+
+static bool vmm_user_page_ok(uint64_t virt, bool write) {
+    uint64_t pml4_phys = read_cr3_phys();
+    uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
+
+    uint64_t e1 = pml4[idx_pml4(virt)];
+    if (!(e1 & PTE_P)) return false;
+    if (!(e1 & PTE_US)) return false;
+    if (write && !(e1 & PTE_RW)) return false;
+
+    uint64_t *pdpt = (uint64_t*)phys_to_virt(e1 & ~0xFFFULL);
+    uint64_t e2 = pdpt[idx_pdpt(virt)];
+    if (!(e2 & PTE_P)) return false;
+    if (!(e2 & PTE_US)) return false;
+    if (write && !(e2 & PTE_RW)) return false;
+
+    uint64_t *pd = (uint64_t*)phys_to_virt(e2 & ~0xFFFULL);
+    uint64_t e3 = pd[idx_pd(virt)];
+    if (!(e3 & PTE_P)) return false;
+    if (!(e3 & PTE_US)) return false;
+    if (write && !(e3 & PTE_RW)) return false;
+
+    uint64_t *pt = (uint64_t*)phys_to_virt(e3 & ~0xFFFULL);
+    uint64_t e4 = pt[idx_pt(virt)];
+    if (!(e4 & PTE_P)) return false;
+    if (!(e4 & PTE_US)) return false;
+    if (write && !(e4 & PTE_RW)) return false;
+
+    return true;
+}
+
+bool vmm_user_accessible(uint64_t virt, size_t size, bool write) {
+    if (size == 0) return true;
+    uint64_t end = virt + (uint64_t)size;
+    if (end < virt) return false; // overflow
+
+    uint64_t v0 = align_down(virt);
+    for (uint64_t v = v0; v < end; v += PAGE_SIZE) {
+        if (!vmm_user_page_ok(v, write)) return false;
+    }
+    return true;
+}
+
 /* legacy name kept for compatibility */
 uint64_t vmm_virt_to_phys(uint64_t virt) {
     return vmm_translate(virt);

@@ -36,3 +36,6 @@ void vmm_flush_tlb(void);
 
 bool vmm_map_range(uint64_t virt, uint64_t phys, size_t size, vmm_flags_t flags);
 bool vmm_unmap_range(uint64_t virt, size_t size);
+
+// Check that [virt, virt+size) is mapped user-accessible (and writable if write=true)
+bool vmm_user_accessible(uint64_t virt, size_t size, bool write);

@@ -1,6 +1,7 @@
 /* --- FiFi OS: run-elf prerequisites --- */
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "kprintf.h"
 #include "thread.h"
@@ -10,7 +11,7 @@
 #include "usermode.h"
 #include "gdt.h"
 
-/* ---- minimal ELF64 defs (needed early because run_thread_fn may appear before other defs) ---- */
+/* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
@@ -54,28 +55,42 @@ typedef struct {
 #define PF_R 4
 /* ---- end ELF64 defs ---- */
 
-/* --- end prerequisites --- */
+// --- FiFi OS: user task mapping helper ---
+// Allocate + map user pages into current address space as VMM_USER.
+// Simple for now: alloc 4K pages, map, zero.
+static int user_map_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
+    const uint64_t PAGE = 0x1000ULL;
+    uint64_t start = va & ~0xFFFULL;
+    uint64_t end   = (va + size + 0xFFFULL) & ~0xFFFULL;
 
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
-#include "vmm.h"
-#include "usermode.h"
+    for (uint64_t v = start; v < end; v += PAGE) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) return -1;
+        if (!vmm_map_page(v, phys, flags)) return -1;
 
-
-static inline uint64_t align_down_4k(uint64_t x) { return x & ~0xFFFULL; }
-static inline uint64_t align_up_4k(uint64_t x)   { return (x + 0xFFFULL) & ~0xFFFULL; }
-
-static void memzero_u8(void *dst, uint64_t n) {
-    uint8_t *d = (uint8_t*)dst;
-    for (uint64_t i = 0; i < n; i++) d[i] = 0;
+        // zero the page through the mapping (kernel can write user pages)
+        volatile uint8_t *pp = (volatile uint8_t*)(uintptr_t)v;
+        for (uint64_t i = 0; i < PAGE; i++) pp[i] = 0;
+    }
+    return 0;
 }
 
-static void memcpy_u8(void *dst, const void *src, uint64_t n) {
-    uint8_t *d = (uint8_t*)dst;
-    const uint8_t *s = (const uint8_t*)src;
-    for (uint64_t i = 0; i < n; i++) d[i] = s[i];
+// Tighten permissions after loading: rewrite PTE flags while keeping same phys.
+// Uses vmm_translate() to find the current phys for each mapped page.
+static int protect_user_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
+    const uint64_t PAGE = 0x1000ULL;
+    uint64_t start = va & ~0xFFFULL;
+    uint64_t end   = (va + size + 0xFFFULL) & ~0xFFFULL;
+
+    for (uint64_t v = start; v < end; v += PAGE) {
+        uint64_t phys = vmm_translate(v);
+        if (!phys) return -1;
+        phys &= ~0xFFFULL;
+        if (!vmm_map_page(v, phys, flags)) return -1;
+    }
+    return 0;
 }
+
 
 // Enter ring3 via iretq. (Runs in the spawned "run" thread, not the shell thread.)
 __attribute__((noreturn))
@@ -109,28 +124,20 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp) {
 
     __builtin_unreachable();
 }
+static char g_run_path[256];
 
-
-static int map_user_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
-    uint64_t start = align_down_4k(va);
-    uint64_t end   = align_up_4k(va + size);
-
-    for (uint64_t v = start; v < end; v += 0x1000ULL) {
-        // unmap any prior mapping (ignore failure)
-        (void)vmm_unmap_page(v);
-
-        uint64_t phys = pmm_alloc_page();
-        if (!phys) return -1;
-
-        if (!vmm_map_page(v, phys, flags)) return -1;
-
-        // zero the page via its virtual address
-        memzero_u8((void*)(uintptr_t)v, 0x1000ULL);
-    }
-    return 0;
+// Tiny no-libc helpers (shell.c runs freestanding)
+static void memzero_u8(void *dst, uint64_t n) {
+    volatile uint8_t *d = (volatile uint8_t*)dst;
+    for (uint64_t i = 0; i < n; i++) d[i] = 0;
 }
 
-static char g_run_path[256];
+static void memcpy_u8(void *dst, const void *src, uint64_t n) {
+    volatile uint8_t *d = (volatile uint8_t*)dst;
+    const uint8_t *s = (const uint8_t*)src;
+    for (uint64_t i = 0; i < n; i++) d[i] = s[i];
+}
+
 
 static void run_thread_fn(void *arg) {
     const char *path = (const char*)arg;
@@ -180,7 +187,7 @@ static void run_thread_fn(void *arg) {
         vmm_flags_t flags = VMM_USER | VMM_WRITE;
         if ((ph->p_flags & PF_X) == 0) flags |= VMM_NX;
 
-        if (map_user_pages(ph->p_vaddr, ph->p_memsz, flags) < 0) {
+        if (user_map_pages(ph->p_vaddr, ph->p_memsz, flags) < 0) {
             kprintf("run: LOAD[%u] map failed\n", i);
             thread_exit();
         }
@@ -193,37 +200,54 @@ static void run_thread_fn(void *arg) {
             memzero_u8((void*)(uintptr_t)(ph->p_vaddr + ph->p_filesz), ph->p_memsz - ph->p_filesz);
         }
 
+        // Final permissions (W^X-ish):
+        // - Executable segments: RX (no WRITE, no NX)
+        // - Non-exec segments: RW (if PF_W) + NX
+        vmm_flags_t final = VMM_USER;
+        if (ph->p_flags & PF_X) {
+            // RX: leave final as VMM_USER
+        } else {
+            if (ph->p_flags & PF_W) final |= VMM_WRITE;
+            final |= VMM_NX;
+        }
+
+        if (protect_user_pages(ph->p_vaddr, ph->p_memsz, final) < 0) {
+            kprintf("run: protect failed\n");
+            thread_exit();
+        }
+
+
         kprintf("run: LOAD[%u] mapped vaddr=%p memsz=%p\n", i, (void*)ph->p_vaddr, (void*)ph->p_memsz);
     }
 
         // 2) Map trampoline + stack in canonical high user VA space
-    const uint64_t tramp_va   = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
-    const uint64_t tramp_page = align_down_4k(tramp_va);
-
-    const uint64_t stack_top  = (uint64_t)FIFI_USER_STACK_TOP;
-    const uint64_t stack_base = (uint64_t)FIFI_USER_STACK_BASE;
-
-    // Map trampoline page (RW for write; we keep it executable so int80 can run)
-    if (map_user_pages(tramp_page, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
+    // Map trampoline + user stack for this user task
+    if (user_map_pages((uint64_t)FIFI_USER_TRAMPOLINE_VA, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
         kprintf("run: trampoline map failed\n");
         thread_exit();
     }
-    memcpy_u8((void*)(uintptr_t)tramp_va, FIFI_USER_TRAMPOLINE_CODE, (uint64_t)sizeof(FIFI_USER_TRAMPOLINE_CODE));
+    // write trampoline bytes
+    for (size_t i = 0; i < sizeof(FIFI_USER_TRAMPOLINE_CODE); i++) {
+        ((volatile uint8_t*)(uintptr_t)FIFI_USER_TRAMPOLINE_VA)[i] = FIFI_USER_TRAMPOLINE_CODE[i];
+    }
 
-    // Map user stack (RW, NX)
-    if (map_user_pages(stack_base, stack_top - stack_base, VMM_USER | VMM_WRITE | VMM_NX) < 0) {
+    if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
+                       (uint64_t)(FIFI_USER_STACK_TOP - FIFI_USER_STACK_BASE),
+                       VMM_USER | VMM_WRITE | VMM_NX) < 0) {
         kprintf("run: stack map failed\n");
         thread_exit();
     }
 
-kprintf("run: entering ring3 rip=%p rsp=%p\n", (void*)eh->e_entry, (void*)(stack_top - 0x10ULL));
 
-    // 3) Enter user mode (never returns)
-        // Set TSS.rsp0 for this thread so interrupts/syscalls from ring3 use the right kernel stack
-    uint64_t ktop = thread_current_kstack_top();
-    if (ktop) gdt_tss_set_rsp0(ktop);
+    // DEBUG: dump bytes at entry to verify code actually landed in memory
+    kprintf("[run] entry bytes:");
+    for (int i = 0; i < 16; i++) {
+        uint8_t b = ((uint8_t*)(uintptr_t)eh->e_entry)[i];
+        kprintf(" %p", (void*)(uint64_t)b);
+    }
+    kprintf("\n");
 
-    enter_user_mode(eh->e_entry, stack_top - 0x10ULL);
+enter_user_mode(eh->e_entry, (uint64_t)FIFI_USER_STACK_TOP - 0x10ULL);
 }
 
 

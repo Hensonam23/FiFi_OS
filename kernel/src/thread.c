@@ -50,6 +50,7 @@ typedef struct {
 static thread_t g_threads[THREAD_MAX];
 static thread_t *g_cur = 0;
 
+
 // Kernel stack top for the currently running thread (for TSS.rsp0)
 uint64_t thread_current_kstack_top(void) {
     // Prefer tracked per-thread value if present
