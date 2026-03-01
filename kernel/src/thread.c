@@ -1,6 +1,14 @@
 #include "thread.h"
 #include "kprintf.h"
 #include "heap.h"
+#include "gdt.h"
+
+static inline uint64_t read_rsp_u64(void) {
+    uint64_t v;
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(v));
+    return v;
+}
+
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -22,6 +30,7 @@ typedef enum {
 
 typedef struct {
     uint64_t rsp;
+    uint64_t kstack_top;  // top of this thread’s kernel stack (for TSS.rsp0)
     thread_state_t state;
     uint8_t prio;
     uint32_t tid;
@@ -108,6 +117,10 @@ void thread_init(void) {
     g_cur->wait_ticks = 0;
     g_slice_left = g_timeslice_ticks;
     kprintf("FiFi OS: thread_init OK (main thread)\n");
+
+    // FiFi OS: bootstrap thread (slot 0) kernel stack top for TSS.rsp0
+    // This is a safe fallback until boot stack is modeled explicitly.
+    g_threads[0].kstack_top = read_rsp_u64();
 }
 
 static int find_free_slot(void) {
@@ -133,6 +146,8 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
        pop r15,r14,r13,r12,rbx,rbp,ret */
     uintptr_t top = (uintptr_t)stack + THREAD_STACK_SIZE;
     top &= ~(uintptr_t)0xF; /* align */
+
+    t->kstack_top = (uint64_t)top; /* TSS.rsp0 top-of-kstack */
 
     uint64_t *sp = (uint64_t *)top;
 
@@ -232,6 +247,8 @@ void thread_yield(void) {
     next->last_start_tick = now;
     next->wait_ticks = 0;
     g_slice_left = g_timeslice_ticks;
+    // FiFi OS: per-thread kernel stack for ring3->ring0 transitions
+    gdt_tss_set_rsp0(next->kstack_top ? next->kstack_top : next->rsp);
     ctx_switch(&prev->rsp, &next->rsp);
 
     /* For existing threads, ctx_switch returns to the yield() callsite.
