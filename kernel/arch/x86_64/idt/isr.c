@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "usermode.h"
 
 #include "isr.h"
 #include "kprintf.h"
@@ -21,14 +22,13 @@ static inline unsigned long long read_cr2_ull(void) {
 static void isr_print_exception_dump(unsigned int vec, const void *ctx_void) {
     const isr_ctx_t *ctx = (const isr_ctx_t*)ctx_void;
 
-    /* Your last run detected fields: rip, cs, rflags. err/rsp/ss may not exist in your ctx. */
-    unsigned long long err    = 0ULL;
+    /* Your last run detected fields: rip, cs, rflags. ctx->error/rsp/ss may not exist in your ctx. */
     unsigned long long rip    = (unsigned long long)ctx->rip;
     unsigned long long cs     = (unsigned long long)ctx->cs;
     unsigned long long rflags = (unsigned long long)ctx->rflags;
 
     serial_write("\n[EXC] vec=");    print_hex_u64((uint64_t)vec);
-    serial_write(" err=");          print_hex_u64((uint64_t)err);
+    serial_write(" ctx->error=");          print_hex_u64((uint64_t)ctx->error);
     serial_write(" rip=");          print_hex_u64((uint64_t)rip);
     serial_write(" cs=");           print_hex_u64((uint64_t)cs);
     serial_write(" rflags=");       print_hex_u64((uint64_t)rflags);
@@ -83,9 +83,7 @@ void isr_common_handler(isr_ctx_t *ctx) {
     if (ctx->vector == 14) {
         uint64_t cr2 = 0;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-
         uint64_t err = ctx->error;
-
         int p    = (int)((err >> 0) & 1); /* present (1=protection, 0=non-present) */
         int wr   = (int)((err >> 1) & 1); /* 1=write, 0=read */
         int us   = (int)((err >> 2) & 1); /* 1=user, 0=kernel */
@@ -109,7 +107,15 @@ void isr_common_handler(isr_ctx_t *ctx) {
             id   ? "INSTR" : "-"
         );
 
-        panic("page fault");
+                  if (cpl == 3) {
+              kprintf("[EXC] user page fault -> redirect to SYS_EXIT\n");
+              ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
+              ctx->rax = (uint64_t)SYS_EXIT;
+              ctx->rdi = (((uint64_t)ctx->vector) << 32) | (uint64_t)ctx->error;
+              return;
+          }
+
+          panic("page fault");
     }
 
 
@@ -119,15 +125,11 @@ void isr_common_handler(isr_ctx_t *ctx) {
 
     uint64_t vec = ctx->vector;
     // Syscall vector (int 0x80)
-    if (vec == 0x80) {
-        syscall_dispatch(ctx);
-        return;
-    }
-    // syscall (int 0x80)
-    if (vec == 0x80) {
-        syscall_dispatch(ctx);
-        return;
-    }
+      if (vec == 0x80) {
+          syscall_dispatch(ctx);
+          return;
+      }
+
 
 
     /* IRQs after PIC remap live at vectors 32-47 */
@@ -161,5 +163,28 @@ void isr_common_handler(isr_ctx_t *ctx) {
     kprintf("RIP=%p CS=%p RFLAGS=%p\n",
             (void*)ctx->rip, (void*)ctx->cs, (void*)ctx->rflags);
 
-    panic("Unhandled CPU exception");
+    
+  // ---- FiFi OS: usermode-safe exceptions ----
+  // If the fault happened in ring3 (CS RPL=3), do NOT panic the kernel.
+  // Instead redirect RIP to a mapped user trampoline page that will do SYS_EXIT.
+  if (fifi_cs_is_user(ctx->cs)) {
+    // Keep your existing dump printing (it should run before this panic in your code).
+    // Then force the current user task to exit via a known-mapped trampoline.
+    ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
+
+    // Syscall ABI: rax = syscall number, rdi = arg0
+    // We assume your dispatcher already uses these (SYS_LOG works).
+    // NOTE: if your syscall number constant is named differently, fix it in syscall header.    // We won't reference SYS_EXIT symbol directly here (to avoid link issues).
+    // Instead we set a number in rax AFTER you add SYS_EXIT in your syscall dispatcher step.
+    // For now, set rax to 0; we'll patch this value in the syscall step if needed.
+    ctx->rax = (uint64_t)SYS_EXIT;
+
+    // Put something useful as exit code: (vec << 32) | ctx->error
+    ctx->rdi = (((uint64_t)vec) << 32) | (uint64_t)ctx->error;
+
+    return;
+  }
+  // ------------------------------------------
+
+  panic("Unhandled CPU exception");
 }

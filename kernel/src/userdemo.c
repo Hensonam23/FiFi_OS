@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
+#include "usermode.h"
+#include <string.h>
 
 #include "kprintf.h"
 #include "pmm.h"
@@ -108,7 +110,14 @@ static void userdemo_thread_fn(void *arg) {
     uint16_t user_cs = gdt_user_cs();
     uint16_t user_ds = gdt_user_ds();
 
-    kprintf("[userdemo] entering ring3 cs=0x%x ds=0x%x rip=%p rsp=%p\n",
+    
+    // FiFi OS: place a tiny user trampoline on the user stack page.
+    // ISR redirects ring3 faults to this VA, which repeatedly calls SYS_EXIT.
+    memcpy((void*)(uintptr_t)FIFI_USER_TRAMPOLINE_VA,
+           FIFI_USER_TRAMPOLINE_CODE,
+           sizeof(FIFI_USER_TRAMPOLINE_CODE));
+
+kprintf("[userdemo] entering ring3 cs=0x%x ds=0x%x rip=%p rsp=%p\n",
             user_cs, user_ds, (void*)USER_CODE_VA, (void*)USER_STACK_TOP);
 
     enter_user_mode(USER_CODE_VA, USER_STACK_TOP - 0x10, user_cs, user_ds);

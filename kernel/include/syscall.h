@@ -11,6 +11,7 @@ enum {
     SYS_LOG    = 1,
     SYS_UPTIME = 2,
     SYS_YIELD  = 3,
+    SYS_EXIT
 };
 
 /*
