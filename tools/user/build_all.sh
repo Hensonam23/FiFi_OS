@@ -4,52 +4,42 @@ set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-OUTDIR="initrd/rootfs"
+# Default: old behavior (build into initrd/rootfs) unless OUTDIR is set
+OUTDIR="${OUTDIR:-initrd/rootfs}"
 mkdir -p "$OUTDIR"
 
 CFLAGS=(--target=x86_64-elf -ffreestanding -nostdlib -static
         -Ikernel/include -Ikernel/arch/x86_64/idt)
-
 LDFLAGS=(-Wl,-e,_start -Wl,-Ttext=0x401000)
 
+echo "[user] building userland -> $OUTDIR"
+
+# Build in manifest order if present, otherwise build all *.c in tools/user/
 MANIFEST="tools/user/manifest.txt"
+LIST=()
 
-echo "[user] building userland -> ${OUTDIR}"
-
-if [ ! -f "$MANIFEST" ]; then
-  echo "[user] ERROR: missing $MANIFEST" >&2
-  exit 1
+if [ -f "$MANIFEST" ]; then
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    LIST+=("tools/user/${name}.c")
+  done < "$MANIFEST"
+else
+  for c in tools/user/*.c; do
+    LIST+=("$c")
+  done
 fi
 
-fail=0
+for c in "${LIST[@]}"; do
+  base="$(basename "$c" .c)"
+  out="${OUTDIR}/${base}.elf"
+  echo "  [user] $base -> $out"
 
-while IFS= read -r name; do
-  # strip whitespace
-  name="$(echo "$name" | sed 's/[[:space:]]//g')"
-  [ -z "$name" ] && continue
-  case "$name" in \#*) continue ;; esac
-
-  src="tools/user/${name}.c"
-  out="${OUTDIR}/${name}.elf"
-
-  if [ ! -f "$src" ]; then
-    echo "[user] ERROR: missing source $src (listed in manifest)" >&2
-    fail=1
-    break
+  if ! clang "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$out" tools/user/crt0.S "$c"; then
+    echo "  [user] FAILED building $base" >&2
+    echo "[user] build failed — fix the error above and rerun:" >&2
+    echo "       OUTDIR=$OUTDIR bash tools/user/build_all.sh" >&2
+    exit 1
   fi
-
-  echo "  [user] $name -> $out"
-  if ! clang "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$out" tools/user/crt0.S "$src"; then
-    echo "  [user] FAILED building $name (terminal stays open)" >&2
-    fail=1
-    break
-  fi
-done < "$MANIFEST"
-
-if [ $fail -ne 0 ]; then
-  echo "[user] build failed. Fix the error above and rerun:" >&2
-  echo "       bash tools/user/build_all.sh" >&2
-  exit 1
-fi
+done
 
 echo "[user] build OK"

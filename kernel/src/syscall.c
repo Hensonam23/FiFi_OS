@@ -286,6 +286,67 @@ case SYS_UPTIME:
             return;
         }
 
+        case SYS_READFILE: {
+            // rdi = user path pointer
+            // rsi = user out buffer (optional)
+            // rdx = capacity (optional)
+            uint64_t upath = (uint64_t)ctx->rdi;
+            uint64_t ubuf  = (uint64_t)ctx->rsi;
+            uint64_t cap   = (uint64_t)ctx->rdx;
+
+            int from_user = ((ctx->cs & 3ULL) == 3ULL);
+
+            const char *kpath = 0;
+            char path[128];
+
+            if (from_user) {
+                if (copyin_str(path, sizeof(path), upath) < 0) {
+                    kprintf("[syscall] SYS_READFILE bad path ptr=%p\n", (void*)upath);
+                    ctx->rax = (uint64_t)-1;
+                    return;
+                }
+                kpath = path;
+            } else {
+                kpath = (const char*)(uintptr_t)upath;
+            }
+
+            const void *data = 0;
+            uint64_t size = 0;
+
+            if (vfs_read(kpath, &data, &size) < 0 || !data) {
+                ctx->rax = (uint64_t)-1;
+                return;
+            }
+
+            // size query mode
+            if (ubuf == 0 || cap == 0) {
+                ctx->rax = (uint64_t)size;
+                return;
+            }
+
+            // clamp to cap
+            uint64_t n = size;
+            if (n > cap) n = cap;
+
+            if (from_user) {
+                int rc = copyout_bytes(ubuf, (const uint8_t*)data, (size_t)n);
+                if (rc < 0) {
+                    ctx->rax = (uint64_t)-1;
+                    return;
+                }
+                ctx->rax = (uint64_t)rc;
+                return;
+            }
+
+            // ring0 caller: treat ubuf as kernel pointer
+            uint8_t *kdst = (uint8_t*)(uintptr_t)ubuf;
+            for (uint64_t i = 0; i < n; i++) kdst[i] = ((const uint8_t*)data)[i];
+
+            ctx->rax = (uint64_t)n;
+            return;
+        }
+
+
 
 
 

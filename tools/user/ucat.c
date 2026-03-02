@@ -1,27 +1,28 @@
 #include "usys.h"
 
+static char buf[4096];
+
 int main(void) {
-    long fd = sys_open("hello.txt");
-    if (fd < 0) {
-        sys_log("ucat: open failed");
+    const char *path = "hello.txt";
+
+    long n = sys_readfile(path, buf, (uint64_t)(sizeof(buf) - 1));
+    if (n < 0) {
+        sys_log("ucat: sys_readfile failed");
         return 1;
     }
 
-    char buf[128];
+    // print in chunks (avoid kernel-side SYS_WRITE clamp issues)
+    uint64_t left = (uint64_t)n;
+    uint64_t off = 0;
 
-    for (;;) {
-        long n = sys_read(fd, buf, (uint64_t)(sizeof(buf) - 1));
-        if (n < 0) {
-            sys_log("ucat: read failed");
-            break;
-        }
-        if (n == 0) break; // EOF
-
-        buf[n] = 0;
-        sys_write(buf, (uint64_t)n);
+    while (left) {
+        uint64_t chunk = left;
+        if (chunk > 512) chunk = 512;
+        sys_write(buf + off, chunk);
+        off += chunk;
+        left -= chunk;
     }
 
-    sys_close(fd);
     sys_write("\n", 1);
     return 0;
 }

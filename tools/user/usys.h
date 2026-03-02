@@ -83,3 +83,11 @@ static inline long sys_read(long fd, void *buf, uint64_t len) {
 static inline long sys_close(long fd) {
     return sys_call1(SYS_CLOSE, (long)fd);
 }
+
+static inline long sys_readfile(const char *path, void *out_buf, uint64_t cap) {
+    return sys_call3(SYS_READFILE,
+                     (long)(uintptr_t)path,
+                     (long)(uintptr_t)out_buf,
+                     (long)cap);
+}
+

@@ -50,3 +50,7 @@ tools/audit_*.sh
 tools/*bak*
 Makefile.bak_*
 kernel/**/*.bak_*
+
+# generated initrd staging
+/initrd/rootfs_build/
+/initrd/initrd.cpio
