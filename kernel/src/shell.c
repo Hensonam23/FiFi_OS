@@ -96,7 +96,7 @@ static int protect_user_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
 
 // Enter ring3 via iretq. (Runs in the spawned "run" thread, not the shell thread.)
 __attribute__((noreturn))
-static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp) {
+static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint64_t user_argc, uint64_t user_argv) {
     // Hardcode selectors to avoid inline-asm operand size issues.
     // Your working GDT layout:
     //   user ds = 0x3B, user cs = 0x43
@@ -108,6 +108,10 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp) {
         "movw %%ax, %%es\n"
         "movw %%ax, %%fs\n"
         "movw %%ax, %%gs\n"
+          // pass argc/argv in SysV ABI regs
+          "mov %[argc], %%rdi\n"
+          "mov %[argv], %%rsi\n"
+
 
         // iret frame: SS, RSP, RFLAGS, CS, RIP
         "pushq $0x3B\n"
@@ -120,13 +124,18 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp) {
         "pushq %[rip]\n"
         "iretq\n"
         :
-        : [rip]"r"(user_rip), [rsp]"r"(user_rsp)
+        : [rip]"r"(user_rip), [rsp]"r"(user_rsp), [argc]"r"(user_argc), [argv]"r"(user_argv)
         : "rax", "memory"
     );
 
     __builtin_unreachable();
 }
 static char g_run_path[256];
+
+#define RUN_MAX_ARGS 6
+static int  g_run_argc = 0;                  // includes argv[0]
+static char g_run_argv[RUN_MAX_ARGS][128];   // simple fixed-size copies
+
 
 // Tiny no-libc helpers (shell.c runs freestanding)
 static void memzero_u8(void *dst, uint64_t n) {
@@ -260,7 +269,57 @@ if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
 
 
 #endif
-enter_user_mode(eh->e_entry, (uint64_t)FIFI_USER_STACK_TOP - 0x10ULL);
+
+    // Build user argv on the user stack and pass argc/argv via rdi/rsi.
+    // Layout (high -> low):
+    //   [strings...]
+    //   argv pointers (argc + 1, null-terminated)
+    // Stack grows down.
+    uint64_t user_stack_top = (uint64_t)FIFI_USER_STACK_TOP;
+    uint64_t sp = user_stack_top;
+
+    // Copy strings onto stack (from last to first so argv[0] ends up lowest string)
+    uint64_t uargv_ptrs[RUN_MAX_ARGS];
+    uint64_t uargc = (uint64_t)g_run_argc;
+    if (uargc > RUN_MAX_ARGS) uargc = RUN_MAX_ARGS;
+
+    for (int i = (int)uargc - 1; i >= 0; i--) {
+        const char *src = g_run_argv[i];
+        uint64_t len = 0;
+        while (src[len] && len < 120) len++;
+        // include null terminator
+        sp -= (len + 1);
+        // keep some alignment
+        sp &= ~0xFULL;
+
+        // copy to user stack
+        for (uint64_t j = 0; j < len; j++) {
+            *(volatile uint8_t*)(uintptr_t)(sp + j) = (uint8_t)src[j];
+        }
+        *(volatile uint8_t*)(uintptr_t)(sp + len) = 0;
+
+        uargv_ptrs[i] = sp;
+    }
+
+    // Now push argv[] pointers (null-terminated)
+    // Ensure 16-byte alignment before entering user
+    sp &= ~0xFULL;
+
+    // NULL terminator
+    sp -= 8;
+    *(volatile uint64_t*)(uintptr_t)sp = 0;
+
+    // argv[i]
+    for (int i = (int)uargc - 1; i >= 0; i--) {
+        sp -= 8;
+        *(volatile uint64_t*)(uintptr_t)sp = (uint64_t)uargv_ptrs[i];
+    }
+
+    uint64_t user_argv = sp;
+    uint64_t user_rsp  = sp - 0x10ULL;
+
+    enter_user_mode(eh->e_entry, user_rsp, uargc, user_argv);
+
 }
 
 
@@ -1518,6 +1577,28 @@ static int cmd_run(int argc, char **argv) {
         kprintf("usage: run <path>\n");
         return -1;
     }
+
+    // Build argv for userland:
+    // argv[0] = program path (argv[1] from shell), argv[1..] = remaining shell args
+    g_run_argc = 0;
+    for (int i = 0; i < RUN_MAX_ARGS; i++) g_run_argv[i][0] = 0;
+
+    // shell: run <prog.elf> [arg1 arg2 ...]
+    // user:  argv[0]=<prog.elf>, argv[1]=arg1, ...
+    int uargc = argc - 1;
+    if (uargc > RUN_MAX_ARGS) uargc = RUN_MAX_ARGS;
+
+    for (int i = 0; i < uargc; i++) {
+        // argv[i+1] in shell becomes argv[i] in user
+        const char *src = argv[i + 1];
+        if (!src) src = "";
+        int j = 0;
+        for (; j < 127 && src[j]; j++) g_run_argv[i][j] = src[j];
+        g_run_argv[i][j] = 0;
+        g_run_argc++;
+    }
+
+
 
     // Copy path into a stable buffer (argv points into the input line buffer)
     const char *in = argv[1];

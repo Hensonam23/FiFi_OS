@@ -2,8 +2,8 @@
 
 static char buf[4096];
 
-int main(void) {
-    const char *path = "hello.txt";
+int main(int argc, char **argv) {
+    const char *path = path;
 
     long n = sys_readfile(path, buf, (uint64_t)(sizeof(buf) - 1));
     if (n < 0) {
