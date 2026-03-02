@@ -1,4 +1,6 @@
 /* --- FiFi OS: run-elf prerequisites --- */
+#define FIFI_DEBUG_USER 0
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -231,7 +233,14 @@ static void run_thread_fn(void *arg) {
         ((volatile uint8_t*)(uintptr_t)FIFI_USER_TRAMPOLINE_VA)[i] = FIFI_USER_TRAMPOLINE_CODE[i];
     }
 
-    if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
+    
+
+    // After writing trampoline bytes, make it RX (user, not writable)
+    if (protect_user_pages((uint64_t)FIFI_USER_TRAMPOLINE_VA, 0x1000ULL, VMM_USER) < 0) {
+        kprintf("run: trampoline protect failed\n");
+        thread_exit();
+    }
+if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
                        (uint64_t)(FIFI_USER_STACK_TOP - FIFI_USER_STACK_BASE),
                        VMM_USER | VMM_WRITE | VMM_NX) < 0) {
         kprintf("run: stack map failed\n");
@@ -240,6 +249,8 @@ static void run_thread_fn(void *arg) {
 
 
     // DEBUG: dump bytes at entry to verify code actually landed in memory
+#if FIFI_DEBUG_USER
+
     kprintf("[run] entry bytes:");
     for (int i = 0; i < 16; i++) {
         uint8_t b = ((uint8_t*)(uintptr_t)eh->e_entry)[i];
@@ -247,6 +258,8 @@ static void run_thread_fn(void *arg) {
     }
     kprintf("\n");
 
+
+#endif
 enter_user_mode(eh->e_entry, (uint64_t)FIFI_USER_STACK_TOP - 0x10ULL);
 }
 
@@ -1009,19 +1022,7 @@ if (streq_simple(argv[0], "clear")) {
         kprintf(")\n");
         return;
     }
-
-    if (streq_simple(argv[0], "jobs")) {
-        kprintf("jobs:\n");
-        for (int i = 0; i < EVERY_MAX; i++) {
-            if (!g_every[i].in_use) continue;
-            kprintf("  id=%p  every=%p ms  cmd=%s\n",
-                    (void*)(uint64_t)i,
-                    (void*)g_every[i].interval_ms,
-                    g_every[i].cmd);
-        }
-        return;
-    }
-
+    if (streq_simple(argv[0], "jobs")) { (void)cmd_jobs(argc, argv); return; }
     if (streq_simple(argv[0], "jobstop")) {
         if (argc < 2) { kprintf("usage: jobstop <id>\n"); return; }
 
