@@ -310,6 +310,7 @@ static int cmd_jobs(int argc, char **argv) {
 #include "thread.h"
 #include "print_state.h"
 #include "syscall.h"
+#include "syscall_inline.h"
 #include "gdt.h"
 #include "userdemo.h"
 
