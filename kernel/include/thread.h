@@ -41,3 +41,6 @@ void thread_jobs(void);
 
 // Kernel stack top for the currently running thread (for TSS.rsp0)
 uint64_t thread_current_kstack_top(void);
+
+// Current thread id (tid)
+uint32_t thread_current_tid(void);

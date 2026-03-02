@@ -114,6 +114,7 @@ $(ISO): $(KERNEL) limine.conf
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin   $(ISO_ROOT)/
 	cp $(LIMINE_DIR)/BOOTX64.EFI          $(ISO_ROOT)/EFI/BOOT/
 
+	bash tools/user/build_all.sh
 	python3 tools/mkcpio.py initrd/rootfs initrd/initrd.cpio
 	cp initrd/initrd.cpio $(ISO_ROOT)/boot/initrd.cpio
 

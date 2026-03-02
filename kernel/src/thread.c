@@ -64,6 +64,12 @@ uint64_t thread_current_kstack_top(void) {
     return 0;
 }
 
+
+// Current thread id (tid)
+uint32_t thread_current_tid(void) {
+    return g_cur ? g_cur->tid : 0;
+}
+
 static int g_cur_idx = 0;
 static volatile int g_need_resched = 0;
 static uint64_t g_boot_tick = 0;
@@ -107,11 +113,29 @@ static void thread_trampoline(void) {
 void thread_init(void) {
     for (int i = 0; i < THREAD_MAX; i++) {
         g_threads[i].state = T_UNUSED;
+        g_threads[i].rsp = 0;
+        g_threads[i].kstack_top = 0;
+        g_threads[i].tid = 0;
+        g_threads[i].prio = 0;
+        g_threads[i].wait_ticks = 0;
+        g_threads[i].wake_tick = 0;
+        g_threads[i].cpu_ticks = 0;
+        g_threads[i].last_start_tick = 0;
+        g_threads[i].entry = 0;
+        g_threads[i].arg = 0;
+        g_threads[i].stack_base = 0;
+        g_threads[i].name[0] = 0;
         g_threads[i].wake_tick = 0;
         g_threads[i].rsp = 0;
         g_threads[i].entry = 0;
         g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].kstack_top = 0;
+        g_threads[i].tid = 0;
+        g_threads[i].prio = 0;
+        g_threads[i].wait_ticks = 0;
+        g_threads[i].cpu_ticks = 0;
+        g_threads[i].last_start_tick = 0;
         g_threads[i].name[0] = 0;
     }
 
@@ -651,7 +675,25 @@ void thread_reap_dead(void) {
         // clear minimal fields
         g_threads[i].state = T_UNUSED;
         g_threads[i].rsp = 0;
+        g_threads[i].kstack_top = 0;
+        g_threads[i].tid = 0;
+        g_threads[i].prio = 0;
+        g_threads[i].wait_ticks = 0;
+        g_threads[i].wake_tick = 0;
+        g_threads[i].cpu_ticks = 0;
+        g_threads[i].last_start_tick = 0;
+        g_threads[i].entry = 0;
+        g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].name[0] = 0;
+        g_threads[i].rsp = 0;
+        g_threads[i].stack_base = 0;
+        g_threads[i].kstack_top = 0;
+        g_threads[i].tid = 0;
+        g_threads[i].prio = 0;
+        g_threads[i].wait_ticks = 0;
+        g_threads[i].cpu_ticks = 0;
+        g_threads[i].last_start_tick = 0;
         g_threads[i].wake_tick = 0;
         g_threads[i].cpu_ticks = 0;
         g_threads[i].last_start_tick = 0;
@@ -663,20 +705,44 @@ void thread_reap_dead(void) {
 }
 
 
-void thread_jobs(void) {
-    kprintf("\n[jobs]\n");
-    for (int i = 0; i < THREAD_MAX; i++) {
-        if (g_threads[i].state == T_UNUSED) continue;
-        if (g_threads[i].state == T_DEAD) continue;
 
-        kprintf("slot=%d tid=%d state=%s name=%s prio=%d\n",
-            i,
-            (int)g_threads[i].tid,
-            state_str(g_threads[i].state),
-            g_threads[i].name,
-            (int)g_threads[i].prio);
+void thread_jobs(void) {
+    kprintf("jobs:\n");
+
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+
+        const char *st = "?";
+        switch (t->state) {
+            case T_UNUSED:   st = "UNUSED"; break;
+            case T_READY:    st = "READY";  break;
+            case T_RUNNING:  st = "RUN";    break;
+            case T_SLEEPING: st = "SLEEP";  break;
+            case T_DEAD:     st = "DEAD";   break;
+        }
+
+        const char *cur = (t == g_cur) ? "*" : " ";
+
+        // Print ALL slots so you always see at least slot 0.
+        kprintf(" [%p]%s tid=%p st=%s pr=%p name=%s rsp=%p ktop=%p sb=%p",
+                (void*)(uint64_t)i,
+                cur,
+                (void*)(uint64_t)t->tid,
+                st,
+                (void*)(uint64_t)t->prio,
+                t->name[0] ? t->name : "(none)",
+                (void*)t->rsp,
+                (void*)t->kstack_top,
+                (void*)t->stack_base);
+
+        if (t->state == T_SLEEPING) {
+            kprintf(" wake=%p", (void*)t->wake_tick);
+        }
+
+        kprintf("\n");
     }
 }
+
 
 /* ===== demo thread so we can prove switching works ===== */
 
