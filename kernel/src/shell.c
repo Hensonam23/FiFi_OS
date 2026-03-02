@@ -102,30 +102,27 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint64_t user_
     //   user ds = 0x3B, user cs = 0x43
     __asm__ volatile (
         "cli\n"
-        // load user data selector into segment regs
-        "movw $0x3B, %%ax\n"
-        "movw %%ax, %%ds\n"
-        "movw %%ax, %%es\n"
-        "movw %%ax, %%fs\n"
-        "movw %%ax, %%gs\n"
-          // pass argc/argv in SysV ABI regs
-          "mov %[argc], %%rdi\n"
-          "mov %[argv], %%rsi\n"
 
+        // pass argc/argv in SysV ABI regs for user main(argc, argv)
+        "movq %[uargc], %%rdi\n"
+        "movq %[uargv], %%rsi\n"
 
-        // iret frame: SS, RSP, RFLAGS, CS, RIP
-        "pushq $0x3B\n"
-        "pushq %[rsp]\n"
+        // iretq frame to ring3: SS, RSP, RFLAGS, CS, RIP
+        "pushq $0x3B\n"         // user SS
+        "pushq %[ursp]\n"       // user RSP
         "pushfq\n"
         "popq %%rax\n"
         "orq $0x200, %%rax\n"   // IF=1
         "pushq %%rax\n"
-        "pushq $0x43\n"
-        "pushq %[rip]\n"
+        "pushq $0x43\n"         // user CS
+        "pushq %[urip]\n"       // user RIP
         "iretq\n"
         :
-        : [rip]"r"(user_rip), [rsp]"r"(user_rsp), [argc]"r"(user_argc), [argv]"r"(user_argv)
-        : "rax", "memory"
+        : [urip]  "r" ((uint64_t)user_rip),
+          [ursp]  "r" ((uint64_t)user_rsp),
+          [uargc] "r" ((uint64_t)user_argc),
+          [uargv] "r" ((uint64_t)user_argv)
+        : "rax", "rdi", "rsi", "memory"
     );
 
     __builtin_unreachable();
