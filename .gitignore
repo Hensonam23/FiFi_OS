@@ -54,3 +54,6 @@ kernel/**/*.bak_*
 # generated initrd staging
 /initrd/rootfs_build/
 /initrd/initrd.cpio
+
+# Generated userland ELF outputs (rebuilt each time)
+initrd/rootfs/*.elf
