@@ -14,6 +14,7 @@ enum {
     SYS_SLEEP_MS  = 5,
     SYS_GETTID    = 6,
     SYS_WRITE     = 7,
+    SYS_READFILE  = 11,
     SYS_OPEN      = 8,
     SYS_READ      = 9,
     SYS_CLOSE     = 10,
