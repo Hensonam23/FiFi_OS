@@ -57,51 +57,23 @@ isr\n:
 
 .global isr_common_stub
 isr_common_stub:
-    # Stack on entry (top -> bottom):
-    #   vector (pushed by stub)
-    #   error  (0 if no error code; CPU pushes real error for some exceptions)
-    #   rip, cs, rflags, (rsp, ss if coming from CPL=3)
-    #
-    # We save regs so that &ctx points at r15 and matches isr_ctx_t.
+    cli
+    PUSH_REGS
 
-    pushq %rax
-    pushq %rbx
-    pushq %rcx
-    pushq %rdx
-    pushq %rbp
-    pushq %rdi
-    pushq %rsi
-    pushq %r8
-    pushq %r9
-    pushq %r10
-    pushq %r11
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
+    // rdi = pointer to our saved context struct (starts at r15)
+    mov rdi, rsp
 
-    movq %rsp, %rdi
+    // SysV ABI alignment: make RSP 16-byte aligned before call
+    sub rsp, 8
     call isr_common_handler
+    add rsp, 8
 
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %r11
-    popq %r10
-    popq %r9
-    popq %r8
-    popq %rsi
-    popq %rdi
-    popq %rbp
-    popq %rdx
-    popq %rcx
-    popq %rbx
-    popq %rax
+    POP_REGS
 
-    # Drop vector + error so iretq sees rip/cs/rflags/(rsp/ss)
-    addq $16, %rsp
+    // drop vector + error
+    add rsp, 16
     iretq
+
 // 0..31 CPU exception stubs
 ISR_NOERR 0
 ISR_NOERR 1
