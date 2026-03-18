@@ -127,11 +127,17 @@ static void enter_user_mode(uint64_t user_rip, uint64_t user_rsp, uint64_t user_
 
     __builtin_unreachable();
 }
-static char g_run_path[256];
-
 #define RUN_MAX_ARGS 6
-static int  g_run_argc = 0;                  // includes argv[0]
-static char g_run_argv[RUN_MAX_ARGS][128];   // simple fixed-size copies
+#define RUN_CTX_MAX 8
+
+typedef struct {
+    int in_use;
+    char path[256];
+    int argc;
+    char argv[RUN_MAX_ARGS][128];
+} run_ctx_t;
+
+static run_ctx_t g_run_ctx[RUN_CTX_MAX];
 
 
 // Tiny no-libc helpers (shell.c runs freestanding)
@@ -147,8 +153,45 @@ static void memcpy_u8(void *dst, const void *src, uint64_t n) {
 }
 
 
+
+static void run_ctx_release(run_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->in_use = 0;
+    ctx->argc = 0;
+}
+
 static void run_thread_fn(void *arg) {
-    const char *path = (const char*)arg;
+    run_ctx_t *ctx = (run_ctx_t*)arg;
+    if (!ctx) {
+        kprintf("run: null ctx\n");
+        thread_exit();
+    }
+
+    char path_local[256];
+    char argv_local[RUN_MAX_ARGS][128];
+    int argc_local = ctx->argc;
+    if (argc_local < 0) argc_local = 0;
+    if (argc_local > RUN_MAX_ARGS) argc_local = RUN_MAX_ARGS;
+
+    int pi = 0;
+    while (ctx->path[pi] && pi < 255) {
+        path_local[pi] = ctx->path[pi];
+        pi++;
+    }
+    path_local[pi] = 0;
+
+    for (int i = 0; i < RUN_MAX_ARGS; i++) {
+        int j = 0;
+        while (ctx->argv[i][j] && j < 127) {
+            argv_local[i][j] = ctx->argv[i][j];
+            j++;
+        }
+        argv_local[i][j] = 0;
+    }
+
+    run_ctx_release(ctx);
+
+    const char *path = path_local;
 
     const void *data = 0;
     uint64_t size = 0;
@@ -277,11 +320,11 @@ if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
 
     // Copy strings onto stack (from last to first so argv[0] ends up lowest string)
     uint64_t uargv_ptrs[RUN_MAX_ARGS];
-    uint64_t uargc = (uint64_t)g_run_argc;
+    uint64_t uargc = (uint64_t)argc_local;
     if (uargc > RUN_MAX_ARGS) uargc = RUN_MAX_ARGS;
 
     for (int i = (int)uargc - 1; i >= 0; i--) {
-        const char *src = g_run_argv[i];
+        const char *src = argv_local[i];
         uint64_t len = 0;
         while (src[len] && len < 120) len++;
         // include null terminator
@@ -322,6 +365,7 @@ if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
 
 
 static int cmd_run(int argc, char **argv);
+static int cmd_runbg(int argc, char **argv);
 
 static int streq(const char *a, const char *b) {
     if (!a || !b) return 0;
@@ -465,6 +509,13 @@ static uint64_t parse_u64(const char *s) {
 
 
 #define SHELL_PROMPT "FiFi> "
+
+static volatile int g_shell_fg_tid = -1;
+
+static void shell_drain_keys(void) {
+    while (keyboard_try_getchar() >= 0) { }
+}
+
 /* === FiFi shell history (single system) === */
 #ifndef SHELL_LINE_MAX
 #define SHELL_LINE_MAX 128
@@ -618,25 +669,29 @@ static int streq_simple(const char *a, const char *b) {
 }
 
 static void shell_help(void) {
-    kprintf("\nCommands:\n");
-    kprintf("  help             show this list\n");
-    kprintf("  clear            clear screen\n");
-    kprintf("  ls               list initrd files\n");
-    kprintf("  cat <file>       print initrd file\n");
-    kprintf("  motd             show motd.txt from initrd\n");
-    kprintf("  stat <file>      show file info (size + type)\n");
-    kprintf("  hexdump <file>   hex dump first 256 bytes\n");
-    kprintf("  version          show build info\n");
-    kprintf("  elf <file>       dump ELF64 header + segments\n");
-    kprintf("  mem              show memory stats (PMM + heap)\n");
-    kprintf("  modules          list limine modules (includes initrd)\n");
-    kprintf("  ai               placeholder for local AI agent\n");
-    kprintf("  reboot           reboot (port 0x64)\n");
-    kprintf("  halt             stop CPU\n");
-    kprintf("\nEditing:\n");
-    kprintf("  left/right/home/end, backspace, delete\n");
-    kprintf("\n");
+    kprintf("\nType: help\n\n");
+
+    kprintf("Useful:\n");
+    kprintf("  help\n");
+    kprintf("  ls\n");
+    kprintf("  cat <file>\n");
+    kprintf("  motd\n");
+    kprintf("  modules\n");
+    kprintf("  clear (or cls)\n");
+    kprintf("  threads\n");
+    kprintf("  ps\n");
+    kprintf("  spawn\n");
+    kprintf("  spawnbg\n");
+    kprintf("  wait <slot>\n");
+    kprintf("  kill <slot>\n");
+    kprintf("  userdemo\n");
+    kprintf("  run <prog.elf> [args]\n");
+    kprintf("  runbg <prog.elf> [args]\n");
+    kprintf("  sys <nop|uptime|yield|log> [message]\n");
+    kprintf("  tss\n");
+    kprintf("  int80\n");
 }
+
 
 // ---- shell helpers ----
 static void shell_print_hex_byte(uint8_t b) {
@@ -693,32 +748,32 @@ static void shell_redraw_line(char *line, uint64_t len, uint64_t pos, uint64_t *
     if (!line) return;
     if (pos > len) pos = len;
 
-    /* 1) CR + prompt + full render with '|' marker inserted */
+    /* 1) CR + prompt + full render with '_' marker inserted */
     kprintf("\r");
     kprintf("%s", SHELL_PROMPT);
 
     
-    print_set_input_active(1);/* Print: line[0..pos-1] + '|' + line[pos..len-1] */
+    print_set_input_active(1);/* Print: line[0..pos-1] + '_' + line[pos..len-1] */
     for (uint64_t i = 0; i <= len; i++) {
-        if (i == pos) kprintf("|");
+        if (i == pos) kprintf("_");
         if (i < len)  kprintf("%c", line[i]);
     }
 
     /* 2) Clear leftovers from previous render (line+cursor only; prompt is constant) */
-    uint64_t render_len = len + 1; /* +1 for '|' */
+    uint64_t render_len = len + 1; /* +1 for '_' */
     if (last_len && *last_len > render_len) {
         uint64_t extra = *last_len - render_len;
         for (uint64_t i = 0; i < extra; i++) kprintf(" ");
     }
     if (last_len) *last_len = render_len;
 
-    /* 3) Put the real cursor on the visible '|' marker */
+    /* 3) Put the real cursor on the visible '_' marker */
     kprintf("\r");
     kprintf("%s", SHELL_PROMPT);
     for (uint64_t i = 0; i < pos && i < len; i++) {
         kprintf("%c", line[i]);
     }
-    kprintf("|");
+    kprintf("_");
     print_set_suppress_dirty(0);
 }
 
@@ -762,6 +817,11 @@ static void shell_exec(char *line) {
 
         return;
     }
+    else if (streq_simple(argv[0], "ps")) {
+        thread_ps_dump();
+        return;
+    }
+
     else if (streq_simple(argv[0], "userdemo")) {
         userdemo_spawn();
         return;
@@ -831,9 +891,36 @@ static void shell_exec(char *line) {
 
 
     else if (streq_simple(argv[0], "spawn")) {
+        int tid = thread_spawn_demo();
+        if (tid >= 0) {
+            g_shell_fg_tid = tid;
+            (void)thread_wait_slot(tid);
+            g_shell_fg_tid = -1;
+            shell_drain_keys();
+        }
+        return;
+    }
 
-        thread_spawn_demo();
+    else if (streq_simple(argv[0], "spawnbg")) {
+        (void)thread_spawn_demo_bg();
+        return;
+    }
 
+    else if (streq_simple(argv[0], "wait")) {
+        if (argc < 2) {
+            kprintf("usage: wait <slot>\\n");
+            return;
+        }
+
+        int slot = (int)parse_u64(argv[1]);
+        g_shell_fg_tid = slot;
+        int rc = thread_wait_slot(slot);
+        g_shell_fg_tid = -1;
+        shell_drain_keys();
+
+        if (rc < 0) {
+            kprintf("wait: bad slot\\n");
+        }
         return;
     }
 
@@ -844,7 +931,7 @@ static void shell_exec(char *line) {
         return;
     }
 
-if (streq_simple(argv[0], "clear")) {
+if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         console_clear();
         return;
     }
@@ -1332,6 +1419,11 @@ kprintf("usage: sc uptime|yield|nop\n");
         (void)cmd_run(argc, argv);
         return;
     }
+
+    if (streq_simple(argv[0], "runbg")) {
+        (void)cmd_runbg(argc, argv);
+        return;
+    }
 // Print syscall numbers (debug / userland build help)
 if (streq(argv[0], "sysnums")) {
     kprintf("SYS_LOG=%d\n", (int)SYS_LOG);
@@ -1341,6 +1433,9 @@ if (streq(argv[0], "sysnums")) {
 
     if (streq(argv[0], "jobs")) { (void)cmd_jobs(argc, argv); return; }
 
+else if (streq(argv[0], "ps")) {
+    thread_ps_dump();
+}
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
@@ -1365,6 +1460,14 @@ void shell_run(void) {
     kprintf("%s", prompt);
 
     for (;;) {
+        if (g_shell_fg_tid >= 0) {
+            timer_poll();
+            workqueue_run();
+            thread_check_resched();
+            __asm__ __volatile__("hlt");
+            continue;
+        }
+        thread_check_resched();
         int key = keyboard_try_getchar();
         if (key < 0) {
             timer_poll();
@@ -1399,7 +1502,8 @@ void shell_run(void) {
 
         // Enter
         if (key == '\n') {
-            kprintf("\n");
+            line[len] = 0;
+            kprintf("\r%s%s \n", prompt, line);
             line[len] = 0;
 
             
@@ -1575,41 +1679,121 @@ static int cmd_run(int argc, char **argv) {
         return -1;
     }
 
-    // Build argv for userland:
-    // argv[0] = program path (argv[1] from shell), argv[1..] = remaining shell args
-    g_run_argc = 0;
-    for (int i = 0; i < RUN_MAX_ARGS; i++) g_run_argv[i][0] = 0;
-
-    // shell: run <prog.elf> [arg1 arg2 ...]
-    // user:  argv[0]=<prog.elf>, argv[1]=arg1, ...
+    run_ctx_t *ctx = 0;
+    for (int i = 0; i < RUN_CTX_MAX; i++) {
+        if (!g_run_ctx[i].in_use) {
+            ctx = &g_run_ctx[i];
+            memzero_u8(ctx, sizeof(*ctx));
+            ctx->in_use = 1;
+            break;
+        }
+    }
+    if (!ctx) {
+        kprintf("run: no free run context\n");
+        return -1;
+    }
     int uargc = argc - 1;
     if (uargc > RUN_MAX_ARGS) uargc = RUN_MAX_ARGS;
 
     for (int i = 0; i < uargc; i++) {
-        // argv[i+1] in shell becomes argv[i] in user
         const char *src = argv[i + 1];
         if (!src) src = "";
         int j = 0;
-        for (; j < 127 && src[j]; j++) g_run_argv[i][j] = src[j];
-        g_run_argv[i][j] = 0;
-        g_run_argc++;
+        for (; j < (int)sizeof(ctx->argv[i]) - 1 && src[j]; j++) ctx->argv[i][j] = src[j];
+        ctx->argv[i][j] = 0;
+        ctx->argc++;
     }
 
-
-
-    // Copy path into a stable buffer (argv points into the input line buffer)
     const char *in = argv[1];
     size_t n = 0;
-    while (in[n] && n < sizeof(g_run_path) - 1) { g_run_path[n] = in[n]; n++; }
-    g_run_path[n] = 0;
+    while (in[n] && n < sizeof(ctx->path) - 1) {
+        ctx->path[n] = in[n];
+        n++;
+    }
+    ctx->path[n] = 0;
 
-    int tid = thread_create("run", run_thread_fn, (void*)g_run_path);
-    if (tid < 0) {
-        kprintf("run: failed to spawn thread\n");
+    if (thread_user_any_active()) {
+        kprintf("run: another user task is already active\n");
+        memzero_u8(ctx, sizeof(*ctx));
         return -1;
     }
-    kprintf("run: spawned thread slot=%d (%s)\n", tid, g_run_path);
+
+    int tid = thread_create(ctx->path, run_thread_fn, (void*)ctx);
+    if (tid < 0) {
+        kprintf("run: failed to spawn thread\n");
+        memzero_u8(ctx, sizeof(*ctx));
+        return -1;
+    }
+    thread_mark_user_slot(tid, 1);
+
+    kprintf("run: spawned thread slot=%d (%s)\n", tid, ctx->path);
+    g_shell_fg_tid = tid;
+    (void)thread_wait_slot(tid);
+    g_shell_fg_tid = -1;
+    shell_drain_keys();
+    memzero_u8(ctx, sizeof(*ctx));
     return 0;
 }
+
+
+
+static int cmd_runbg(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("usage: runbg <path>\n");
+        return -1;
+    }
+
+    run_ctx_t *ctx = 0;
+    for (int i = 0; i < RUN_CTX_MAX; i++) {
+        if (!g_run_ctx[i].in_use) {
+            ctx = &g_run_ctx[i];
+            memzero_u8(ctx, sizeof(*ctx));
+            ctx->in_use = 1;
+            break;
+        }
+    }
+    if (!ctx) {
+        kprintf("runbg: no free run context\n");
+        return -1;
+    }
+    int uargc = argc - 1;
+    if (uargc > RUN_MAX_ARGS) uargc = RUN_MAX_ARGS;
+
+    for (int i = 0; i < uargc; i++) {
+        const char *src = argv[i + 1];
+        if (!src) src = "";
+        int j = 0;
+        for (; j < (int)sizeof(ctx->argv[i]) - 1 && src[j]; j++) ctx->argv[i][j] = src[j];
+        ctx->argv[i][j] = 0;
+        ctx->argc++;
+    }
+
+    const char *in = argv[1];
+    size_t n = 0;
+    while (in[n] && n < sizeof(ctx->path) - 1) {
+        ctx->path[n] = in[n];
+        n++;
+    }
+    ctx->path[n] = 0;
+
+    if (thread_user_any_active()) {
+        kprintf("runbg: another user task is already active\n");
+        memzero_u8(ctx, sizeof(*ctx));
+        return -1;
+    }
+
+    int tid = thread_create(ctx->path, run_thread_fn, (void*)ctx);
+    if (tid < 0) {
+        kprintf("run: failed to spawn thread\n");
+        memzero_u8(ctx, sizeof(*ctx));
+        return -1;
+    }
+    thread_mark_user_slot(tid, 1);
+
+    kprintf("runbg: spawned thread slot=%d (%s)\n", tid, ctx->path);
+    return 0;
+}
+
+
 
 

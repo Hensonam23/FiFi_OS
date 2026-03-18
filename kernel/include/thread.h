@@ -7,11 +7,17 @@ void thread_init(void);
 int  thread_create(const char *name, thread_entry_t entry, void *arg);
 void thread_yield(void);
 __attribute__((noreturn)) void thread_exit(void);
+int thread_wait_slot(int slot);
+int thread_kill_slot(int slot);
+int thread_user_any_active(void);
+void thread_mark_user_slot(int slot, int on);
+
 
 void thread_dump(void);
 
 /* temporary demo helper so we can test quickly from the shell */
 int thread_spawn_demo(void);
+int thread_spawn_demo_bg(void);
 void thread_request_resched(void);
 void thread_check_resched(void);
 
@@ -44,3 +50,6 @@ uint64_t thread_current_kstack_top(void);
 
 // Current thread id (tid)
 uint32_t thread_current_tid(void);
+
+// Debug: list threads for shell 'ps'
+void thread_ps_dump(void);

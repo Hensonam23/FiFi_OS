@@ -3,6 +3,7 @@
 #include "heap.h"
 #include "gdt.h"
 
+// forward decl (used by scheduler)
 static inline uint64_t read_rsp_u64(void) {
     uint64_t v;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(v));
@@ -45,6 +46,7 @@ typedef struct {
     void *arg;
 
     void *stack_base;
+    uint8_t is_user;
 } thread_t;
 
 static thread_t g_threads[THREAD_MAX];
@@ -124,12 +126,14 @@ void thread_init(void) {
         g_threads[i].entry = 0;
         g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].is_user = 0;
         g_threads[i].name[0] = 0;
         g_threads[i].wake_tick = 0;
         g_threads[i].rsp = 0;
         g_threads[i].entry = 0;
         g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].is_user = 0;
         g_threads[i].kstack_top = 0;
         g_threads[i].tid = 0;
         g_threads[i].prio = 0;
@@ -173,6 +177,8 @@ static int find_free_slot(void) {
 }
 
 int thread_create(const char *name, thread_entry_t entry, void *arg) {
+    // reclaim DEAD slots before allocating a new thread slot
+    thread_reap_dead();
     if (!entry) return -1;
 
     int idx = find_free_slot();
@@ -208,6 +214,7 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->entry = entry;
     t->arg = arg;
     t->stack_base = stack;
+    t->is_user = 0;
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
 
     t->cpu_ticks = 0;
@@ -266,6 +273,10 @@ void thread_yield(void) {
     if (!g_cur) return;
 
     k_cli();
+
+    // reclaim dead threads so slots can be reused
+    thread_reap_dead();
+
 
     int next_idx = pick_next_ready();
     if (next_idx < 0) {
@@ -344,8 +355,8 @@ void thread_exit(void) {
             g_cur->cpu_ticks += (now - g_cur->last_start_tick);
         }
         g_cur->state = T_DEAD;
-        kprintf("\n[thread] exit: %s\n", g_cur->name);
-    }
+        
+}
 
     /* switch away forever */
     for (;;) {
@@ -685,9 +696,11 @@ void thread_reap_dead(void) {
         g_threads[i].entry = 0;
         g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].is_user = 0;
         g_threads[i].name[0] = 0;
         g_threads[i].rsp = 0;
         g_threads[i].stack_base = 0;
+        g_threads[i].is_user = 0;
         g_threads[i].kstack_top = 0;
         g_threads[i].tid = 0;
         g_threads[i].prio = 0;
@@ -751,7 +764,7 @@ static void demo_fn(void *arg) {
     for (int i = 0; i < 5; i++) {
         kprintf("\n[demo] i=%d\n", i);
         /* cheap delay so it doesn't spam instantly */
-        thread_sleep_ms(250);thread_yield();
+        thread_sleep_ms(250);
     }
     kprintf("\n[demo] done\n");
 }
@@ -759,9 +772,128 @@ static void demo_fn(void *arg) {
 int thread_spawn_demo(void) {
     int id = thread_create("demo", demo_fn, 0);
     if (id >= 0) {
-        kprintf("\n[thread] spawned demo as id=%d\n", id);
+        kprintf("\n[thread] spawned demo slot=%d\n", id);
     } else {
         kprintf("\n[thread] spawn demo FAILED\n");
     }
     return id;
 }
+
+
+
+static void demo_bg_fn(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 5; i++) {
+        thread_sleep_ms(250);
+    }
+}
+
+int thread_spawn_demo_bg(void) {
+    int id = thread_create("demo.bg", demo_bg_fn, 0);
+    if (id >= 0) {
+        kprintf("\n[thread] spawned background demo slot=%d\n", id);
+    } else {
+        kprintf("\n[thread] spawn background demo FAILED\n");
+    }
+    return id;
+}
+
+// ---- ps: show current thread list (simple view) ----
+static const char* thread_state_name(thread_state_t s) {
+    switch (s) {
+        case T_UNUSED:   return "UNUSED";
+        case T_READY:    return "READY";
+        case T_RUNNING:  return "RUNNING";
+        case T_SLEEPING: return "SLEEP";
+        case T_DEAD:     return "DEAD";
+        default:         return "?";
+    }
+}
+
+
+void thread_mark_user_slot(int slot, int on) {
+    if (slot < 0 || slot >= THREAD_MAX) return;
+    g_threads[slot].is_user = on ? 1 : 0;
+}
+
+int thread_user_any_active(void) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (!g_threads[i].is_user) continue;
+        if (g_threads[i].state == T_UNUSED || g_threads[i].state == T_DEAD) continue;
+        return 1;
+    }
+    return 0;
+}
+
+void thread_ps_dump(void) {
+    kprintf("\n--- FiFi ps (threads) ---\n");
+    kprintf("SLOT CUR  TID   STATE     CPU_TICKS   PTR                 NAME\n");
+    kprintf("-------------------------------------------------------------------\n");
+
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->state == T_UNUSED) continue;
+
+        char cur = (t == g_cur) ? '*' : ' ';
+
+        const char *st = thread_state_name(t->state);
+        const char *nm = (t->name[0] != 0) ? t->name : "(noname)";
+
+        kprintf("%d    %c    %p  %s  %p   %p  %s\n",
+                i,
+                cur,
+                (void*)(uintptr_t)t->tid,
+                st,
+                (void*)(uintptr_t)t->cpu_ticks,
+                (void*)t,
+                nm);
+    }
+
+    kprintf("\n");
+}
+
+int thread_wait_slot(int slot) {
+    if (slot < 0 || slot >= THREAD_MAX) return -1;
+
+    for (;;) {
+        k_cli();
+        thread_state_t st = g_threads[slot].state;
+        k_sti();
+
+        if (st == T_DEAD || st == T_UNUSED) {
+            return 0;
+        }
+
+        // Keep the scheduler alive while waiting on a foreground thread.
+        thread_check_resched();
+        __asm__ __volatile__("hlt");
+    }
+}
+
+int thread_kill_slot(int slot) {
+    if (slot < 0 || slot >= THREAD_MAX) return -1;
+
+    k_cli();
+
+    thread_t *t = &g_threads[slot];
+
+    if (t == g_cur) {
+        k_sti();
+        return -1;
+    }
+
+    if (t->state == T_UNUSED || t->state == T_DEAD) {
+        k_sti();
+        return -1;
+    }
+
+    t->state = T_DEAD;
+    t->wake_tick = 0;
+    t->wait_ticks = 0;
+
+    k_sti();
+
+    thread_reap_dead();
+    return 0;
+}
+
