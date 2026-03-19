@@ -14,6 +14,7 @@ static uint64_t g_pmm_free_pages = 0;
 static uint64_t g_hhdm = 0;
 static uint64_t g_cursor = 0;
 static uint64_t g_end = 0;
+static uint64_t g_free_list = 0;
 
 static inline uint64_t align_up(uint64_t x, uint64_t a) {
     return (x + (a - 1)) & ~(a - 1);
@@ -23,6 +24,7 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm_offset) {
     g_hhdm = hhdm_offset;
     g_cursor = 0;
     g_end = 0;
+    g_free_list = 0;
 
     if (!mm) {
         serial_write("FiFi OS: PMM init failed (no memmap)\n");
@@ -76,6 +78,14 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm_offset) {
 
 
 uint64_t pmm_alloc_page(void) {
+    if (g_free_list) {
+        uint64_t p = g_free_list;
+        uint64_t *next = (uint64_t*)pmm_phys_to_virt(p);
+        g_free_list = *next;
+        if (g_pmm_free_pages) g_pmm_free_pages--;
+        return p;
+    }
+
     if (!g_cursor) return 0;
     if (g_cursor + PAGE_SIZE > g_end) return 0;
 
@@ -83,6 +93,21 @@ uint64_t pmm_alloc_page(void) {
     g_cursor += PAGE_SIZE;
     if (g_pmm_free_pages) g_pmm_free_pages--;
     return p;
+}
+
+void pmm_free_page(uint64_t phys) {
+    if (!phys) return;
+    if (!g_hhdm) return;
+
+    phys &= ~(PAGE_SIZE - 1ULL);
+    if (phys < MIN_PHYS) return;
+    if (!g_cursor) return;
+    if (phys >= g_cursor) return;
+
+    uint64_t *node = (uint64_t*)pmm_phys_to_virt(phys);
+    *node = g_free_list;
+    g_free_list = phys;
+    g_pmm_free_pages++;
 }
 
 uint64_t pmm_alloc_pages(size_t count) {

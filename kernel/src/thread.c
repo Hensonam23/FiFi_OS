@@ -2,6 +2,7 @@
 #include "kprintf.h"
 #include "heap.h"
 #include "gdt.h"
+#include "vmm.h"
 
 // forward decl (used by scheduler)
 static inline uint64_t read_rsp_u64(void) {
@@ -13,6 +14,7 @@ static inline uint64_t read_rsp_u64(void) {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "pit.h"
 
 extern void ctx_switch(uint64_t *old_rsp, uint64_t *new_rsp);
@@ -28,6 +30,14 @@ typedef enum {
     T_SLEEPING,
     T_DEAD
 } thread_state_t;
+
+#define THREAD_USER_MAP_MAX 8
+
+typedef struct {
+    uint64_t base;
+    uint64_t size;
+    uint8_t in_use;
+} thread_user_map_t;
 
 typedef struct {
     uint64_t rsp;
@@ -47,6 +57,7 @@ typedef struct {
 
     void *stack_base;
     uint8_t is_user;
+      thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
 static thread_t g_threads[THREAD_MAX];
@@ -96,6 +107,51 @@ static void name_copy(char *dst, const char *src) {
     dst[THREAD_NAME_MAX - 1] = 0;
 }
 
+static void thread_user_maps_zero(thread_t *t) {
+    if (!t) return;
+    for (int i = 0; i < THREAD_USER_MAP_MAX; i++) {
+        t->user_maps[i].base = 0;
+        t->user_maps[i].size = 0;
+        t->user_maps[i].in_use = 0;
+    }
+}
+
+static void thread_user_cleanup(thread_t *t) {
+    if (!t) return;
+
+    int regions = 0;
+    uint64_t pages = 0;
+
+    for (int i = 0; i < THREAD_USER_MAP_MAX; i++) {
+        if (!t->user_maps[i].in_use) continue;
+
+        regions++;
+        pages += (t->user_maps[i].size + 0xFFFULL) >> 12;
+
+        kprintf("[tclean] tid=%p map=%p base=%p size=%p\n",
+                (void*)(uintptr_t)t->tid,
+                (void*)(uintptr_t)i,
+                (void*)t->user_maps[i].base,
+                (void*)t->user_maps[i].size);
+
+        (void)vmm_unmap_range_and_free(t->user_maps[i].base, (size_t)t->user_maps[i].size);
+
+        t->user_maps[i].base = 0;
+        t->user_maps[i].size = 0;
+        t->user_maps[i].in_use = 0;
+    }
+
+    if (regions) {
+        kprintf("[tclean] tid=%p cleaned regions=%p pages=%p\n",
+                (void*)(uintptr_t)t->tid,
+                (void*)(uintptr_t)regions,
+                (void*)pages);
+    }
+
+    t->is_user = 0;
+}
+
+
 /* This runs when a brand new thread is first switched to. */
 __attribute__((noreturn))
 static void thread_trampoline(void) {
@@ -141,6 +197,7 @@ void thread_init(void) {
         g_threads[i].cpu_ticks = 0;
         g_threads[i].last_start_tick = 0;
         g_threads[i].name[0] = 0;
+        thread_user_maps_zero(&g_threads[i]);
     }
 
     /* slot 0 = "main" thread (current context) */
@@ -215,6 +272,7 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->arg = arg;
     t->stack_base = stack;
     t->is_user = 0;
+    thread_user_maps_zero(t);
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
 
     t->cpu_ticks = 0;
@@ -354,16 +412,16 @@ void thread_exit(void) {
         if (g_cur->last_start_tick != 0 && now >= g_cur->last_start_tick) {
             g_cur->cpu_ticks += (now - g_cur->last_start_tick);
         }
-        g_cur->state = T_DEAD;
-        
-}
+          thread_user_cleanup(g_cur);
+          g_cur->state = T_DEAD;
+    }
 
-    /* switch away forever */
     for (;;) {
         thread_yield();
         __asm__ volatile("hlt");
     }
 }
+
 
 
 static uint64_t thread_effective_cpu_ticks(thread_t *t) {
@@ -676,14 +734,35 @@ int thread_kill(int slot) {
 }
 
 
+
+
 void thread_reap_dead(void) {
-    // Safe reaping of DEAD threads: turn them into UNUSED slots.
-    // Never reap slot 0 (main) and never reap the currently running thread.
     for (int i = 1; i < THREAD_MAX; i++) {
         if (g_threads[i].state != T_DEAD) continue;
         if (&g_threads[i] == g_cur) continue;
 
-        // clear minimal fields
+        kprintf("[treap] slot=%p tid=%p begin\n",
+                (void*)(uintptr_t)i,
+                (void*)(uintptr_t)g_threads[i].tid);
+
+        thread_user_cleanup(&g_threads[i]);
+
+        if (g_threads[i].stack_base) {
+            int ok = vmm_unmap_range_and_free(
+                (uint64_t)(uintptr_t)g_threads[i].stack_base,
+                (size_t)THREAD_STACK_SIZE
+            );
+
+            kprintf("[treap] slot=%p stack_base=%p size=%p ok=%p\n",
+                    (void*)(uintptr_t)i,
+                    g_threads[i].stack_base,
+                    (void*)(uintptr_t)THREAD_STACK_SIZE,
+                    (void*)(uintptr_t)ok);
+        } else {
+            kprintf("[treap] slot=%p no stack_base\n",
+                    (void*)(uintptr_t)i);
+        }
+
         g_threads[i].state = T_UNUSED;
         g_threads[i].rsp = 0;
         g_threads[i].kstack_top = 0;
@@ -698,24 +777,15 @@ void thread_reap_dead(void) {
         g_threads[i].stack_base = 0;
         g_threads[i].is_user = 0;
         g_threads[i].name[0] = 0;
-        g_threads[i].rsp = 0;
-        g_threads[i].stack_base = 0;
-        g_threads[i].is_user = 0;
-        g_threads[i].kstack_top = 0;
-        g_threads[i].tid = 0;
-        g_threads[i].prio = 0;
-        g_threads[i].wait_ticks = 0;
-        g_threads[i].cpu_ticks = 0;
-        g_threads[i].last_start_tick = 0;
-        g_threads[i].wake_tick = 0;
-        g_threads[i].cpu_ticks = 0;
-        g_threads[i].last_start_tick = 0;
-        g_threads[i].wait_ticks = 0;
-        g_threads[i].prio = 0;
-        g_threads[i].tid = 0;
-        g_threads[i].name[0] = 0;
+        thread_user_maps_zero(&g_threads[i]);
+
+        kprintf("[treap] slot=%p done\n", (void*)(uintptr_t)i);
     }
 }
+
+
+
+
 
 
 
@@ -816,6 +886,53 @@ void thread_mark_user_slot(int slot, int on) {
     g_threads[slot].is_user = on ? 1 : 0;
 }
 
+int thread_user_map_add(uint64_t va, uint64_t size) {
+    if (!g_cur || size == 0) return -1;
+
+    for (int i = 0; i < THREAD_USER_MAP_MAX; i++) {
+        if (!g_cur->user_maps[i].in_use) continue;
+        if (g_cur->user_maps[i].base == va && g_cur->user_maps[i].size == size) {
+            g_cur->is_user = 1;
+            kprintf("[tmap] tid=%p existing map=%p base=%p size=%p\n",
+                    (void*)(uintptr_t)g_cur->tid,
+                    (void*)(uintptr_t)i,
+                    (void*)va,
+                    (void*)size);
+            return 0;
+        }
+    }
+
+    for (int i = 0; i < THREAD_USER_MAP_MAX; i++) {
+        if (g_cur->user_maps[i].in_use) continue;
+        g_cur->user_maps[i].base = va;
+        g_cur->user_maps[i].size = size;
+        g_cur->user_maps[i].in_use = 1;
+        g_cur->is_user = 1;
+
+        kprintf("[tmap] tid=%p new map=%p base=%p size=%p\n",
+                (void*)(uintptr_t)g_cur->tid,
+                (void*)(uintptr_t)i,
+                (void*)va,
+                (void*)size);
+
+        return 0;
+    }
+
+    kprintf("[tmap] tid=%p failed no free user map slots\n",
+            (void*)(uintptr_t)(g_cur ? g_cur->tid : 0));
+    return -1;
+}
+
+
+void thread_user_map_cleanup_current(void) {
+    thread_user_cleanup(g_cur);
+}
+
+void thread_user_map_cleanup_slot(int slot) {
+    if (slot < 0 || slot >= THREAD_MAX) return;
+    thread_user_cleanup(&g_threads[slot]);
+}
+
 int thread_user_any_active(void) {
     for (int i = 0; i < THREAD_MAX; i++) {
         if (!g_threads[i].is_user) continue;
@@ -860,8 +977,20 @@ int thread_wait_slot(int slot) {
         thread_state_t st = g_threads[slot].state;
         k_sti();
 
-        if (st == T_DEAD || st == T_UNUSED) {
+        if (st == T_UNUSED) {
             return 0;
+        }
+
+        if (st == T_DEAD) {
+            thread_reap_dead();
+
+            k_cli();
+            st = g_threads[slot].state;
+            k_sti();
+
+            if (st == T_UNUSED || st == T_DEAD) {
+                return 0;
+            }
         }
 
         // Keep the scheduler alive while waiting on a foreground thread.
@@ -869,6 +998,7 @@ int thread_wait_slot(int slot) {
         __asm__ __volatile__("hlt");
     }
 }
+
 
 int thread_kill_slot(int slot) {
     if (slot < 0 || slot >= THREAD_MAX) return -1;
@@ -893,6 +1023,7 @@ int thread_kill_slot(int slot) {
 
     k_sti();
 
+    thread_user_cleanup(t);
     thread_reap_dead();
     return 0;
 }

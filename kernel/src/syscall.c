@@ -114,6 +114,18 @@ static void fd_close(uint64_t tid, int fd) {
 }
 
 
+static void fd_close_all(uint64_t tid) {
+    for (int i = 0; i < SYS_FD_MAX; i++) {
+        if (!g_fds[i].used) continue;
+        if (g_fds[i].owner_tid != tid) continue;
+        g_fds[i].used = 0;
+        g_fds[i].owner_tid = 0;
+        g_fds[i].data = 0;
+        g_fds[i].size = 0;
+        g_fds[i].off = 0;
+    }
+}
+
 void syscall_dispatch(isr_ctx_t *ctx) {
     uint64_t n = ctx->rax;
 
@@ -167,6 +179,11 @@ case SYS_UPTIME:
 
         case SYS_EXIT: {
             unsigned long long code = (unsigned long long)ctx->rdi;
+            uint64_t tid = thread_current_tid();
+
+            fd_close_all(tid);
+            thread_user_map_cleanup_current();
+
             kprintf("[syscall] exit code=%p\n", (void*)code);
             thread_exit();
         }

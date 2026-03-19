@@ -11,6 +11,9 @@ int thread_wait_slot(int slot);
 int thread_kill_slot(int slot);
 int thread_user_any_active(void);
 void thread_mark_user_slot(int slot, int on);
+int thread_user_map_add(uint64_t va, uint64_t size);
+void thread_user_map_cleanup_current(void);
+void thread_user_map_cleanup_slot(int slot);
 
 
 void thread_dump(void);

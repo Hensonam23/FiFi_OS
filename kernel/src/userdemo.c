@@ -59,15 +59,27 @@ static int user_map_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
     uint64_t end   = align_up_4k(va + size);
 
     for (uint64_t v = start; v < end; v += 0x1000ULL) {
-        (void)vmm_unmap_page(v);
+        (void)vmm_unmap_page_and_free(v);
         uint64_t phys = pmm_alloc_page();
-        if (!phys) return -1;
-        if (!vmm_map_page(v, phys, flags)) return -1;
+        if (!phys) {
+            (void)vmm_unmap_range_and_free(start, v - start);
+            return -1;
+        }
+        if (!vmm_map_page(v, phys, flags)) {
+            pmm_free_page(phys);
+            (void)vmm_unmap_range_and_free(start, v - start);
+            return -1;
+        }
 
-        // zero page
         uint8_t *p = (uint8_t*)(uintptr_t)v;
         for (uint64_t i = 0; i < 0x1000ULL; i++) p[i] = 0;
     }
+
+    if (thread_user_map_add(start, end - start) < 0) {
+        (void)vmm_unmap_range_and_free(start, end - start);
+        return -1;
+    }
+
     return 0;
 }
 

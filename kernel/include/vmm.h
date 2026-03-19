@@ -25,6 +25,7 @@ void vmm_init(uint64_t hhdm_offset);
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, vmm_flags_t flags);
 bool vmm_unmap_page(uint64_t virt);
+bool vmm_unmap_page_and_free(uint64_t virt);
 
 uint64_t vmm_translate(uint64_t virt);
 
@@ -36,6 +37,7 @@ void vmm_flush_tlb(void);
 
 bool vmm_map_range(uint64_t virt, uint64_t phys, size_t size, vmm_flags_t flags);
 bool vmm_unmap_range(uint64_t virt, size_t size);
+bool vmm_unmap_range_and_free(uint64_t virt, size_t size);
 
 // Check that [virt, virt+size) is mapped user-accessible (and writable if write=true)
 bool vmm_user_accessible(uint64_t virt, size_t size, bool write);

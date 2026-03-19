@@ -8,6 +8,7 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm_offset);
 
 /* Returns physical address of a 4KiB page, or 0 on failure */
 uint64_t pmm_alloc_page(void);
+void pmm_free_page(uint64_t phys);
 
 /* Returns physical address of a contiguous run of pages, or 0 on failure */
 uint64_t pmm_alloc_pages(size_t count);

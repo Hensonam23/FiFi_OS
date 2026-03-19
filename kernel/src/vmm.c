@@ -141,30 +141,74 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, vmm_flags_t flags) {
     return true;
 }
 
+static int table_is_empty(uint64_t *tbl) {
+    for (int i = 0; i < 512; i++) {
+        if (tbl[i] & PTE_P) return 0;
+    }
+    return 1;
+}
+
 bool vmm_unmap_page(uint64_t virt) {
     uint64_t v = align_down(virt);
 
     uint64_t pml4_phys = read_cr3_phys();
     uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
 
-    uint64_t e1 = pml4[idx_pml4(v)];
+    uint16_t i1 = idx_pml4(v);
+    uint64_t e1 = pml4[i1];
     if (!(e1 & PTE_P)) return false;
 
-    uint64_t *pdpt = (uint64_t*)phys_to_virt(e1 & ~0xFFFULL);
-    uint64_t e2 = pdpt[idx_pdpt(v)];
+    uint64_t pdpt_phys = e1 & 0x000FFFFFFFFFF000ULL;
+    uint64_t *pdpt = (uint64_t*)phys_to_virt(pdpt_phys);
+
+    uint16_t i2 = idx_pdpt(v);
+    uint64_t e2 = pdpt[i2];
     if (!(e2 & PTE_P)) return false;
 
-    uint64_t *pd = (uint64_t*)phys_to_virt(e2 & ~0xFFFULL);
-    uint64_t e3 = pd[idx_pd(v)];
+    uint64_t pd_phys = e2 & 0x000FFFFFFFFFF000ULL;
+    uint64_t *pd = (uint64_t*)phys_to_virt(pd_phys);
+
+    uint16_t i3 = idx_pd(v);
+    uint64_t e3 = pd[i3];
     if (!(e3 & PTE_P)) return false;
 
-    uint64_t *pt = (uint64_t*)phys_to_virt(e3 & ~0xFFFULL);
-    uint16_t i = idx_pt(v);
+    uint64_t pt_phys = e3 & 0x000FFFFFFFFFF000ULL;
+    uint64_t *pt = (uint64_t*)phys_to_virt(pt_phys);
 
-    if (!(pt[i] & PTE_P)) return false;
+    uint16_t i4 = idx_pt(v);
+    if (!(pt[i4] & PTE_P)) return false;
 
-    pt[i] = 0;
+    pt[i4] = 0;
     invlpg(v);
+
+    if (!table_is_empty(pt)) return true;
+
+    pd[i3] = 0;
+    pmm_free_page(pt_phys);
+
+    if (!table_is_empty(pd)) return true;
+
+    pdpt[i2] = 0;
+    pmm_free_page(pd_phys);
+
+    if (!table_is_empty(pdpt)) return true;
+
+    pml4[i1] = 0;
+    pmm_free_page(pdpt_phys);
+    vmm_flush_tlb();
+    return true;
+}
+
+
+bool vmm_unmap_page_and_free(uint64_t virt) {
+    uint64_t v = align_down(virt);
+    uint64_t phys = vmm_translate(v);
+    if (!phys) return true;
+
+    phys &= 0x000FFFFFFFFFF000ULL;
+    if (!vmm_unmap_page(v)) return false;
+
+    pmm_free_page(phys);
     return true;
 }
 
@@ -187,7 +231,7 @@ uint64_t vmm_translate(uint64_t virt) {
     uint64_t e4 = pt[idx_pt(virt)];
     if (!(e4 & PTE_P)) return 0;
 
-    return (e4 & ~0xFFFULL) | (virt & 0xFFFULL);
+    return (e4 & 0x000FFFFFFFFFF000ULL) | (virt & 0xFFFULL);
 }
 
 
@@ -272,5 +316,38 @@ bool vmm_unmap_range(uint64_t virt, size_t size) {
     for (uint64_t off = 0; off < bytes; off += PAGE_SIZE) {
         (void)vmm_unmap_page(v0 + off);
     }
+    return true;
+}
+
+bool vmm_unmap_range_and_free(uint64_t virt, size_t size) {
+    if (size == 0) return true;
+
+    uint64_t v0 = align_down(virt);
+    uint64_t lead = virt - v0;
+    uint64_t bytes = align_up((uint64_t)size + lead);
+
+    kprintf("[vunmap] begin virt=%p size=%p v0=%p bytes=%p\n",
+            (void*)virt,
+            (void*)(uintptr_t)size,
+            (void*)v0,
+            (void*)bytes);
+
+    for (uint64_t off = 0; off < bytes; off += PAGE_SIZE) {
+        uint64_t cur = v0 + off;
+        uint64_t phys = vmm_translate(cur);
+
+        kprintf("[vunmap] page virt=%p phys=%p\n",
+                (void*)cur,
+                (void*)phys);
+
+        if (!vmm_unmap_page_and_free(cur)) {
+            kprintf("[vunmap] FAIL virt=%p\n", (void*)cur);
+            return false;
+        }
+    }
+
+    kprintf("[vunmap] done virt=%p bytes=%p\n",
+            (void*)v0,
+            (void*)bytes);
     return true;
 }

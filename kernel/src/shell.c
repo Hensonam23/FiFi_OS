@@ -66,14 +66,28 @@ static int user_map_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
     uint64_t end   = (va + size + 0xFFFULL) & ~0xFFFULL;
 
     for (uint64_t v = start; v < end; v += PAGE) {
-        uint64_t phys = pmm_alloc_page();
-        if (!phys) return -1;
-        if (!vmm_map_page(v, phys, flags)) return -1;
+        (void)vmm_unmap_page_and_free(v);
 
-        // zero the page through the mapping (kernel can write user pages)
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) {
+            (void)vmm_unmap_range_and_free(start, v - start);
+            return -1;
+        }
+        if (!vmm_map_page(v, phys, flags)) {
+            pmm_free_page(phys);
+            (void)vmm_unmap_range_and_free(start, v - start);
+            return -1;
+        }
+
         volatile uint8_t *pp = (volatile uint8_t*)(uintptr_t)v;
         for (uint64_t i = 0; i < PAGE; i++) pp[i] = 0;
     }
+
+    if (thread_user_map_add(start, end - start) < 0) {
+        (void)vmm_unmap_range_and_free(start, end - start);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -156,9 +170,9 @@ static void memcpy_u8(void *dst, const void *src, uint64_t n) {
 
 static void run_ctx_release(run_ctx_t *ctx) {
     if (!ctx) return;
-    ctx->in_use = 0;
-    ctx->argc = 0;
+    memzero_u8(ctx, sizeof(*ctx));
 }
+
 
 static void run_thread_fn(void *arg) {
     run_ctx_t *ctx = (run_ctx_t*)arg;
@@ -1731,7 +1745,6 @@ static int cmd_run(int argc, char **argv) {
     (void)thread_wait_slot(tid);
     g_shell_fg_tid = -1;
     shell_drain_keys();
-    memzero_u8(ctx, sizeof(*ctx));
     return 0;
 }
 
