@@ -36,6 +36,22 @@ static uint64_t cur_page_virt = 0;
 static size_t   cur_off = 0;
 static uint64_t next_page_virt = 0;
 
+/* ── Free list ─────────────────────────────────────────────────────────
+ * Every allocation is preceded by a heap_hdr_t (16 bytes).
+ * kfree() chains freed blocks here. kmalloc() checks here first.
+ * The 'next' pointer is stored in the first 8 bytes of the user area
+ * while the block is on the free list (safe — user isn't using it).
+ */
+#define HEAP_MAGIC 0xF1F10A110DEAD000ULL
+
+typedef struct {
+    size_t   size;   /* usable bytes after this header */
+    uint64_t magic;  /* HEAP_MAGIC when valid */
+} heap_hdr_t;        /* 16 bytes, keeps 16-byte alloc alignment */
+
+static heap_hdr_t *g_free_list = 0;
+
+
 static inline uintptr_t align_up_uintptr(uintptr_t x, uintptr_t a) {
     return (x + (a - 1)) & ~(a - 1);
 }
@@ -144,71 +160,78 @@ void heap_init(void) {
 #endif
 }
 
+/* Round size up to 8-byte multiple. */
+static inline size_t round_size(size_t s) { return (s + 7UL) & ~7UL; }
+
+/* First-fit free list search. Returns user pointer or 0. */
+static void *freelist_take(size_t need) {
+    heap_hdr_t **pp = &g_free_list;
+    while (*pp) {
+        heap_hdr_t *hdr = *pp;
+        void       *usr = (void*)(hdr + 1);
+        if (hdr->size >= need) {
+            *pp = *(heap_hdr_t **)usr;
+            hdr->magic = HEAP_MAGIC;
+            memzero(usr, hdr->size);
+            return usr;
+        }
+        pp = (heap_hdr_t **)usr;
+    }
+    return 0;
+}
+
 void *kmalloc_aligned(size_t size, size_t align) {
     if (size == 0) return 0;
-
     if (align < 16) align = 16;
+    if (align & (align - 1)) panic("kmalloc_aligned: align not power-of-two");
 
-    /* enforce power-of-two alignment (keeps align math safe) */
-    if ((align & (align - 1)) != 0) {
-        panic("kmalloc_aligned: align not power-of-two");
-    }
-
-    if (!cur_page_virt) return 0;
-
-    /* Big alloc: map whole pages from next_page_virt */
+    /* Large alloc: bypass free list, map whole pages. No header — not tracked for free. */
     if (size >= PAGE_SIZE) {
         size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         uint64_t bytes = (uint64_t)pages * PAGE_SIZE;
-
         uint64_t v = align_down_u64(next_page_virt);
         uint64_t vend = v + bytes;
-        if (vend > heap_usable_end) {
-            panic("heap: big alloc exceeds arena (hit end guard)");
-        }
-
+        if (vend > heap_usable_end) panic("heap: big alloc exceeds arena");
         uint64_t phys = pmm_alloc_pages(pages);
         if (!phys) return 0;
-
-        if (!vmm_map_range(v, phys, bytes, VMM_WRITE)) {
-            panic("heap: vmm_map_range failed");
-        }
-
-#ifdef FIFI_HEAP_POISON
-        memfill((void*)(uintptr_t)v, 0xAA, (size_t)bytes);
-#endif
-
+        if (!vmm_map_range(v, phys, bytes, VMM_WRITE)) panic("heap: vmm_map_range failed");
         next_page_virt = vend;
         return (void*)(uintptr_t)v;
     }
 
-    /* Small alloc: bump inside current mapped page */
-    uintptr_t base = (uintptr_t)cur_page_virt;
-    uintptr_t ptr  = align_up_uintptr(base + cur_off, (uintptr_t)align);
-    size_t new_off = (size_t)((ptr - base) + size);
+    /* Standard alloc: check free list first (16-byte align only). */
+    size_t need = round_size(size < 8 ? 8 : size);
+    if (align == 16) {
+        void *hit = freelist_take(need);
+        if (hit) return hit;
+    }
+
+    /* Bump allocate with header prepended. */
+    size_t total = sizeof(heap_hdr_t) + need;
+    if (!cur_page_virt) return 0;
+
+    uintptr_t base    = (uintptr_t)cur_page_virt;
+    uintptr_t hptr    = align_up_uintptr(base + cur_off, (uintptr_t)align);
+    size_t    new_off = (size_t)((hptr - base) + total);
 
     if (new_off > PAGE_SIZE) {
         heap_map_fresh_page();
-
-        base = (uintptr_t)cur_page_virt;
-        ptr  = align_up_uintptr(base + cur_off, (uintptr_t)align);
-        new_off = (size_t)((ptr - base) + size);
-
+        base    = (uintptr_t)cur_page_virt;
+        hptr    = align_up_uintptr(base + cur_off, (uintptr_t)align);
+        new_off = (size_t)((hptr - base) + total);
         if (new_off > PAGE_SIZE) return 0;
     }
 
     cur_off = new_off;
-
-#ifdef FIFI_HEAP_POISON
-    memfill((void*)ptr, 0xAA, size);
-#endif
-
-    return (void*)ptr;
+    heap_hdr_t *hdr = (heap_hdr_t*)hptr;
+    hdr->size  = need;
+    hdr->magic = HEAP_MAGIC;
+    void *usr = (void*)(hdr + 1);
+    memzero(usr, need);
+    return usr;
 }
 
-void *kmalloc(size_t size) {
-    return kmalloc_aligned(size, 16);
-}
+void *kmalloc(size_t size) { return kmalloc_aligned(size, 16); }
 
 void *kzalloc(size_t size) {
     void *p = kmalloc(size);
@@ -216,10 +239,21 @@ void *kzalloc(size_t size) {
     return p;
 }
 
+void kfree(void *ptr) {
+    if (!ptr) return;
+    heap_hdr_t *hdr = (heap_hdr_t*)ptr - 1;
+    if (hdr->magic != HEAP_MAGIC)
+        panic("kfree: bad magic (double-free or corrupt pointer)");
+    hdr->magic = 0;
+#ifdef FIFI_HEAP_POISON
+    memfill(ptr, 0xDD, hdr->size);
+#endif
+    *(heap_hdr_t **)ptr = g_free_list;
+    g_free_list = hdr;
+}
 
 
-
-// ---- Heap stats (for shell 'mem' command) ----
+// ---- Heap statstats (for shell 'mem' command) ----
 void *heap_get_cur_page(void) {
     return (void*)(uintptr_t)cur_page_virt;
 }
