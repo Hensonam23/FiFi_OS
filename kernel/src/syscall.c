@@ -4,6 +4,7 @@
 #include "timer.h"
 #include "thread.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "usermode.h"
 #include "vfs.h"
 #include "exec.h"
@@ -385,6 +386,64 @@ case SYS_UPTIME:
         case SYS_FORK: {
             ctx->rax = (uint64_t)do_fork(ctx);
             break;
+        }
+
+        case SYS_BRK: {
+            uint64_t new_brk = ctx->rdi;
+            uint64_t cur_brk = thread_get_brk();
+
+            /* brk(0) = query current break */
+            if (new_brk == 0) {
+                ctx->rax = cur_brk;
+                break;
+            }
+
+            /* Clamp: must stay in user space and be page-aligned or we round up */
+            const uint64_t PAGE = 0x1000ULL;
+            new_brk = (new_brk + PAGE - 1) & ~(PAGE - 1);
+
+            if (new_brk >= (uint64_t)FIFI_USER_TOP || new_brk < PAGE) {
+                ctx->rax = cur_brk;  /* reject — return old break */
+                break;
+            }
+
+            if (new_brk > cur_brk) {
+                /* Grow: map new pages */
+                uint64_t v = cur_brk;
+                for (; v < new_brk; v += PAGE) {
+                    uint64_t phys = pmm_alloc_page();
+                    if (!phys) goto brk_oom;
+                    if (!vmm_map_page(v, phys, VMM_USER | VMM_WRITE | VMM_NX)) {
+                        pmm_free_page(phys);
+                        goto brk_oom;
+                    }
+                    /* zero via direct virtual access (heap pages start clean) */
+                    volatile uint8_t *p = (volatile uint8_t*)(uintptr_t)v;
+                    for (uint64_t b = 0; b < PAGE; b++) p[b] = 0;
+                }
+                thread_user_map_add(cur_brk, new_brk - cur_brk);
+                thread_set_brk(new_brk);
+                ctx->rax = new_brk;
+                break;
+
+            brk_oom:
+                /* Partial grow failed — unmap what we managed to map */
+                vmm_unmap_range_and_free(cur_brk, v - cur_brk);
+                ctx->rax = cur_brk;  /* return old break on failure */
+                break;
+
+            } else if (new_brk < cur_brk) {
+                /* Shrink: unmap pages */
+                vmm_unmap_range_and_free(new_brk, cur_brk - new_brk);
+                thread_set_brk(new_brk);
+                ctx->rax = new_brk;
+                break;
+
+            } else {
+                /* No change */
+                ctx->rax = cur_brk;
+                break;
+            }
         }
 
         default:

@@ -122,6 +122,7 @@ int exec_load(isr_ctx_t *ctx, const char *path) {
     kprintf("[exec] loading %s entry=%p\n", path, (void*)eh->e_entry);
 
     /* 4. Map and load PT_LOAD segments */
+    uint64_t brk_init = 0;
     const uint8_t *phbase = buf + (size_t)eh->e_phoff;
     for (unsigned i = 0; i < (unsigned)eh->e_phnum; i++) {
         const Elf64_Phdr *ph = (const Elf64_Phdr*)(phbase + (size_t)i * eh->e_phentsize);
@@ -158,6 +159,10 @@ int exec_load(isr_ctx_t *ctx, const char *path) {
             kprintf("[exec] protect failed\n");
             goto fail;
         }
+
+        /* track highest byte of this segment for initial brk */
+        uint64_t seg_top = (ph->p_vaddr + ph->p_memsz + 0xFFFULL) & ~0xFFFULL;
+        if (seg_top > brk_init) brk_init = seg_top;
     }
 
     /* 5. Map trampoline (RX) */
@@ -183,7 +188,10 @@ int exec_load(isr_ctx_t *ctx, const char *path) {
         goto fail;
     }
 
-    /* 7. Redirect iretq to the new program.
+    /* 7. Record initial program break (page-aligned top of loaded image) */
+    thread_set_brk(brk_init);
+
+    /* 8. Redirect iretq to the new program.
      *    isr_ctx_t ends with rflags. Above it on the stack (higher address)
      *    are the CPU-pushed user RSP and SS (because this is a ring3 syscall). */
     ctx->rip    = eh->e_entry;

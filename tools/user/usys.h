@@ -99,3 +99,19 @@ static inline long sys_exec(const char *path) {
 static inline long sys_fork(void) {
     return sys_call0(SYS_FORK);
 }
+
+/* brk(0) returns current break; brk(addr) sets break, returns new break.
+ * On failure returns the unchanged old break. */
+static inline unsigned long sys_brk(unsigned long addr) {
+    return (unsigned long)sys_call1(SYS_BRK, (long)addr);
+}
+
+/* sbrk(n): grow heap by n bytes, return pointer to start of new region.
+ * Returns (void*)-1 on failure. */
+static inline void *sys_sbrk(unsigned long n) {
+    unsigned long cur = sys_brk(0);
+    if (!cur) return (void*)-1UL;
+    unsigned long new_brk = sys_brk(cur + n);
+    if (new_brk != cur + n && new_brk == cur) return (void*)-1UL;
+    return (void*)cur;
+}

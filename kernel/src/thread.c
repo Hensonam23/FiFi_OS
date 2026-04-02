@@ -58,6 +58,7 @@ typedef struct {
     void *stack_base;
     uint8_t is_user;
     uint64_t cr3;          /* physical addr of this task's PML4, 0 = use kernel CR3 */
+    uint64_t user_brk;     /* current program break (heap top), 0 = not set */
       thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
@@ -189,6 +190,7 @@ void thread_init(void) {
         g_threads[i].cpu_ticks = 0;
         g_threads[i].last_start_tick = 0;
         g_threads[i].name[0] = 0;
+        g_threads[i].user_brk = 0;
         thread_user_maps_zero(&g_threads[i]);
     }
 
@@ -264,6 +266,7 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->arg = arg;
     t->stack_base = stack;
     t->is_user = 0;
+    t->user_brk = 0;
     thread_user_maps_zero(t);
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
 
@@ -1021,3 +1024,13 @@ int thread_kill_slot(int slot) {
     return 0;
 }
 
+
+uint64_t thread_get_brk(void) {
+    if (!g_cur) return 0;
+    return g_cur->user_brk;
+}
+
+void thread_set_brk(uint64_t brk) {
+    if (!g_cur) return;
+    g_cur->user_brk = brk;
+}
