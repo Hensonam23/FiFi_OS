@@ -50,6 +50,7 @@ OBJS := \
     $(BUILD)/initrd.o \
     $(BUILD)/acpi.o \
     $(BUILD)/vfs.o \
+    $(BUILD)/exec.o \
     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -183,6 +184,9 @@ $(BUILD)/initrd.o: kernel/src/initrd.c | $(BUILD)
 $(BUILD)/acpi.o: kernel/src/acpi.c | $(BUILD)
 		$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/vfs.o: kernel/src/vfs.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/exec.o: kernel/src/exec.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # elf object

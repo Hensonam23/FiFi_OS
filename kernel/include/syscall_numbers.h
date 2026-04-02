@@ -22,4 +22,5 @@ enum {
     SYS_CLOSE     = 9,
     SYS_READ      = 10,
     SYS_READFILE  = 11,
+    SYS_EXEC      = 12,
 };

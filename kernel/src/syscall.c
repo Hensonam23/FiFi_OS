@@ -5,6 +5,7 @@
 #include "vmm.h"
 #include "usermode.h"
 #include "vfs.h"
+#include "exec.h"
 
 static int copyin_str(char *dst, size_t dst_cap, uint64_t uaddr) {
     if (!dst || dst_cap == 0) return -1;
@@ -366,6 +367,19 @@ case SYS_UPTIME:
 
 
 
+
+        case SYS_EXEC: {
+            uint64_t upath = ctx->rdi;
+            char path[256];
+            if (copyin_str(path, sizeof(path), upath) < 0) {
+                ctx->rax = (uint64_t)-1;
+                break;
+            }
+            int r = exec_load(ctx, path);
+            if (r < 0) ctx->rax = (uint64_t)-1;
+            /* on success exec_load modified ctx for iretq to new program */
+            break;
+        }
 
         default:
             kprintf("[syscall] unknown n=%p (ctx->rax=%p)\n", (void*)n, (void*)ctx->rax);

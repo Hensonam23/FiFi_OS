@@ -91,3 +91,7 @@ static inline long sys_readfile(const char *path, void *out_buf, uint64_t cap) {
                      (long)cap);
 }
 
+
+static inline long sys_exec(const char *path) {
+    return sys_call1(SYS_EXEC, (long)(uintptr_t)path);
+}

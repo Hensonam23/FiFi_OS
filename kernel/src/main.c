@@ -237,7 +237,12 @@ heap_init();
     initrd_init();
     initrd_cat("motd.txt");
     thread_init();
-shell_run();
+    {
+        uint64_t t = pmm_get_total_pages(), f = pmm_get_free_pages(), u = pmm_get_used_pages();
+        kprintf("BOOT PMM baseline: total=0x%x free=0x%x used=0x%x pages\n",
+                (unsigned)t, (unsigned)f, (unsigned)u);
+    }
+    shell_run();
 
     serial_write("FiFi OS: entering idle loop (hlt)\n");
 

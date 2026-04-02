@@ -59,3 +59,9 @@ void thread_ps_dump(void);
 
 /* Set the current thread's page map CR3 (used by run task before switching) */
 void g_cur_set_cr3(uint64_t cr3_phys);
+
+/* Read current thread's page map CR3 (0 if no user map) */
+uint64_t g_cur_cr3(void);
+
+/* Zero the current thread's user map tracking array (without unmapping) */
+void thread_user_maps_zero_current(void);
