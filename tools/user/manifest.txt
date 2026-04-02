@@ -6,3 +6,4 @@ ulongsleep
 utid
 ucat
 uread
+uexec
