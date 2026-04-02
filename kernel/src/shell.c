@@ -246,6 +246,7 @@ static void run_thread_fn(void *arg) {
     vmm_switch_to(task_cr3);
 
     // 1) Map and load PT_LOAD segments
+    uint64_t brk_init = 0;
     const uint8_t *phbase = buf + (size_t)eh->e_phoff;
 
     for (unsigned i = 0; i < (unsigned)eh->e_phnum; i++) {
@@ -291,6 +292,8 @@ static void run_thread_fn(void *arg) {
             thread_exit();
         }
 
+        uint64_t seg_top = (ph->p_vaddr + ph->p_memsz + 0xFFFULL) & ~0xFFFULL;
+        if (seg_top > brk_init) brk_init = seg_top;
 
         kprintf("run: LOAD[%u] mapped vaddr=%p memsz=%p\n", i, (void*)ph->p_vaddr, (void*)ph->p_memsz);
     }
@@ -382,6 +385,7 @@ if (user_map_pages((uint64_t)FIFI_USER_STACK_BASE,
     uint64_t user_argv = sp;
     uint64_t user_rsp  = sp - 0x10ULL;
 
+    thread_set_brk(brk_init);
     enter_user_mode(eh->e_entry, user_rsp, uargc, user_argv);
 
 }

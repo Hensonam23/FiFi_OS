@@ -65,3 +65,7 @@ uint64_t g_cur_cr3(void);
 
 /* Zero the current thread's user map tracking array (without unmapping) */
 void thread_user_maps_zero_current(void);
+
+/* User-space program break (heap top) for the current thread */
+uint64_t thread_get_brk(void);
+void     thread_set_brk(uint64_t brk);
