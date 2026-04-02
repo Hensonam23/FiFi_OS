@@ -56,3 +56,6 @@ uint32_t thread_current_tid(void);
 
 // Debug: list threads for shell 'ps'
 void thread_ps_dump(void);
+
+/* Set the current thread's page map CR3 (used by run task before switching) */
+void g_cur_set_cr3(uint64_t cr3_phys);

@@ -72,10 +72,14 @@ static inline uint64_t make_pte_flags(vmm_flags_t flags) {
     return f;
 }
 
+/* Kernel's permanent PML4 physical address — shared across all process page maps */
+static uint64_t g_kernel_cr3 = 0;
+
 void vmm_init(uint64_t hhdm_offset) {
     (void)hhdm_offset;
 
     uint64_t pml4_phys = read_cr3_phys();
+    g_kernel_cr3 = pml4_phys;   /* save kernel CR3 before any user maps exist */
     kprintf("VMM init: CR3=%p\n", (void*)pml4_phys);
 
 #ifdef FIFI_VMM_API_TEST
@@ -326,28 +330,139 @@ bool vmm_unmap_range_and_free(uint64_t virt, size_t size) {
     uint64_t lead = virt - v0;
     uint64_t bytes = align_up((uint64_t)size + lead);
 
-    kprintf("[vunmap] begin virt=%p size=%p v0=%p bytes=%p\n",
-            (void*)virt,
-            (void*)(uintptr_t)size,
-            (void*)v0,
-            (void*)bytes);
-
     for (uint64_t off = 0; off < bytes; off += PAGE_SIZE) {
         uint64_t cur = v0 + off;
-        uint64_t phys = vmm_translate(cur);
-
-        kprintf("[vunmap] page virt=%p phys=%p\n",
-                (void*)cur,
-                (void*)phys);
 
         if (!vmm_unmap_page_and_free(cur)) {
-            kprintf("[vunmap] FAIL virt=%p\n", (void*)cur);
             return false;
         }
     }
+    return true;
+}
 
-    kprintf("[vunmap] done virt=%p bytes=%p\n",
-            (void*)v0,
-            (void*)bytes);
+/* ── Per-process address space management ─────────────────────────────────────
+ *
+ * Each user task gets its own PML4 (page table root, loaded into CR3).
+ * Kernel higher-half mappings (PML4 entries 256-511) are shared across all
+ * page maps so the kernel stays accessible from every process.
+ *
+ * User lower-half (entries 0-255) is private per process.
+ */
+
+
+void vmm_set_kernel_cr3(uint64_t cr3_phys) {
+    g_kernel_cr3 = cr3_phys;
+}
+
+uint64_t vmm_get_kernel_cr3(void) {
+    return g_kernel_cr3;
+}
+
+/*
+ * vmm_create_user_pagemap()
+ * Allocates a fresh PML4 for a user task.
+ * Copies kernel higher-half entries (256-511) so the kernel is reachable.
+ * Returns physical address of new PML4, or 0 on failure.
+ */
+uint64_t vmm_create_user_pagemap(void) {
+    uint64_t new_pml4_phys = pmm_alloc_page();
+    if (!new_pml4_phys) return 0;
+
+    uint64_t *new_pml4 = (uint64_t*)phys_to_virt(new_pml4_phys);
+    /* Zero the whole page first */
+    for (int i = 0; i < 512; i++) new_pml4[i] = 0;
+
+    if (!g_kernel_cr3) {
+        /* Fallback: read current CR3 as kernel CR3 */
+        g_kernel_cr3 = read_cr3_phys();
+    }
+
+    uint64_t *kernel_pml4 = (uint64_t*)phys_to_virt(g_kernel_cr3);
+
+    /* Share kernel higher-half entries (256-511) — do NOT deep copy, just copy
+     * the PML4 slot pointers so all processes see the same kernel mappings. */
+    for (int i = 256; i < 512; i++) {
+        new_pml4[i] = kernel_pml4[i];
+    }
+
+    return new_pml4_phys;
+}
+
+/*
+ * vmm_destroy_user_pagemap()
+ * Tears down a user process's page tables and frees all physical pages.
+ * Walks lower-half PML4 entries (0-255) only — never touches kernel half.
+ * Also frees the page table structure pages themselves (PT, PD, PDPT, PML4).
+ */
+void vmm_destroy_user_pagemap(uint64_t cr3_phys) {
+    if (!cr3_phys) return;
+    if (cr3_phys == g_kernel_cr3) return; /* safety: never destroy kernel map */
+
+    uint64_t *pml4 = (uint64_t*)phys_to_virt(cr3_phys);
+
+    for (int i1 = 0; i1 < 256; i1++) {     /* lower half only */
+        if (!(pml4[i1] & PTE_P)) continue;
+        uint64_t pdpt_phys = pml4[i1] & ~0xFFFULL;
+        uint64_t *pdpt = (uint64_t*)phys_to_virt(pdpt_phys);
+
+        for (int i2 = 0; i2 < 512; i2++) {
+            if (!(pdpt[i2] & PTE_P)) continue;
+            uint64_t pd_phys = pdpt[i2] & ~0xFFFULL;
+            uint64_t *pd = (uint64_t*)phys_to_virt(pd_phys);
+
+            for (int i3 = 0; i3 < 512; i3++) {
+                if (!(pd[i3] & PTE_P)) continue;
+                uint64_t pt_phys = pd[i3] & ~0xFFFULL;
+                uint64_t *pt = (uint64_t*)phys_to_virt(pt_phys);
+
+                /* Free every mapped page in this PT */
+                for (int i4 = 0; i4 < 512; i4++) {
+                    if (!(pt[i4] & PTE_P)) continue;
+                    uint64_t page_phys = pt[i4] & ~0xFFFULL;
+                    pmm_free_page(page_phys);
+                    pt[i4] = 0;
+                }
+
+                pmm_free_page(pt_phys);   /* free the PT page itself */
+                pd[i3] = 0;
+            }
+
+            pmm_free_page(pd_phys);       /* free the PD page itself */
+            pdpt[i2] = 0;
+        }
+
+        pmm_free_page(pdpt_phys);         /* free the PDPT page itself */
+        pml4[i1] = 0;
+    }
+
+    pmm_free_page(cr3_phys);              /* free the PML4 page itself */
+}
+
+/*
+ * vmm_switch_to(cr3_phys)
+ * Loads a page map into CR3. Pass 0 to switch back to the kernel map.
+ */
+void vmm_switch_to(uint64_t cr3_phys) {
+    if (!cr3_phys) cr3_phys = g_kernel_cr3;
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3_phys) : "memory");
+}
+
+/*
+ * vmm_map_page_into(cr3_phys, virt, phys, flags)
+ * Maps a single page into a specific page map (identified by its CR3).
+ * Uses the HHDM to walk/create page tables without switching CR3.
+ */
+bool vmm_map_page_into(uint64_t cr3_phys, uint64_t virt, uint64_t phys, vmm_flags_t flags) {
+    bool user = (flags & VMM_USER) != 0;
+    uint64_t *pml4 = (uint64_t*)phys_to_virt(cr3_phys);
+
+    uint64_t *pdpt = ensure_table(pml4, idx_pml4(virt), user);
+    if (!pdpt) return false;
+    uint64_t *pd   = ensure_table(pdpt, idx_pdpt(virt), user);
+    if (!pd) return false;
+    uint64_t *pt   = ensure_table(pd,   idx_pd(virt),   user);
+    if (!pt) return false;
+
+    pt[idx_pt(virt)] = (phys & ~0xFFFULL) | make_pte_flags(flags);
     return true;
 }

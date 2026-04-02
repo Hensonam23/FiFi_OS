@@ -84,6 +84,15 @@ static int user_map_pages(uint64_t va, uint64_t size, vmm_flags_t flags) {
 }
 
 static void userdemo_thread_fn(void *arg) {
+    /* Create a per-process page map for userdemo */
+    uint64_t task_cr3 = vmm_create_user_pagemap();
+    if (!task_cr3) {
+        kprintf("[userdemo] failed to create page map\n");
+        thread_exit();
+    }
+    g_cur_set_cr3(task_cr3);
+    vmm_switch_to(task_cr3);
+
     // Map canonical trampoline + stack
     if (user_map_pages((uint64_t)FIFI_USER_TRAMPOLINE_VA, 0x1000ULL, VMM_USER | VMM_WRITE) < 0) {
         kprintf("[userdemo] trampoline map failed\n");
