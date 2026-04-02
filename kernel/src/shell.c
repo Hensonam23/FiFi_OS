@@ -235,6 +235,16 @@ static void run_thread_fn(void *arg) {
 
     kprintf("run: loading %s entry=%p\n", path, (void*)eh->e_entry);
 
+    /* Create a fresh per-process page map for this user task.
+     * All subsequent vmm_map_page calls go into this isolated address space. */
+    uint64_t task_cr3 = vmm_create_user_pagemap();
+    if (!task_cr3) {
+        kprintf("run: failed to create page map\n");
+        thread_exit();
+    }
+    g_cur_set_cr3(task_cr3);
+    vmm_switch_to(task_cr3);
+
     // 1) Map and load PT_LOAD segments
     const uint8_t *phbase = buf + (size_t)eh->e_phoff;
 

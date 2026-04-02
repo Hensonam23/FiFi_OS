@@ -1,5 +1,6 @@
 #include "kprintf.h"
 #include "console.h"
+#include "serial.h"
 #include <stdint.h>
 #include "spinlock.h"
 
@@ -28,6 +29,8 @@ int print_take_dirty(void) {
 
 static void putc_(char c) {
     console_putc(c);
+    if (c == '\n') serial_write_char('\r');
+    serial_write_char(c);
 }
 
 static void puts_(const char *s) {

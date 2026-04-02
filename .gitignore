@@ -57,3 +57,6 @@ kernel/**/*.bak_*
 
 # Generated userland ELF outputs (rebuilt each time)
 initrd/rootfs/*.elf
+
+# QEMU serial log (read by Claude for live debugging)
+serial.log

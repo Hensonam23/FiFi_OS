@@ -57,6 +57,7 @@ typedef struct {
 
     void *stack_base;
     uint8_t is_user;
+    uint64_t cr3;          /* physical addr of this task's PML4, 0 = use kernel CR3 */
       thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
@@ -65,6 +66,10 @@ static thread_t *g_cur = 0;
 
 
 // Kernel stack top for the currently running thread (for TSS.rsp0)
+void g_cur_set_cr3(uint64_t cr3_phys) {
+    if (g_cur) g_cur->cr3 = cr3_phys;
+}
+
 uint64_t thread_current_kstack_top(void) {
     // Prefer tracked per-thread value if present
     if (g_cur && g_cur->kstack_top) return g_cur->kstack_top;
@@ -119,33 +124,12 @@ static void thread_user_maps_zero(thread_t *t) {
 static void thread_user_cleanup(thread_t *t) {
     if (!t) return;
 
-    int regions = 0;
-    uint64_t pages = 0;
-
     for (int i = 0; i < THREAD_USER_MAP_MAX; i++) {
         if (!t->user_maps[i].in_use) continue;
-
-        regions++;
-        pages += (t->user_maps[i].size + 0xFFFULL) >> 12;
-
-        kprintf("[tclean] tid=%p map=%p base=%p size=%p\n",
-                (void*)(uintptr_t)t->tid,
-                (void*)(uintptr_t)i,
-                (void*)t->user_maps[i].base,
-                (void*)t->user_maps[i].size);
-
         (void)vmm_unmap_range_and_free(t->user_maps[i].base, (size_t)t->user_maps[i].size);
-
         t->user_maps[i].base = 0;
         t->user_maps[i].size = 0;
         t->user_maps[i].in_use = 0;
-    }
-
-    if (regions) {
-        kprintf("[tclean] tid=%p cleaned regions=%p pages=%p\n",
-                (void*)(uintptr_t)t->tid,
-                (void*)(uintptr_t)regions,
-                (void*)pages);
     }
 
     t->is_user = 0;
@@ -364,6 +348,13 @@ void thread_yield(void) {
     if (!ktop && next->stack_base) ktop = (uint64_t)(uintptr_t)next->stack_base + (uint64_t)THREAD_STACK_SIZE;
     if (ktop) gdt_tss_set_rsp0(ktop);
 
+    /* Load per-process page map if the next thread has one */
+    if (next->cr3) {
+        vmm_switch_to(next->cr3);
+    } else {
+        vmm_switch_to(vmm_get_kernel_cr3());
+    }
+
     ctx_switch(&prev->rsp, &next->rsp);
 
     /* For existing threads, ctx_switch returns to the yield() callsite.
@@ -412,7 +403,19 @@ void thread_exit(void) {
         if (g_cur->last_start_tick != 0 && now >= g_cur->last_start_tick) {
             g_cur->cpu_ticks += (now - g_cur->last_start_tick);
         }
-          thread_user_cleanup(g_cur);
+
+        /* If this thread owns a per-process page map, switch back to the
+         * kernel map first, then destroy the user map entirely. */
+        if (g_cur->cr3) {
+            uint64_t dying_cr3 = g_cur->cr3;
+            g_cur->cr3 = 0;
+            vmm_switch_to(vmm_get_kernel_cr3());
+            vmm_destroy_user_pagemap(dying_cr3);
+            thread_user_maps_zero(g_cur); /* tracking already freed — just zero */
+        } else {
+            thread_user_cleanup(g_cur);
+        }
+
           g_cur->state = T_DEAD;
     }
 
@@ -741,26 +744,23 @@ void thread_reap_dead(void) {
         if (g_threads[i].state != T_DEAD) continue;
         if (&g_threads[i] == g_cur) continue;
 
-        kprintf("[treap] slot=%p tid=%p begin\n",
-                (void*)(uintptr_t)i,
-                (void*)(uintptr_t)g_threads[i].tid);
-
-        thread_user_cleanup(&g_threads[i]);
+        /* Destroy per-process page map if thread was killed before exiting */
+        if (g_threads[i].cr3) {
+            uint64_t dying_cr3 = g_threads[i].cr3;
+            g_threads[i].cr3 = 0;
+            if (dying_cr3 != vmm_get_kernel_cr3()) {
+                vmm_destroy_user_pagemap(dying_cr3);
+            }
+            thread_user_maps_zero(&g_threads[i]);
+        } else {
+            thread_user_cleanup(&g_threads[i]);
+        }
 
         if (g_threads[i].stack_base) {
-            int ok = vmm_unmap_range_and_free(
+            (void)vmm_unmap_range_and_free(
                 (uint64_t)(uintptr_t)g_threads[i].stack_base,
                 (size_t)THREAD_STACK_SIZE
             );
-
-            kprintf("[treap] slot=%p stack_base=%p size=%p ok=%p\n",
-                    (void*)(uintptr_t)i,
-                    g_threads[i].stack_base,
-                    (void*)(uintptr_t)THREAD_STACK_SIZE,
-                    (void*)(uintptr_t)ok);
-        } else {
-            kprintf("[treap] slot=%p no stack_base\n",
-                    (void*)(uintptr_t)i);
         }
 
         g_threads[i].state = T_UNUSED;
@@ -776,10 +776,9 @@ void thread_reap_dead(void) {
         g_threads[i].arg = 0;
         g_threads[i].stack_base = 0;
         g_threads[i].is_user = 0;
+        g_threads[i].cr3 = 0;
         g_threads[i].name[0] = 0;
         thread_user_maps_zero(&g_threads[i]);
-
-        kprintf("[treap] slot=%p done\n", (void*)(uintptr_t)i);
     }
 }
 
@@ -893,11 +892,6 @@ int thread_user_map_add(uint64_t va, uint64_t size) {
         if (!g_cur->user_maps[i].in_use) continue;
         if (g_cur->user_maps[i].base == va && g_cur->user_maps[i].size == size) {
             g_cur->is_user = 1;
-            kprintf("[tmap] tid=%p existing map=%p base=%p size=%p\n",
-                    (void*)(uintptr_t)g_cur->tid,
-                    (void*)(uintptr_t)i,
-                    (void*)va,
-                    (void*)size);
             return 0;
         }
     }
@@ -909,17 +903,8 @@ int thread_user_map_add(uint64_t va, uint64_t size) {
         g_cur->user_maps[i].in_use = 1;
         g_cur->is_user = 1;
 
-        kprintf("[tmap] tid=%p new map=%p base=%p size=%p\n",
-                (void*)(uintptr_t)g_cur->tid,
-                (void*)(uintptr_t)i,
-                (void*)va,
-                (void*)size);
-
         return 0;
     }
-
-    kprintf("[tmap] tid=%p failed no free user map slots\n",
-            (void*)(uintptr_t)(g_cur ? g_cur->tid : 0));
     return -1;
 }
 

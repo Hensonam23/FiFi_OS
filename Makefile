@@ -131,6 +131,9 @@ $(ISO): $(KERNEL) limine.conf
 	limine bios-install $(ISO)
 
 run: iso
+	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial file:serial.log -no-reboot -no-shutdown
+
+rundbg: iso
 	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial stdio -no-reboot -no-shutdown
 
 clean:
