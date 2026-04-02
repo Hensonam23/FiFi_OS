@@ -23,4 +23,5 @@ enum {
     SYS_READ      = 10,
     SYS_READFILE  = 11,
     SYS_EXEC      = 12,
+    SYS_FORK      = 13,
 };

@@ -51,6 +51,7 @@ OBJS := \
     $(BUILD)/acpi.o \
     $(BUILD)/vfs.o \
     $(BUILD)/exec.o \
+    $(BUILD)/fork.o \
     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run

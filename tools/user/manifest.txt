@@ -7,3 +7,4 @@ utid
 ucat
 uread
 uexec
+ufork

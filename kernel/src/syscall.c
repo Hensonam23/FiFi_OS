@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "fork.h"
 #include "kprintf.h"
 #include "timer.h"
 #include "thread.h"
@@ -378,6 +379,11 @@ case SYS_UPTIME:
             int r = exec_load(ctx, path);
             if (r < 0) ctx->rax = (uint64_t)-1;
             /* on success exec_load modified ctx for iretq to new program */
+            break;
+        }
+
+        case SYS_FORK: {
+            ctx->rax = (uint64_t)do_fork(ctx);
             break;
         }
 
