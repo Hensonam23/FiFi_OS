@@ -1061,6 +1061,12 @@ void thread_set_brk(uint64_t brk) {
     g_cur->user_brk = brk;
 }
 
+/* Return the TID assigned to a given thread slot (0 if invalid/unused). */
+uint32_t thread_tid_of_slot(int slot) {
+    if (slot < 0 || slot >= THREAD_MAX) return 0;
+    return g_threads[slot].tid;
+}
+
 /* Store exit code in current thread before calling thread_exit. */
 void thread_set_exit_code(int code) {
     if (g_cur) g_cur->exit_code = code;
