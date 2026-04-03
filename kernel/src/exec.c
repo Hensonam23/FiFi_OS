@@ -84,8 +84,7 @@ int exec_load(isr_ctx_t *ctx, const char *path,
     const void *data = 0;
     uint64_t    size = 0;
     if (vfs_read(path, &data, &size) < 0 || !data || size < sizeof(Elf64_Ehdr)) {
-        kprintf("[exec] vfs_read failed: %s\n", path);
-        return -1;
+        return -1;  /* not-found is normal; caller handles the message */
     }
 
     const uint8_t  *buf = (const uint8_t*)data;

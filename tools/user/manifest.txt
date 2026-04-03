@@ -13,3 +13,4 @@ umalloc_test
 uinfo
 uwait
 ush
+uls

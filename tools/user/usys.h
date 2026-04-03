@@ -113,6 +113,12 @@ static inline unsigned long sys_brk(unsigned long addr) {
     return (unsigned long)sys_call1(SYS_BRK, (long)addr);
 }
 
+/* listfiles(buf, cap): fill buf with "name\n"-separated VFS file list.
+ * Returns bytes written, or -1 on error. cap should be at most 4096. */
+static inline long sys_listfiles(char *buf, unsigned long cap) {
+    return sys_call2(SYS_LISTFILES, (long)(uintptr_t)buf, (long)cap);
+}
+
 /* getchar(): blocking read of one character from the console keyboard.
  * Returns ASCII value (or KEY_* special code). Never returns -1. */
 static inline int sys_getchar(void) {
