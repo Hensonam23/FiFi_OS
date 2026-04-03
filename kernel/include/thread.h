@@ -75,3 +75,11 @@ void thread_set_exit_code(int code);
 void thread_set_parent_for_slot(int slot, uint32_t ptid);
 long thread_reap_zombie_child(uint32_t parent_tid, uint32_t child_tid, int *code_out);
 uint32_t thread_tid_of_slot(int slot);
+
+/* Signal delivery */
+/* Send SIGINT to all user threads that were forked (parent_tid != 0).
+ * Sleeping threads are woken so they can exit promptly. */
+void thread_signal_children(void);
+/* If the current thread has a pending signal, set exit_code=130 and exit.
+ * Call this in blocking syscall loops after each sleep. */
+void thread_check_signal(void);
