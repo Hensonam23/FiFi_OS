@@ -9,3 +9,4 @@ uread
 uexec
 ufork
 uheap
+umalloc_test
