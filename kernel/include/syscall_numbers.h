@@ -30,4 +30,5 @@ enum {
     SYS_LISTFILES = 17,
     SYS_PIPE      = 18,
     SYS_DUP2      = 19,
+    SYS_CREAT     = 20,
 };

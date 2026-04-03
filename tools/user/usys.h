@@ -150,6 +150,12 @@ static inline long sys_dup2(int old_fd, int new_fd) {
     return sys_call2(SYS_DUP2, (long)old_fd, (long)new_fd);
 }
 
+/* creat(path): create or truncate a file for writing.
+ * Returns a write-only fd, or -1 on failure. */
+static inline long sys_creat(const char *path) {
+    return sys_call1(SYS_CREAT, (long)(uintptr_t)path);
+}
+
 /* sbrk(n): grow heap by n bytes, return pointer to start of new region.
  * Returns (void*)-1 on failure. */
 static inline void *sys_sbrk(unsigned long n) {

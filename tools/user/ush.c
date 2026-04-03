@@ -119,6 +119,47 @@ static int ush_builtin(int argc, char *argv[]) {
     return 0;
 }
 
+/* ── redirection helpers ─────────────────────────────────────────────────── */
+
+/*
+ * Scan toks[0..ntok-1] for ">" and "<" redirection operators.
+ * Removes them (and their filename arguments) from the token list in-place.
+ * Sets *out_file / *in_file to the corresponding filename, or NULL if absent.
+ * Updates *ntok_p to the new (reduced) token count.
+ */
+static void ush_extract_redirects(char *toks[], int *ntok_p,
+                                   char **out_file, char **in_file) {
+    *out_file = (char*)0;
+    *in_file  = (char*)0;
+    int n = *ntok_p;
+    int w = 0;
+    for (int i = 0; i < n; ) {
+        if (toks[i][0] == '>' && toks[i][1] == '\0' && i + 1 < n) {
+            *out_file = toks[i + 1];
+            i += 2;
+        } else if (toks[i][0] == '<' && toks[i][1] == '\0' && i + 1 < n) {
+            *in_file = toks[i + 1];
+            i += 2;
+        } else {
+            toks[w++] = toks[i++];
+        }
+    }
+    toks[w] = (char*)0;
+    *ntok_p  = w;
+}
+
+/* Apply stdin/stdout redirections in a child process (call before exec). */
+static void ush_apply_redirects(const char *out_file, const char *in_file) {
+    if (in_file) {
+        long fd = sys_open(in_file);
+        if (fd >= 0) { sys_dup2((int)fd, 0); sys_close((int)fd); }
+    }
+    if (out_file) {
+        long fd = sys_creat(out_file);
+        if (fd >= 0) { sys_dup2((int)fd, 1); sys_close((int)fd); }
+    }
+}
+
 /* ── pipe helper ─────────────────────────────────────────────────────────── */
 
 /*
@@ -153,6 +194,7 @@ static long run_piped(char *toks[], int ntok,
     if (close_b >= 0) sys_close(close_b);
     if (dup_stdin  >= 0) { sys_dup2(dup_stdin,  0); sys_close(dup_stdin); }
     if (dup_stdout >= 0) { sys_dup2(dup_stdout, 1); sys_close(dup_stdout); }
+    /* File redirections apply after pipe wiring (pipe takes precedence for its end) */
 
     /* Try builtin first (rare for piped cmds, but handle echo etc.) */
     if (ush_builtin(ntok, toks)) sys_exit(0);
@@ -183,6 +225,12 @@ int main(int argc, char **argv) {
         if (n == 0) continue;
 
         int ntok = ush_tokenise(line, toks, MAXARGS);
+        if (ntok == 0) continue;
+
+        /* ── extract redirections (>, <) before anything else ── */
+        char *redir_out = (char*)0;
+        char *redir_in  = (char*)0;
+        ush_extract_redirects(toks, &ntok, &redir_out, &redir_in);
         if (ntok == 0) continue;
 
         /* ── pipe: cmd1 | cmd2 ── */
@@ -229,13 +277,18 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        /* ── no pipe: regular command ── */
-        if (ush_builtin(ntok, toks)) continue;
+        /* ── no pipe: regular command or builtin ── */
+        /* No redirections: run builtin directly in the shell process. */
+        if (!redir_out && !redir_in && ush_builtin(ntok, toks)) continue;
 
+        /* Everything else (external commands, or builtins with redirections)
+         * runs in a forked child so the shell's fds are never touched. */
         long child = sys_fork();
         if (child < 0) { printf("ush: fork failed\n"); continue; }
 
         if (child == 0) {
+            ush_apply_redirects(redir_out, redir_in);
+            if (ush_builtin(ntok, toks)) sys_exit(0);
             long r = ush_execv(toks[0], (const char *const *)toks);
             if (r < 0) {
                 printf("ush: not found: %s\n", toks[0]);

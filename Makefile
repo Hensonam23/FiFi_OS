@@ -55,6 +55,7 @@ OBJS := \
     $(BUILD)/pci.o \
     $(BUILD)/virtio_blk.o \
     $(BUILD)/ext2.o \
+    $(BUILD)/ramfs.o \
     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -212,6 +213,9 @@ $(BUILD)/vfs.o: kernel/src/vfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/exec.o: kernel/src/exec.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/ramfs.o: kernel/src/ramfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/pci.o: kernel/src/pci.c | $(BUILD)
