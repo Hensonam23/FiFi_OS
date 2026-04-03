@@ -4,6 +4,7 @@
 #include "vfs.h"
 #include "initrd.h"
 #include "ext2.h"
+#include "ramfs.h"
 #include "heap.h"
 #include "kprintf.h"
 
@@ -33,7 +34,10 @@ int vfs_read(const char *path, const void **data, uint64_t *size) {
     const char *n = vfs_norm_path(path);
     if (!n || !*n) return -1;
 
-    /* Try initrd first */
+    /* ramfs first (written files shadow initrd/ext2) */
+    if (ramfs_get(n, data, size) == 0) return 0;
+
+    /* Try initrd */
     if (initrd_get(n, data, size) == 0) return 0;
 
     /* Fall back to ext2 */
@@ -62,7 +66,8 @@ int vfs_read(const char *path, const void **data, uint64_t *size) {
 
 size_t vfs_list(char *buf, size_t cap) {
     if (!buf || cap == 0) return 0;
-    size_t pos = initrd_ls_buf(buf, cap);
+    size_t pos = ramfs_ls_buf(buf, cap);
+    if (pos < cap) pos += initrd_ls_buf(buf + pos, cap - pos);
     if (ext2_present() && pos < cap)
         pos += ext2_ls_buf(buf + pos, cap - pos);
     if (pos < cap) buf[pos] = '\0';

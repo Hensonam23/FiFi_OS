@@ -7,6 +7,7 @@
 #include "pmm.h"
 #include "usermode.h"
 #include "vfs.h"
+#include "ramfs.h"
 #include "exec.h"
 #include "keyboard.h"
 
@@ -142,6 +143,7 @@ static uint32_t pipe_ring_read(pipe_t *p, uint8_t *dst, uint32_t n) {
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
 #define FD_TYPE_PIPE_W 2
+#define FD_TYPE_RAMW   3   /* write-only fd backed by a ramfs_entry_t */
 
 #define SYS_FD_MAX 32
 
@@ -156,6 +158,8 @@ typedef struct {
     uint64_t off;
     /* pipe: */
     pipe_t  *pipe;
+    /* ramfs write: */
+    ramfs_entry_t *ramfile;
 } sys_fd_t;
 
 static sys_fd_t g_fds[SYS_FD_MAX];
@@ -191,6 +195,7 @@ static int fd_alloc(uint64_t tid, const uint8_t *data, uint64_t size) {
             g_fds[i].size      = size;
             g_fds[i].off       = 0;
             g_fds[i].pipe      = (pipe_t*)0;
+            g_fds[i].ramfile   = (ramfs_entry_t*)0;
             return fd_num;
         }
     }
@@ -202,7 +207,7 @@ static void fd_close_entry(sys_fd_t *f) {
     if (f->type == FD_TYPE_PIPE_R && f->pipe) { f->pipe->ropen--; }
     if (f->type == FD_TYPE_PIPE_W && f->pipe) { f->pipe->wopen--; }
     f->used = 0; f->fd_num = 0; f->owner_tid = 0;
-    f->type = 0; f->data = 0; f->size = 0; f->off = 0; f->pipe = 0;
+    f->type = 0; f->data = 0; f->size = 0; f->off = 0; f->pipe = 0; f->ramfile = 0;
 }
 
 static void fd_close(uint64_t tid, int fd_num) {
@@ -359,7 +364,19 @@ case SYS_UPTIME:
                 return;
             }
 
-            /* Default: write to console (fd=1 with no pipe redirect, or ring0) */
+            if (wf && wf->type == FD_TYPE_RAMW && wf->ramfile) {
+                /* Write to ramfs buffer (output redirection) */
+                ramfs_entry_t *rf = wf->ramfile;
+                uint32_t room = (uint32_t)RAMFS_FILE_SIZE - rf->size;
+                uint32_t w = (uint32_t)n;
+                if (w > room) w = room;
+                for (uint32_t i = 0; i < w; i++) rf->data[rf->size + i] = wr_buf[i];
+                rf->size += w;
+                ctx->rax = (uint64_t)w;
+                return;
+            }
+
+            /* Default: write to console (fd=1 with no redirect, or ring0) */
             for (int i = 0; i < n; i++) kprintf("%c", (int)wr_buf[i]);
             ctx->rax = (uint64_t)n;
             return;
@@ -745,6 +762,39 @@ case SYS_UPTIME:
                 ctx->rax = (uint64_t)-1; return;
             }
             ctx->rax = 0;
+            return;
+        }
+
+        case SYS_CREAT: {
+            /* rdi = user path string — create/truncate a ramfs file for writing.
+             * Returns a write-only fd, or -1 on error. */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char creat_path[128];
+            if (copyin_str(creat_path, sizeof(creat_path), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ramfs_entry_t *rf = ramfs_creat(creat_path);
+            if (!rf) { ctx->rax = (uint64_t)-1; return; }
+
+            uint64_t tid = thread_current_tid();
+            int creat_fd_num = fd_next_num(tid);
+            if (creat_fd_num < 0) { ctx->rax = (uint64_t)-1; return; }
+            for (int i = 0; i < SYS_FD_MAX; i++) {
+                if (!g_fds[i].used) {
+                    g_fds[i].used      = 1;
+                    g_fds[i].fd_num    = creat_fd_num;
+                    g_fds[i].owner_tid = tid;
+                    g_fds[i].type      = FD_TYPE_RAMW;
+                    g_fds[i].data      = (const uint8_t*)0;
+                    g_fds[i].size      = 0;
+                    g_fds[i].off       = 0;
+                    g_fds[i].pipe      = (pipe_t*)0;
+                    g_fds[i].ramfile   = rf;
+                    ctx->rax = (uint64_t)creat_fd_num;
+                    return;
+                }
+            }
+            ctx->rax = (uint64_t)-1;
             return;
         }
 
