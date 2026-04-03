@@ -75,7 +75,11 @@ static int protect_user_pages(uint64_t va, size_t size, vmm_flags_t flags) {
  *             to caller via normal path.
  * On failure: returns -1, ctx unchanged, old address space still intact.
  */
-int exec_load(isr_ctx_t *ctx, const char *path) {
+/* Maximum arguments exec_load will place on the user stack. */
+#define EXEC_MAX_ARGS 8
+
+int exec_load(isr_ctx_t *ctx, const char *path,
+              int argc, const char *const *argv) {
     /* 1. Read ELF from VFS */
     const void *data = 0;
     uint64_t    size = 0;
@@ -204,8 +208,56 @@ int exec_load(isr_ctx_t *ctx, const char *path) {
     ctx->r8  = 0; ctx->r9  = 0; ctx->r10 = 0; ctx->r11 = 0;
     ctx->r12 = 0; ctx->r13 = 0; ctx->r14 = 0; ctx->r15 = 0;
 
+    /* ── Build argc/argv on the user stack ─────────────────────────────────
+     *
+     * Layout (high → low, stack grows down):
+     *   [packed NUL-terminated strings for argv[0]..argv[argc-1]]
+     *   [8-byte alignment pad if needed]
+     *   [argv[argc]  = 0  ]  8 bytes  (NULL sentinel)
+     *   [argv[argc-1]     ]  8 bytes
+     *   ...
+     *   [argv[0]          ]  8 bytes
+     *   [argc             ]  8 bytes  ← RSP points here
+     *
+     * crt0.S does:  pop rdi (argc)  /  mov rsp,rsi (argv)  /  call main
+     */
+    if (argc < 0) argc = 0;
+    if (argc > EXEC_MAX_ARGS) argc = EXEC_MAX_ARGS;
+
+    uint64_t sp = (uint64_t)FIFI_USER_STACK_TOP;
+
+    /* 1. Copy argument strings onto the stack (highest-addressed first) */
+    uint64_t str_va[EXEC_MAX_ARGS];
+    for (int i = argc - 1; i >= 0; i--) {
+        const char *s = (argv && argv[i]) ? argv[i] : "";
+        size_t slen = 0;
+        while (s[slen]) slen++;
+        slen++;                  /* include NUL terminator */
+        sp -= (uint64_t)slen;
+        volatile uint8_t *dst = (volatile uint8_t*)(uintptr_t)sp;
+        for (size_t j = 0; j < slen; j++) dst[j] = (uint8_t)s[j];
+        str_va[i] = sp;
+    }
+
+    /* 2. Align sp down to 8 bytes */
+    sp &= ~7ULL;
+
+    /* 3. argv[argc] = NULL sentinel */
+    sp -= 8;
+    *(volatile uint64_t*)(uintptr_t)sp = 0ULL;
+
+    /* 4. argv pointers in reverse (so argv[0] ends up first above argc) */
+    for (int i = argc - 1; i >= 0; i--) {
+        sp -= 8;
+        *(volatile uint64_t*)(uintptr_t)sp = str_va[i];
+    }
+
+    /* 5. argc */
+    sp -= 8;
+    *(volatile uint64_t*)(uintptr_t)sp = (uint64_t)argc;
+
     uint64_t *iret_extra = (uint64_t*)(ctx + 1); /* [0]=user rsp, [1]=user ss */
-    iret_extra[0] = (uint64_t)FIFI_USER_STACK_TOP;
+    iret_extra[0] = sp;
     iret_extra[1] = (uint64_t)FIFI_USER_DS;
 
     kprintf("[exec] exec OK, iretq -> %p\n", (void*)eh->e_entry);

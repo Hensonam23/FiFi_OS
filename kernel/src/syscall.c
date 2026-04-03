@@ -373,13 +373,36 @@ case SYS_UPTIME:
 
 
         case SYS_EXEC: {
+            /* rdi = path, rsi = user argv ptr (NULL-terminated array, or 0) */
             uint64_t upath = ctx->rdi;
+            uint64_t uargv = ctx->rsi;
             char path[256];
             if (copyin_str(path, sizeof(path), upath) < 0) {
                 ctx->rax = (uint64_t)-1;
                 break;
             }
-            int r = exec_load(ctx, path);
+
+            /* Copy argv strings from user space onto the kernel stack */
+            #define EXEC_KMAX_ARGS 8
+            #define EXEC_KARG_LEN  128
+            char arg_store[EXEC_KMAX_ARGS][EXEC_KARG_LEN];
+            const char *argv_k[EXEC_KMAX_ARGS + 1];
+            int argc_k = 0;
+
+            if (uargv != 0) {
+                for (int i = 0; i < EXEC_KMAX_ARGS; i++) {
+                    uint64_t uptr_addr = uargv + (uint64_t)i * 8;
+                    if (!vmm_user_accessible(uptr_addr, 8, false)) break;
+                    uint64_t ustr = *(volatile uint64_t*)(uintptr_t)uptr_addr;
+                    if (ustr == 0) break;
+                    if (copyin_str(arg_store[argc_k], EXEC_KARG_LEN, ustr) < 0) break;
+                    argv_k[argc_k] = arg_store[argc_k];
+                    argc_k++;
+                }
+            }
+            argv_k[argc_k] = (const char*)0;
+
+            int r = exec_load(ctx, path, argc_k, argv_k);
             if (r < 0) ctx->rax = (uint64_t)-1;
             /* on success exec_load modified ctx for iretq to new program */
             break;

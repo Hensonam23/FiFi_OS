@@ -1,11 +1,21 @@
 .global _start
 .extern main
 
-# Kernel enters usermode with RSP already set to the user stack top-0x10.
-# That is 16-byte aligned, so calling main() is ABI-safe.
+# exec_load places the following on the user stack (RSP points at argc):
+#   [argc]          <- RSP
+#   [argv[0] ptr  ]
+#   [argv[1] ptr  ]
+#   ...
+#   [NULL         ]
+#   [string data  ]
+#
+# We pop argc into rdi and point rsi at the argv array, then call main.
+# After pop, RSP += 8; the 'call' pushes 8 bytes back, keeping 16-byte alignment.
 
 _start:
     xor %rbp, %rbp
+    pop %rdi            # argc  (RSP now points at argv[0])
+    mov %rsp, %rsi      # argv
     call main
 
     # main() return value in eax -> exit code in edi
