@@ -122,7 +122,6 @@ int exec_load(isr_ctx_t *ctx, const char *path,
     g_cur_set_cr3(new_cr3);
     vmm_switch_to(new_cr3);
 
-    kprintf("[exec] loading %s entry=%p\n", path, (void*)eh->e_entry);
 
     /* 4. Map and load PT_LOAD segments */
     uint64_t brk_init = 0;
@@ -259,7 +258,7 @@ int exec_load(isr_ctx_t *ctx, const char *path,
     iret_extra[0] = sp;
     iret_extra[1] = (uint64_t)FIFI_USER_DS;
 
-    kprintf("[exec] exec OK, iretq -> %p\n", (void*)eh->e_entry);
+    /* exec succeeded — iretq will enter new program */
     return 0;
 
 fail:

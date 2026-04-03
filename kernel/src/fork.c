@@ -156,7 +156,5 @@ long do_fork(isr_ctx_t *ctx) {
 
     uint32_t child_tid = thread_tid_of_slot(child_slot);
     thread_set_parent_for_slot(child_slot, thread_current_tid());
-    kprintf("[fork] parent=%d child_slot=%d child_tid=%d\n",
-            (int)thread_current_tid(), child_slot, (int)child_tid);
     return (long)child_tid;
 }

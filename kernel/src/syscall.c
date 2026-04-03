@@ -311,7 +311,6 @@ case SYS_UPTIME:
             thread_user_map_cleanup_current();
             thread_set_exit_code(code);
 
-            kprintf("[syscall] exit code=%d\n", code);
             thread_exit();
         }
 

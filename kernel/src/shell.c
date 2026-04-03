@@ -248,8 +248,6 @@ static void run_thread_fn(void *arg) {
         thread_exit();
     }
 
-    kprintf("run: loading %s entry=%p\n", path, (void*)eh->e_entry);
-
     /* Create a fresh per-process page map for this user task.
      * All subsequent vmm_map_page calls go into this isolated address space. */
     uint64_t task_cr3 = vmm_create_user_pagemap();
@@ -310,7 +308,6 @@ static void run_thread_fn(void *arg) {
         uint64_t seg_top = (ph->p_vaddr + ph->p_memsz + 0xFFFULL) & ~0xFFFULL;
         if (seg_top > brk_init) brk_init = seg_top;
 
-        kprintf("run: LOAD[%u] mapped vaddr=%p memsz=%p\n", i, (void*)ph->p_vaddr, (void*)ph->p_memsz);
     }
 
         // 2) Map trampoline + stack in canonical high user VA space
@@ -1832,7 +1829,6 @@ static int cmd_run(int argc, char **argv) {
     }
     thread_mark_user_slot(tid, 1);
 
-    kprintf("run: spawned thread slot=%d (%s)\n", tid, ctx->path);
     g_shell_fg_tid = tid;
     (void)thread_wait_slot(tid);
     g_shell_fg_tid = -1;
