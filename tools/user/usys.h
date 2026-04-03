@@ -156,6 +156,27 @@ static inline long sys_creat(const char *path) {
     return sys_call1(SYS_CREAT, (long)(uintptr_t)path);
 }
 
+/* unlink(path): delete a file.  Returns 0 on success, -1 on failure. */
+static inline long sys_unlink(const char *path) {
+    return sys_call1(SYS_UNLINK, (long)(uintptr_t)path);
+}
+
+/* openw(path): open a file for append-write (pre-loads existing content).
+ * Returns a write-only fd, or -1 on failure. */
+static inline long sys_openw(const char *path) {
+    return sys_call1(SYS_OPENW, (long)(uintptr_t)path);
+}
+
+/* filesize(path): returns file size in bytes, or -1 if not found. */
+static inline long sys_filesize(const char *path) {
+    return sys_call1(SYS_FILESIZE, (long)(uintptr_t)path);
+}
+
+/* mkdir(path): create a directory.  Returns 0 on success, -1 on failure. */
+static inline long sys_mkdir(const char *path) {
+    return sys_call1(SYS_MKDIR, (long)(uintptr_t)path);
+}
+
 /* sbrk(n): grow heap by n bytes, return pointer to start of new region.
  * Returns (void*)-1 on failure. */
 static inline void *sys_sbrk(unsigned long n) {

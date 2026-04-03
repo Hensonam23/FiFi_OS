@@ -206,6 +206,18 @@ static int fd_alloc(uint64_t tid, const uint8_t *data, uint64_t size) {
 static void fd_close_entry(sys_fd_t *f) {
     if (f->type == FD_TYPE_PIPE_R && f->pipe) { f->pipe->ropen--; }
     if (f->type == FD_TYPE_PIPE_W && f->pipe) { f->pipe->wopen--; }
+    /* Flush RAMW files to ext2 on close so redirected output survives reboot. */
+    if (f->type == FD_TYPE_RAMW && f->ramfile && f->ramfile->size > 0) {
+        char path[RAMFS_NAME_MAX + 2];
+        path[0] = '/';
+        size_t i = 0;
+        while (f->ramfile->name[i] && i < (size_t)(RAMFS_NAME_MAX - 1)) {
+            path[i + 1] = f->ramfile->name[i];
+            i++;
+        }
+        path[i + 1] = '\0';
+        vfs_write(path, f->ramfile->data, (uint64_t)f->ramfile->size);
+    }
     f->used = 0; f->fd_num = 0; f->owner_tid = 0;
     f->type = 0; f->data = 0; f->size = 0; f->off = 0; f->pipe = 0; f->ramfile = 0;
 }
@@ -806,6 +818,85 @@ case SYS_UPTIME:
             uint64_t tid = thread_current_tid();
             int r = fd_dup2(tid, old_fd, new_fd);
             ctx->rax = (r >= 0) ? (uint64_t)r : (uint64_t)-1;
+            return;
+        }
+
+        case SYS_UNLINK: {
+            /* rdi = user path string — delete a file from VFS + ext2. */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char ul_path[128];
+            if (copyin_str(ul_path, sizeof(ul_path), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)(int64_t)vfs_delete(ul_path);
+            return;
+        }
+
+        case SYS_OPENW: {
+            /* rdi = user path string — open a file for append-write.
+             * Creates a RAMW fd pre-loaded with the file's current content.
+             * Returns a write-only fd, or -1 on error. */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char ow_path[128];
+            if (copyin_str(ow_path, sizeof(ow_path), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            /* ramfs_creat truncates — use it then pre-load existing content */
+            ramfs_entry_t *ow_rf = ramfs_creat(ow_path);
+            if (!ow_rf) { ctx->rax = (uint64_t)-1; return; }
+
+            /* Pre-populate with existing content if the file exists */
+            const void *existing_data; uint64_t existing_size;
+            if (vfs_read(ow_path, &existing_data, &existing_size) == 0
+                    && existing_size > 0
+                    && existing_size <= (uint64_t)RAMFS_FILE_SIZE) {
+                const uint8_t *src = (const uint8_t*)existing_data;
+                for (uint64_t bi = 0; bi < existing_size; bi++)
+                    ow_rf->data[bi] = src[bi];
+                ow_rf->size = (uint32_t)existing_size;
+            }
+
+            uint64_t ow_tid = thread_current_tid();
+            int ow_fd_num = fd_next_num(ow_tid);
+            if (ow_fd_num < 0) { ctx->rax = (uint64_t)-1; return; }
+            for (int i = 0; i < SYS_FD_MAX; i++) {
+                if (!g_fds[i].used) {
+                    g_fds[i].used      = 1;
+                    g_fds[i].fd_num    = ow_fd_num;
+                    g_fds[i].owner_tid = ow_tid;
+                    g_fds[i].type      = FD_TYPE_RAMW;
+                    g_fds[i].data      = (const uint8_t*)0;
+                    g_fds[i].size      = 0;
+                    g_fds[i].off       = 0;
+                    g_fds[i].pipe      = (pipe_t*)0;
+                    g_fds[i].ramfile   = ow_rf;
+                    ctx->rax = (uint64_t)ow_fd_num;
+                    return;
+                }
+            }
+            ctx->rax = (uint64_t)-1;
+            return;
+        }
+
+        case SYS_FILESIZE: {
+            /* rdi = user path string — returns file size, or -1 if not found. */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char fs_path[128];
+            if (copyin_str(fs_path, sizeof(fs_path), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)(int64_t)vfs_filesize(fs_path);
+            return;
+        }
+
+        case SYS_MKDIR: {
+            /* rdi = user path string — create a directory. */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char mk_path[128];
+            if (copyin_str(mk_path, sizeof(mk_path), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)(int64_t)vfs_mkdir(mk_path);
             return;
         }
 

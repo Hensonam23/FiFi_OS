@@ -977,13 +977,22 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
     }
 
     if (streq_simple(argv[0], "ls")) {
-        initrd_ls();
+        static char ls_buf[4096];
+        size_t n = vfs_list(ls_buf, sizeof(ls_buf) - 1);
+        ls_buf[n] = '\0';
+        kprintf("%s", ls_buf);
         return;
     }
 
     if (streq_simple(argv[0], "cat")) {
         if (argc < 2) { kprintf("usage: cat <file>\n"); return; }
-        initrd_cat(argv[1]);
+        const void *data; uint64_t size;
+        if (vfs_read(argv[1], &data, &size) == 0) {
+            for (uint64_t i = 0; i < size; i++) kprintf("%c", ((const char*)data)[i]);
+            if (size > 0 && ((const char*)data)[size - 1] != '\n') kprintf("\n");
+        } else {
+            kprintf("cat: not found: %s\n", argv[1]);
+        }
         return;
     }
 

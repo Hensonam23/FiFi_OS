@@ -31,4 +31,8 @@ enum {
     SYS_PIPE      = 18,
     SYS_DUP2      = 19,
     SYS_CREAT     = 20,
+    SYS_UNLINK    = 21,  /* delete a file */
+    SYS_OPENW     = 22,  /* open for append-write (RAMW fd pre-loaded with existing content) */
+    SYS_FILESIZE  = 23,  /* return file size in bytes, or -1 */
+    SYS_MKDIR     = 24,  /* create a directory */
 };
