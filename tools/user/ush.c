@@ -23,6 +23,11 @@ static int ush_readline(char *buf, int cap) {
             buf[n] = '\0';
             return n;
         }
+        if (c == 3) {            /* Ctrl-C: cancel current line */
+            sys_write("^C\n", 3);
+            buf[0] = '\0';
+            return 0;
+        }
         if (c == '\b' || c == 127) {
             if (n > 0) { n--; sys_write("\b \b", 3); }
             continue;
@@ -245,6 +250,8 @@ int main(int argc, char **argv) {
             printf("ush: waitpid failed\n");
         } else if (code == 127) {
             /* "not found" already printed by child */
+        } else if (code == 130) {
+            /* killed by Ctrl-C — readline will echo ^C on next prompt */
         } else if (code != 0) {
             printf("[exit %d]\n", code);
         }

@@ -62,6 +62,7 @@ typedef struct {
     uint64_t user_brk;     /* current program break (heap top), 0 = not set */
     uint32_t parent_tid;   /* TID of parent (0 = no parent, exit goes T_DEAD) */
     volatile int exit_code;/* stored before thread_exit; read by waitpid */
+    volatile int sig_pending; /* non-zero = SIGINT pending (set by Ctrl-C handler) */
     thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
@@ -1103,4 +1104,35 @@ long thread_reap_zombie_child(uint32_t par_tid, uint32_t child_tid, int *code_ou
         }
     }
     return found_alive ? -1L : -2L;
+}
+
+/* ── signal delivery ─────────────────────────────────────────────────────── */
+
+/*
+ * Send SIGINT to every user thread that was created via fork (parent_tid != 0).
+ * Sleeping threads are woken immediately so they reach a signal check quickly.
+ * Called from the keyboard IRQ handler on Ctrl-C.
+ */
+void thread_signal_children(void) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->state == T_UNUSED || t->state == T_DEAD || t->state == T_ZOMBIE)
+            continue;
+        if (!t->is_user) continue;
+        if (t->parent_tid == 0) continue;   /* skip ush — no fork parent */
+        t->sig_pending = 1;
+        if (t->state == T_SLEEPING) t->state = T_READY;  /* wake to die */
+    }
+}
+
+/*
+ * Check whether the current thread has a pending signal.
+ * If so, set exit_code = 130 (128 + SIGINT) and call thread_exit().
+ * Call this in blocking kernel loops after each sleep, and at syscall entry.
+ */
+void thread_check_signal(void) {
+    if (!g_cur || !g_cur->sig_pending) return;
+    g_cur->sig_pending = 0;
+    g_cur->exit_code   = 130;  /* 128 + SIGINT(2) — conventional Unix value */
+    thread_exit();
 }

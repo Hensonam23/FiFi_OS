@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "keyboard.h"
+#include "thread.h"
 
 /*
   PS/2 Set 1 keyboard decoder (QEMU friendly)
@@ -124,12 +125,13 @@ void keyboard_on_scancode(uint8_t sc) {
     char c = shift_down ? map_shift[code] : map_norm[code];
     if (!c) return;
 
-    // Ctrl combos -> ASCII control codes (Ctrl+A=1 ... Ctrl+Z=26)
+    /* Ctrl combos → ASCII control codes (Ctrl+A=1 … Ctrl+Z=26) */
     if (ctrl_down) {
         char lc = c;
         if (lc >= 'A' && lc <= 'Z') lc = (char)(lc - 'A' + 'a');
         if (lc >= 'a' && lc <= 'z') {
-            kbd_push((uint8_t)(lc - 'a' + 1));
+            if (lc == 'c') thread_signal_children();  /* Ctrl-C: SIGINT to children */
+            kbd_push((uint8_t)(lc - 'a' + 1));        /* also buffer ASCII 3 for readline */
             return;
         }
     }

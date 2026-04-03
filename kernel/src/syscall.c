@@ -253,6 +253,10 @@ static int fd_dup2(uint64_t tid, int old_fd_num, int new_fd_num) {
 }
 
 void syscall_dispatch(isr_ctx_t *ctx) {
+    /* Deliver any pending signal before handling the syscall.
+     * This catches user threads that were signaled while running user code. */
+    thread_check_signal();
+
     uint64_t n = ctx->rax;
 
     switch (n) {
@@ -349,7 +353,7 @@ case SYS_UPTIME:
                     uint32_t w = pipe_ring_write(wf->pipe, wr_buf + written,
                                                   (uint32_t)n - written);
                     written += w;
-                    if (written < (uint32_t)n) thread_sleep_ms(1);
+                    if (written < (uint32_t)n) { thread_sleep_ms(1); thread_check_signal(); }
                 }
                 ctx->rax = (uint64_t)written;
                 return;
@@ -425,6 +429,7 @@ case SYS_UPTIME:
                         return;
                     }
                     thread_sleep_ms(2);
+                    thread_check_signal();
                 }
             }
 
@@ -583,6 +588,7 @@ case SYS_UPTIME:
                 }
                 /* child alive but not zombie yet — yield and retry */
                 thread_sleep_ms(10);
+                thread_check_signal();
             }
             ctx->rax = (uint64_t)-1; /* timeout */
             return;
@@ -671,6 +677,7 @@ case SYS_UPTIME:
                     return;
                 }
                 thread_sleep_ms(10);
+                thread_check_signal();
             }
         }
 
