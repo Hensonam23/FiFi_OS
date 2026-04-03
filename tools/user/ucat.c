@@ -13,18 +13,23 @@ static void putstr(const char *s) {
     sys_write(s, (uint64_t)c_strlen(s));
 }
 
+static uint8_t buf[64 * 1024];
+
 int main(int argc, char **argv) {
+    /* No filename: read from stdin (fd=0) until EOF — useful as pipe target */
     if (argc < 2 || !argv || !argv[1]) {
-        putstr("usage: ucat <file>\n");
-        return 1;
+        long total = 0;
+        for (;;) {
+            long n = sys_read(0, buf, (uint64_t)(sizeof(buf) - 1));
+            if (n <= 0) break;
+            sys_write(buf, (uint64_t)n);
+            total += n;
+        }
+        return 0;
     }
 
     const char *path = argv[1];
-
-    // Big static buffer so we don't blow the user stack.
-    static uint8_t buf[64 * 1024];
-
-    long n = sys_readfile(path, buf, (uint64_t)sizeof(buf));
+    long n = sys_readfile(path, buf, (uint64_t)(sizeof(buf) - 1));
     if (n < 0) {
         putstr("ucat: not found: ");
         sys_write(path, (uint64_t)c_strlen(path));
@@ -34,10 +39,7 @@ int main(int argc, char **argv) {
 
     if (n > 0) {
         sys_write(buf, (uint64_t)n);
-        if (buf[(size_t)n - 1] != '\n') {
-            putstr("\n");
-        }
+        if (buf[(size_t)n - 1] != '\n') putstr("\n");
     }
-
     return 0;
 }

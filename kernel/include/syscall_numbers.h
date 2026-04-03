@@ -28,4 +28,6 @@ enum {
     SYS_WAITPID   = 15,
     SYS_GETCHAR   = 16,
     SYS_LISTFILES = 17,
+    SYS_PIPE      = 18,
+    SYS_DUP2      = 19,
 };
