@@ -17,3 +17,6 @@ void ext2_ls(const char *path);
 
 /* Return file size in bytes, or -1 if not found / not a file. */
 int ext2_file_size(const char *path);
+
+/* Write "name\n" entries for root directory into buf. Returns bytes written. */
+size_t ext2_ls_buf(char *buf, size_t cap);

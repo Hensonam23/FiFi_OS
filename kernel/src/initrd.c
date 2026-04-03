@@ -178,6 +178,20 @@ void initrd_ls(void) {
     }
 }
 
+size_t initrd_ls_buf(char *buf, size_t cap) {
+    if (!buf || cap == 0 || !g_initrd.ready) return 0;
+    size_t pos = 0;
+    for (uint64_t i = 0; i < g_initrd.count; i++) {
+        const char *n = g_initrd.files[i].name;
+        if (!n) continue;
+        /* append "name\n" */
+        for (size_t j = 0; n[j] && pos + 1 < cap; j++) buf[pos++] = n[j];
+        if (pos + 1 < cap) buf[pos++] = '\n';
+    }
+    if (pos < cap) buf[pos] = '\0';
+    return pos;
+}
+
 int initrd_get(const char *name, const void **data, uint64_t *size) {
     if (!g_initrd.ready || !name || !data || !size) return -1;
 

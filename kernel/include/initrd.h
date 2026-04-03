@@ -10,3 +10,6 @@ void initrd_ls(void);
 void initrd_cat(const char *name);
 int  initrd_get(const char *name, const void **data, uint64_t *size);
 
+/* Write "name\n" entries into buf (up to cap bytes). Returns bytes written. */
+size_t initrd_ls_buf(char *buf, size_t cap);
+
