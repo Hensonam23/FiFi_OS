@@ -432,3 +432,41 @@ void ext2_ls(const char *path) {
         }
     }
 }
+
+size_t ext2_ls_buf(char *buf, size_t cap) {
+    if (!buf || cap == 0 || !g.ready) return 0;
+
+    ext2_inode_t root;
+    if (!e2_read_inode(2, &root)) return 0;
+    if ((root.i_mode & 0xF000u) != EXT2_IMODE_DIR) return 0;
+
+    uint8_t  *blk = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    uint32_t  spb = g.block_size / 512;
+    size_t pos = 0;
+
+    for (int b = 0; b < 12; b++) {
+        if (root.i_block[b] == 0) break;
+        uint64_t sector = (uint64_t)root.i_block[b] * spb;
+        if (!virtio_blk_read(sector, blk, spb)) continue;
+
+        uint8_t *p   = blk;
+        uint8_t *end = blk + g.block_size;
+        while (p < end) {
+            ext2_dirent_t *de = (ext2_dirent_t*)p;
+            if (de->rec_len == 0) break;
+            if (de->inode != 0 && de->name_len > 0) {
+                /* skip "." and ".." */
+                if (!(de->name_len == 1 && de->name[0] == '.') &&
+                    !(de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.')) {
+                    for (uint8_t i = 0; i < de->name_len && pos + 1 < cap; i++)
+                        buf[pos++] = de->name[i];
+                    if (pos + 1 < cap) buf[pos++] = '\n';
+                }
+            }
+            p += de->rec_len;
+        }
+    }
+
+    if (pos < cap) buf[pos] = '\0';
+    return pos;
+}

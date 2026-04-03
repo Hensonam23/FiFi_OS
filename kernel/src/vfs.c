@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 
 #include "vfs.h"
 #include "initrd.h"
@@ -57,6 +58,15 @@ int vfs_read(const char *path, const void **data, uint64_t *size) {
     *data = g_ext2_buf;
     *size = (uint64_t)got;
     return 0;
+}
+
+size_t vfs_list(char *buf, size_t cap) {
+    if (!buf || cap == 0) return 0;
+    size_t pos = initrd_ls_buf(buf, cap);
+    if (ext2_present() && pos < cap)
+        pos += ext2_ls_buf(buf + pos, cap - pos);
+    if (pos < cap) buf[pos] = '\0';
+    return pos;
 }
 
 void vfs_cat(const char *path) {

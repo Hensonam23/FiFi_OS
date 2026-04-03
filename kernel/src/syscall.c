@@ -497,6 +497,22 @@ case SYS_UPTIME:
             }
         }
 
+        case SYS_LISTFILES: {
+            /* rdi = user buf ptr, rsi = capacity (max 4096) */
+            uint64_t ubuf = ctx->rdi;
+            uint64_t cap  = ctx->rsi;
+            if (!ubuf || cap == 0) { ctx->rax = (uint64_t)-1; return; }
+            if (cap > 4096) cap = 4096;
+
+            static char ls_kbuf[4096];
+            size_t ls_n = vfs_list(ls_kbuf, (size_t)cap);
+            if (copyout_bytes(ubuf, (const uint8_t*)ls_kbuf, ls_n) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)ls_n;
+            return;
+        }
+
         case SYS_GETCHAR: {
             /* Block until a key is available; returns ASCII/KEY_* value */
             for (;;) {
