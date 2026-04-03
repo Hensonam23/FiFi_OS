@@ -25,4 +25,5 @@ enum {
     SYS_EXEC      = 12,
     SYS_FORK      = 13,
     SYS_BRK       = 14,
+    SYS_WAITPID   = 15,
 };

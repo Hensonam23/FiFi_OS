@@ -106,6 +106,13 @@ static inline unsigned long sys_brk(unsigned long addr) {
     return (unsigned long)sys_call1(SYS_BRK, (long)addr);
 }
 
+/* waitpid(child_tid, &exit_code): wait for child to exit, collect status.
+ * child_tid == (uint32_t)-1 waits for any child.
+ * Returns reaped TID on success, -1 on error/timeout/no child. */
+static inline long sys_waitpid(unsigned long child_tid, int *exit_code) {
+    return sys_call2(SYS_WAITPID, (long)child_tid, (long)(uintptr_t)exit_code);
+}
+
 /* sbrk(n): grow heap by n bytes, return pointer to start of new region.
  * Returns (void*)-1 on failure. */
 static inline void *sys_sbrk(unsigned long n) {

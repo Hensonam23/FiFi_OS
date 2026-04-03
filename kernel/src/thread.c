@@ -28,7 +28,8 @@ typedef enum {
     T_READY,
     T_RUNNING,
     T_SLEEPING,
-    T_DEAD
+    T_DEAD,
+    T_ZOMBIE,   /* exited; waiting for parent to collect exit status */
 } thread_state_t;
 
 #define THREAD_USER_MAP_MAX 8
@@ -59,7 +60,9 @@ typedef struct {
     uint8_t is_user;
     uint64_t cr3;          /* physical addr of this task's PML4, 0 = use kernel CR3 */
     uint64_t user_brk;     /* current program break (heap top), 0 = not set */
-      thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
+    uint32_t parent_tid;   /* TID of parent (0 = no parent, exit goes T_DEAD) */
+    volatile int exit_code;/* stored before thread_exit; read by waitpid */
+    thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
 static thread_t g_threads[THREAD_MAX];
@@ -191,6 +194,8 @@ void thread_init(void) {
         g_threads[i].last_start_tick = 0;
         g_threads[i].name[0] = 0;
         g_threads[i].user_brk = 0;
+        g_threads[i].parent_tid = 0;
+        g_threads[i].exit_code = 0;
         thread_user_maps_zero(&g_threads[i]);
     }
 
@@ -267,6 +272,8 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->stack_base = stack;
     t->is_user = 0;
     t->user_brk = 0;
+    t->parent_tid = 0;
+    t->exit_code = 0;
     thread_user_maps_zero(t);
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
 
@@ -427,7 +434,21 @@ void thread_exit(void) {
             thread_user_cleanup(g_cur);
         }
 
-          g_cur->state = T_DEAD;
+        /* Go T_ZOMBIE if our parent is still alive so it can collect our
+         * exit status via waitpid; otherwise go straight to T_DEAD. */
+        int go_zombie = 0;
+        if (g_cur->parent_tid != 0) {
+            for (int _i = 0; _i < THREAD_MAX; _i++) {
+                if (g_threads[_i].tid == g_cur->parent_tid &&
+                    g_threads[_i].state != T_UNUSED &&
+                    g_threads[_i].state != T_DEAD &&
+                    g_threads[_i].state != T_ZOMBIE) {
+                    go_zombie = 1;
+                    break;
+                }
+            }
+        }
+        g_cur->state = go_zombie ? T_ZOMBIE : T_DEAD;
     }
 
     for (;;) {
@@ -465,12 +486,13 @@ static int eff_prio(thread_t *t) {
 
 static const char *state_str(thread_state_t s) {
     switch (s) {
-        case T_UNUSED:  return "UNUSED";
-        case T_READY:   return "READY";
-        case T_RUNNING: return "RUNNING";
+        case T_UNUSED:   return "UNUSED";
+        case T_READY:    return "READY";
+        case T_RUNNING:  return "RUNNING";
         case T_SLEEPING: return "SLEEPING";
-        case T_DEAD:    return "DEAD";
-        default:        return "?";
+        case T_DEAD:     return "DEAD";
+        case T_ZOMBIE:   return "ZOMBIE";
+        default:         return "?";
     }
 }
 
@@ -789,6 +811,8 @@ void thread_reap_dead(void) {
         g_threads[i].is_user = 0;
         g_threads[i].cr3 = 0;
         g_threads[i].name[0] = 0;
+        g_threads[i].parent_tid = 0;
+        g_threads[i].exit_code = 0;
         thread_user_maps_zero(&g_threads[i]);
     }
 }
@@ -807,11 +831,12 @@ void thread_jobs(void) {
 
         const char *st = "?";
         switch (t->state) {
-            case T_UNUSED:   st = "UNUSED"; break;
-            case T_READY:    st = "READY";  break;
-            case T_RUNNING:  st = "RUN";    break;
-            case T_SLEEPING: st = "SLEEP";  break;
-            case T_DEAD:     st = "DEAD";   break;
+            case T_UNUSED:   st = "UNUSED";  break;
+            case T_READY:    st = "READY";   break;
+            case T_RUNNING:  st = "RUN";     break;
+            case T_SLEEPING: st = "SLEEP";   break;
+            case T_DEAD:     st = "DEAD";    break;
+            case T_ZOMBIE:   st = "ZOMBIE";  break;
         }
 
         const char *cur = (t == g_cur) ? "*" : " ";
@@ -886,6 +911,7 @@ static const char* thread_state_name(thread_state_t s) {
         case T_RUNNING:  return "RUNNING";
         case T_SLEEPING: return "SLEEP";
         case T_DEAD:     return "DEAD";
+        case T_ZOMBIE:   return "ZOMBIE";
         default:         return "?";
     }
 }
@@ -932,7 +958,7 @@ void thread_user_map_cleanup_slot(int slot) {
 int thread_user_any_active(void) {
     for (int i = 0; i < THREAD_MAX; i++) {
         if (!g_threads[i].is_user) continue;
-        if (g_threads[i].state == T_UNUSED || g_threads[i].state == T_DEAD) continue;
+        if (g_threads[i].state == T_UNUSED || g_threads[i].state == T_DEAD || g_threads[i].state == T_ZOMBIE) continue;
         return 1;
     }
     return 0;
@@ -1033,4 +1059,42 @@ uint64_t thread_get_brk(void) {
 void thread_set_brk(uint64_t brk) {
     if (!g_cur) return;
     g_cur->user_brk = brk;
+}
+
+/* Store exit code in current thread before calling thread_exit. */
+void thread_set_exit_code(int code) {
+    if (g_cur) g_cur->exit_code = code;
+}
+
+/* Set parent TID for a freshly-created thread slot (called by do_fork). */
+void thread_set_parent_for_slot(int slot, uint32_t ptid) {
+    if (slot < 0 || slot >= THREAD_MAX) return;
+    g_threads[slot].parent_tid = ptid;
+}
+
+/*
+ * Search for a zombie child whose parent_tid == parent_tid.
+ * child_tid == (uint32_t)-1 matches any child.
+ *
+ * Returns:
+ *   > 0  : reaped child's TID (zombie → T_DEAD so reaper can collect)
+ *   -1   : matching child exists but is still running
+ *   -2   : no matching child found at all
+ */
+long thread_reap_zombie_child(uint32_t par_tid, uint32_t child_tid, int *code_out) {
+    int found_alive = 0;
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].parent_tid != par_tid) continue;
+        if (child_tid != (uint32_t)-1 && g_threads[i].tid != child_tid) continue;
+        if (g_threads[i].state == T_ZOMBIE) {
+            uint32_t reaped = g_threads[i].tid;
+            if (code_out) *code_out = g_threads[i].exit_code;
+            g_threads[i].state = T_DEAD; /* let thread_reap_dead() free the slot */
+            return (long)reaped;
+        }
+        if (g_threads[i].state != T_UNUSED) {
+            found_alive = 1;
+        }
+    }
+    return found_alive ? -1L : -2L;
 }

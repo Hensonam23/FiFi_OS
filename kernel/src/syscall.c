@@ -181,13 +181,14 @@ case SYS_UPTIME:
         }
 
         case SYS_EXIT: {
-            unsigned long long code = (unsigned long long)ctx->rdi;
+            int code = (int)(unsigned int)ctx->rdi;
             uint64_t tid = thread_current_tid();
 
             fd_close_all(tid);
             thread_user_map_cleanup_current();
+            thread_set_exit_code(code);
 
-            kprintf("[syscall] exit code=%p\n", (void*)code);
+            kprintf("[syscall] exit code=%d\n", code);
             thread_exit();
         }
 
@@ -386,6 +387,32 @@ case SYS_UPTIME:
         case SYS_FORK: {
             ctx->rax = (uint64_t)do_fork(ctx);
             break;
+        }
+
+        case SYS_WAITPID: {
+            /* rdi = child TID (-1 = any), rsi = user int* for exit code */
+            uint32_t child_tid = (uint32_t)(uint64_t)ctx->rdi;
+            uint64_t ucode     = ctx->rsi;
+            uint32_t me        = thread_current_tid();
+
+            /* Poll up to ~5 s (500 × 10 ms) for child to become zombie */
+            for (int attempt = 0; attempt < 500; attempt++) {
+                int code = 0;
+                long reaped = thread_reap_zombie_child(me, child_tid, &code);
+                if (reaped > 0) {
+                    if (ucode) copyout_bytes(ucode, (const uint8_t*)&code, sizeof(int));
+                    ctx->rax = (uint64_t)(uint32_t)reaped;
+                    return;
+                }
+                if (reaped == -2L) {
+                    ctx->rax = (uint64_t)-1; /* no matching child */
+                    return;
+                }
+                /* child alive but not zombie yet — yield and retry */
+                thread_sleep_ms(10);
+            }
+            ctx->rax = (uint64_t)-1; /* timeout */
+            return;
         }
 
         case SYS_BRK: {
