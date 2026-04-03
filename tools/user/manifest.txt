@@ -10,3 +10,4 @@ uexec
 ufork
 uheap
 umalloc_test
+uinfo
