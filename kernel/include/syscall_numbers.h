@@ -26,4 +26,5 @@ enum {
     SYS_FORK      = 13,
     SYS_BRK       = 14,
     SYS_WAITPID   = 15,
+    SYS_GETCHAR   = 16,
 };

@@ -106,6 +106,12 @@ static inline unsigned long sys_brk(unsigned long addr) {
     return (unsigned long)sys_call1(SYS_BRK, (long)addr);
 }
 
+/* getchar(): blocking read of one character from the console keyboard.
+ * Returns ASCII value (or KEY_* special code). Never returns -1. */
+static inline int sys_getchar(void) {
+    return (int)sys_call0(SYS_GETCHAR);
+}
+
 /* waitpid(child_tid, &exit_code): wait for child to exit, collect status.
  * child_tid == (uint32_t)-1 waits for any child.
  * Returns reaped TID on success, -1 on error/timeout/no child. */
