@@ -25,6 +25,7 @@ static inline int    ul_strncmp(const char *a, const char *b, size_t n);
 static inline char  *ul_strcpy(char *dst, const char *src);
 static inline char  *ul_strncpy(char *dst, const char *src, size_t n);
 static inline char  *ul_strcat(char *dst, const char *src);
+static inline char  *ul_strchr(const char *s, int c);
 static inline void  *ul_memcpy(void *dst, const void *src, size_t n);
 static inline void  *ul_memset(void *s, int c, size_t n);
 static inline int    ul_memcmp(const void *a, const void *b, size_t n);
@@ -47,6 +48,7 @@ void ul_puts(const char *s);
 #define strcpy    ul_strcpy
 #define strncpy   ul_strncpy
 #define strcat    ul_strcat
+#define strchr    ul_strchr
 #define memcpy    ul_memcpy
 #define memset    ul_memset
 #define memcmp    ul_memcmp
@@ -92,6 +94,11 @@ static inline char *ul_strcat(char *dst, const char *src) {
     char *d = dst + ul_strlen(dst);
     while ((*d++ = *src++));
     return dst;
+}
+
+static inline char *ul_strchr(const char *s, int c) {
+    for (; *s; s++) if ((unsigned char)*s == (unsigned char)c) return (char*)s;
+    return (char*)0;
 }
 
 static inline void *ul_memcpy(void *dst, const void *src, size_t n) {

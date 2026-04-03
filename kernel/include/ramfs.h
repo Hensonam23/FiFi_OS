@@ -19,5 +19,8 @@ ramfs_entry_t *ramfs_creat(const char *name);
 /* Look up a file.  Returns 0 on success and fills *data / *size. */
 int  ramfs_get(const char *name, const void **data, uint64_t *size);
 
+/* Delete a named file.  Returns 0 on success, -1 if not found. */
+int ramfs_delete(const char *name);
+
 /* Fill buf with "name\n" lines for each live entry.  Returns bytes written. */
 size_t ramfs_ls_buf(char *buf, size_t cap);

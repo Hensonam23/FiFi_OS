@@ -48,6 +48,18 @@ int ramfs_get(const char *name, const void **data, uint64_t *size) {
     return -1;
 }
 
+int ramfs_delete(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (g_ramfs[i].used && rf_streq(g_ramfs[i].name, name)) {
+            g_ramfs[i].used = 0;
+            g_ramfs[i].size = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 size_t ramfs_ls_buf(char *buf, size_t cap) {
     if (!buf || cap == 0) return 0;
     size_t pos = 0;

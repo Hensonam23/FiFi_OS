@@ -1,5 +1,5 @@
 /*
- * ext2.c — read-only ext2 filesystem driver for FiFi OS
+ * ext2.c — ext2 filesystem driver for FiFi OS (read + write)
  *
  * Supports:
  *   - 1KB, 2KB, 4KB block sizes
@@ -469,4 +469,428 @@ size_t ext2_ls_buf(char *buf, size_t cap) {
 
     if (pos < cap) buf[pos] = '\0';
     return pos;
+}
+
+/* ── write support ────────────────────────────────────────────────────────── */
+
+static void e2_memset(void *dst, uint8_t v, size_t n) {
+    volatile uint8_t *d = (volatile uint8_t*)dst;
+    for (size_t i = 0; i < n; i++) d[i] = v;
+}
+
+/* Write one filesystem block from src (any kernel virtual address). */
+static bool e2_write_block(uint32_t blk, const void *src) {
+    if (blk == 0) return false;
+    uint32_t spb    = g.block_size / 512;
+    uint64_t sector = (uint64_t)blk * spb;
+    return virtio_blk_write(sector, src, (size_t)spb);
+}
+
+/* Write in-memory BGD for group back to disk. */
+static bool e2_flush_bgd(uint32_t gidx) {
+    uint32_t bgdt_block = g.first_data_block + 1;
+    uint32_t off        = gidx * (uint32_t)sizeof(ext2_bgd_t);
+    uint32_t blk_off    = off / g.block_size;
+    uint32_t in_blk     = off % g.block_size;
+
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    if (!e2_read_block(bgdt_block + blk_off, buf)) return false;
+    e2_memcpy(buf + in_blk, &g.bgdt[gidx], sizeof(ext2_bgd_t));
+    return e2_write_block(bgdt_block + blk_off, buf);
+}
+
+/* Write inode struct back to inode table on disk. */
+static bool e2_write_inode(uint32_t ino, const ext2_inode_t *inode) {
+    if (ino == 0 || !g.ready) return false;
+    uint32_t group = (ino - 1) / g.inodes_per_group;
+    uint32_t index = (ino - 1) % g.inodes_per_group;
+    if (group >= g.num_groups) return false;
+
+    uint32_t table_block = g.bgdt[group].bg_inode_table;
+    uint32_t byte_off    = index * g.inode_size;
+    uint32_t blk_off     = byte_off / g.block_size;
+    uint32_t in_blk      = byte_off % g.block_size;
+
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    if (!e2_read_block(table_block + blk_off, buf)) return false;
+    e2_memcpy(buf + in_blk, inode, sizeof(ext2_inode_t));
+    return e2_write_block(table_block + blk_off, buf);
+}
+
+/* Mark a data block as free in its group's bitmap. */
+static void e2_free_block(uint32_t blk) {
+    if (blk < g.first_data_block) return;
+    uint32_t adj  = blk - g.first_data_block;
+    uint32_t gidx = adj / g.blocks_per_group;
+    uint32_t bit  = adj % g.blocks_per_group;
+    if (gidx >= g.num_groups) return;
+
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    if (!e2_read_block(g.bgdt[gidx].bg_block_bitmap, buf)) return;
+    buf[bit / 8] &= ~(1u << (bit % 8));
+    if (!e2_write_block(g.bgdt[gidx].bg_block_bitmap, buf)) return;
+    g.bgdt[gidx].bg_free_blocks_count++;
+    (void)e2_flush_bgd(gidx);
+}
+
+/* Allocate a free data block. Returns absolute block number, 0 on failure. */
+static uint32_t e2_alloc_block(void) {
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    for (uint32_t gidx = 0; gidx < g.num_groups; gidx++) {
+        if (g.bgdt[gidx].bg_free_blocks_count == 0) continue;
+        uint32_t bmap = g.bgdt[gidx].bg_block_bitmap;
+        if (!e2_read_block(bmap, buf)) continue;
+        uint32_t nbits = g.blocks_per_group;
+        for (uint32_t bit = 0; bit < nbits; bit++) {
+            if (!(buf[bit / 8] & (1u << (bit % 8)))) {
+                buf[bit / 8] |= (1u << (bit % 8));
+                if (!e2_write_block(bmap, buf)) return 0;
+                g.bgdt[gidx].bg_free_blocks_count--;
+                (void)e2_flush_bgd(gidx);
+                return g.first_data_block + gidx * g.blocks_per_group + bit;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Allocate a free inode. Returns 1-based inode number, 0 on failure. */
+static uint32_t e2_alloc_inode(void) {
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    for (uint32_t gidx = 0; gidx < g.num_groups; gidx++) {
+        if (g.bgdt[gidx].bg_free_inodes_count == 0) continue;
+        uint32_t imap = g.bgdt[gidx].bg_inode_bitmap;
+        if (!e2_read_block(imap, buf)) continue;
+        uint32_t nbits = g.inodes_per_group;
+        for (uint32_t bit = 0; bit < nbits; bit++) {
+            if (!(buf[bit / 8] & (1u << (bit % 8)))) {
+                buf[bit / 8] |= (1u << (bit % 8));
+                if (!e2_write_block(imap, buf)) return 0;
+                g.bgdt[gidx].bg_free_inodes_count--;
+                (void)e2_flush_bgd(gidx);
+                return gidx * g.inodes_per_group + bit + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * Add an entry to a directory inode.
+ * dir_ino: inode of the directory to modify.
+ * name / name_len: the new file's name.
+ * new_ino: inode number to link.
+ * ftype: EXT2_FT_* (1 = regular file, 2 = directory).
+ *
+ * Uses g.io_phys as scratch but saves dir_inode on the stack first, so
+ * e2_alloc_block (which also uses io_phys) is safe to call after scanning.
+ */
+static bool e2_add_dirent(uint32_t dir_ino, const char *name, uint32_t name_len,
+                           uint32_t new_ino, uint8_t ftype) {
+    ext2_inode_t dir_inode;
+    if (!e2_read_inode(dir_ino, &dir_inode)) return false;
+
+    uint32_t needed = ((8u + name_len) + 3u) & ~3u;
+    uint8_t *buf    = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+
+    /* Scan existing directory blocks for a free slot. */
+    for (int b = 0; b < 12; b++) {
+        uint32_t dblk = dir_inode.i_block[b];
+        if (dblk == 0) {
+            /* No space found — allocate a new directory block.
+             * e2_alloc_block reuses io_phys; we are done scanning so this is safe. */
+            uint32_t new_blk = e2_alloc_block();
+            if (!new_blk) return false;
+            e2_memset(buf, 0, g.block_size);
+            ext2_dirent_t *de = (ext2_dirent_t*)buf;
+            de->inode     = new_ino;
+            de->rec_len   = (uint16_t)g.block_size;
+            de->name_len  = (uint8_t)name_len;
+            de->file_type = ftype;
+            e2_memcpy(de->name, name, name_len);
+            if (!e2_write_block(new_blk, buf)) return false;
+            dir_inode.i_block[b]  = new_blk;
+            dir_inode.i_blocks   += g.block_size / 512;
+            dir_inode.i_size     += g.block_size;
+            return e2_write_inode(dir_ino, &dir_inode);
+        }
+
+        if (!e2_read_block(dblk, buf)) continue;
+
+        uint8_t *p   = buf;
+        uint8_t *end = buf + g.block_size;
+        while (p < end) {
+            ext2_dirent_t *de = (ext2_dirent_t*)p;
+            if (de->rec_len == 0) break;
+
+            /* Minimum space actually occupied by this entry */
+            uint32_t actual = (de->inode != 0)
+                              ? ((8u + (uint32_t)de->name_len + 3u) & ~3u) : 0u;
+            uint32_t slack  = de->rec_len - (de->inode != 0 ? actual : 0u);
+
+            if (slack >= needed) {
+                if (de->inode != 0) {
+                    /* Split: shrink this entry, put new one in the gap. */
+                    uint16_t old_len = de->rec_len;
+                    de->rec_len = (uint16_t)actual;
+                    ext2_dirent_t *ne = (ext2_dirent_t*)(p + actual);
+                    ne->inode     = new_ino;
+                    ne->rec_len   = (uint16_t)(old_len - actual);
+                    ne->name_len  = (uint8_t)name_len;
+                    ne->file_type = ftype;
+                    e2_memcpy(ne->name, name, name_len);
+                } else {
+                    /* Reuse a deleted-entry slot. */
+                    de->inode     = new_ino;
+                    de->name_len  = (uint8_t)name_len;
+                    de->file_type = ftype;
+                    e2_memcpy(de->name, name, name_len);
+                }
+                return e2_write_block(dblk, buf);
+            }
+            p += de->rec_len;
+        }
+    }
+    return false; /* all 12 direct directory blocks full */
+}
+
+/*
+ * ext2_write_file — create or overwrite a root-level file on the ext2 disk.
+ *
+ * path must be "/filename" with no embedded slashes.
+ * Handles files up to 12 × block_size bytes (direct blocks only).
+ * Overwrites: frees old data blocks, writes new data.
+ * Returns 0 on success, -1 on error.
+ */
+int ext2_write_file(const char *path, const void *data, uint32_t size) {
+    if (!g.ready || !path || path[0] != '/') return -1;
+
+    const char *name = path + 1;
+    uint32_t name_len = 0;
+    while (name[name_len] && name_len < 255) name_len++;
+    if (name_len == 0) return -1;
+    for (uint32_t i = 0; i < name_len; i++)
+        if (name[i] == '/') return -1;
+
+    /* Cap at 12 direct blocks */
+    uint32_t max_size = 12u * g.block_size;
+    if (size > max_size) size = max_size;
+
+    /* Does the file already exist? */
+    uint32_t     ino    = e2_resolve(path);
+    ext2_inode_t inode;
+    bool         is_new = (ino == 0);
+
+    if (!is_new) {
+        if (!e2_read_inode(ino, &inode)) return -1;
+        if ((inode.i_mode & 0xF000u) != EXT2_IMODE_FILE) return -1;
+        /* Free existing data blocks so they can be reused */
+        for (int b = 0; b < 12; b++) {
+            if (inode.i_block[b] == 0) break;
+            e2_free_block(inode.i_block[b]);
+            inode.i_block[b] = 0;
+        }
+        inode.i_blocks = 0;
+        inode.i_size   = 0;
+    } else {
+        ino = e2_alloc_inode();
+        if (ino == 0) return -1;
+        e2_memset(&inode, 0, sizeof(inode));
+        inode.i_mode        = EXT2_IMODE_FILE | 0644u;
+        inode.i_links_count = 1;
+    }
+
+    /* Write data blocks */
+    const uint8_t *src       = (const uint8_t*)data;
+    uint32_t       remaining = size;
+    uint32_t       offset    = 0;
+    uint8_t       *buf       = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+
+    for (int b = 0; b < 12 && remaining > 0; b++) {
+        uint32_t blk = e2_alloc_block();
+        if (!blk) goto fail;
+
+        uint32_t chunk = (remaining < g.block_size) ? remaining : g.block_size;
+        e2_memset(buf, 0, g.block_size);
+        e2_memcpy(buf, src + offset, chunk);
+        if (!e2_write_block(blk, buf)) goto fail;
+
+        inode.i_block[b]  = blk;
+        inode.i_blocks   += g.block_size / 512;
+        offset    += chunk;
+        remaining -= chunk;
+    }
+    inode.i_size = size;
+
+    if (!e2_write_inode(ino, &inode)) goto fail;
+
+    /* For new files, add the directory entry last (so a partial write
+     * doesn't leave a dangling directory entry). */
+    if (is_new) {
+        if (!e2_add_dirent(2, name, name_len, ino, 1 /*EXT2_FT_REG_FILE*/))
+            goto fail;
+    }
+
+    return 0;
+
+fail:
+    return -1;
+}
+
+/* ── delete / mkdir shared helpers ───────────────────────────────────────── */
+
+/* Free an inode: clear its bitmap bit and increment group free count. */
+static void e2_free_inode(uint32_t ino) {
+    if (ino == 0) return;
+    uint32_t group = (ino - 1) / g.inodes_per_group;
+    uint32_t index = (ino - 1) % g.inodes_per_group;
+    if (group >= g.num_groups) return;
+
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    uint32_t imap = g.bgdt[group].bg_inode_bitmap;
+    if (!e2_read_block(imap, buf)) return;
+    buf[index / 8] &= ~(1u << (index % 8));
+    if (!e2_write_block(imap, buf)) return;
+    g.bgdt[group].bg_free_inodes_count++;
+    (void)e2_flush_bgd(group);
+}
+
+/*
+ * Remove a directory entry from dir_ino by zeroing its inode field.
+ * The rec_len chain is preserved so the space is reclaimed as slack
+ * by the next e2_add_dirent scan.
+ */
+static bool e2_remove_dirent(uint32_t dir_ino, const char *name) {
+    ext2_inode_t dir_inode;
+    if (!e2_read_inode(dir_ino, &dir_inode)) return false;
+
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+
+    for (int b = 0; b < 12; b++) {
+        uint32_t dblk = dir_inode.i_block[b];
+        if (dblk == 0) break;
+        if (!e2_read_block(dblk, buf)) continue;
+
+        uint8_t *p   = buf;
+        uint8_t *end = buf + g.block_size;
+        while (p < end) {
+            ext2_dirent_t *de = (ext2_dirent_t*)p;
+            if (de->rec_len == 0) break;
+            if (de->inode != 0 && e2_name_eq(de, name)) {
+                de->inode = 0;
+                return e2_write_block(dblk, buf);
+            }
+            p += de->rec_len;
+        }
+    }
+    return false;
+}
+
+/* ── mkdir support ────────────────────────────────────────────────────────── */
+
+/*
+ * ext2_mkdir — create a root-level directory on the ext2 disk.
+ * path must be "/dirname" (no subdirectories).
+ * Returns 0 on success, -1 on error.
+ */
+int ext2_mkdir(const char *path) {
+    if (!g.ready || !path || path[0] != '/') return -1;
+
+    const char *name = path + 1;
+    uint32_t name_len = 0;
+    while (name[name_len] && name_len < 255) name_len++;
+    if (name_len == 0) return -1;
+    for (uint32_t i = 0; i < name_len; i++)
+        if (name[i] == '/') return -1;
+
+    /* Already exists? */
+    if (e2_resolve(path) != 0) return -1;
+
+    /* Allocate inode */
+    uint32_t ino = e2_alloc_inode();
+    if (ino == 0) return -1;
+
+    /* Allocate one data block */
+    uint32_t blk = e2_alloc_block();
+    if (!blk) { e2_free_inode(ino); return -1; }
+
+    /* Write '.' and '..' entries into the block */
+    uint8_t *buf = (uint8_t*)pmm_phys_to_virt(g.io_phys);
+    e2_memset(buf, 0, g.block_size);
+
+    /* '.' entry: rec_len = 12 (smallest aligned entry for 1-char name) */
+    ext2_dirent_t *dot = (ext2_dirent_t*)buf;
+    dot->inode     = ino;
+    dot->rec_len   = 12;
+    dot->name_len  = 1;
+    dot->file_type = 2; /* EXT2_FT_DIR */
+    dot->name[0]   = '.';
+
+    /* '..' entry: rec_len = rest of block */
+    ext2_dirent_t *dotdot = (ext2_dirent_t*)(buf + 12);
+    dotdot->inode     = 2; /* parent = root */
+    dotdot->rec_len   = (uint16_t)(g.block_size - 12);
+    dotdot->name_len  = 2;
+    dotdot->file_type = 2;
+    dotdot->name[0]   = '.';
+    dotdot->name[1]   = '.';
+
+    if (!e2_write_block(blk, buf)) { e2_free_inode(ino); e2_free_block(blk); return -1; }
+
+    /* Build and write the directory inode */
+    ext2_inode_t inode;
+    e2_memset(&inode, 0, sizeof(inode));
+    inode.i_mode        = EXT2_IMODE_DIR | 0755u;
+    inode.i_links_count = 2; /* '.' + parent entry */
+    inode.i_size        = g.block_size;
+    inode.i_blocks      = g.block_size / 512;
+    inode.i_block[0]    = blk;
+
+    if (!e2_write_inode(ino, &inode)) { e2_free_inode(ino); e2_free_block(blk); return -1; }
+
+    /* Add directory entry to root */
+    if (!e2_add_dirent(2, name, name_len, ino, 2 /*EXT2_FT_DIR*/)) {
+        e2_free_inode(ino); e2_free_block(blk); return -1;
+    }
+
+    return 0;
+}
+
+/* ── delete support ───────────────────────────────────────────────────────── */
+
+/*
+ * ext2_delete_file — remove a root-level file from the ext2 disk.
+ * path must be "/filename".  Frees data blocks and inode.
+ * Returns 0 on success, -1 if not found or not a regular file.
+ */
+int ext2_delete_file(const char *path) {
+    if (!g.ready || !path || path[0] != '/') return -1;
+
+    const char *name = path + 1;
+    uint32_t name_len = 0;
+    while (name[name_len] && name_len < 255) name_len++;
+    if (name_len == 0) return -1;
+    for (uint32_t i = 0; i < name_len; i++)
+        if (name[i] == '/') return -1;
+
+    uint32_t ino = e2_resolve(path);
+    if (ino == 0) return -1;
+
+    ext2_inode_t inode;
+    if (!e2_read_inode(ino, &inode)) return -1;
+    if ((inode.i_mode & 0xF000u) != EXT2_IMODE_FILE) return -1;
+
+    /* Free direct data blocks */
+    for (int b = 0; b < 12; b++) {
+        if (inode.i_block[b] == 0) break;
+        e2_free_block(inode.i_block[b]);
+    }
+
+    /* Remove directory entry first (so partial failures leave no dangling ref) */
+    if (!e2_remove_dirent(2, name)) return -1;
+
+    /* Free the inode */
+    e2_free_inode(ino);
+
+    return 0;
 }
