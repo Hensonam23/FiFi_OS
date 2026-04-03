@@ -52,6 +52,8 @@ OBJS := \
     $(BUILD)/vfs.o \
     $(BUILD)/exec.o \
     $(BUILD)/fork.o \
+    $(BUILD)/pci.o \
+    $(BUILD)/virtio_blk.o \
     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -132,11 +134,25 @@ $(ISO): $(KERNEL) limine.conf
 
 	limine bios-install $(ISO)
 
-run: iso
-	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial file:serial.log -no-reboot -no-shutdown
+DISK := build/disk.img
+DISK_MB := 32
 
-rundbg: iso
-	qemu-system-x86_64 -m 1024 -cdrom $(ISO) -serial stdio -no-reboot -no-shutdown
+$(DISK): | $(BUILD)
+	dd if=/dev/zero of=$(DISK) bs=1M count=$(DISK_MB) 2>/dev/null
+	@# Write magic header at sector 0 so blkread can verify I/O
+	printf '\xF1\xF1\x05\x05FiFiDisk\x00' | dd of=$(DISK) bs=1 seek=0 conv=notrunc 2>/dev/null
+	@echo "[disk] created $(DISK) ($(DISK_MB) MiB)"
+
+disk: $(DISK)
+
+QEMU_COMMON := -M q35 -m 256M -smp 1 -cdrom $(ISO) -no-reboot
+QEMU_DISK   := -drive file=$(DISK),format=raw,if=virtio
+
+run: iso $(DISK)
+	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) -serial file:serial.log -no-shutdown
+
+rundbg: iso $(DISK)
+	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) -serial stdio -no-shutdown
 
 clean:
 	rm -rf $(BUILD)
@@ -188,6 +204,12 @@ $(BUILD)/vfs.o: kernel/src/vfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/exec.o: kernel/src/exec.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/pci.o: kernel/src/pci.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/virtio_blk.o: kernel/src/virtio_blk.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # elf object

@@ -22,6 +22,7 @@
 #include "shell.h"
 #include "thread.h"
 #include "gdt.h"
+#include "virtio_blk.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -236,6 +237,8 @@ heap_init();
 
     initrd_init();
     initrd_cat("motd.txt");
+    virtio_blk_init();
+
     thread_init();
     {
         uint64_t t = pmm_get_total_pages(), f = pmm_get_free_pages(), u = pmm_get_used_pages();
