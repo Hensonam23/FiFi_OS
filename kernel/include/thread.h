@@ -74,3 +74,4 @@ void     thread_set_brk(uint64_t brk);
 void thread_set_exit_code(int code);
 void thread_set_parent_for_slot(int slot, uint32_t ptid);
 long thread_reap_zombie_child(uint32_t parent_tid, uint32_t child_tid, int *code_out);
+uint32_t thread_tid_of_slot(int slot);
