@@ -12,6 +12,7 @@
 #include "pmm.h"
 #include "usermode.h"
 #include "gdt.h"
+#include "virtio_blk.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1234,6 +1235,46 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         }
 
         kprintf("Heap: cur_page=%p offset=%p bytes\n", hpage, (void*)hoff);
+        return;
+    }
+
+    if (streq_simple(argv[0], "blkinfo")) {
+        if (!virtio_blk_present()) {
+            kprintf("blkinfo: no VirtIO block device\n");
+        } else {
+            uint64_t secs = virtio_blk_sector_count();
+            kprintf("blkinfo: %p sectors (%p MiB)\n",
+                    (void*)secs, (void*)(secs / 2048));
+        }
+        return;
+    }
+
+    if (streq_simple(argv[0], "blkread")) {
+        /* blkread <sector> — hex-dump first 64 bytes of a sector */
+        if (argc < 2) { kprintf("usage: blkread <sector>\n"); return; }
+        if (!virtio_blk_present()) { kprintf("blkread: no disk\n"); return; }
+
+        /* Parse sector number (decimal) */
+        uint64_t sec = 0;
+        const char *p = argv[1];
+        while (*p >= '0' && *p <= '9') sec = sec * 10 + (uint64_t)(*p++ - '0');
+
+        /* Use a stack-local 512-byte buffer (kernel stack, physically mapped) */
+        static uint8_t blk_buf[512];
+        if (!virtio_blk_read(sec, blk_buf, 1)) {
+            kprintf("blkread: read failed\n");
+            return;
+        }
+
+        kprintf("sector %p:\n", (void*)sec);
+        for (int row = 0; row < 4; row++) {
+            kprintf("  %p: ", (void*)(uintptr_t)(row * 16));
+            for (int col = 0; col < 16; col++) {
+                uint8_t b = blk_buf[row * 16 + col];
+                kprintf("%x%x ", b >> 4, b & 0xF);
+            }
+            kprintf("\n");
+        }
         return;
     }
 
