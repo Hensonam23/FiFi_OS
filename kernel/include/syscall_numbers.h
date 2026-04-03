@@ -27,4 +27,5 @@ enum {
     SYS_BRK       = 14,
     SYS_WAITPID   = 15,
     SYS_GETCHAR   = 16,
+    SYS_LISTFILES = 17,
 };

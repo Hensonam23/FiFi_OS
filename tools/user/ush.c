@@ -68,19 +68,49 @@ static long ush_execv(const char *name, const char *const *argv) {
 
 /* ── builtins ────────────────────────────────────────────────────────────── */
 
+static char ls_buf[4096];
+static char cat_buf[64 * 1024];
+
 static int ush_builtin(int argc, char *argv[]) {
     if (argc == 0) return 0;
+
     if (strcmp(argv[0], "exit") == 0 || strcmp(argv[0], "quit") == 0) {
         int code = (argc > 1) ? (int)(argv[1][0] - '0') : 0;
         printf("bye\n");
         sys_exit(code);
     }
+
     if (strcmp(argv[0], "help") == 0) {
-        printf("ush builtins: exit  quit  help\n");
-        printf("Run any .elf from initrd/disk — .elf suffix is optional.\n");
-        printf("Examples:  ucat motd.txt    uinfo    ucat /hello.txt\n");
+        printf("builtins: exit quit help echo cat ls\n");
+        printf("Run any .elf — .elf suffix optional. Examples:\n");
+        printf("  ucat motd.txt    uinfo    uwait    uls\n");
         return 1;
     }
+
+    if (strcmp(argv[0], "echo") == 0) {
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) sys_write(" ", 1);
+            sys_write(argv[i], (uint64_t)strlen(argv[i]));
+        }
+        sys_write("\n", 1);
+        return 1;
+    }
+
+    if (strcmp(argv[0], "ls") == 0) {
+        long n = sys_listfiles(ls_buf, sizeof(ls_buf));
+        if (n > 0) sys_write(ls_buf, (uint64_t)n);
+        return 1;
+    }
+
+    if (strcmp(argv[0], "cat") == 0) {
+        if (argc < 2) { printf("usage: cat <file>\n"); return 1; }
+        long n = sys_readfile(argv[1], cat_buf, (uint64_t)(sizeof(cat_buf) - 1));
+        if (n < 0) { printf("cat: not found: %s\n", argv[1]); return 1; }
+        sys_write(cat_buf, (uint64_t)n);
+        if (n > 0 && cat_buf[n - 1] != '\n') sys_write("\n", 1);
+        return 1;
+    }
+
     return 0;
 }
 

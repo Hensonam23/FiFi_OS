@@ -303,3 +303,6 @@ void ul_puts(const char *s) {
     sys_write(s, (uint64_t)ul_strlen(s));
     sys_write("\n", 1);
 }
+
+/* Pull in the heap allocator (malloc/free/calloc/realloc) */
+#include "umalloc.h"
