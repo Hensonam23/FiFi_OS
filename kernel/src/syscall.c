@@ -8,6 +8,7 @@
 #include "usermode.h"
 #include "vfs.h"
 #include "exec.h"
+#include "keyboard.h"
 
 static int copyin_str(char *dst, size_t dst_cap, uint64_t uaddr) {
     if (!dst || dst_cap == 0) return -1;
@@ -470,6 +471,18 @@ case SYS_UPTIME:
                 /* No change */
                 ctx->rax = cur_brk;
                 break;
+            }
+        }
+
+        case SYS_GETCHAR: {
+            /* Block until a key is available; returns ASCII/KEY_* value */
+            for (;;) {
+                int c = keyboard_try_getchar();
+                if (c >= 0) {
+                    ctx->rax = (uint64_t)(unsigned int)c;
+                    return;
+                }
+                thread_sleep_ms(10);
             }
         }
 
