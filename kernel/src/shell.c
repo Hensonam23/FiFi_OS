@@ -212,8 +212,21 @@ static void run_thread_fn(void *arg) {
     const void *data = 0;
     uint64_t size = 0;
     int rc = vfs_read(path, &data, &size);
+
+    /* If not found and no extension given, try appending ".elf" */
+    static char path_elf[260];
+    if ((rc < 0 || !data) && pi < 252) {
+        int ei = 0;
+        while (path_local[ei] && ei < 255) { path_elf[ei] = path_local[ei]; ei++; }
+        path_elf[ei++] = '.'; path_elf[ei++] = 'e';
+        path_elf[ei++] = 'l'; path_elf[ei++] = 'f';
+        path_elf[ei] = '\0';
+        rc = vfs_read(path_elf, &data, &size);
+        if (rc == 0) path = path_elf;
+    }
+
     if (rc < 0 || !data || size < sizeof(Elf64_Ehdr)) {
-        kprintf("run: read failed: %s\n", path);
+        kprintf("run: read failed: %s\n", path_local);
         thread_exit();
     }
 
