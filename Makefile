@@ -54,6 +54,7 @@ OBJS := \
     $(BUILD)/fork.o \
     $(BUILD)/pci.o \
     $(BUILD)/virtio_blk.o \
+    $(BUILD)/ext2.o \
     $(BUILD)/isr_asm.o
 
 .PHONY: all kernel iso clean run
@@ -139,9 +140,16 @@ DISK_MB := 32
 
 $(DISK): | $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=$(DISK_MB) 2>/dev/null
-	@# Write magic header at sector 0 so blkread can verify I/O
-	printf '\xF1\xF1\x05\x05FiFiDisk\x00' | dd of=$(DISK) bs=1 seek=0 conv=notrunc 2>/dev/null
-	@echo "[disk] created $(DISK) ($(DISK_MB) MiB)"
+	mkfs.ext2 -b 1024 -L "fifidisk" $(DISK)
+	@# Mount, populate test files, unmount
+	mkdir -p /tmp/fifi_mnt
+	sudo mount -o loop $(DISK) /tmp/fifi_mnt
+	echo "Hello from ext2!" | sudo tee /tmp/fifi_mnt/hello.txt > /dev/null
+	sudo mkdir -p /tmp/fifi_mnt/docs
+	echo "FiFi OS ext2 filesystem" | sudo tee /tmp/fifi_mnt/docs/readme.txt > /dev/null
+	python3 -c "print('A'*1200)" | sudo tee /tmp/fifi_mnt/big.txt > /dev/null
+	sudo umount /tmp/fifi_mnt
+	@echo "[disk] created $(DISK) with ext2 ($(DISK_MB) MiB)"
 
 disk: $(DISK)
 

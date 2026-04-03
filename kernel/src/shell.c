@@ -13,6 +13,7 @@
 #include "usermode.h"
 #include "gdt.h"
 #include "virtio_blk.h"
+#include "ext2.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1235,6 +1236,29 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         }
 
         kprintf("Heap: cur_page=%p offset=%p bytes\n", hpage, (void*)hoff);
+        return;
+    }
+
+    if (streq_simple(argv[0], "e2ls")) {
+        const char *path = (argc >= 2) ? argv[1] : "/";
+        ext2_ls(path);
+        return;
+    }
+
+    if (streq_simple(argv[0], "e2cat")) {
+        if (argc < 2) { kprintf("usage: e2cat <path>\n"); return; }
+        if (!ext2_present()) { kprintf("e2cat: ext2 not ready\n"); return; }
+        int sz = ext2_file_size(argv[1]);
+        if (sz < 0) { kprintf("e2cat: not found: %s\n", argv[1]); return; }
+        /* Allocate a kernel buffer for the file */
+        char *fbuf = (char*)kmalloc((size_t)sz + 1);
+        if (!fbuf) { kprintf("e2cat: alloc failed\n"); return; }
+        int got = ext2_read_file(argv[1], fbuf, (uint32_t)sz);
+        if (got < 0) { kprintf("e2cat: read failed\n"); kfree(fbuf); return; }
+        fbuf[got] = '\0';
+        kprintf("%s", fbuf);
+        if (got > 0 && fbuf[got-1] != '\n') kprintf("\n");
+        kfree(fbuf);
         return;
     }
 
