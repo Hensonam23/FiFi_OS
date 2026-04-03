@@ -68,8 +68,14 @@ static inline uint64_t sys_gettid(void) {
     return (uint64_t)sys_call0(SYS_GETTID);
 }
 
+/* sys_write: write to fd (1 = stdout/console).  Same call sites as before. */
 static inline long sys_write(const void *buf, uint64_t len) {
-    return sys_call2(SYS_WRITE, (long)(uintptr_t)buf, (long)len);
+    return sys_call3(SYS_WRITE, 1L, (long)(uintptr_t)buf, (long)len);
+}
+
+/* sys_fdwrite: write to an arbitrary fd (e.g., a pipe write end). */
+static inline long sys_fdwrite(int fd, const void *buf, uint64_t len) {
+    return sys_call3(SYS_WRITE, (long)fd, (long)(uintptr_t)buf, (long)len);
 }
 
 static inline long sys_open(const char *path) {
@@ -130,6 +136,18 @@ static inline int sys_getchar(void) {
  * Returns reaped TID on success, -1 on error/timeout/no child. */
 static inline long sys_waitpid(unsigned long child_tid, int *exit_code) {
     return sys_call2(SYS_WAITPID, (long)child_tid, (long)(uintptr_t)exit_code);
+}
+
+/* pipe(pipefd): create a pipe.  pipefd[0] = read end, pipefd[1] = write end.
+ * Returns 0 on success, -1 on failure. */
+static inline long sys_pipe(int pipefd[2]) {
+    return sys_call1(SYS_PIPE, (long)(uintptr_t)pipefd);
+}
+
+/* dup2(old_fd, new_fd): make new_fd refer to the same resource as old_fd.
+ * Returns new_fd on success, -1 on failure. */
+static inline long sys_dup2(int old_fd, int new_fd) {
+    return sys_call2(SYS_DUP2, (long)old_fd, (long)new_fd);
 }
 
 /* sbrk(n): grow heap by n bytes, return pointer to start of new region.

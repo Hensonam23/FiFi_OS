@@ -74,60 +74,182 @@ static int copyout_bytes(uint64_t uaddr, const uint8_t *src, size_t n) {
     return (int)n;
 }
 
-#define SYS_FD_MAX 16
+/* ── pipes ──────────────────────────────────────────────────────────────────
+ * Fixed-size ring-buffer pipes.  No dynamic allocation — just a static pool.
+ * The pipe is ref-counted: ropen = live read-end fds, wopen = live write-end fds.
+ */
+#define PIPE_BUF  4096
+#define PIPE_MAX  8
 
 typedef struct {
-    int used;
+    uint8_t  buf[PIPE_BUF];
+    uint32_t head;          /* index of next byte to read */
+    uint32_t nread;         /* bytes currently in buffer */
+    volatile int ropen;     /* number of live read-end fds */
+    volatile int wopen;     /* number of live write-end fds */
+} pipe_t;
+
+static pipe_t g_pipes[PIPE_MAX];
+
+static pipe_t *pipe_alloc(void) {
+    for (int i = 0; i < PIPE_MAX; i++) {
+        pipe_t *p = &g_pipes[i];
+        if (p->ropen == 0 && p->wopen == 0) {
+            p->head  = 0;
+            p->nread = 0;
+            p->ropen = 1;
+            p->wopen = 1;
+            return p;
+        }
+    }
+    return (pipe_t*)0;
+}
+
+/* Write up to n bytes into the ring buffer.  Returns bytes actually written. */
+static uint32_t pipe_ring_write(pipe_t *p, const uint8_t *src, uint32_t n) {
+    uint32_t free_space = (uint32_t)PIPE_BUF - p->nread;
+    if (n > free_space) n = free_space;
+    if (n == 0) return 0;
+    uint32_t tail  = (p->head + p->nread) % (uint32_t)PIPE_BUF;
+    uint32_t chunk = (uint32_t)PIPE_BUF - tail;  /* contiguous space to end */
+    if (chunk > n) chunk = n;
+    for (uint32_t i = 0; i < chunk; i++) p->buf[tail + i] = src[i];
+    if (chunk < n)
+        for (uint32_t i = 0; i < n - chunk; i++) p->buf[i] = src[chunk + i];
+    p->nread += n;
+    return n;
+}
+
+/* Read up to n bytes from the ring buffer.  Returns bytes actually read. */
+static uint32_t pipe_ring_read(pipe_t *p, uint8_t *dst, uint32_t n) {
+    if (n > p->nread) n = p->nread;
+    if (n == 0) return 0;
+    uint32_t chunk = (uint32_t)PIPE_BUF - p->head;
+    if (chunk > n) chunk = n;
+    for (uint32_t i = 0; i < chunk; i++) dst[i] = p->buf[p->head + i];
+    if (chunk < n)
+        for (uint32_t i = 0; i < n - chunk; i++) dst[chunk + i] = p->buf[i];
+    p->head  = (p->head + n) % (uint32_t)PIPE_BUF;
+    p->nread -= n;
+    return n;
+}
+
+/* ── file-descriptor table ────────────────────────────────────────────────
+ * Each entry holds a (owner_tid, fd_num) pair so that two threads can each
+ * own fd 3 simultaneously (needed for fork).  Linear search is fine for 32
+ * entries and O(1)-ish thread counts.
+ */
+#define FD_TYPE_FILE   0
+#define FD_TYPE_PIPE_R 1
+#define FD_TYPE_PIPE_W 2
+
+#define SYS_FD_MAX 32
+
+typedef struct {
+    int      used;
+    int      fd_num;        /* logical fd as seen by userspace */
     uint64_t owner_tid;
+    uint8_t  type;          /* FD_TYPE_* */
+    /* file: */
     const uint8_t *data;
     uint64_t size;
     uint64_t off;
+    /* pipe: */
+    pipe_t  *pipe;
 } sys_fd_t;
 
 static sys_fd_t g_fds[SYS_FD_MAX];
 
+/* Find the entry for (tid, fd_num), or NULL. */
+static sys_fd_t *fd_get(uint64_t tid, int fd_num) {
+    for (int i = 0; i < SYS_FD_MAX; i++) {
+        sys_fd_t *f = &g_fds[i];
+        if (f->used && f->owner_tid == tid && f->fd_num == fd_num)
+            return f;
+    }
+    return (sys_fd_t*)0;
+}
+
+/* Return the lowest fd_num ≥ 3 not already used by tid. */
+static int fd_next_num(uint64_t tid) {
+    for (int n = 3; n < 256; n++)
+        if (!fd_get(tid, n)) return n;
+    return -1;
+}
+
+/* Find a free slot; fill it with type=FILE.  Returns fd_num or -1. */
 static int fd_alloc(uint64_t tid, const uint8_t *data, uint64_t size) {
+    int fd_num = fd_next_num(tid);
+    if (fd_num < 0) return -1;
     for (int i = 0; i < SYS_FD_MAX; i++) {
         if (!g_fds[i].used) {
-            g_fds[i].used = 1;
+            g_fds[i].used      = 1;
+            g_fds[i].fd_num    = fd_num;
             g_fds[i].owner_tid = tid;
-            g_fds[i].data = data;
-            g_fds[i].size = size;
-            g_fds[i].off = 0;
-            return i;
+            g_fds[i].type      = FD_TYPE_FILE;
+            g_fds[i].data      = data;
+            g_fds[i].size      = size;
+            g_fds[i].off       = 0;
+            g_fds[i].pipe      = (pipe_t*)0;
+            return fd_num;
         }
     }
     return -1;
 }
 
-static sys_fd_t *fd_get(uint64_t tid, int fd) {
-    if (fd < 0 || fd >= SYS_FD_MAX) return 0;
-    if (!g_fds[fd].used) return 0;
-    if (g_fds[fd].owner_tid != tid) return 0;
-    return &g_fds[fd];
+/* Decrement pipe refcounts; zero the entry. */
+static void fd_close_entry(sys_fd_t *f) {
+    if (f->type == FD_TYPE_PIPE_R && f->pipe) { f->pipe->ropen--; }
+    if (f->type == FD_TYPE_PIPE_W && f->pipe) { f->pipe->wopen--; }
+    f->used = 0; f->fd_num = 0; f->owner_tid = 0;
+    f->type = 0; f->data = 0; f->size = 0; f->off = 0; f->pipe = 0;
 }
 
-static void fd_close(uint64_t tid, int fd) {
-    sys_fd_t *f = fd_get(tid, fd);
-    if (!f) return;
-    f->used = 0;
-    f->owner_tid = 0;
-    f->data = 0;
-    f->size = 0;
-    f->off = 0;
+static void fd_close(uint64_t tid, int fd_num) {
+    sys_fd_t *f = fd_get(tid, fd_num);
+    if (f) fd_close_entry(f);
 }
-
 
 static void fd_close_all(uint64_t tid) {
     for (int i = 0; i < SYS_FD_MAX; i++) {
-        if (!g_fds[i].used) continue;
-        if (g_fds[i].owner_tid != tid) continue;
-        g_fds[i].used = 0;
-        g_fds[i].owner_tid = 0;
-        g_fds[i].data = 0;
-        g_fds[i].size = 0;
-        g_fds[i].off = 0;
+        if (g_fds[i].used && g_fds[i].owner_tid == tid)
+            fd_close_entry(&g_fds[i]);
     }
+}
+
+/* Called from SYS_FORK: give the child copies of all parent fds. */
+static void fd_fork_inherit(uint64_t parent_tid, uint64_t child_tid) {
+    for (int i = 0; i < SYS_FD_MAX; i++) {
+        sys_fd_t *p = &g_fds[i];
+        if (!p->used || p->owner_tid != parent_tid) continue;
+        /* Find a free slot for child's copy */
+        for (int j = 0; j < SYS_FD_MAX; j++) {
+            if (!g_fds[j].used) {
+                g_fds[j] = *p;
+                g_fds[j].owner_tid = child_tid;
+                if (p->type == FD_TYPE_PIPE_R && p->pipe) p->pipe->ropen++;
+                if (p->type == FD_TYPE_PIPE_W && p->pipe) p->pipe->wopen++;
+                break;
+            }
+        }
+    }
+}
+
+/* dup2(old_fd, new_fd): close new_fd if open, then duplicate old_fd as new_fd. */
+static int fd_dup2(uint64_t tid, int old_fd_num, int new_fd_num) {
+    sys_fd_t *old = fd_get(tid, old_fd_num);
+    if (!old) return -1;
+    fd_close(tid, new_fd_num);      /* close new_fd if it was open */
+    for (int i = 0; i < SYS_FD_MAX; i++) {
+        if (!g_fds[i].used) {
+            g_fds[i] = *old;
+            g_fds[i].fd_num = new_fd_num;
+            if (old->type == FD_TYPE_PIPE_R && old->pipe) old->pipe->ropen++;
+            if (old->type == FD_TYPE_PIPE_W && old->pipe) old->pipe->wopen++;
+            return new_fd_num;
+        }
+    }
+    return -1;
 }
 
 void syscall_dispatch(isr_ctx_t *ctx) {
@@ -194,38 +316,49 @@ case SYS_UPTIME:
         }
 
         case SYS_WRITE: {
-            // rdi = user ptr, rsi = len
-            uint64_t ptr = (uint64_t)ctx->rdi;
-            uint64_t len = (uint64_t)ctx->rsi;
+            /* rdi = fd (1 = stdout/console), rsi = user buf ptr, rdx = len */
+            int      wr_fd = (int)ctx->rdi;
+            uint64_t ptr   = ctx->rsi;
+            uint64_t len   = ctx->rdx;
 
-            // keep it sane
-            if (len > 1024) len = 1024;
+            if (len > 4096) len = 4096;
 
             int from_user = ((ctx->cs & 3ULL) == 3ULL);
 
+            /* Copyin the data first (or use kernel ptr for ring0) */
+            uint8_t wr_buf[4096];
+            int n;
             if (from_user) {
-                uint8_t buf[1024];
-                int n = copyin_bytes(buf, sizeof(buf), ptr, (size_t)len);
-                if (n < 0) {
-                    kprintf("[syscall] SYS_WRITE bad user ptr=%p len=%p\n", (void*)ptr, (void*)len);
-                    ctx->rax = (uint64_t)-1;
-                    return;
-                }
+                n = copyin_bytes(wr_buf, sizeof(wr_buf), ptr, (size_t)len);
+                if (n < 0) { ctx->rax = (uint64_t)-1; return; }
+            } else {
+                n = (int)len;
+                if (n > (int)sizeof(wr_buf)) n = (int)sizeof(wr_buf);
+                const uint8_t *k = (const uint8_t*)(uintptr_t)ptr;
+                for (int i = 0; i < n; i++) wr_buf[i] = k[i];
+            }
 
-                for (int i = 0; i < n; i++) {
-                    kprintf("%c", (int)buf[i]);
-                }
+            /* Check if this fd is a pipe write end */
+            uint64_t tid = thread_current_tid();
+            sys_fd_t *wf = fd_get(tid, wr_fd);
 
-                ctx->rax = (uint64_t)n;
+            if (wf && wf->type == FD_TYPE_PIPE_W) {
+                /* Write to pipe — block if full, bail if read end closed */
+                uint32_t written = 0;
+                while (written < (uint32_t)n) {
+                    if (wf->pipe->ropen == 0) { ctx->rax = (uint64_t)-1; return; }
+                    uint32_t w = pipe_ring_write(wf->pipe, wr_buf + written,
+                                                  (uint32_t)n - written);
+                    written += w;
+                    if (written < (uint32_t)n) thread_sleep_ms(1);
+                }
+                ctx->rax = (uint64_t)written;
                 return;
             }
 
-            // ring0 caller: treat as kernel pointer
-            const uint8_t *k = (const uint8_t*)(uintptr_t)ptr;
-            for (uint64_t i = 0; i < len; i++) {
-                kprintf("%c", (int)k[i]);
-            }
-            ctx->rax = len;
+            /* Default: write to console (fd=1 with no pipe redirect, or ring0) */
+            for (int i = 0; i < n; i++) kprintf("%c", (int)wr_buf[i]);
+            ctx->rax = (uint64_t)n;
             return;
         }
 
@@ -263,34 +396,46 @@ case SYS_UPTIME:
         }
 
         case SYS_READ: {
-            // rdi = fd, rsi = user buf ptr, rdx = len
-            int fd = (int)ctx->rdi;
-            uint64_t ubuf = (uint64_t)ctx->rsi;
-            uint64_t len  = (uint64_t)ctx->rdx;
+            /* rdi = fd, rsi = user buf ptr, rdx = len */
+            int      rd_fd = (int)ctx->rdi;
+            uint64_t ubuf  = ctx->rsi;
+            uint64_t len   = ctx->rdx;
 
-            int from_user = ((ctx->cs & 3ULL) == 3ULL);
-            if (!from_user) { ctx->rax = (uint64_t)-1; return; }
-
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
             if (len > 4096) len = 4096;
 
             uint64_t tid = thread_current_tid();
-            sys_fd_t *f = fd_get(tid, fd);
+            sys_fd_t *f = fd_get(tid, rd_fd);
             if (!f) { ctx->rax = (uint64_t)-1; return; }
 
-            if (f->off >= f->size) {
-                ctx->rax = 0; // EOF
-                return;
+            if (f->type == FD_TYPE_PIPE_R) {
+                /* Blocking pipe read — wait until data available or write end closed */
+                uint8_t rd_buf[4096];
+                for (;;) {
+                    uint32_t got = pipe_ring_read(f->pipe, rd_buf, (uint32_t)len);
+                    if (got > 0) {
+                        if (copyout_bytes(ubuf, rd_buf, (size_t)got) < 0) {
+                            ctx->rax = (uint64_t)-1; return;
+                        }
+                        ctx->rax = (uint64_t)got;
+                        return;
+                    }
+                    /* Buffer empty */
+                    if (f->pipe->wopen == 0) {
+                        ctx->rax = 0;   /* EOF — writer is gone */
+                        return;
+                    }
+                    thread_sleep_ms(2);
+                }
             }
 
+            /* Regular file fd */
+            if (f->off >= f->size) { ctx->rax = 0; return; }
             uint64_t remain = f->size - f->off;
-            uint64_t n = len;
-            if (n > remain) n = remain;
-
-            if (copyout_bytes(ubuf, f->data + f->off, (size_t)n) < 0) {
-                ctx->rax = (uint64_t)-1;
-                return;
+            uint64_t n = (len < remain) ? len : remain;
+            if (copyout_bytes(ubuf, f->data + (size_t)f->off, (size_t)n) < 0) {
+                ctx->rax = (uint64_t)-1; return;
             }
-
             f->off += n;
             ctx->rax = n;
             return;
@@ -409,7 +554,12 @@ case SYS_UPTIME:
         }
 
         case SYS_FORK: {
-            ctx->rax = (uint64_t)do_fork(ctx);
+            uint64_t fork_parent = thread_current_tid();
+            long fork_child = do_fork(ctx);
+            if (fork_child > 0) {
+                fd_fork_inherit(fork_parent, (uint64_t)fork_child);
+            }
+            ctx->rax = (uint64_t)fork_child;
             break;
         }
 
@@ -523,6 +673,84 @@ case SYS_UPTIME:
                 }
                 thread_sleep_ms(10);
             }
+        }
+
+        case SYS_PIPE: {
+            /* rdi = user int[2] to receive [read_fd, write_fd] */
+            uint64_t ufd_arr = ctx->rdi;
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+
+            pipe_t *pp = pipe_alloc();
+            if (!pp) { ctx->rax = (uint64_t)-1; return; }
+
+            uint64_t tid = thread_current_tid();
+            /* Allocate read end first, then write end, at next free fd numbers */
+            int rfd_n = fd_next_num(tid);
+            if (rfd_n < 0) { pp->ropen = pp->wopen = 0; ctx->rax = (uint64_t)-1; return; }
+            /* Temporarily mark it used so wfd_n gets a different number */
+            int rfd_slot = -1;
+            for (int i = 0; i < SYS_FD_MAX; i++) {
+                if (!g_fds[i].used) { rfd_slot = i; break; }
+            }
+            if (rfd_slot < 0) { pp->ropen = pp->wopen = 0; ctx->rax = (uint64_t)-1; return; }
+            g_fds[rfd_slot].used = 1;  /* reserve slot */
+            g_fds[rfd_slot].fd_num = rfd_n;
+            g_fds[rfd_slot].owner_tid = tid;
+
+            int wfd_n = fd_next_num(tid);
+            if (wfd_n < 0) {
+                g_fds[rfd_slot].used = 0;
+                pp->ropen = pp->wopen = 0;
+                ctx->rax = (uint64_t)-1; return;
+            }
+            /* Finish populating rfd_slot and find wfd_slot */
+            g_fds[rfd_slot].type = FD_TYPE_PIPE_R;
+            g_fds[rfd_slot].data = (const uint8_t*)0;
+            g_fds[rfd_slot].size = g_fds[rfd_slot].off = 0;
+            g_fds[rfd_slot].pipe = pp;
+            /* ropen was pre-set to 1 by pipe_alloc; bump again since we also count this fd */
+            /* Actually pipe_alloc already set ropen=1 and wopen=1 so we're good as is.
+             * But fd_alloc_pipe_at would have done ropen++ again — avoid double-count. */
+
+            int wfd_slot = -1;
+            for (int i = 0; i < SYS_FD_MAX; i++) {
+                if (!g_fds[i].used) { wfd_slot = i; break; }
+            }
+            if (wfd_slot < 0) {
+                fd_close_entry(&g_fds[rfd_slot]);
+                ctx->rax = (uint64_t)-1; return;
+            }
+            g_fds[wfd_slot].used      = 1;
+            g_fds[wfd_slot].fd_num    = wfd_n;
+            g_fds[wfd_slot].owner_tid = tid;
+            g_fds[wfd_slot].type      = FD_TYPE_PIPE_W;
+            g_fds[wfd_slot].data      = (const uint8_t*)0;
+            g_fds[wfd_slot].size      = g_fds[wfd_slot].off = 0;
+            g_fds[wfd_slot].pipe      = pp;
+            /* wopen already 1 from pipe_alloc */
+
+            /* Write the two fd numbers into user memory */
+            int fds_out[2];
+            fds_out[0] = rfd_n;
+            fds_out[1] = wfd_n;
+            if (copyout_bytes(ufd_arr, (const uint8_t*)fds_out, sizeof(fds_out)) < 0) {
+                fd_close_entry(&g_fds[rfd_slot]);
+                fd_close_entry(&g_fds[wfd_slot]);
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_DUP2: {
+            /* rdi = old_fd, rsi = new_fd */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            int old_fd = (int)ctx->rdi;
+            int new_fd = (int)ctx->rsi;
+            uint64_t tid = thread_current_tid();
+            int r = fd_dup2(tid, old_fd, new_fd);
+            ctx->rax = (r >= 0) ? (uint64_t)r : (uint64_t)-1;
+            return;
         }
 
         default:

@@ -114,6 +114,53 @@ static int ush_builtin(int argc, char *argv[]) {
     return 0;
 }
 
+/* ── pipe helper ─────────────────────────────────────────────────────────── */
+
+/*
+ * Find a pipe '|' token in toks[0..ntok-1].
+ * Returns the index of '|', or -1 if none.
+ */
+static int find_pipe(char *toks[], int ntok) {
+    for (int i = 0; i < ntok; i++) {
+        if (toks[i][0] == '|' && toks[i][1] == '\0') return i;
+    }
+    return -1;
+}
+
+/*
+ * Run a single command (toks[0..ntok-1]) in a child.
+ * Before exec:
+ *   - close_read  ≥ 0  → close that fd
+ *   - close_write ≥ 0  → close that fd
+ *   - dup_read    ≥ 0  → dup2(dup_read, 0)   (stdin from pipe)
+ *   - dup_write   ≥ 0  → dup2(dup_write, 1)  (stdout to pipe)
+ * Returns child TID, or -1 on fork failure.
+ */
+static long run_piped(char *toks[], int ntok,
+                      int dup_stdin,  int dup_stdout,
+                      int close_a,    int close_b) {
+    long child = sys_fork();
+    if (child < 0) return -1;
+    if (child != 0) return child;  /* parent — return child TID */
+
+    /* child */
+    if (close_a >= 0) sys_close(close_a);
+    if (close_b >= 0) sys_close(close_b);
+    if (dup_stdin  >= 0) { sys_dup2(dup_stdin,  0); sys_close(dup_stdin); }
+    if (dup_stdout >= 0) { sys_dup2(dup_stdout, 1); sys_close(dup_stdout); }
+
+    /* Try builtin first (rare for piped cmds, but handle echo etc.) */
+    if (ush_builtin(ntok, toks)) sys_exit(0);
+
+    long r = ush_execv(toks[0], (const char *const *)toks);
+    if (r < 0) {
+        printf("ush: not found: %s\n", toks[0]);
+        sys_exit(127);
+    }
+    sys_exit(1);  /* unreachable */
+    return -1;    /* silence compiler */
+}
+
 /* ── main ────────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -133,23 +180,65 @@ int main(int argc, char **argv) {
         int ntok = ush_tokenise(line, toks, MAXARGS);
         if (ntok == 0) continue;
 
+        /* ── pipe: cmd1 | cmd2 ── */
+        int pipe_idx = find_pipe(toks, ntok);
+        if (pipe_idx >= 0) {
+            /* Split into left and right at '|' */
+            toks[pipe_idx] = (char*)0;
+            char **left_toks  = toks;
+            int    left_ntok  = pipe_idx;
+            char **right_toks = toks + pipe_idx + 1;
+            int    right_ntok = ntok - pipe_idx - 1;
+
+            if (left_ntok == 0 || right_ntok == 0) {
+                printf("ush: syntax error near '|'\n");
+                continue;
+            }
+
+            int pipefd[2];
+            if (sys_pipe(pipefd) < 0) {
+                printf("ush: pipe failed\n");
+                continue;
+            }
+
+            /* left child: stdout → pipe write end; close read end */
+            long c1 = run_piped(left_toks,  left_ntok,
+                                 -1,        pipefd[1],   /* dup stdout = write end */
+                                 pipefd[0], -1);          /* close read end in child */
+            if (c1 < 0) { printf("ush: fork failed\n"); sys_close(pipefd[0]); sys_close(pipefd[1]); continue; }
+
+            /* right child: stdin → pipe read end; close write end */
+            long c2 = run_piped(right_toks, right_ntok,
+                                 pipefd[0], -1,           /* dup stdin = read end */
+                                 pipefd[1], -1);           /* close write end in child */
+            if (c2 < 0) { printf("ush: fork failed\n"); sys_close(pipefd[0]); sys_close(pipefd[1]); continue; }
+
+            /* parent: close both ends then wait */
+            sys_close(pipefd[0]);
+            sys_close(pipefd[1]);
+
+            int code = 0;
+            sys_waitpid((unsigned long)c1, &code);
+            sys_waitpid((unsigned long)c2, &code);
+            if (code != 0 && code != 127) printf("[exit %d]\n", code);
+            continue;
+        }
+
+        /* ── no pipe: regular command ── */
         if (ush_builtin(ntok, toks)) continue;
 
-        /* external command: fork → execv → waitpid */
         long child = sys_fork();
         if (child < 0) { printf("ush: fork failed\n"); continue; }
 
         if (child == 0) {
-            /* child */
             long r = ush_execv(toks[0], (const char *const *)toks);
             if (r < 0) {
                 printf("ush: not found: %s\n", toks[0]);
                 sys_exit(127);
             }
-            sys_exit(1); /* unreachable after exec */
+            sys_exit(1);
         }
 
-        /* parent */
         int code = 0;
         long reaped = sys_waitpid((unsigned long)child, &code);
         if (reaped < 0) {
