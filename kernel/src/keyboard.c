@@ -3,6 +3,7 @@
 #include "keyboard.h"
 #include "thread.h"
 #include "io.h"
+#include "kprintf.h"
 
 /*
   PS/2 Set 1 keyboard decoder (QEMU friendly)
@@ -173,11 +174,54 @@ void keyboard_ps2_init(void) {
     for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
     outb(0x64, 0xAE);
 
-    /* Flush again */
+    /* Small settle delay after enabling interface */
+    for (volatile int i = 0; i < 50000; i++) __asm__ volatile("pause");
+
+    /* Flush any bytes the controller/keyboard generated during enable */
+    for (int i = 0; i < 32; i++) {
+        if (!(inb(0x64) & 0x01)) break;
+        (void)inb(0x60);
+    }
+
+    /* Send 0xF4 (Enable Scanning) to the keyboard device itself.
+     * Required on real hardware — QEMU auto-enables scanning, but laptop
+     * ECs and real i8042 controllers keep scanning disabled until told. */
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x60, 0xF4);
+
+    /* Wait for ACK (0xFA) from keyboard */
+    bool got_ack = false;
+    for (int i = 0; i < 100000; i++) {
+        if (inb(0x64) & 0x01) {
+            uint8_t r = inb(0x60);
+            if (r == 0xFA) { got_ack = true; break; }
+            if (r == 0xFE) break;   /* resend request — give up */
+        }
+    }
+
+    kprintf("[ps2] enable scanning: %s\n", got_ack ? "ACK" : "no response");
+
+    /* Also set scan code set 2 (translated to set 1 by bit 6 of config byte).
+     * Some laptop ECs need this explicitly. */
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x60, 0xF0);   /* Set Scan Code Set command */
+    for (int i = 0; i < 50000; i++) {
+        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
+    }
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x60, 0x02);   /* Scan code set 2 */
+    for (int i = 0; i < 50000; i++) {
+        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
+    }
+
+    /* Final flush */
     for (int i = 0; i < 16; i++) {
         if (!(inb(0x64) & 0x01)) break;
         (void)inb(0x60);
     }
+
+    kprintf("[ps2] i8042 status=0x%x cfg=0x%x\n",
+            (unsigned)inb(0x64), (unsigned)cfg);
 }
 
 void keyboard_irq_handler(void) {
