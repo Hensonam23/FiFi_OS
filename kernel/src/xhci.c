@@ -18,6 +18,72 @@
 #include "kprintf.h"
 #include "io.h"
 
+/* ── XHCI diagnostic log buffer ──────────────────────────────────────────── */
+/*
+ * All key XHCI messages are stored here in addition to going to kprintf.
+ * Viewable via the `xhci-log` shell command once boot completes.
+ * Useful when keyboard doesn't work: read the log to diagnose what happened.
+ */
+#define XHCI_LOG_SIZE 4096
+static char     xhci_log_buf[XHCI_LOG_SIZE];
+static uint32_t xhci_log_pos = 0;
+
+/* xlog: dual-output to kprintf + log buffer.
+ * Supports: %s %u %x (all uint32_t args — cast before passing) */
+static void xlog(const char *fmt, ...) {
+    char tmp[256];
+    int  pos = 0;
+    va_list ap;
+    va_start(ap, fmt);
+    for (const char *f = fmt; *f && pos < 255; f++) {
+        if (*f != '%') { tmp[pos++] = *f; continue; }
+        f++;
+        switch (*f) {
+        case 'u': {
+            uint32_t v = va_arg(ap, uint32_t);
+            if (!v) { tmp[pos++] = '0'; break; }
+            char t[12]; int n = 0;
+            while (v) { t[n++] = (char)('0' + (v%10)); v /= 10; }
+            for (int i = n-1; i >= 0 && pos < 255; i--) tmp[pos++] = t[i];
+            break;
+        }
+        case 'x': {
+            uint32_t v = va_arg(ap, uint32_t);
+            bool lead = true;
+            for (int sh = 28; sh >= 0; sh -= 4) {
+                uint8_t nib = (uint8_t)((v >> sh) & 0xF);
+                if (nib || !lead || sh == 0) {
+                    lead = false;
+                    if (pos < 255) tmp[pos++] = "0123456789abcdef"[nib];
+                }
+            }
+            break;
+        }
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            while (*s && pos < 255) tmp[pos++] = *s++;
+            break;
+        }
+        default: if (pos < 255) tmp[pos++] = *f; break;
+        }
+    }
+    va_end(ap);
+    tmp[pos] = 0;
+
+    /* Append to log buffer */
+    for (int i = 0; tmp[i] && xhci_log_pos < XHCI_LOG_SIZE - 1; i++)
+        xhci_log_buf[xhci_log_pos++] = tmp[i];
+    xhci_log_buf[xhci_log_pos] = 0;
+
+    /* Print to screen/serial */
+    kprintf("%s", tmp);
+}
+
+/* Exposed so shell's xhci-log command can display the buffer */
+const char *xhci_log_get(void)  { return xhci_log_buf; }
+uint32_t    xhci_log_size(void) { return xhci_log_pos; }
+
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
 static void *memset_x(void *s, int c, size_t n) {
@@ -239,6 +305,13 @@ static struct {
 
     uint8_t  *kbd_data[KBD_BUFS];
     uint64_t  kbd_data_phys[KBD_BUFS];
+
+    /* USB mass storage (for writing debug log to USB drive) */
+    int      stor_slot;
+    int      stor_bout_dci;
+    int      stor_bin_dci;
+    ring_t   stor_bout;
+    ring_t   stor_bin;
 } g;
 
 /* ── Doorbell ────────────────────────────────────────────────────────────── */
@@ -250,7 +323,7 @@ static void ring_doorbell(uint8_t slot, uint8_t dci) {
 /* ── Event ring: wait for one event of a given type ─────────────────────── */
 
 static bool wait_event(uint8_t want_type, uint32_t *cc, uint64_t *param, uint8_t *slot) {
-    for (int i = 0; i < 100000; i++) {
+    for (int i = 0; i < 30000; i++) {
         xhci_trb_t *ev = &g.evt.trbs[g.evt.deq];
         if ((ev->control & 1u) != (uint32_t)g.evt.cycle) { udelay(10); continue; }
 
@@ -488,49 +561,38 @@ typedef struct {
 #define HUB_C_PORT_CONN     16
 #define HUB_C_PORT_RESET    20
 
-/* ── Try to enumerate one device as a HID boot keyboard ──────────────────── */
+/* ── Try to enumerate one device ─────────────────────────────────────────── */
 /*
- * slot:        already-enabled xHCI slot
- * root_port1:  1-based root hub port (or same as parent's root port for hub children)
- * speed:       PORTSC speed code
- * route:       20-bit route string (0 for root, hub_port in bits 3:0 for tier-1 hub)
- * hub_slot:    parent hub slot (0 = no hub)
- * hub_port:    1-based port on parent hub (0 = no hub)
- *
- * Returns: 0=not a keyboard, 1=keyboard set up OK, -1=error
+ * Returns: 0=not kbd/hub, 1=keyboard OK, -1=error, 2=mass storage set up
  */
 static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
                               uint32_t route, uint8_t hub_slot, uint8_t hub_port) {
-    /* Choose EP0 MPS based on speed: LS=8, FS=8, HS=64 */
-    uint16_t ep0_mps = (speed == 3) ? 64 : 8;
+    uint16_t ep0_mps = (speed == 4) ? 512 : (speed == 3) ? 64 : 8;
 
     if (!cmd_address_device(slot, route, speed, root_port1,
-                             hub_slot, hub_port, ep0_mps)) {
+                             hub_slot, hub_port, ep0_mps))
         return -1;
-    }
 
-    /* Allocate descriptor buffer */
     uint64_t buf_phys = pmm_alloc_page();
     if (!buf_phys) return -1;
     uint8_t *buf = (uint8_t *)pmm_phys_to_virt(buf_phys);
 
-    /* GET_DESCRIPTOR: device descriptor (8 bytes to get class + MPS) */
     memset_x(buf, 0, 4096);
-    if (!ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 8), buf_phys, 8, true))
+    if (!ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 18), buf_phys, 18, true))
         return -1;
 
     usb_dev_desc_t *dd = (usb_dev_desc_t *)buf;
     uint8_t dev_class = dd->bDeviceClass;
+    xlog("[xhci]   slot %u class=%x vid=%x pid=%x\n",
+         (uint32_t)slot, (uint32_t)dev_class,
+         (uint32_t)dd->idVendor, (uint32_t)dd->idProduct);
 
-    /* Class 0x09 = Hub (caller handles this) */
-    if (dev_class == 0x09) return 0;
+    if (dev_class == 0x09) return 0;   /* hub — caller handles */
 
-    /* GET_DESCRIPTOR: full configuration descriptor */
     memset_x(buf, 0, 255);
     if (!ctrl_xfer(slot, usb_setup(0x80, 6, 0x0200, 0, 255), buf_phys, 255, true))
         return -1;
 
-    /* Parse for HID boot keyboard interface + interrupt-IN endpoint */
     usb_cfg_desc_t *cd = (usb_cfg_desc_t *)buf;
     if (cd->bDescriptorType != 2) return 0;
 
@@ -539,58 +601,217 @@ static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
     uint16_t ep_mps     = 8;
     uint8_t  ep_iv      = 10;
     bool     found_kbd  = false;
-    uint16_t total      = cd->wTotalLength;
+    /* Mass storage detection */
+    bool     found_msc  = false;
+    uint8_t  msc_bout_addr = 0, msc_bin_addr = 0;
+    uint16_t msc_bout_mps = 64, msc_bin_mps = 64;
+    uint16_t total = cd->wTotalLength;
     if (total > 255) total = 255;
     uint16_t off = cd->bLength;
+    bool     cur_kbd = false, cur_msc = false;
 
     while (off < total) {
         uint8_t len  = buf[off];
         uint8_t type = buf[off + 1];
         if (len < 2) break;
-        if (type == 4) {
+        if (type == 4) {    /* Interface descriptor */
             usb_intf_desc_t *id = (usb_intf_desc_t *)(buf + off);
-            if (id->bInterfaceClass == 3 &&
-                id->bInterfaceSubClass == 1 &&
-                id->bInterfaceProtocol == 1)
-                found_kbd = true;
-            else
-                found_kbd = false;
-        } else if (type == 5 && found_kbd) {
+            cur_kbd = (id->bInterfaceClass == 3 &&
+                       id->bInterfaceSubClass == 1 &&
+                       id->bInterfaceProtocol == 1);
+            cur_msc = (id->bInterfaceClass == 0x08);
+            if (cur_kbd) found_kbd = true;
+            if (cur_msc) found_msc = true;
+        } else if (type == 5) {     /* Endpoint descriptor */
             usb_ep_desc_t *ep = (usb_ep_desc_t *)(buf + off);
-            if ((ep->bEndpointAddress & 0x80u) && (ep->bmAttributes & 3u) == 3u) {
+            if (cur_kbd && (ep->bEndpointAddress & 0x80u) &&
+                (ep->bmAttributes & 3u) == 3u) {
                 ep_addr = ep->bEndpointAddress;
                 ep_mps  = ep->wMaxPacketSize;
                 ep_iv   = ep->bInterval;
-                break;
+            }
+            if (cur_msc && (ep->bmAttributes & 3u) == 2u) {   /* bulk */
+                if (ep->bEndpointAddress & 0x80u) {
+                    msc_bin_addr = ep->bEndpointAddress;
+                    msc_bin_mps  = ep->wMaxPacketSize;
+                } else {
+                    msc_bout_addr = ep->bEndpointAddress;
+                    msc_bout_mps  = ep->wMaxPacketSize;
+                }
             }
         }
         off = (uint16_t)(off + len);
     }
-    if (!found_kbd) return 0;  /* Not a keyboard */
 
-    /* SET_CONFIGURATION */
-    if (!ctrl_xfer(slot, usb_setup(0x00, 9, cfg_val, 0, 0), 0, 0, false))
-        return -1;
+    /* ── Keyboard path ── */
+    if (found_kbd) {
+        if (!ctrl_xfer(slot, usb_setup(0x00, 9, cfg_val, 0, 0), 0, 0, false))
+            return -1;
+        if (!ctrl_xfer(slot, usb_setup(0x21, 0x0B, 0, 0, 0), 0, 0, false))
+            return -1;
+        if (!cmd_config_ep(slot, ep_addr, ep_iv, ep_mps)) return -1;
 
-    /* SET_PROTOCOL = 0 (boot protocol) */
-    if (!ctrl_xfer(slot, usb_setup(0x21, 0x0B, 0, 0, 0), 0, 0, false))
-        return -1;
-
-    /* Configure interrupt-IN endpoint */
-    if (!cmd_config_ep(slot, ep_addr, ep_iv, ep_mps)) return -1;
-
-    /* Queue Normal TRBs */
-    ring_t *xr = &g.xfer[slot];
-    for (uint32_t i = 0; i < KBD_BUFS; i++) {
-        g.kbd_data_phys[i] = pmm_alloc_page();
-        g.kbd_data[i]      = (uint8_t *)pmm_phys_to_virt(g.kbd_data_phys[i]);
-        memset_x(g.kbd_data[i], 0, 4096);
-        ring_enqueue(xr, g.kbd_data_phys[i], 8u,
-                     TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+        ring_t *xr = &g.xfer[slot];
+        for (uint32_t i = 0; i < KBD_BUFS; i++) {
+            g.kbd_data_phys[i] = pmm_alloc_page();
+            g.kbd_data[i]      = (uint8_t *)pmm_phys_to_virt(g.kbd_data_phys[i]);
+            memset_x(g.kbd_data[i], 0, 4096);
+            ring_enqueue(xr, g.kbd_data_phys[i], 8u,
+                         TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+        }
+        ring_doorbell((uint8_t)slot, (uint8_t)g.kbd_ep_dci);
+        return 1;  /* keyboard ready */
     }
-    ring_doorbell((uint8_t)slot, (uint8_t)g.kbd_ep_dci);
 
-    return 1;  /* keyboard ready */
+    /* ── Mass storage path (for log writing to USB drive) ── */
+    if (found_msc && msc_bout_addr && msc_bin_addr && g.stor_slot < 0) {
+        xlog("[xhci]   mass storage slot %u bout=%x bin=%x\n",
+             (uint32_t)slot, (uint32_t)msc_bout_addr, (uint32_t)msc_bin_addr);
+        if (!ctrl_xfer(slot, usb_setup(0x00, 9, cfg_val, 0, 0), 0, 0, false))
+            return 0;
+
+        uint8_t bout_dci = (uint8_t)((msc_bout_addr & 0x0Fu) * 2u);
+        uint8_t bin_dci  = (uint8_t)((msc_bin_addr & 0x0Fu) * 2u + 1u);
+        uint8_t max_dci  = (bout_dci > bin_dci) ? bout_dci : bin_dci;
+
+        uint64_t iphys = pmm_alloc_pages(2);
+        if (!iphys) return 0;
+        xhci_input_ctx_t *ictx = (xhci_input_ctx_t *)pmm_phys_to_virt(iphys);
+        memset_x(ictx, 0, sizeof(xhci_input_ctx_t));
+
+        ictx->icc.add_flags = (1u << 0) | (1u << bout_dci) | (1u << bin_dci);
+        memcpy_x(&ictx->dev.slot, &g.dev_ctx[slot]->slot, sizeof(xhci_slot_ctx_t));
+        ictx->dev.slot.dw0 = (ictx->dev.slot.dw0 & ~(0x1Fu << 27))
+                            | ((uint32_t)max_dci << 27);
+
+        /* Bulk OUT */
+        g.stor_bout = ring_alloc(XFER_ENTRIES);
+        ring_link(&g.stor_bout);
+        ictx->dev.ep[bout_dci - 1].dw0 = 0;
+        ictx->dev.ep[bout_dci - 1].dw1 = (3u << 1) | (2u << 3)
+                                        | ((uint32_t)msc_bout_mps << 16);
+        ictx->dev.ep[bout_dci - 1].tr_dequeue_ptr = g.stor_bout.phys | 1u;
+        ictx->dev.ep[bout_dci - 1].dw4 = msc_bout_mps;
+
+        /* Bulk IN */
+        g.stor_bin = ring_alloc(XFER_ENTRIES);
+        ring_link(&g.stor_bin);
+        ictx->dev.ep[bin_dci - 1].dw0 = 0;
+        ictx->dev.ep[bin_dci - 1].dw1 = (3u << 1) | (6u << 3)
+                                       | ((uint32_t)msc_bin_mps << 16);
+        ictx->dev.ep[bin_dci - 1].tr_dequeue_ptr = g.stor_bin.phys | 1u;
+        ictx->dev.ep[bin_dci - 1].dw4 = msc_bin_mps;
+
+        ring_enqueue(&g.cmd, iphys, 0, TRB_TYPE(TRB_CONFIG_EP) | TRB_SLOT(slot));
+        ring_doorbell(0, 0);
+        uint32_t cc = 0;
+        if (wait_event(TRB_EV_CMD, &cc, NULL, NULL) && cc == CC_SUCCESS) {
+            g.stor_slot     = slot;
+            g.stor_bout_dci = bout_dci;
+            g.stor_bin_dci  = bin_dci;
+            xlog("[xhci]   storage ready slot %u\n", (uint32_t)slot);
+        }
+        return 2;   /* mass storage, don't probe as hub */
+    }
+
+    return 0;  /* not a keyboard */
+}
+
+/* ── Write XHCI log buffer to USB drive via SCSI WRITE(10) ─────────────── */
+
+#define LOG_LBA 16384u   /* sector 16384 = byte 8MB — well past 4.2MB ISO */
+
+static void usb_storage_write_log(void) {
+    if (g.stor_slot < 0 || xhci_log_pos == 0) {
+        xlog("[xhci] log write skip: slot=%u logpos=%u\n",
+             (uint32_t)(g.stor_slot & 0xFF), (uint32_t)xhci_log_pos);
+        return;
+    }
+
+    uint8_t slot = (uint8_t)g.stor_slot;
+    xlog("[xhci] log write: slot=%u bout_dci=%u bin_dci=%u bytes=%u\n",
+         (uint32_t)slot, (uint32_t)g.stor_bout_dci,
+         (uint32_t)g.stor_bin_dci, (uint32_t)xhci_log_pos);
+
+    uint64_t cbw_phys = pmm_alloc_page();
+    uint64_t dat_phys = pmm_alloc_page();
+    uint64_t csw_phys = pmm_alloc_page();
+    if (!cbw_phys || !dat_phys || !csw_phys) {
+        xlog("[xhci] log write: alloc fail\n");
+        return;
+    }
+
+    uint8_t *cbw = (uint8_t *)pmm_phys_to_virt(cbw_phys);
+    uint8_t *dat = (uint8_t *)pmm_phys_to_virt(dat_phys);
+    uint8_t *csw = (uint8_t *)pmm_phys_to_virt(csw_phys);
+    memset_x(cbw, 0, 512);
+    memset_x(dat, 0, 4096);
+    memset_x(csw, 0, 512);
+
+    /* Copy log to data buffer (zero-padded to 4096) */
+    uint32_t n = xhci_log_pos < 4096 ? xhci_log_pos : 4095;
+    memcpy_x(dat, xhci_log_buf, n);
+
+    /* Build CBW for SCSI WRITE(10): 31 bytes */
+    cbw[0] = 0x55; cbw[1] = 0x53; cbw[2] = 0x42; cbw[3] = 0x43; /* USBC */
+    cbw[4] = 0x01; cbw[5] = 0x00; cbw[6] = 0x00; cbw[7] = 0x00; /* tag=1 */
+    cbw[8] = 0x00; cbw[9] = 0x10; cbw[10] = 0x00; cbw[11] = 0x00; /* 4096 LE */
+    cbw[12] = 0x00;     /* direction: OUT */
+    cbw[13] = 0;        /* LUN 0 */
+    cbw[14] = 10;       /* CDB length */
+    /* SCSI WRITE(10): opcode 0x2A, LBA=16384=0x00004000 BE, xfer_len=8 BE */
+    cbw[15] = 0x2A;
+    cbw[16] = 0x00;     /* flags */
+    cbw[17] = 0x00; cbw[18] = 0x00; cbw[19] = 0x40; cbw[20] = 0x00; /* LBA */
+    cbw[21] = 0x00;     /* group */
+    cbw[22] = 0x00; cbw[23] = 0x08; /* transfer length: 8 sectors */
+    cbw[24] = 0x00;     /* control */
+
+    uint32_t cc = 0;
+
+    /* 1. Send CBW (31 bytes) on bulk OUT */
+    ring_enqueue(&g.stor_bout, cbw_phys, 31, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_doorbell(slot, (uint8_t)g.stor_bout_dci);
+    if (!wait_event(TRB_EV_XFER, &cc, NULL, NULL)) {
+        xlog("[xhci] log CBW: no event\n");
+        return;
+    }
+    if (cc != CC_SUCCESS && cc != CC_SHORT_PKT) {
+        xlog("[xhci] log CBW: cc=%u\n", (uint32_t)cc);
+        return;
+    }
+    xlog("[xhci] log CBW: ok\n");
+
+    /* 2. Send data (4096 bytes) on bulk OUT */
+    ring_enqueue(&g.stor_bout, dat_phys, 4096, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_doorbell(slot, (uint8_t)g.stor_bout_dci);
+    if (!wait_event(TRB_EV_XFER, &cc, NULL, NULL)) {
+        xlog("[xhci] log DATA: no event\n");
+        return;
+    }
+    if (cc != CC_SUCCESS && cc != CC_SHORT_PKT) {
+        xlog("[xhci] log DATA: cc=%u\n", (uint32_t)cc);
+        return;
+    }
+    xlog("[xhci] log DATA: ok\n");
+
+    /* 3. Read CSW (13 bytes) on bulk IN */
+    ring_enqueue(&g.stor_bin, csw_phys, 13, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_doorbell(slot, (uint8_t)g.stor_bin_dci);
+    if (!wait_event(TRB_EV_XFER, &cc, NULL, NULL)) {
+        xlog("[xhci] log CSW: no event\n");
+        return;
+    }
+    xlog("[xhci] log CSW: cc=%u sig=%x st=%u\n",
+         (uint32_t)cc,
+         (uint32_t)(csw[0] | ((uint32_t)csw[1]<<8) | ((uint32_t)csw[2]<<16) | ((uint32_t)csw[3]<<24)),
+         (uint32_t)csw[12]);
+
+    if (csw[12] == 0)
+        xlog("[xhci] log -> USB sector %u OK (%u bytes)\n",
+             (uint32_t)LOG_LBA, (uint32_t)n);
+    else
+        xlog("[xhci] log write FAIL csw_status=%u\n", (uint32_t)csw[12]);
 }
 
 /* ── Enumerate a USB hub and search for keyboard on its ports ────────────── */
@@ -598,7 +819,7 @@ static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
 static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_speed __attribute__((unused))) {
     /* SET_CONFIGURATION 1 */
     if (!ctrl_xfer(hub_slot, usb_setup(0x00, 9, 1, 0, 0), 0, 0, false)) {
-        kprintf("[xhci] hub SET_CONFIG failed\n");
+        xlog("[xhci] hub SET_CONFIG failed\n");
         return false;
     }
 
@@ -609,24 +830,25 @@ static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_spee
     memset_x(buf, 0, 64);
 
     if (!ctrl_xfer(hub_slot, usb_setup(0xA0, 6, 0x2900, 0, 8), buf_phys, 8, true)) {
-        kprintf("[xhci] hub GET_DESCRIPTOR failed\n");
+        xlog("[xhci] hub GET_DESCRIPTOR failed\n");
         return false;
     }
     usb_hub_desc_t *hd = (usb_hub_desc_t *)buf;
     uint8_t nports     = hd->bNbrPorts;
     uint32_t pwr_delay = (uint32_t)hd->bPwrOn2PwrGood * 2u + 50u; /* ms */
     if (nports == 0 || nports > 15) nports = 8;
-    if (pwr_delay < 50) pwr_delay = 50;
+    if (pwr_delay < 50)  pwr_delay = 50;
+    if (pwr_delay > 200) pwr_delay = 200;  /* cap at 200ms */
 
-    kprintf("[xhci] hub slot %u has %u ports, pwr_delay=%ums\n",
-            hub_slot, nports, pwr_delay);
+    xlog("[xhci] hub slot=%u ports=%u pwr=%ums\n",
+         (uint32_t)hub_slot, (uint32_t)nports, (uint32_t)pwr_delay);
 
     /* Power each downstream port */
     for (uint8_t p = 1; p <= nports; p++) {
         ctrl_xfer(hub_slot, usb_setup(0x23, HUB_SET_FEATURE, HUB_PORT_POWER, p, 0),
                   0, 0, false);
     }
-    udelay(pwr_delay * 1000u);  /* wait for power-on */
+    udelay(pwr_delay * 1000u);
 
     /* Check each port and try to find keyboard */
     for (uint8_t p = 1; p <= nports; p++) {
@@ -644,22 +866,22 @@ static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_spee
                        : (port_status & (1u << 10)) ? 3u /* HS */
                        : 1u;                             /* FS */
 
-        kprintf("[xhci] hub port %u: device connected speed=%u\n", p, pspeed);
+        xlog("[xhci] hub port %u: connected spd=%u\n", (uint32_t)p, (uint32_t)pspeed);
 
         /* Reset the hub port */
         ctrl_xfer(hub_slot, usb_setup(0x23, HUB_SET_FEATURE, HUB_PORT_RESET, p, 0),
                   0, 0, false);
-        udelay(60000);  /* 60ms reset */
+        udelay(30000);  /* 30ms reset */
 
         /* Clear C_PORT_RESET */
         ctrl_xfer(hub_slot, usb_setup(0x23, HUB_CLEAR_FEATURE, HUB_C_PORT_RESET, p, 0),
                   0, 0, false);
-        udelay(5000);
+        udelay(3000);
 
         /* Enable a slot for this device */
         uint8_t slot = 0;
         if (!cmd_enable_slot(&slot)) {
-            kprintf("[xhci] hub port %u: enable_slot failed\n", p);
+            xlog("[xhci] hub port %u: enable_slot failed\n", (uint32_t)p);
             continue;
         }
 
@@ -669,7 +891,8 @@ static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_spee
         int r = try_enumerate_kbd(slot, root_port1, pspeed,
                                   route, hub_slot, p);
         if (r == 1) {
-            kprintf("[xhci] USB HID keyboard on hub slot %u port %u\n", hub_slot, p);
+            xlog("[xhci] keyboard on hub slot=%u port=%u\n",
+                 (uint32_t)hub_slot, (uint32_t)p);
             g.kbd_slot = slot;
             return true;
         }
@@ -679,70 +902,90 @@ static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_spee
 
 /* ── Root port reset ─────────────────────────────────────────────────────── */
 /*
- * PLS (Port Link State) values seen in practice after xHCI controller reset:
- *   0 = U0 (active, already enabled) — just use it
- *   7 = Polling — link is training; the controller is mid-reset already.
- *       Do NOT write PR=1 again, just wait for it to finish.
- *   5 = RxDetect — nothing connected despite CCS glitch; skip
- *   others — try a full PR write
+ * AMD XHCI behavior (Renoir/Cezanne/Rembrandt USB 2.0 ports):
+ *  - Device connects → CCS=1, CSC=1, PLS=7 (Polling)
+ *  - AMD requires software to ACKNOWLEDGE CSC (write 1 to bit 17) BEFORE
+ *    the port will exit Polling and assert PED=1.
+ *  - Without the CSC clear, the port loops forever in Polling.
+ *
+ * PLS values:
+ *   0 = U0 (active/enabled) — SS or already-enabled port
+ *   7 = Polling — USB2 mid-reset; clear CSC then wait for PED
+ *   5 = RxDetect — no real device
  */
 #define PLS(sc)  (((sc) >> 5) & 0xFu)
 
 static bool root_port_reset(uint8_t port0, uint8_t *speed_out) {
     uint32_t sc = mmio_r32(g.op, OP_PORTSC(port0));
-    kprintf("[xhci] port %u sc=%x pls=%u ped=%u\n",
-            port0, sc, PLS(sc), (sc & PORTSC_PED) ? 1 : 0);
+    xlog("[xhci] port %u: sc=%x pls=%u ped=%u spd=%u csc=%u\n",
+         (uint32_t)(port0 + 1), (uint32_t)sc, (uint32_t)PLS(sc),
+         (uint32_t)((sc >> 1) & 1), (uint32_t)PORTSC_SPEED(sc),
+         (uint32_t)((sc >> 17) & 1));
 
     if (!(sc & PORTSC_CCS)) return false;
 
-    /* If port already enabled and active, use it directly */
+    /* Step 1: Acknowledge CSC (AMD XHCI requires this before port can proceed).
+     * Write 1 to CSC bit only (W1C = clears it), preserve other W1C bits as 0. */
+    if (sc & PORTSC_CSC) {
+        mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_CSC);
+        udelay(2000);
+        sc = mmio_r32(g.op, OP_PORTSC(port0));
+    }
+
+    /* Step 2: If already enabled (SS port or fast-enabling FS port), use directly */
     if ((sc & PORTSC_PED) && PLS(sc) == 0) {
+        /* Clear any stale change bits (e.g. PRC) */
+        if (sc & PORTSC_W1C_BITS)
+            mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
         *speed_out = (uint8_t)PORTSC_SPEED(sc);
+        xlog("[xhci] port %u: already enabled spd=%u\n",
+             (uint32_t)(port0 + 1), (uint32_t)*speed_out);
         return true;
     }
 
-    /* PLS=7 (Polling): controller is already mid-reset — wait for it to finish.
-     * Writing PR=1 here would restart/corrupt the in-progress reset. */
+    /* Step 3: PLS=7 (Polling) — after CSC clear, give controller up to 150ms.
+     * If PED still doesn't appear, fall through to explicit PR write. */
     if (PLS(sc) == 7) {
-        for (int i = 0; i < 300; i++) {       /* up to 1.5s */
+        for (int i = 0; i < 30; i++) {     /* up to 150ms */
             udelay(5000);
             sc = mmio_r32(g.op, OP_PORTSC(port0));
             if (!(sc & PORTSC_CCS)) return false;
             if (sc & PORTSC_PED) goto done;
-            if (PLS(sc) != 7) break;           /* changed state, fall through */
+            if (PLS(sc) != 7) break;
         }
-        /* Clear any change bits and check again */
-        mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
-        udelay(2000);
-        sc = mmio_r32(g.op, OP_PORTSC(port0));
-        if (sc & PORTSC_PED) goto done;
         if (!(sc & PORTSC_CCS)) return false;
     }
 
-    /* Initiate host-side port reset (USB2 ports) */
+    /* Step 4: Issue explicit port reset (USB2 only; SS auto-resets). */
     sc = mmio_r32(g.op, OP_PORTSC(port0));
-    mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_PR);
+    if (!(sc & PORTSC_CCS)) return false;
 
-    /* Wait for hardware to clear PR (signals reset complete) */
-    for (int i = 0; i < 150; i++) {
-        udelay(2000);
-        sc = mmio_r32(g.op, OP_PORTSC(port0));
-        if (!(sc & PORTSC_PR)) break;
+    if (PORTSC_SPEED(sc) != 4) {
+        xlog("[xhci] port %u: PR reset spd=%u\n",
+             (uint32_t)(port0 + 1), (uint32_t)PORTSC_SPEED(sc));
+        mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_PR);
+
+        /* Wait up to 200ms for PR to clear */
+        for (int i = 0; i < 100; i++) {
+            udelay(2000);
+            sc = mmio_r32(g.op, OP_PORTSC(port0));
+            if (!(sc & PORTSC_PR)) break;
+        }
+        udelay(5000);  /* USB2 reset recovery */
     }
-    udelay(10000);
 
-    /* Clear change bits */
+    /* Step 5: Clear all change bits */
     sc = mmio_r32(g.op, OP_PORTSC(port0));
     mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
     udelay(2000);
     sc = mmio_r32(g.op, OP_PORTSC(port0));
 
 done:
-    kprintf("[xhci] port %u after reset: sc=%x ped=%u speed=%u\n",
-            port0, sc, (sc & PORTSC_PED) ? 1 : 0, PORTSC_SPEED(sc));
+    xlog("[xhci] port %u: final sc=%x ped=%u spd=%u\n",
+         (uint32_t)(port0 + 1), (uint32_t)sc,
+         (uint32_t)((sc >> 1) & 1), (uint32_t)PORTSC_SPEED(sc));
     if (!(sc & PORTSC_CCS)) return false;
     *speed_out = (uint8_t)PORTSC_SPEED(sc);
-    /* Proceed even if PED=0 — some controllers set it only after Enable Slot */
     return true;
 }
 
@@ -817,17 +1060,17 @@ static void process_hid_report(const uint8_t *rep) {
 /* ── Per-controller init (called for each XHCI PCI device found) ─────────── */
 
 static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
-    kprintf("[xhci] trying controller %u:%u.%u\n", bus, dev, fn);
+    xlog("[xhci] ctrl %u:%u.%u\n", (uint32_t)bus, (uint32_t)dev, (uint32_t)fn);
 
     uint64_t mmio_phys = pci_bar_base64(bus, dev, fn, 0);
-    if (!mmio_phys) { kprintf("[xhci] bad BAR0\n"); return false; }
+    if (!mmio_phys) { xlog("[xhci] bad BAR0\n"); return false; }
 
     /* Each controller gets its own 64KB MMIO window */
     static uint64_t mmio_virt_next = 0xFFFFFF0040000000ULL;
     uint64_t mmio_virt = mmio_virt_next;
     mmio_virt_next += 0x10000ULL;
     if (!vmm_map_range(mmio_virt, mmio_phys, 0x10000, VMM_WRITE)) {
-        kprintf("[xhci] MMIO map failed\n"); return false;
+        xlog("[xhci] MMIO map failed\n"); return false;
     }
     pci_enable(bus, dev, fn);
 
@@ -842,10 +1085,10 @@ static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
     g.max_ports   = (uint8_t)(hcs1 >> 24);
     if (g.max_slots > MAX_SLOTS) g.max_slots = (uint8_t)MAX_SLOTS;
 
-    kprintf("[xhci] phys=%p maxslots=%u maxports=%u\n",
-            (void *)mmio_phys, g.max_slots, g.max_ports);
+    xlog("[xhci] maxslots=%u maxports=%u\n",
+         (uint32_t)g.max_slots, (uint32_t)g.max_ports);
 
-    if (!ctrl_reset()) { kprintf("[xhci] reset timed out\n"); return false; }
+    if (!ctrl_reset()) { xlog("[xhci] reset timed out\n"); return false; }
 
     mmio_w32(g.op, OP_CONFIG, g.max_slots);
 
@@ -886,9 +1129,9 @@ static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
     mmio_w64(ir0, IR_ERSTBA, g.erst_phys);
     mmio_w64(ir0, IR_ERDP,   g.evt.phys | (1u << 3));
 
-    if (!ctrl_start()) { kprintf("[xhci] start failed\n"); return false; }
+    if (!ctrl_start()) { xlog("[xhci] start failed\n"); return false; }
     g.present = true;
-    kprintf("[xhci] controller running\n");
+    xlog("[xhci] controller running\n");
 
     /* Power all ports and wait for devices to appear */
     for (uint8_t p = 0; p < g.max_ports; p++) {
@@ -897,65 +1140,61 @@ static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
             mmio_w32(g.op, OP_PORTSC(p), (sc & ~PORTSC_W1C_BITS) | PORTSC_PP);
         }
     }
-    udelay(500000);  /* 500ms for port power + device enumeration */
+    udelay(200000);  /* 200ms for port power settle */
 
-    /* Retry port scan up to 8 times with 200ms gaps (total ~2s) */
-    for (int attempt = 0; attempt < 8 && g.kbd_slot < 0; attempt++) {
-        if (attempt > 0) udelay(200000);
+    /* Single pass: enumerate every connected port once.
+     * No retries — saves many seconds on AMD with many ports. */
+    uint32_t port_done = 0;   /* bitmask of ports we finished */
 
-        for (uint8_t p = 0; p < g.max_ports; p++) {
-            if (g.kbd_slot >= 0) break;
-            uint32_t sc = mmio_r32(g.op, OP_PORTSC(p));
-            if (!(sc & PORTSC_CCS)) continue;
+    for (uint8_t p = 0; p < g.max_ports && p < 32; p++) {
+        if (g.kbd_slot >= 0) break;
+        uint32_t sc = mmio_r32(g.op, OP_PORTSC(p));
+        if (!(sc & PORTSC_CCS)) continue;
 
-            uint8_t speed = 0;
-            if (!root_port_reset(p, &speed)) {
-                kprintf("[xhci] port %u reset failed (sc=%x)\n", p,
-                        mmio_r32(g.op, OP_PORTSC(p)));
-                continue;
-            }
-            kprintf("[xhci] port %u: device speed=%u\n", p, speed);
+        uint8_t speed = 0;
+        if (!root_port_reset(p, &speed)) continue;
 
-            uint8_t slot = 0;
-            if (!cmd_enable_slot(&slot)) {
-                kprintf("[xhci] port %u: enable_slot failed\n", p);
-                continue;
-            }
+        xlog("[xhci] port %u: spd=%u\n",
+             (uint32_t)(p + 1), (uint32_t)speed);
 
-            /* First: try direct keyboard enumeration */
-            int r = try_enumerate_kbd(slot, (uint8_t)(p + 1), speed,
-                                      0, 0, 0);
-            if (r == 1) {
-                kprintf("[xhci] USB HID keyboard ready on slot %u port %u\n",
-                        slot, p + 1);
-                g.kbd_slot = slot;
-                break;
-            }
+        uint8_t slot = 0;
+        if (!cmd_enable_slot(&slot)) {
+            xlog("[xhci] port %u: enable_slot fail\n", (uint32_t)(p + 1));
+            continue;
+        }
 
-            /* Not a keyboard — check if it's a hub */
-            /* Re-get device descriptor to check class */
-            uint64_t buf_phys = pmm_alloc_page();
-            uint8_t *buf = (uint8_t *)pmm_phys_to_virt(buf_phys);
-            memset_x(buf, 0, 64);
+        int r = try_enumerate_kbd(slot, (uint8_t)(p + 1), speed, 0, 0, 0);
+        if (r == 1) {
+            xlog("[xhci] keyboard slot=%u port=%u\n",
+                 (uint32_t)slot, (uint32_t)(p + 1));
+            g.kbd_slot = slot;
+            break;
+        }
+        if (r == 2) continue;   /* mass storage — already saved, move on */
 
-            /* address_device was already called inside try_enumerate_kbd,
-             * so we can reuse the existing EP0 control pipe for this slot */
-            if (ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 8),
-                          buf_phys, 8, true)) {
-                usb_dev_desc_t *dd = (usb_dev_desc_t *)buf;
-                if (dd->bDeviceClass == 0x09) {
-                    kprintf("[xhci] port %u: USB hub detected, scanning...\n", p);
-                    if (enumerate_hub(slot, (uint8_t)(p + 1), speed)) {
-                        /* kbd_slot set inside enumerate_hub */
-                        break;
-                    }
-                }
+        /* Check for hub (class was already read inside try_enumerate_kbd,
+         * device descriptor bDeviceClass==0x09 made it return 0) */
+        uint64_t bp = pmm_alloc_page();
+        uint8_t *bb = (uint8_t *)pmm_phys_to_virt(bp);
+        memset_x(bb, 0, 64);
+        if (ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 8), bp, 8, true)) {
+            usb_dev_desc_t *dd = (usb_dev_desc_t *)bb;
+            if (dd->bDeviceClass == 0x09) {
+                xlog("[xhci] port %u: hub\n", (uint32_t)(p + 1));
+                if (enumerate_hub(slot, (uint8_t)(p + 1), speed))
+                    break;
             }
         }
+        port_done |= (1u << p);
     }
+    (void)port_done;
 
     if (g.kbd_slot < 0)
-        kprintf("[xhci] no USB keyboard on this controller\n");
+        xlog("[xhci] no kbd on this controller\n");
+
+    /* Write log to USB while THIS controller is still alive */
+    if (g.stor_slot >= 0)
+        usb_storage_write_log();
 
     return (g.kbd_slot >= 0);
 }
@@ -964,26 +1203,38 @@ static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
 
 void xhci_init(void) {
     memset_x(&g, 0, sizeof(g));
-    g.kbd_slot = -1;
+    g.kbd_slot  = -1;
+    g.stor_slot = -1;
+    xhci_log_pos = 0;
+    xhci_log_buf[0] = 0;
 
-    /* Collect all XHCI controllers (AMD Ryzen has 2: one external, one internal) */
+    /* PS/2 diagnostic snapshot — captured here so it gets written to USB log.
+     * keyboard_ps2_init() has already run by this point. */
+    {
+        uint8_t st = inb(0x64);
+        uint64_t irqs = keyboard_irq_count();
+        xlog("[ps2] i8042 status=0x%x irq_count=%u\n",
+             (uint32_t)st, (uint32_t)irqs);
+    }
+
     uint8_t all_bus[8], all_dev[8], all_fn[8];
     uint32_t n = pci_find_all_class(0x0C, 0x03, 0x30,
                                      all_bus, all_dev, all_fn, 8);
     if (n == 0) {
-        kprintf("[xhci] no XHCI controller found\n");
+        xlog("[xhci] no XHCI controller found\n");
         return;
     }
-    kprintf("[xhci] found %u XHCI controller(s)\n", (unsigned)n);
+    xlog("[xhci] found %u controller(s)\n", (uint32_t)n);
 
     for (uint32_t i = 0; i < n; i++) {
-        /* Reset global state for each controller attempt */
         memset_x(&g, 0, sizeof(g));
-        g.kbd_slot = -1;
+        g.kbd_slot  = -1;
+        g.stor_slot = -1;
         if (xhci_init_one(all_bus[i], all_dev[i], all_fn[i]))
-            return;  /* keyboard found, stop */
+            break;   /* keyboard found */
     }
-    kprintf("[xhci] no USB keyboard found on any controller\n");
+    if (g.kbd_slot < 0)
+        xlog("[xhci] no USB keyboard found on any controller\n");
 }
 
 /* ── xhci_poll ─ called from pit_on_tick() ───────────────────────────────── */
@@ -997,9 +1248,13 @@ void xhci_poll(void) {
 
         uint8_t type = (uint8_t)((ev->control >> 10) & 0x3Fu);
         if (type == TRB_EV_XFER && (uint8_t)(ev->control >> 24) == (uint8_t)g.kbd_slot) {
+            /* ev->param = phys addr of the TRB in the transfer ring that completed.
+             * Dereference it to get the data buffer address (stored in the TRB's param). */
             uint64_t trb_phys = ev->param;
+            xhci_trb_t *src_trb = (xhci_trb_t *)pmm_phys_to_virt(trb_phys);
+            uint64_t data_phys = src_trb->param;
             for (uint32_t i = 0; i < KBD_BUFS; i++) {
-                if (trb_phys == g.kbd_data_phys[i]) {
+                if (data_phys == g.kbd_data_phys[i]) {
                     process_hid_report(g.kbd_data[i]);
                     ring_enqueue(&g.xfer[g.kbd_slot], g.kbd_data_phys[i], 8u,
                                  TRB_TYPE(TRB_NORMAL) | TRB_IOC);
