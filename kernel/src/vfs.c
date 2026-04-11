@@ -166,6 +166,21 @@ int vfs_write(const char *path, const void *data, uint64_t size) {
     return ext2_write_file(full, data, (uint32_t)size);
 }
 
+/* Returns 1 if path is a directory (initrd and ramfs are flat, so only ext2 +
+ * the virtual root "/" are checked). */
+int vfs_isdir(const char *path) {
+    const char *n = vfs_norm_path(path);
+    /* Normalised empty string means the caller passed "/" — that's the root */
+    if (!n || !*n) return 1;
+    if (!ext2_present()) return 0;
+    char full[258];
+    full[0] = '/';
+    size_t i = 0;
+    while (n[i] && i < 256) { full[i + 1] = n[i]; i++; }
+    full[i + 1] = '\0';
+    return ext2_isdir(full);
+}
+
 void vfs_cat(const char *path) {
     const char *n = vfs_norm_path(path);
     if (!n || !*n) {

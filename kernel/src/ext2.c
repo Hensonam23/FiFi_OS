@@ -894,3 +894,15 @@ int ext2_delete_file(const char *path) {
 
     return 0;
 }
+
+/* Returns 1 if path names a directory, 0 otherwise. */
+int ext2_isdir(const char *path) {
+    if (!path) return 0;
+    /* Root is always a directory */
+    if (path[0] == '/' && path[1] == '\0') return 1;
+    uint32_t ino = e2_resolve(path);
+    if (!ino) return 0;
+    ext2_inode_t inode;
+    if (!e2_read_inode(ino, &inode)) return 0;
+    return ((inode.i_mode & 0xF000u) == EXT2_IMODE_DIR) ? 1 : 0;
+}

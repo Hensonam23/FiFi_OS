@@ -75,6 +75,59 @@ static int copyout_bytes(uint64_t uaddr, const uint8_t *src, size_t n) {
     return (int)n;
 }
 
+/* Resolve a user path to an absolute, normalised path in out[cap].
+ * Expands relative paths against the current thread's cwd.
+ * Collapses '.' and '..' components.  Returns 0 on success, -1 on overflow. */
+static int path_resolve(char *out, size_t cap, const char *in) {
+    char tmp[512];
+    size_t o = 0;
+
+    if (in[0] == '/') {
+        tmp[o++] = '/';
+        in++;
+    } else {
+        /* Relative: prepend cwd */
+        const char *cwd = thread_get_cwd();
+        tmp[o++] = '/';
+        const char *cp = cwd[0] == '/' ? cwd + 1 : cwd;
+        while (*cp && o < sizeof(tmp) - 2) tmp[o++] = *cp++;
+        if (o > 1 && tmp[o - 1] != '/') tmp[o++] = '/';
+    }
+    while (*in && o < sizeof(tmp) - 1) tmp[o++] = *in++;
+    tmp[o] = '\0';
+
+    /* Normalise: walk components, resolve '.' and '..' */
+    char norm[512];
+    size_t no = 0;
+    norm[no++] = '/';
+    char *p = tmp + 1;
+    while (*p) {
+        char *sep = p;
+        while (*sep && *sep != '/') sep++;
+        size_t clen = (size_t)(sep - p);
+        if (clen == 0) { p = *sep ? sep + 1 : sep; continue; }
+        if (clen == 1 && p[0] == '.') { p = *sep ? sep + 1 : sep; continue; }
+        if (clen == 2 && p[0] == '.' && p[1] == '.') {
+            if (no > 1) {
+                if (norm[no - 1] == '/') no--;
+                while (no > 1 && norm[no - 1] != '/') no--;
+            }
+            p = *sep ? sep + 1 : sep;
+            continue;
+        }
+        if (no + clen + 2 > sizeof(norm)) return -1;
+        for (size_t i = 0; i < clen; i++) norm[no++] = p[i];
+        norm[no++] = '/';
+        p = *sep ? sep + 1 : sep;
+    }
+    if (no > 1 && norm[no - 1] == '/') no--;
+    norm[no] = '\0';
+
+    if (no + 1 > cap) return -1;
+    for (size_t i = 0; i <= no; i++) out[i] = norm[i];
+    return 0;
+}
+
 /* ── pipes ──────────────────────────────────────────────────────────────────
  * Fixed-size ring-buffer pipes.  No dynamic allocation — just a static pool.
  * The pipe is ref-counted: ropen = live read-end fds, wopen = live write-end fds.
@@ -407,10 +460,13 @@ case SYS_UPTIME:
             // only allow from ring3
             if (!from_user) { ctx->rax = (uint64_t)-1; return; }
 
-            char path[128];
-            if (copyin_str(path, sizeof(path), upath) < 0) {
+            char path_raw[256], path[256];
+            if (copyin_str(path_raw, sizeof(path_raw), upath) < 0) {
                 ctx->rax = (uint64_t)-1;
                 return;
+            }
+            if (path_resolve(path, sizeof(path), path_raw) < 0) {
+                ctx->rax = (uint64_t)-1; return;
             }
 
             const void *data = 0;
@@ -497,13 +553,16 @@ case SYS_UPTIME:
             int from_user = ((ctx->cs & 3ULL) == 3ULL);
 
             const char *kpath = 0;
-            char path[128];
+            char path_raw[256], path[256];
 
             if (from_user) {
-                if (copyin_str(path, sizeof(path), upath) < 0) {
+                if (copyin_str(path_raw, sizeof(path_raw), upath) < 0) {
                     kprintf("[syscall] SYS_READFILE bad path ptr=%p\n", (void*)upath);
                     ctx->rax = (uint64_t)-1;
                     return;
+                }
+                if (path_resolve(path, sizeof(path), path_raw) < 0) {
+                    ctx->rax = (uint64_t)-1; return;
                 }
                 kpath = path;
             } else {
@@ -554,10 +613,13 @@ case SYS_UPTIME:
             /* rdi = path, rsi = user argv ptr (NULL-terminated array, or 0) */
             uint64_t upath = ctx->rdi;
             uint64_t uargv = ctx->rsi;
-            char path[256];
-            if (copyin_str(path, sizeof(path), upath) < 0) {
+            char path_raw[256], path[256];
+            if (copyin_str(path_raw, sizeof(path_raw), upath) < 0) {
                 ctx->rax = (uint64_t)-1;
                 break;
+            }
+            if (path_resolve(path, sizeof(path), path_raw) < 0) {
+                ctx->rax = (uint64_t)-1; break;
             }
 
             /* Copy argv strings from user space onto the kernel stack */
@@ -781,8 +843,11 @@ case SYS_UPTIME:
             /* rdi = user path string — create/truncate a ramfs file for writing.
              * Returns a write-only fd, or -1 on error. */
             if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
-            char creat_path[128];
-            if (copyin_str(creat_path, sizeof(creat_path), ctx->rdi) < 0) {
+            char creat_raw[256], creat_path[256];
+            if (copyin_str(creat_raw, sizeof(creat_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(creat_path, sizeof(creat_path), creat_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
             ramfs_entry_t *rf = ramfs_creat(creat_path);
@@ -824,8 +889,11 @@ case SYS_UPTIME:
         case SYS_UNLINK: {
             /* rdi = user path string — delete a file from VFS + ext2. */
             if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
-            char ul_path[128];
-            if (copyin_str(ul_path, sizeof(ul_path), ctx->rdi) < 0) {
+            char ul_raw[256], ul_path[256];
+            if (copyin_str(ul_raw, sizeof(ul_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(ul_path, sizeof(ul_path), ul_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
             ctx->rax = (uint64_t)(int64_t)vfs_delete(ul_path);
@@ -837,8 +905,11 @@ case SYS_UPTIME:
              * Creates a RAMW fd pre-loaded with the file's current content.
              * Returns a write-only fd, or -1 on error. */
             if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
-            char ow_path[128];
-            if (copyin_str(ow_path, sizeof(ow_path), ctx->rdi) < 0) {
+            char ow_raw[256], ow_path[256];
+            if (copyin_str(ow_raw, sizeof(ow_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(ow_path, sizeof(ow_path), ow_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
             /* ramfs_creat truncates — use it then pre-load existing content */
@@ -881,8 +952,11 @@ case SYS_UPTIME:
         case SYS_FILESIZE: {
             /* rdi = user path string — returns file size, or -1 if not found. */
             if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
-            char fs_path[128];
-            if (copyin_str(fs_path, sizeof(fs_path), ctx->rdi) < 0) {
+            char fs_raw[256], fs_path[256];
+            if (copyin_str(fs_raw, sizeof(fs_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(fs_path, sizeof(fs_path), fs_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
             ctx->rax = (uint64_t)(int64_t)vfs_filesize(fs_path);
@@ -892,11 +966,49 @@ case SYS_UPTIME:
         case SYS_MKDIR: {
             /* rdi = user path string — create a directory. */
             if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
-            char mk_path[128];
-            if (copyin_str(mk_path, sizeof(mk_path), ctx->rdi) < 0) {
+            char mk_raw[256], mk_path[256];
+            if (copyin_str(mk_raw, sizeof(mk_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(mk_path, sizeof(mk_path), mk_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
             ctx->rax = (uint64_t)(int64_t)vfs_mkdir(mk_path);
+            return;
+        }
+
+        case SYS_GETCWD: {
+            /* rdi = user buf, rsi = buf capacity — copies cwd string, returns length */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            uint64_t ubuf = ctx->rdi;
+            uint64_t cap  = ctx->rsi;
+            if (cap == 0) { ctx->rax = (uint64_t)-1; return; }
+            const char *cwd = thread_get_cwd();
+            size_t len = 0;
+            while (cwd[len]) len++;
+            if (len + 1 > cap) { ctx->rax = (uint64_t)-1; return; }
+            if (copyout_bytes(ubuf, (const uint8_t *)cwd, len + 1) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)len;
+            return;
+        }
+
+        case SYS_CHDIR: {
+            /* rdi = user path string — change working directory */
+            if (!((ctx->cs & 3ULL) == 3ULL)) { ctx->rax = (uint64_t)-1; return; }
+            char cd_raw[256], cd_path[256];
+            if (copyin_str(cd_raw, sizeof(cd_raw), ctx->rdi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (path_resolve(cd_path, sizeof(cd_path), cd_raw) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            if (!vfs_isdir(cd_path)) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            thread_set_cwd(cd_path);
+            ctx->rax = 0;
             return;
         }
 

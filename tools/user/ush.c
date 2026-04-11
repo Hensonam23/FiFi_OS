@@ -159,7 +159,7 @@ static int ush_builtin(int argc, char *argv[]) {
 
     if (strcmp(argv[0], "help") == 0) {
         printf("builtins: exit quit help echo cat ls rm mkdir stat cp mv\n");
-        printf("          export unset env source\n");
+        printf("          cd pwd export unset env source\n");
         printf("Redirections: > (overwrite)  >> (append)  < (stdin)\n");
         printf("Pipes:        cmd1 | cmd2\n");
         printf("Variables:    export KEY=VAL  echo $KEY  unset KEY\n");
@@ -286,6 +286,20 @@ static int ush_builtin(int argc, char *argv[]) {
             *nl = saved;
             p = (*nl) ? nl + 1 : nl;
         }
+        return 1;
+    }
+
+    if (strcmp(argv[0], "cd") == 0) {
+        const char *target = (argc >= 2) ? argv[1] : "/";
+        if (sys_chdir(target) < 0)
+            printf("cd: not a directory: %s\n", target);
+        return 1;
+    }
+
+    if (strcmp(argv[0], "pwd") == 0) {
+        char cwd[256];
+        if (sys_getcwd(cwd, sizeof(cwd)) < 0) printf("/\n");
+        else printf("%s\n", cwd);
         return 1;
     }
 
@@ -518,9 +532,13 @@ int main(int argc, char **argv) {
     printf("Type 'help' for help, 'exit' to quit.\n\n");
 
     static char line[LINEMAX];
+    static char cwd_buf[256];
 
     for (;;) {
-        printf("$ ");
+        if (sys_getcwd(cwd_buf, sizeof(cwd_buf)) < 0) {
+            cwd_buf[0] = '/'; cwd_buf[1] = '\0';
+        }
+        printf("fifi:%s$ ", cwd_buf);
         int n = ush_readline(line, LINEMAX);
         if (n == 0) continue;
         ush_exec_line(line);

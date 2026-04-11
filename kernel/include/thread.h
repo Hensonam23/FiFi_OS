@@ -76,6 +76,11 @@ void thread_set_parent_for_slot(int slot, uint32_t ptid);
 long thread_reap_zombie_child(uint32_t parent_tid, uint32_t child_tid, int *code_out);
 uint32_t thread_tid_of_slot(int slot);
 
+/* Working directory */
+const char *thread_get_cwd(void);
+void        thread_set_cwd(const char *path);
+void        thread_copy_cwd_to_slot(int slot, const char *cwd);
+
 /* Signal delivery */
 /* Send SIGINT to all user threads that were forked (parent_tid != 0).
  * Sleeping threads are woken so they can exit promptly. */
