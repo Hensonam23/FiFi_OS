@@ -678,29 +678,72 @@ static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_spee
 }
 
 /* ── Root port reset ─────────────────────────────────────────────────────── */
+/*
+ * PLS (Port Link State) values seen in practice after xHCI controller reset:
+ *   0 = U0 (active, already enabled) — just use it
+ *   7 = Polling — link is training; the controller is mid-reset already.
+ *       Do NOT write PR=1 again, just wait for it to finish.
+ *   5 = RxDetect — nothing connected despite CCS glitch; skip
+ *   others — try a full PR write
+ */
+#define PLS(sc)  (((sc) >> 5) & 0xFu)
 
 static bool root_port_reset(uint8_t port0, uint8_t *speed_out) {
     uint32_t sc = mmio_r32(g.op, OP_PORTSC(port0));
+    kprintf("[xhci] port %u sc=%x pls=%u ped=%u\n",
+            port0, sc, PLS(sc), (sc & PORTSC_PED) ? 1 : 0);
+
     if (!(sc & PORTSC_CCS)) return false;
 
-    /* Assert port reset (clear W1C bits first) */
-    sc = (sc & ~PORTSC_W1C_BITS) | PORTSC_PR;
-    mmio_w32(g.op, OP_PORTSC(port0), sc);
-    udelay(60000);  /* 60ms */
-
-    /* Wait for PRC */
-    for (int i = 0; i < 100; i++) {
-        sc = mmio_r32(g.op, OP_PORTSC(port0));
-        if (sc & PORTSC_PRC) break;
-        udelay(2000);
+    /* If port already enabled and active, use it directly */
+    if ((sc & PORTSC_PED) && PLS(sc) == 0) {
+        *speed_out = (uint8_t)PORTSC_SPEED(sc);
+        return true;
     }
-    /* Clear W1C */
+
+    /* PLS=7 (Polling): controller is already mid-reset — wait for it to finish.
+     * Writing PR=1 here would restart/corrupt the in-progress reset. */
+    if (PLS(sc) == 7) {
+        for (int i = 0; i < 300; i++) {       /* up to 1.5s */
+            udelay(5000);
+            sc = mmio_r32(g.op, OP_PORTSC(port0));
+            if (!(sc & PORTSC_CCS)) return false;
+            if (sc & PORTSC_PED) goto done;
+            if (PLS(sc) != 7) break;           /* changed state, fall through */
+        }
+        /* Clear any change bits and check again */
+        mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
+        udelay(2000);
+        sc = mmio_r32(g.op, OP_PORTSC(port0));
+        if (sc & PORTSC_PED) goto done;
+        if (!(sc & PORTSC_CCS)) return false;
+    }
+
+    /* Initiate host-side port reset (USB2 ports) */
+    sc = mmio_r32(g.op, OP_PORTSC(port0));
+    mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_PR);
+
+    /* Wait for hardware to clear PR (signals reset complete) */
+    for (int i = 0; i < 150; i++) {
+        udelay(2000);
+        sc = mmio_r32(g.op, OP_PORTSC(port0));
+        if (!(sc & PORTSC_PR)) break;
+    }
+    udelay(10000);
+
+    /* Clear change bits */
+    sc = mmio_r32(g.op, OP_PORTSC(port0));
     mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
     udelay(2000);
-
     sc = mmio_r32(g.op, OP_PORTSC(port0));
+
+done:
+    kprintf("[xhci] port %u after reset: sc=%x ped=%u speed=%u\n",
+            port0, sc, (sc & PORTSC_PED) ? 1 : 0, PORTSC_SPEED(sc));
+    if (!(sc & PORTSC_CCS)) return false;
     *speed_out = (uint8_t)PORTSC_SPEED(sc);
-    return (sc & PORTSC_PED) != 0;
+    /* Proceed even if PED=0 — some controllers set it only after Enable Slot */
+    return true;
 }
 
 /* ── HID boot-protocol key translation ───────────────────────────────────── */
@@ -854,11 +897,11 @@ static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
             mmio_w32(g.op, OP_PORTSC(p), (sc & ~PORTSC_W1C_BITS) | PORTSC_PP);
         }
     }
-    udelay(300000);  /* 300ms for port power + device enumeration */
+    udelay(500000);  /* 500ms for port power + device enumeration */
 
-    /* Retry port scan up to 5 times with 100ms gaps */
-    for (int attempt = 0; attempt < 5 && g.kbd_slot < 0; attempt++) {
-        if (attempt > 0) udelay(100000);
+    /* Retry port scan up to 8 times with 200ms gaps (total ~2s) */
+    for (int attempt = 0; attempt < 8 && g.kbd_slot < 0; attempt++) {
+        if (attempt > 0) udelay(200000);
 
         for (uint8_t p = 0; p < g.max_ports; p++) {
             if (g.kbd_slot >= 0) break;
