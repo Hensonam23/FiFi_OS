@@ -110,6 +110,28 @@ size_t vfs_list(char *buf, size_t cap) {
     return pos;
 }
 
+size_t vfs_listdir(const char *path, char *buf, size_t cap) {
+    if (!buf || cap == 0) return 0;
+    /* Root: same as vfs_list (all layers) */
+    if (!path || path[0] == '\0' || (path[0] == '/' && path[1] == '\0'))
+        return vfs_list(buf, cap);
+    /* Subdirectory: delegate to ext2 */
+    if (!ext2_present()) return 0;
+    /* Ensure absolute path */
+    char full[258];
+    if (path[0] == '/') {
+        size_t i = 0;
+        while (path[i] && i < 257) { full[i] = path[i]; i++; }
+        full[i] = '\0';
+    } else {
+        full[0] = '/';
+        size_t i = 0;
+        while (path[i] && i < 256) { full[i + 1] = path[i]; i++; }
+        full[i + 1] = '\0';
+    }
+    return ext2_ls_buf_at(full, buf, cap);
+}
+
 int vfs_mkdir(const char *path) {
     if (!ext2_present()) return -1;
     const char *n = vfs_norm_path(path);

@@ -130,8 +130,9 @@ void keyboard_on_scancode(uint8_t sc) {
         char lc = c;
         if (lc >= 'A' && lc <= 'Z') lc = (char)(lc - 'A' + 'a');
         if (lc >= 'a' && lc <= 'z') {
-            if (lc == 'c') thread_signal_children();  /* Ctrl-C: SIGINT to children */
-            kbd_push((uint8_t)(lc - 'a' + 1));        /* also buffer ASCII 3 for readline */
+            if (lc == 'c') thread_signal_children();   /* Ctrl-C: SIGINT to children */
+            if (lc == 'z') thread_sigtstp_children();  /* Ctrl-Z: SIGTSTP to children */
+            kbd_push((uint8_t)(lc - 'a' + 1));         /* also buffer control code for readline */
             return;
         }
     }

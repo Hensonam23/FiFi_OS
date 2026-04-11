@@ -21,6 +21,176 @@
 static char g_hist_buf[HIST_MAX][LINEMAX];
 static int  g_hist_n = 0;
 
+/* ── job control ─────────────────────────────────────────────────────────── */
+#define JOB_MAX   8
+#define JOB_RUN   1
+#define JOB_STOP  2
+#define JOB_DONE  3
+
+typedef struct {
+    uint32_t  tid;
+    int       state;      /* JOB_RUN / JOB_STOP / JOB_DONE / 0=unused */
+    int       exit_code;
+    int       job_num;    /* 1-based job number */
+    char      cmd[LINEMAX];
+} job_t;
+
+static job_t g_jobs[JOB_MAX];
+static int   g_job_seq = 0;    /* next job number to assign */
+
+static int job_alloc(uint32_t tid, const char *cmd) {
+    for (int i = 0; i < JOB_MAX; i++) {
+        if (g_jobs[i].state == 0) {
+            g_jobs[i].tid      = tid;
+            g_jobs[i].state    = JOB_RUN;
+            g_jobs[i].exit_code= 0;
+            g_jobs[i].job_num  = ++g_job_seq;
+            int j = 0;
+            while (cmd && cmd[j] && j < LINEMAX - 1) { g_jobs[i].cmd[j] = cmd[j]; j++; }
+            g_jobs[i].cmd[j] = '\0';
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Poll all background jobs; print notifications for newly done/stopped. */
+static void job_poll(void) {
+    for (int i = 0; i < JOB_MAX; i++) {
+        if (!g_jobs[i].state || g_jobs[i].state == JOB_DONE) continue;
+        int status = 0;
+        long r = sys_waitpid_flags((unsigned long)g_jobs[i].tid, &status, WNOHANG | WUNTRACED);
+        if (r <= 0) continue;
+        if (WIFSTOPPED(status)) {
+            g_jobs[i].state = JOB_STOP;
+            printf("[%d]+ Stopped      %s\n", g_jobs[i].job_num, g_jobs[i].cmd);
+        } else {
+            g_jobs[i].exit_code = status;
+            g_jobs[i].state = JOB_DONE;
+            if (status != 0)
+                printf("[%d]+ Done(%d)      %s\n", g_jobs[i].job_num, status, g_jobs[i].cmd);
+            else
+                printf("[%d]+ Done         %s\n", g_jobs[i].job_num, g_jobs[i].cmd);
+        }
+    }
+}
+
+/* Find job by 1-based number or TID. */
+static int job_find(int jobnum) {
+    for (int i = 0; i < JOB_MAX; i++) {
+        if (g_jobs[i].state && g_jobs[i].job_num == jobnum) return i;
+    }
+    return -1;
+}
+
+/* ── tab completion ──────────────────────────────────────────────────────── */
+
+static char g_tab_listbuf[4096];
+
+/* Find the partial word starting at buf+0..n-1 (from last space). */
+static int ush_tab_word_start(const char *buf, int n) {
+    int start = 0;
+    for (int i = 0; i < n; i++)
+        if (buf[i] == ' ' || buf[i] == '\t') start = i + 1;
+    return start;
+}
+
+/*
+ * Attempt tab completion on the current line buffer buf[0..n-1].
+ * Modifies buf and n in-place. Returns new n.
+ * Prints to console as needed.
+ */
+static int ush_do_tab(char *buf, int n, int cap) {
+    int ws  = ush_tab_word_start(buf, n);
+    int plen = n - ws;                  /* length of partial word */
+    char *partial = buf + ws;
+
+    /* Split partial into dir and name parts for path-aware completion. */
+    char dir_part[LINEMAX];   /* directory to list */
+    char name_part[LINEMAX];  /* prefix to match */
+    int  name_off = 0;        /* offset of name within partial */
+
+    {
+        int last_slash = -1;
+        for (int i = 0; i < plen; i++)
+            if (partial[i] == '/') last_slash = i;
+        if (last_slash < 0) {
+            dir_part[0] = '\0';   /* list flat (all files) */
+            name_off = 0;
+        } else {
+            /* Copy up to and including the last slash as dir */
+            int dlen = last_slash + 1;
+            if (dlen > LINEMAX - 1) dlen = LINEMAX - 1;
+            for (int i = 0; i < dlen; i++) dir_part[i] = partial[i];
+            dir_part[dlen] = '\0';
+            name_off = dlen;
+        }
+        int nlen = plen - name_off;
+        if (nlen > LINEMAX - 1) nlen = LINEMAX - 1;
+        for (int i = 0; i < nlen; i++) name_part[i] = partial[name_off + i];
+        name_part[nlen] = '\0';
+    }
+
+    /* Fetch file list */
+    long list_n;
+    if (dir_part[0] == '\0') {
+        list_n = sys_listfiles(g_tab_listbuf, sizeof(g_tab_listbuf));
+    } else {
+        list_n = sys_listdir(dir_part, g_tab_listbuf, sizeof(g_tab_listbuf));
+        if (list_n < 0) list_n = 0;
+    }
+    if (list_n <= 0) { sys_write("\a", 1); return n; }
+
+    /* Scan for matches */
+    char *matches[32];
+    int   nmatch = 0;
+    int   nlen_p = strlen(name_part);
+    char *p = g_tab_listbuf;
+    char *end = g_tab_listbuf + list_n;
+    while (p < end && nmatch < 32) {
+        char *nl = p;
+        while (nl < end && *nl != '\n') nl++;
+        int elen = (int)(nl - p);
+        if (elen > 0 && (nlen_p == 0 || (elen >= nlen_p && strncmp(p, name_part, (size_t)nlen_p) == 0))) {
+            matches[nmatch++] = p;
+            *nl = '\0';  /* null-terminate the entry in place */
+        }
+        p = nl + 1;
+    }
+
+    if (nmatch == 0) {
+        sys_write("\a", 1);
+        return n;
+    }
+
+    if (nmatch == 1) {
+        /* Single match: complete the word */
+        const char *suffix = matches[0] + nlen_p;
+        while (*suffix && n + 1 < cap) {
+            buf[n++] = *suffix;
+            sys_write(suffix, 1);
+            suffix++;
+        }
+        /* Add trailing space if it's a file (not a directory) */
+        if (n + 1 < cap) { buf[n++] = ' '; sys_write(" ", 1); }
+        return n;
+    }
+
+    /* Multiple matches: print them, then reprint prompt + current line */
+    sys_write("\n", 1);
+    for (int i = 0; i < nmatch; i++) {
+        sys_write(matches[i], (uint64_t)strlen(matches[i]));
+        if (i + 1 < nmatch) sys_write("  ", 2);
+    }
+    sys_write("\n", 1);
+    /* Reprint prompt */
+    char cwd_t[256]; cwd_t[0] = '/'; cwd_t[1] = '\0';
+    sys_getcwd(cwd_t, sizeof(cwd_t));
+    printf("fifi:%s$ ", cwd_t);
+    sys_write(buf, (uint64_t)n);
+    return n;
+}
+
 /* ── environment variables ───────────────────────────────────────────────── */
 
 #define ENV_MAX     24
@@ -138,6 +308,12 @@ static int ush_readline(char *buf, int cap) {
             if (n > 0) { n--; sys_write("\b \b", 3); }
             continue;
         }
+        if (c == '\t') {
+            n = ush_do_tab(buf, n, cap);
+            hist_pos = -1;  /* cancel history navigation on edit */
+            continue;
+        }
+        if (c == 26) continue;  /* Ctrl-Z: kernel already handled it; skip char */
         /* History navigation */
         if (c == KEY_UP || c == KEY_DOWN) {
             int new_pos;
@@ -241,11 +417,82 @@ static int ush_builtin(int argc, char *argv[]) {
     if (strcmp(argv[0], "help") == 0) {
         printf("builtins: exit quit help echo cat ls rm mkdir stat cp mv\n");
         printf("          cd pwd export unset env source\n");
+        printf("          jobs fg bg kill\n");
         printf("Redirections: > (overwrite)  >> (append)  < (stdin)\n");
         printf("Pipes:        cmd1 | cmd2\n");
+        printf("Background:   cmd &\n");
         printf("Variables:    export KEY=VAL  echo $KEY  unset KEY\n");
-        printf("Run any .elf — .elf suffix optional. Examples:\n");
-        printf("  ucat motd.txt    uinfo    uwait    uls\n");
+        printf("Signals:      Ctrl-C kills  Ctrl-Z stops\n");
+        printf("Run any .elf — .elf suffix optional.\n");
+        return 1;
+    }
+
+    if (strcmp(argv[0], "jobs") == 0) {
+        int any = 0;
+        for (int i = 0; i < JOB_MAX; i++) {
+            if (!g_jobs[i].state) continue;
+            const char *st = (g_jobs[i].state == JOB_RUN)  ? "Running" :
+                             (g_jobs[i].state == JOB_STOP) ? "Stopped" : "Done";
+            printf("[%d] %s\t%s\n", g_jobs[i].job_num, st, g_jobs[i].cmd);
+            any = 1;
+        }
+        if (!any) printf("No background jobs.\n");
+        return 1;
+    }
+
+    if (strcmp(argv[0], "fg") == 0) {
+        int jnum = (argc >= 2) ? (int)(argv[1][0] == '%' ? argv[1][1]-'0' : argv[1][0]-'0') : g_job_seq;
+        int ji = job_find(jnum);
+        if (ji < 0) { printf("fg: no such job\n"); return 1; }
+        /* If stopped, send SIGCONT to resume */
+        if (g_jobs[ji].state == JOB_STOP)
+            sys_kill((unsigned long)g_jobs[ji].tid, SIGCONT);
+        g_jobs[ji].state = JOB_RUN;
+        printf("[%d] %s\n", g_jobs[ji].job_num, g_jobs[ji].cmd);
+        /* Wait for it with WUNTRACED */
+        int status = 0;
+        long r = sys_waitpid_flags((unsigned long)g_jobs[ji].tid, &status, WUNTRACED);
+        if (r > 0) {
+            if (WIFSTOPPED(status)) {
+                g_jobs[ji].state = JOB_STOP;
+                printf("\n[%d]+ Stopped      %s\n", g_jobs[ji].job_num, g_jobs[ji].cmd);
+            } else {
+                g_jobs[ji].exit_code = status;
+                g_jobs[ji].state = JOB_DONE;
+            }
+        }
+        return 1;
+    }
+
+    if (strcmp(argv[0], "bg") == 0) {
+        int jnum = (argc >= 2) ? (int)(argv[1][0] == '%' ? argv[1][1]-'0' : argv[1][0]-'0') : g_job_seq;
+        int ji = job_find(jnum);
+        if (ji < 0) { printf("bg: no such job\n"); return 1; }
+        if (g_jobs[ji].state == JOB_STOP) {
+            sys_kill((unsigned long)g_jobs[ji].tid, SIGCONT);
+            g_jobs[ji].state = JOB_RUN;
+            printf("[%d]& %s\n", g_jobs[ji].job_num, g_jobs[ji].cmd);
+        } else if (g_jobs[ji].state == JOB_RUN) {
+            printf("[%d] already running\n", g_jobs[ji].job_num);
+        }
+        return 1;
+    }
+
+    if (strcmp(argv[0], "kill") == 0) {
+        if (argc < 2) { printf("usage: kill [-SIG] TID\n"); return 1; }
+        int sig = SIGTERM;
+        int tidarg = 1;
+        if (argv[1][0] == '-') {
+            /* parse signal number or name */
+            const char *sp = argv[1] + 1;
+            if (sp[0] >= '0' && sp[0] <= '9') sig = (int)(sp[0] - '0');
+            tidarg = 2;
+        }
+        if (tidarg >= argc) { printf("kill: missing TID\n"); return 1; }
+        unsigned long tid = 0;
+        for (int i = 0; argv[tidarg][i]; i++) tid = tid * 10 + (unsigned long)(argv[tidarg][i] - '0');
+        int r = sys_kill(tid, sig);
+        if (r < 0) printf("kill: no such process %lu\n", tid);
         return 1;
     }
 
@@ -576,13 +823,23 @@ static int ush_exec_line(char *line) {
         return 0;
     }
 
+    /* ── check for background operator '&' ── */
+    int background = 0;
+    if (ntok > 0 && strcmp(toks[ntok - 1], "&") == 0) {
+        background = 1;
+        toks[--ntok] = (char*)0;
+        if (ntok == 0) return 0;
+    }
+
     /* ── no pipe: regular command or builtin ── */
-    if (!redir_out && !redir_in && ush_builtin(ntok, toks)) return 0;
+    if (!background && !redir_out && !redir_in && ush_builtin(ntok, toks)) return 0;
 
     long child = sys_fork();
     if (child < 0) { printf("ush: fork failed\n"); return 0; }
 
     if (child == 0) {
+        /* Put child in its own process group */
+        sys_setpgid(0, 0);
         ush_apply_redirects(redir_out, redir_in, redir_app);
         if (ush_builtin(ntok, toks)) sys_exit(0);
         long r = ush_execv(toks[0], (const char *const *)toks);
@@ -590,15 +847,28 @@ static int ush_exec_line(char *line) {
         sys_exit(1);
     }
 
+    if (background) {
+        int ji = job_alloc((uint32_t)child, toks[0]);
+        if (ji >= 0) printf("[%d] %u\n", g_jobs[ji].job_num, (unsigned)child);
+        return 0;
+    }
+
     int code = 0;
-    long reaped = sys_waitpid((unsigned long)child, &code);
+    long reaped = sys_waitpid_flags((unsigned long)child, &code, WUNTRACED);
     if (reaped < 0) {
         printf("ush: waitpid failed\n");
+    } else if (WIFSTOPPED(code)) {
+        /* Child was stopped by Ctrl-Z */
+        int ji = job_alloc((uint32_t)child, toks[0]);
+        if (ji >= 0) {
+            g_jobs[ji].state = JOB_STOP;
+            printf("\n[%d]+ Stopped      %s\n", g_jobs[ji].job_num, g_jobs[ji].cmd);
+        }
     } else if (code == 127) {
         /* "not found" already printed */
     } else if (code == 130) {
-        /* Ctrl-C */
-    } else if (code != 0) {
+        printf("\n");  /* Ctrl-C — newline after ^C output */
+    } else if (code != 0 && !WIFSIGNALED(code)) {
         printf("[exit %d]\n", code);
     }
     return 0;
@@ -616,6 +886,9 @@ int main(int argc, char **argv) {
     static char cwd_buf[256];
 
     for (;;) {
+        /* Reap/notify any completed or newly-stopped background jobs */
+        job_poll();
+
         if (sys_getcwd(cwd_buf, sizeof(cwd_buf)) < 0) {
             cwd_buf[0] = '/'; cwd_buf[1] = '\0';
         }
