@@ -23,5 +23,9 @@ int keyboard_try_getchar(void);
 // Debug: number of scancodes received (IRQ1)
 uint64_t keyboard_irq_count(void);
 
+// Direct inject: push a single ASCII/KEY_* byte into the ring buffer.
+// Used by USB HID keyboard driver to bypass PS/2 scancode translation.
+void keyboard_push_char(uint8_t c);
+
 #endif
 void keyboard_irq_handler(void);

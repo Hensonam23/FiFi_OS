@@ -140,6 +140,10 @@ void keyboard_on_scancode(uint8_t sc) {
     kbd_push((uint8_t)c);
 }
 
+void keyboard_push_char(uint8_t c) {
+    kbd_push(c);
+}
+
 void keyboard_irq_handler(void) {
     // IRQ1: read scancode
     g_kbd_irq_count++;

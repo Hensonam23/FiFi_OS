@@ -82,6 +82,46 @@ bool pci_find(uint16_t vendor, uint16_t device,
     return false;
 }
 
+bool pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t progif,
+                    uint8_t *out_bus, uint8_t *out_dev, uint8_t *out_fn) {
+    for (uint32_t bus = 0; bus < 256; bus++) {
+        for (uint32_t dev = 0; dev < 32; dev++) {
+            uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, 0, 0x00);
+            if ((id & 0xFFFF) == 0xFFFF) continue;
+            uint8_t hdr = pci_read8((uint8_t)bus, (uint8_t)dev, 0, 0x0E);
+            uint8_t fns = (hdr & 0x80) ? 8 : 1;
+            for (uint8_t fn = 0; fn < fns; fn++) {
+                id = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF) continue;
+                uint32_t cr = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x08);
+                uint8_t c  = (uint8_t)(cr >> 24);
+                uint8_t sc = (uint8_t)(cr >> 16);
+                uint8_t pi = (uint8_t)(cr >> 8);
+                if (c == class_code && sc == subclass && pi == progif) {
+                    if (out_bus) *out_bus = (uint8_t)bus;
+                    if (out_dev) *out_dev = (uint8_t)dev;
+                    if (out_fn)  *out_fn  = fn;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+uint64_t pci_bar_base64(uint8_t bus, uint8_t dev, uint8_t fn, int bar) {
+    uint8_t reg = (uint8_t)(0x10 + bar * 4);
+    uint32_t lo = pci_read32(bus, dev, fn, reg);
+    if (lo & 1) return 0;                  /* I/O BAR, not MMIO */
+    if (((lo >> 1) & 3) != 2) {
+        /* 32-bit MMIO BAR */
+        return (uint64_t)(lo & 0xFFFFFFF0u);
+    }
+    /* 64-bit MMIO BAR */
+    uint32_t hi = pci_read32(bus, dev, fn, (uint8_t)(reg + 4));
+    return ((uint64_t)hi << 32) | (uint64_t)(lo & 0xFFFFFFF0u);
+}
+
 void pci_enable(uint8_t bus, uint8_t dev, uint8_t fn) {
     uint16_t cmd = pci_read16(bus, dev, fn, 0x04);
     cmd |= (1u << 0)  /* I/O space */

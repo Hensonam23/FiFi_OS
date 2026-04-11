@@ -24,6 +24,7 @@
 #include "gdt.h"
 #include "virtio_blk.h"
 #include "ext2.h"
+#include "xhci.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -240,6 +241,7 @@ heap_init();
     initrd_cat("motd.txt");
     virtio_blk_init();
     ext2_init();
+    xhci_init();
 
     thread_init();
     {
