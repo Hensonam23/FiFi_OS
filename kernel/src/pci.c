@@ -109,6 +109,34 @@ bool pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t progif,
     return false;
 }
 
+uint32_t pci_find_all_class(uint8_t class_code, uint8_t subclass, uint8_t progif,
+                             uint8_t *out_bus, uint8_t *out_dev, uint8_t *out_fn,
+                             uint32_t max_results) {
+    uint32_t found = 0;
+    for (uint32_t bus = 0; bus < 256 && found < max_results; bus++) {
+        for (uint32_t dev = 0; dev < 32 && found < max_results; dev++) {
+            uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, 0, 0x00);
+            if ((id & 0xFFFF) == 0xFFFF) continue;
+            uint8_t hdr = pci_read8((uint8_t)bus, (uint8_t)dev, 0, 0x0E);
+            uint8_t fns = (hdr & 0x80) ? 8 : 1;
+            for (uint8_t fn = 0; fn < fns && found < max_results; fn++) {
+                id = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF) continue;
+                uint32_t cr = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x08);
+                if ((uint8_t)(cr >> 24) == class_code &&
+                    (uint8_t)(cr >> 16) == subclass &&
+                    (uint8_t)(cr >>  8) == progif) {
+                    out_bus[found] = (uint8_t)bus;
+                    out_dev[found] = (uint8_t)dev;
+                    out_fn[found]  = fn;
+                    found++;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 uint64_t pci_bar_base64(uint8_t bus, uint8_t dev, uint8_t fn, int bar) {
     uint8_t reg = (uint8_t)(0x10 + bar * 4);
     uint32_t lo = pci_read32(bus, dev, fn, reg);

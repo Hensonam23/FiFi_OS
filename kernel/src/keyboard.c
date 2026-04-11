@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include "keyboard.h"
 #include "thread.h"
+#include "io.h"
 
 /*
   PS/2 Set 1 keyboard decoder (QEMU friendly)
@@ -24,12 +25,6 @@ static volatile uint64_t g_kbd_irq_count = 0;
 static bool shift_down = false;
 static bool ctrl_down  = false;
 static bool ext_e0     = false;
-
-static inline uint8_t inb(uint16_t port) {
-    uint8_t val;
-    __asm__ __volatile__("inb %1, %0" : "=a"(val) : "Nd"(port));
-    return val;
-}
 
 static void kbd_push(uint8_t c) {
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
@@ -142,6 +137,47 @@ void keyboard_on_scancode(uint8_t sc) {
 
 void keyboard_push_char(uint8_t c) {
     kbd_push(c);
+}
+
+/* Initialize the 8042 PS/2 controller.
+ * On real hardware the keyboard interface may start disabled or need
+ * the interrupt enabled explicitly. Safe to call even on systems without
+ * a real 8042 (the port writes are ignored). */
+void keyboard_ps2_init(void) {
+    /* Flush any pending output from the controller */
+    for (int i = 0; i < 16; i++) {
+        if (!(inb(0x64) & 0x01)) break;
+        (void)inb(0x60);
+    }
+
+    /* Read current controller configuration byte */
+    /* Command: 0x20 = read config byte */
+    /* Wait for input buffer empty (bit 1 of status = 0) */
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x64, 0x20);
+    for (int i = 0; i < 10000; i++) { if (inb(0x64) & 0x01) break; }
+    uint8_t cfg = inb(0x60);
+
+    /* Set bit 0 (enable keyboard interrupt) and bit 6 (scancode translation) */
+    /* Clear bit 4 (keyboard clock disable) if set */
+    cfg |=  (1u << 0) | (1u << 6);
+    cfg &= ~(1u << 4);
+
+    /* Write back: command 0x60 = write config byte */
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x64, 0x60);
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x60, cfg);
+
+    /* Enable keyboard interface: command 0xAE */
+    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
+    outb(0x64, 0xAE);
+
+    /* Flush again */
+    for (int i = 0; i < 16; i++) {
+        if (!(inb(0x64) & 0x01)) break;
+        (void)inb(0x60);
+    }
 }
 
 void keyboard_irq_handler(void) {

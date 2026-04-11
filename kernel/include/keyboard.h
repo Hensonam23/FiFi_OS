@@ -27,5 +27,9 @@ uint64_t keyboard_irq_count(void);
 // Used by USB HID keyboard driver to bypass PS/2 scancode translation.
 void keyboard_push_char(uint8_t c);
 
+// Initialize 8042 PS/2 controller (enable keyboard interface + IRQ).
+// Call once after PIC is set up. Safe on systems without a real 8042.
+void keyboard_ps2_init(void);
+
 #endif
 void keyboard_irq_handler(void);
