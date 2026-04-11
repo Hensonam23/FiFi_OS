@@ -20,5 +20,13 @@ uint32_t pci_bar_base(uint8_t bus, uint8_t dev, uint8_t fn, int bar, bool *is_io
 bool pci_find(uint16_t vendor, uint16_t device,
               uint8_t *out_bus, uint8_t *out_dev, uint8_t *out_fn);
 
+/* Find first device matching PCI class/subclass/prog-if.
+ * Returns true and fills out_bus/out_dev/out_fn on success. */
+bool pci_find_class(uint8_t class_code, uint8_t subclass, uint8_t progif,
+                    uint8_t *out_bus, uint8_t *out_dev, uint8_t *out_fn);
+
+/* Read a 64-bit MMIO BAR (BAR n and n+1). Returns 0 if not a 64-bit MMIO BAR. */
+uint64_t pci_bar_base64(uint8_t bus, uint8_t dev, uint8_t fn, int bar);
+
 /* Enable bus-mastering and I/O-space access on a device */
 void pci_enable(uint8_t bus, uint8_t dev, uint8_t fn);

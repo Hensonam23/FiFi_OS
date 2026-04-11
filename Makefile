@@ -55,6 +55,7 @@ OBJS := \
     $(BUILD)/pci.o \
     $(BUILD)/virtio_blk.o \
     $(BUILD)/ext2.o \
+    $(BUILD)/xhci.o \
     $(BUILD)/ramfs.o \
     $(BUILD)/isr_asm.o
 
@@ -249,6 +250,9 @@ $(BUILD)/pci.o: kernel/src/pci.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/virtio_blk.o: kernel/src/virtio_blk.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/xhci.o: kernel/src/xhci.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # elf object

@@ -1,5 +1,6 @@
 #include "pit.h"
 #include "io.h"
+#include "xhci.h"
 
 static volatile uint64_t g_pit_ticks = 0;
 static volatile uint32_t g_pit_hz = 0;
@@ -15,8 +16,8 @@ uint64_t pit_ticks(void) {
 
 /* This will be called by the IRQ0 handler */
 void pit_on_tick(void) {
-
     g_ticks++;
+    xhci_poll();
 }
 
 /* Set PIT frequency */
