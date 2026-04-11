@@ -1,9 +1,10 @@
 /*
  * xhci.c — Minimal XHCI USB host controller driver
  * Supports USB HID keyboards in Boot Protocol mode.
+ * Handles keyboards directly on root hub ports OR behind a single-tier USB hub
+ * (common on laptops where the internal keyboard sits behind an internal hub).
  *
  * Design: polling-only (no MSI/MSI-X), called from pit_on_tick() at 100 Hz.
- * Handles a single USB keyboard on any root-hub port.
  */
 
 #include <stdint.h>
@@ -25,14 +26,19 @@ static void *memset_x(void *s, int c, size_t n) {
     return s;
 }
 
-/* Spin-delay in rough microseconds (calibrated for ~3 GHz kernel, no SIMD) */
-static void udelay(uint32_t us) {
-    for (volatile uint32_t i = 0; i < us * 1000u; i++) {
-        __asm__ volatile ("pause");
-    }
+static void *memcpy_x(void *d, const void *s, size_t n) {
+    uint8_t *dst = (uint8_t *)d;
+    const uint8_t *src = (const uint8_t *)s;
+    for (size_t i = 0; i < n; i++) dst[i] = src[i];
+    return d;
 }
 
-/* ── MMIO accessors (volatile, no cache) ─────────────────────────────────── */
+static void udelay(uint32_t us) {
+    for (volatile uint32_t i = 0; i < us * 300u; i++)
+        __asm__ volatile ("pause");
+}
+
+/* ── MMIO accessors ───────────────────────────────────────────────────────── */
 
 static inline uint32_t mmio_r32(uint64_t base, uint32_t off) {
     return *(volatile uint32_t *)(uintptr_t)(base + off);
@@ -40,16 +46,12 @@ static inline uint32_t mmio_r32(uint64_t base, uint32_t off) {
 static inline void mmio_w32(uint64_t base, uint32_t off, uint32_t val) {
     *(volatile uint32_t *)(uintptr_t)(base + off) = val;
 }
-static inline uint64_t mmio_r64(uint64_t base, uint32_t off) {
-    return *(volatile uint64_t *)(uintptr_t)(base + off);
-}
 static inline void mmio_w64(uint64_t base, uint32_t off, uint64_t val) {
     *(volatile uint64_t *)(uintptr_t)(base + off) = val;
 }
 
 /* ── XHCI register offsets ───────────────────────────────────────────────── */
 
-/* Capability registers */
 #define CAP_CAPLENGTH   0x00u
 #define CAP_HCSPARAMS1  0x04u
 #define CAP_HCSPARAMS2  0x08u
@@ -57,26 +59,20 @@ static inline void mmio_w64(uint64_t base, uint32_t off, uint64_t val) {
 #define CAP_DBOFF       0x14u
 #define CAP_RTSOFF      0x18u
 
-/* Operational registers (offset = cap_base + CAPLENGTH) */
 #define OP_USBCMD       0x00u
 #define OP_USBSTS       0x04u
-#define OP_PAGESIZE     0x08u
 #define OP_DNCTRL       0x14u
 #define OP_CRCR         0x18u
 #define OP_DCBAAP       0x30u
 #define OP_CONFIG       0x38u
 #define OP_PORTSC(n)    (0x400u + (uint32_t)(n) * 0x10u)
 
-/* USBCMD bits */
 #define USBCMD_RS       (1u << 0)
 #define USBCMD_HCRST    (1u << 1)
 #define USBCMD_EWE      (1u << 10)
-
-/* USBSTS bits */
 #define USBSTS_HCH      (1u << 0)
 #define USBSTS_CNR      (1u << 11)
 
-/* PORTSC bits */
 #define PORTSC_CCS      (1u << 0)
 #define PORTSC_PED      (1u << 1)
 #define PORTSC_PR       (1u << 4)
@@ -85,10 +81,11 @@ static inline void mmio_w64(uint64_t base, uint32_t off, uint64_t val) {
 #define PORTSC_PEC      (1u << 18)
 #define PORTSC_PRC      (1u << 21)
 #define PORTSC_WRC      (1u << 19)
+#define PORTSC_W1C_BITS (PORTSC_CSC | PORTSC_PEC | PORTSC_PRC | PORTSC_WRC | \
+                         (1u<<22) | (1u<<23) | (1u<<24))
 #define PORTSC_SPEED(v) (((v) >> 10) & 0xFu)
-/* PORTSC speed codes: 1=FS(12Mbps), 2=LS(1.5Mbps), 3=HS(480Mbps), 4=SS(5Gbps) */
 
-/* Interrupter register set (runtime base + 0x20 + n*0x20) */
+/* IR = Interrupter Register Set */
 #define IR_IMAN     0x00u
 #define IR_IMOD     0x04u
 #define IR_ERSTSZ   0x08u
@@ -103,80 +100,63 @@ typedef struct {
     uint32_t control;
 } __attribute__((packed, aligned(16))) xhci_trb_t;
 
-#define TRB_TYPE_NORMAL         1u
-#define TRB_TYPE_SETUP          2u
-#define TRB_TYPE_DATA           3u
-#define TRB_TYPE_STATUS         4u
-#define TRB_TYPE_LINK           6u
-#define TRB_TYPE_ENABLE_SLOT    9u
-#define TRB_TYPE_ADDR_DEVICE    11u
-#define TRB_TYPE_CONFIG_EP      12u
-#define TRB_TYPE_EVAL_CTX       13u
-#define TRB_TYPE_EV_XFER        32u
-#define TRB_TYPE_EV_CMD         33u
-#define TRB_TYPE_EV_PORT        34u
+#define TRB_NORMAL      1u
+#define TRB_SETUP       2u
+#define TRB_DATA        3u
+#define TRB_STATUS      4u
+#define TRB_LINK        6u
+#define TRB_ENABLE_SLOT 9u
+#define TRB_ADDR_DEV    11u
+#define TRB_CONFIG_EP   12u
+#define TRB_EVAL_CTX    13u
+#define TRB_EV_XFER     32u
+#define TRB_EV_CMD      33u
+#define TRB_EV_PORT     34u
 
-#define TRB_C           (1u << 0)   /* cycle bit */
-#define TRB_TC          (1u << 1)   /* toggle cycle (Link) */
-#define TRB_IOC         (1u << 5)   /* interrupt on completion */
-#define TRB_IDT         (1u << 6)   /* immediate data */
-#define TRB_BSR         (1u << 9)   /* block set address request */
-#define TRB_DIR_IN      (1u << 16)  /* data direction IN */
-#define TRB_TRT_IN      (3u << 16)  /* transfer type IN (Setup Stage) */
-#define TRB_TRT_NONE    (0u << 16)  /* no data stage (Setup Stage) */
-
+#define TRB_C           (1u << 0)
+#define TRB_TC          (1u << 1)
+#define TRB_IOC         (1u << 5)
+#define TRB_IDT         (1u << 6)
+#define TRB_BSR         (1u << 9)
+#define TRB_DIR_IN      (1u << 16)
+#define TRB_TRT_IN      (3u << 16)
+#define TRB_TRT_NONE    (0u << 16)
 #define TRB_TYPE(t)     ((uint32_t)(t) << 10)
 #define TRB_SLOT(s)     ((uint32_t)(s) << 24)
 #define TRB_EP(ep)      ((uint32_t)(ep) << 16)
-
 #define TRB_CC(trb)     (((trb).status >> 24) & 0xFFu)
 #define CC_SUCCESS      1u
 #define CC_SHORT_PKT    13u
 
 /* ── Context structures ──────────────────────────────────────────────────── */
 
-/* Slot Context (32 bytes) */
 typedef struct {
-    uint32_t dw0;  /* bits 19:0 = route string, 23:20 = speed, 24 = MTT, 25 = hub,
-                      31:27 = context entries */
-    uint32_t dw1;  /* bits 15:0 = max exit latency, 23:16 = root hub port, 31:24 = num ports */
-    uint32_t dw2;  /* bits 7:0 = parent hub slot, 15:8 = parent port, 17:16 = TT think time,
-                      31:22 = interrupter target */
-    uint32_t dw3;  /* bits 7:0 = USB device address, 31:27 = slot state */
+    uint32_t dw0, dw1, dw2, dw3;
     uint32_t rsvd[4];
 } __attribute__((packed)) xhci_slot_ctx_t;
 
-/* Endpoint Context (32 bytes) */
 typedef struct {
-    uint32_t dw0;  /* bits 2:0 = EP state, 9:8 = mult, 14:10 = max PSAStreams,
-                      15 = LSA, 23:16 = interval, 31:24 = max ESIT payload hi */
-    uint32_t dw1;  /* bits 2:0 = rsvd, 5:3 = EP type, 6 = HID, 15:8 = max burst size,
-                      31:16 = max packet size */
-    uint64_t tr_dequeue_ptr; /* bits 0 = DCS (dequeue cycle state), 63:4 = TR dequeue ptr */
-    uint32_t dw4;  /* bits 15:0 = average TRB length, 31:16 = max ESIT payload lo */
+    uint32_t dw0, dw1;
+    uint64_t tr_dequeue_ptr;
+    uint32_t dw4;
     uint32_t rsvd[3];
 } __attribute__((packed)) xhci_ep_ctx_t;
 
-/* Device Context: slot + up to 31 endpoints */
 typedef struct {
     xhci_slot_ctx_t slot;
     xhci_ep_ctx_t   ep[31];
 } __attribute__((packed)) xhci_dev_ctx_t;
 
-/* Input Control Context (32 bytes) */
 typedef struct {
-    uint32_t drop_flags;
-    uint32_t add_flags;
+    uint32_t drop_flags, add_flags;
     uint32_t rsvd[6];
 } __attribute__((packed)) xhci_icc_t;
 
-/* Input Context: input control context + device context */
 typedef struct {
-    xhci_icc_t      icc;
-    xhci_dev_ctx_t  dev;
+    xhci_icc_t     icc;
+    xhci_dev_ctx_t dev;
 } __attribute__((packed)) xhci_input_ctx_t;
 
-/* ERST entry (16 bytes) */
 typedef struct {
     uint64_t base;
     uint16_t size;
@@ -190,12 +170,11 @@ typedef struct {
 #define XFER_ENTRIES    64u
 
 typedef struct {
-    xhci_trb_t *trbs;    /* virtual address */
-    uint64_t    phys;    /* physical base */
-    uint32_t    enq;     /* producer index */
-    uint32_t    deq;     /* consumer index */
-    uint8_t     cycle;   /* current producer cycle bit */
-    uint32_t    size;    /* total TRB slots including Link */
+    xhci_trb_t *trbs;
+    uint64_t    phys;
+    uint32_t    enq, deq;
+    uint8_t     cycle;
+    uint32_t    size;
 } ring_t;
 
 static ring_t ring_alloc(uint32_t entries) {
@@ -205,54 +184,43 @@ static ring_t ring_alloc(uint32_t entries) {
     r.cycle = 1;
     r.phys  = pmm_alloc_pages((entries * 16 + 4095) / 4096);
     r.trbs  = (xhci_trb_t *)pmm_phys_to_virt(r.phys);
-    memset_x(r.trbs, 0, entries * sizeof(xhci_trb_t));
+    memset_x(r.trbs, 0, entries * 16);
     return r;
 }
 
-/* Append a Link TRB pointing back to the start of the ring (makes it circular) */
 static void ring_link(ring_t *r) {
     xhci_trb_t *lnk = &r->trbs[r->size - 1];
     lnk->param   = r->phys;
     lnk->status  = 0;
-    lnk->control = TRB_TYPE(TRB_TYPE_LINK) | TRB_TC | (r->cycle ? TRB_C : 0);
+    lnk->control = TRB_TYPE(TRB_LINK) | TRB_TC | (r->cycle ? TRB_C : 0);
 }
 
-/* Enqueue one TRB on a command/transfer ring (updates cycle bit, handles wrap) */
 static xhci_trb_t *ring_enqueue(ring_t *r, uint64_t param, uint32_t status, uint32_t control) {
     xhci_trb_t *trb = &r->trbs[r->enq];
     trb->param   = param;
     trb->status  = status;
-    /* inject current cycle bit */
     trb->control = control | (r->cycle ? TRB_C : 0);
-
     r->enq++;
-    if (r->enq == r->size - 1) {   /* last slot is the Link TRB */
-        /* update Link TRB cycle to match what we just used */
+    if (r->enq == r->size - 1) {
         r->trbs[r->size - 1].control =
-            TRB_TYPE(TRB_TYPE_LINK) | TRB_TC | (r->cycle ? TRB_C : 0);
+            TRB_TYPE(TRB_LINK) | TRB_TC | (r->cycle ? TRB_C : 0);
         r->enq   = 0;
         r->cycle ^= 1;
     }
     return trb;
 }
 
-/* ── Controller state ────────────────────────────────────────────────────── */
+/* ── Controller global state ─────────────────────────────────────────────── */
 
 #define MAX_SLOTS   32u
-#define MAX_PORTS   16u
-#define KBD_BUFS    8u       /* queued Normal TRBs for interrupt IN endpoint */
+#define KBD_BUFS    8u
 
 static struct {
     bool     present;
-    uint64_t cap;            /* cap register base (virtual) */
-    uint64_t op;             /* operational register base */
-    uint64_t rt;             /* runtime register base */
-    uint64_t db;             /* doorbell array base */
+    uint64_t cap, op, rt, db;
+    uint8_t  max_slots, max_ports;
 
-    uint8_t  max_slots;
-    uint8_t  max_ports;
-
-    uint64_t *dcbaa;         /* virtual */
+    uint64_t *dcbaa;
     uint64_t  dcbaa_phys;
 
     ring_t   cmd;
@@ -261,135 +229,88 @@ static struct {
     xhci_erst_t *erst;
     uint64_t     erst_phys;
 
-    /* Per-slot device context */
     xhci_dev_ctx_t *dev_ctx[MAX_SLOTS + 1];
     uint64_t        dev_ctx_phys[MAX_SLOTS + 1];
+    ring_t          xfer[MAX_SLOTS + 1];
 
-    /* Per-slot interrupt-IN transfer ring */
-    ring_t    xfer[MAX_SLOTS + 1];
+    int      kbd_slot;
+    int      kbd_ep_dci;
+    uint8_t  last_keys[6];
 
-    /* Keyboard tracking */
-    int      kbd_slot;       /* slot ID, or -1 */
-    int      kbd_ep_dci;     /* doorbell context index for intr-IN EP */
-    uint8_t  last_keys[6];   /* previous key bytes from HID report */
-
-    /* Buffers for queued interrupt-IN TRBs */
     uint8_t  *kbd_data[KBD_BUFS];
     uint64_t  kbd_data_phys[KBD_BUFS];
 } g;
 
 /* ── Doorbell ────────────────────────────────────────────────────────────── */
 
-static void ring_doorbell(uint8_t slot, uint8_t ep_dci) {
-    uint32_t off = (uint32_t)slot * 4u;
-    mmio_w32(g.db, off, ep_dci);
+static void ring_doorbell(uint8_t slot, uint8_t dci) {
+    mmio_w32(g.db, (uint32_t)slot * 4u, dci);
 }
 
-/* ── Wait for a Command Completion event (polls event ring) ──────────────── */
+/* ── Event ring: wait for one event of a given type ─────────────────────── */
 
-static bool wait_cmd_event(uint8_t expected_type, uint32_t *cc_out, uint64_t *param_out,
-                           uint8_t *slot_out) {
-    for (int tries = 0; tries < 50000; tries++) {
+static bool wait_event(uint8_t want_type, uint32_t *cc, uint64_t *param, uint8_t *slot) {
+    for (int i = 0; i < 100000; i++) {
         xhci_trb_t *ev = &g.evt.trbs[g.evt.deq];
-        uint8_t  cycle = (uint8_t)(ev->control & 1u);
-        if (cycle != g.evt.cycle) {
-            udelay(1);
-            continue;
-        }
-        uint8_t type = (uint8_t)((ev->control >> 10) & 0x3Fu);
-        if (type == expected_type || expected_type == 0) {
-            if (cc_out)    *cc_out    = TRB_CC(*ev);
-            if (param_out) *param_out = ev->param;
-            if (slot_out)  *slot_out  = (uint8_t)(ev->control >> 24);
+        if ((ev->control & 1u) != (uint32_t)g.evt.cycle) { udelay(10); continue; }
 
-            g.evt.deq++;
-            if (g.evt.deq >= g.evt.size) {
-                g.evt.deq   = 0;
-                g.evt.cycle ^= 1;
-            }
-            /* Update ERDP to tell controller we consumed it */
-            uint64_t erdp_phys = g.evt.phys + g.evt.deq * 16u;
-            uint64_t rt_ir = g.rt + 0x20u;
-            mmio_w64(rt_ir, IR_ERDP, erdp_phys | (1u << 3));
-            return true;
+        uint8_t type = (uint8_t)((ev->control >> 10) & 0x3Fu);
+        bool match = (want_type == 0 || type == want_type);
+
+        if (match) {
+            if (cc)    *cc    = TRB_CC(*ev);
+            if (param) *param = ev->param;
+            if (slot)  *slot  = (uint8_t)(ev->control >> 24);
         }
-        /* advance past unrelated events */
+
         g.evt.deq++;
-        if (g.evt.deq >= g.evt.size) {
-            g.evt.deq   = 0;
-            g.evt.cycle ^= 1;
-        }
+        if (g.evt.deq >= g.evt.size) { g.evt.deq = 0; g.evt.cycle ^= 1; }
+        mmio_w64(g.rt + 0x20u, IR_ERDP, g.evt.phys + g.evt.deq * 16u | (1u << 3));
+
+        if (match) return true;
     }
     return false;
 }
 
-/* ── Control transfer helpers ────────────────────────────────────────────── */
+/* ── USB setup packet builder ────────────────────────────────────────────── */
 
-/*
- * Issue a USB control transfer on EP0 of the given slot.
- * setup_pkt: 8-byte SETUP packet packed into a uint64_t
- * data_phys:  physical address of data buffer (0 if no data stage)
- * data_len:   number of bytes to transfer
- * in_dir:     true = device-to-host (IN)
- * Returns true on success.
- */
-static bool ctrl_xfer(uint8_t slot, uint64_t setup_pkt, uint64_t data_phys,
-                      uint32_t data_len, bool in_dir) {
+static uint64_t usb_setup(uint8_t bmRT, uint8_t bReq,
+                           uint16_t wVal, uint16_t wIdx, uint16_t wLen) {
+    return (uint64_t)bmRT | ((uint64_t)bReq << 8) | ((uint64_t)wVal << 16)
+         | ((uint64_t)wIdx << 32) | ((uint64_t)wLen << 48);
+}
+
+/* ── Control transfer on EP0 of slot ─────────────────────────────────────── */
+
+static bool ctrl_xfer(uint8_t slot, uint64_t setup, uint64_t data_phys,
+                      uint32_t len, bool in) {
     ring_t *r = &g.xfer[slot];
-
-    /* Setup Stage — TRB with Immediate Data */
-    uint32_t trt = (data_len == 0) ? TRB_TRT_NONE :
-                   (in_dir        ? TRB_TRT_IN    : (2u << 16));
-    ring_enqueue(r, setup_pkt, 8u, TRB_TYPE(TRB_TYPE_SETUP) | TRB_IDT | trt);
-
-    /* Data Stage (if any) */
-    if (data_len > 0) {
-        uint32_t dir = in_dir ? TRB_DIR_IN : 0u;
-        ring_enqueue(r, data_phys, data_len, TRB_TYPE(TRB_TYPE_DATA) | dir | TRB_IOC);
+    uint32_t trt = (len == 0) ? TRB_TRT_NONE : (in ? TRB_TRT_IN : (2u << 16));
+    ring_enqueue(r, setup, 8u, TRB_TYPE(TRB_SETUP) | TRB_IDT | trt);
+    if (len > 0) {
+        uint32_t dir = in ? TRB_DIR_IN : 0u;
+        ring_enqueue(r, data_phys, len, TRB_TYPE(TRB_DATA) | dir | TRB_IOC);
     }
-
-    /* Status Stage — direction opposite to data (or IN if no data stage) */
-    uint32_t stat_dir = (data_len > 0 && in_dir) ? 0u : TRB_DIR_IN;
-    ring_enqueue(r, 0, 0, TRB_TYPE(TRB_TYPE_STATUS) | stat_dir | TRB_IOC);
-
-    /* Ring EP0 doorbell */
+    ring_enqueue(r, 0, 0,
+                 TRB_TYPE(TRB_STATUS) | ((len > 0 && in) ? 0u : TRB_DIR_IN) | TRB_IOC);
     ring_doorbell((uint8_t)slot, 1);
 
-    /* Wait for completion event */
     uint32_t cc = 0;
-    if (!wait_cmd_event(TRB_TYPE_EV_XFER, &cc, NULL, NULL)) return false;
+    if (!wait_event(TRB_EV_XFER, &cc, NULL, NULL)) return false;
     return (cc == CC_SUCCESS || cc == CC_SHORT_PKT);
 }
 
-/* Convenience: build a USB setup packet */
-static uint64_t usb_setup(uint8_t bmRT, uint8_t bReq,
-                           uint16_t wVal, uint16_t wIdx, uint16_t wLen) {
-    return (uint64_t)bmRT
-         | ((uint64_t)bReq << 8)
-         | ((uint64_t)wVal << 16)
-         | ((uint64_t)wIdx << 32)
-         | ((uint64_t)wLen << 48);
-}
-
-/* ── Controller reset and init ───────────────────────────────────────────── */
+/* ── Controller reset + start ────────────────────────────────────────────── */
 
 static bool ctrl_reset(void) {
-    /* Stop controller */
     uint32_t cmd = mmio_r32(g.op, OP_USBCMD);
-    cmd &= ~USBCMD_RS;
-    mmio_w32(g.op, OP_USBCMD, cmd);
-
-    /* Wait for HCH */
+    mmio_w32(g.op, OP_USBCMD, cmd & ~USBCMD_RS);
     for (int i = 0; i < 100; i++) {
         if (mmio_r32(g.op, OP_USBSTS) & USBSTS_HCH) break;
         udelay(1000);
     }
-
-    /* Issue HCRST */
     mmio_w32(g.op, OP_USBCMD, mmio_r32(g.op, OP_USBCMD) | USBCMD_HCRST);
     udelay(100);
-
-    /* Wait for reset to clear */
     for (int i = 0; i < 500; i++) {
         if (!(mmio_r32(g.op, OP_USBCMD) & USBCMD_HCRST) &&
             !(mmio_r32(g.op, OP_USBSTS) & USBSTS_CNR)) return true;
@@ -399,8 +320,7 @@ static bool ctrl_reset(void) {
 }
 
 static bool ctrl_start(void) {
-    mmio_w32(g.op, OP_USBCMD,
-             mmio_r32(g.op, OP_USBCMD) | USBCMD_RS | USBCMD_EWE);
+    mmio_w32(g.op, OP_USBCMD, mmio_r32(g.op, OP_USBCMD) | USBCMD_RS | USBCMD_EWE);
     for (int i = 0; i < 100; i++) {
         if (!(mmio_r32(g.op, OP_USBSTS) & USBSTS_HCH)) return true;
         udelay(1000);
@@ -408,84 +328,37 @@ static bool ctrl_start(void) {
     return false;
 }
 
-/* ── USB enumeration ─────────────────────────────────────────────────────── */
+/* ── Enable Slot command ─────────────────────────────────────────────────── */
 
-static bool enable_slot(uint8_t *slot_out) {
-    ring_enqueue(&g.cmd, 0, 0, TRB_TYPE(TRB_TYPE_ENABLE_SLOT));
+static bool cmd_enable_slot(uint8_t *slot_out) {
+    ring_enqueue(&g.cmd, 0, 0, TRB_TYPE(TRB_ENABLE_SLOT));
     ring_doorbell(0, 0);
-
-    uint32_t cc   = 0;
-    uint8_t  slot = 0;
-    if (!wait_cmd_event(TRB_TYPE_EV_CMD, &cc, NULL, &slot)) return false;
+    uint32_t cc = 0; uint8_t slot = 0;
+    if (!wait_event(TRB_EV_CMD, &cc, NULL, &slot)) return false;
     if (cc != CC_SUCCESS) return false;
     *slot_out = slot;
     return true;
 }
 
+/* ── Address Device command ──────────────────────────────────────────────── */
 /*
- * Set up device context + input context for a newly attached device.
- * speed: PORTSC speed code (1=FS, 2=LS, 3=HS, 4=SS)
- * port1: 1-based root hub port number
+ * route_string: 20-bit path through hubs (0 = directly on root)
+ * speed:        PORTSC speed code (1=FS, 2=LS, 3=HS, 4=SS)
+ * root_port1:   1-based root hub port number
+ * hub_slot:     slot of parent hub (0 = no hub, directly on root)
+ * hub_port:     port number on parent hub (0 = no hub)
+ * ep0_mps:      max packet size for EP0 (8 for LS/FS, 64 for HS)
  */
-static bool address_device(uint8_t slot, uint8_t port1, uint8_t speed) {
+static bool cmd_address_device(uint8_t slot, uint32_t route_string, uint8_t speed,
+                                uint8_t root_port1, uint8_t hub_slot, uint8_t hub_port,
+                                uint16_t ep0_mps) {
     /* Allocate output device context */
-    uint64_t phys = pmm_alloc_pages(2);  /* 8KB, plenty for one device context */
+    uint64_t phys = pmm_alloc_pages(2);
     if (!phys) return false;
     g.dev_ctx[slot]      = (xhci_dev_ctx_t *)pmm_phys_to_virt(phys);
     g.dev_ctx_phys[slot] = phys;
     memset_x(g.dev_ctx[slot], 0, sizeof(xhci_dev_ctx_t));
     g.dcbaa[slot] = phys;
-
-    /* Allocate input context (input ctrl ctx + slot ctx + EP0 ctx) */
-    uint64_t iphys = pmm_alloc_pages(2);
-    if (!iphys) return false;
-    xhci_input_ctx_t *ictx = (xhci_input_ctx_t *)pmm_phys_to_virt(iphys);
-    memset_x(ictx, 0, sizeof(xhci_input_ctx_t));
-
-    /* Input Control Context: Add slot (A0) and EP0 (A1) */
-    ictx->icc.add_flags = (1u << 0) | (1u << 1);
-
-    /* Slot Context */
-    uint8_t ctx_entries = 1;  /* just EP0 for now */
-    ictx->dev.slot.dw0 = ((uint32_t)speed << 20)
-                       | ((uint32_t)ctx_entries << 27);
-    ictx->dev.slot.dw1 = (uint32_t)port1 << 16;
-
-    /* EP0 Context — Control Bidirectional, EP type 4 */
-    /* Max packet size: LS=8, FS=8, HS=64, SS=512 */
-    uint16_t mps = (speed == 3) ? 64 : (speed == 4) ? 512 : 8;
-
-    /* Allocate EP0 transfer ring */
-    g.xfer[slot] = ring_alloc(RING_ENTRIES);
-    ring_link(&g.xfer[slot]);
-
-    ictx->dev.ep[0].dw1      = (4u << 3)                     /* EP type: control bidir */
-                              | ((uint32_t)mps << 16);        /* max packet size */
-    ictx->dev.ep[0].tr_dequeue_ptr = g.xfer[slot].phys | 1u; /* DCS=1 */
-    ictx->dev.ep[0].dw4      = 8u;                            /* average TRB length */
-
-    /* Address Device command */
-    ring_enqueue(&g.cmd, iphys, 0,
-                 TRB_TYPE(TRB_TYPE_ADDR_DEVICE) | TRB_SLOT(slot));
-    ring_doorbell(0, 0);
-
-    uint32_t cc = 0;
-    if (!wait_cmd_event(TRB_TYPE_EV_CMD, &cc, NULL, NULL)) return false;
-    return (cc == CC_SUCCESS);
-}
-
-/*
- * Configure the interrupt-IN endpoint for a HID keyboard.
- * ep_addr: USB endpoint address byte (e.g. 0x81 = EP1 IN)
- * interval: bInterval from endpoint descriptor (in frames / microframes)
- * mps:      wMaxPacketSize
- */
-static bool config_kbd_ep(uint8_t slot, uint8_t ep_addr,
-                           uint8_t interval, uint16_t mps) {
-    uint8_t ep_num = ep_addr & 0x0Fu;    /* endpoint number */
-    uint8_t dir    = (ep_addr & 0x80u) ? 1u : 0u;
-    uint8_t dci    = (uint8_t)(ep_num * 2u + dir); /* doorbell context index */
-    g.kbd_ep_dci   = dci;
 
     /* Allocate input context */
     uint64_t iphys = pmm_alloc_pages(2);
@@ -493,372 +366,409 @@ static bool config_kbd_ep(uint8_t slot, uint8_t ep_addr,
     xhci_input_ctx_t *ictx = (xhci_input_ctx_t *)pmm_phys_to_virt(iphys);
     memset_x(ictx, 0, sizeof(xhci_input_ctx_t));
 
-    /* Add slot (A0) and new endpoint (A<dci>) */
-    ictx->icc.add_flags = (1u << 0) | (1u << dci);
+    ictx->icc.add_flags = (1u << 0) | (1u << 1);  /* A0=slot, A1=EP0 */
 
-    /* Copy current slot context from device context */
-    xhci_slot_ctx_t *sc = &g.dev_ctx[slot]->slot;
-    ictx->dev.slot = *sc;
-    /* Update context entries to include new endpoint */
-    ictx->dev.slot.dw0 = (sc->dw0 & ~(0x1Fu << 27)) | ((uint32_t)dci << 27);
-
-    /* Allocate interrupt-IN transfer ring */
-    g.xfer[slot] = ring_alloc(XFER_ENTRIES);
-    ring_link(&g.xfer[slot]);
-
-    /* xHCI interval for full-speed interrupt: bInterval is in milliseconds (1-255).
-     * xHCI stores interval as log2(microframes), base 125us microframes.
-     * For full-speed: interval (ms) * 8 microframes/ms → log2(interval*8) */
-    uint8_t xhci_interval = 3;   /* default 8ms = 2^3 125us microframes */
-    if (interval >= 1 && interval <= 255) {
-        /* full-speed: bInterval frames → xhci interval = log2(bInterval * 8) */
-        uint32_t mf = (uint32_t)interval * 8u;
-        uint8_t  lg = 0;
-        while ((1u << lg) < mf && lg < 15) lg++;
-        xhci_interval = lg;
+    /* Slot context */
+    ictx->dev.slot.dw0 = (route_string & 0xFFFFFu)
+                       | ((uint32_t)speed << 20)
+                       | (1u << 27);        /* context entries = 1 (EP0 only) */
+    ictx->dev.slot.dw1 = (uint32_t)root_port1 << 16;
+    if (hub_slot) {
+        ictx->dev.slot.dw2 = (uint32_t)hub_slot        /* parent hub slot */
+                           | ((uint32_t)hub_port << 8); /* parent port */
     }
 
-    /* Endpoint context: Interrupt IN */
-    ictx->dev.ep[dci - 1].dw0 = (uint32_t)xhci_interval << 16;
-    ictx->dev.ep[dci - 1].dw1 = (7u << 3)               /* EP type: intr IN */
-                               | (1u << 6)               /* HID */
-                               | ((uint32_t)mps << 16);
-    ictx->dev.ep[dci - 1].tr_dequeue_ptr = g.xfer[slot].phys | 1u;
-    ictx->dev.ep[dci - 1].dw4 = 8u;
+    /* EP0 context */
+    g.xfer[slot] = ring_alloc(RING_ENTRIES);
+    ring_link(&g.xfer[slot]);
+    ictx->dev.ep[0].dw1      = (4u << 3) | ((uint32_t)ep0_mps << 16);
+    ictx->dev.ep[0].tr_dequeue_ptr = g.xfer[slot].phys | 1u;
+    ictx->dev.ep[0].dw4      = 8u;
 
-    /* Configure Endpoint command */
-    ring_enqueue(&g.cmd, iphys, 0,
-                 TRB_TYPE(TRB_TYPE_CONFIG_EP) | TRB_SLOT(slot));
+    ring_enqueue(&g.cmd, iphys, 0, TRB_TYPE(TRB_ADDR_DEV) | TRB_SLOT(slot));
     ring_doorbell(0, 0);
 
     uint32_t cc = 0;
-    if (!wait_cmd_event(TRB_TYPE_EV_CMD, &cc, NULL, NULL)) return false;
+    if (!wait_event(TRB_EV_CMD, &cc, NULL, NULL)) return false;
     return (cc == CC_SUCCESS);
 }
 
-/* ── USB descriptor structures (minimal) ─────────────────────────────────── */
+/* ── Configure interrupt-IN endpoint ─────────────────────────────────────── */
+
+static bool cmd_config_ep(uint8_t slot, uint8_t ep_addr,
+                           uint8_t interval, uint16_t ep_mps) {
+    uint8_t ep_num = ep_addr & 0x0Fu;
+    uint8_t dir    = (ep_addr & 0x80u) ? 1u : 0u;
+    uint8_t dci    = (uint8_t)(ep_num * 2u + dir);
+    g.kbd_ep_dci   = dci;
+
+    uint64_t iphys = pmm_alloc_pages(2);
+    if (!iphys) return false;
+    xhci_input_ctx_t *ictx = (xhci_input_ctx_t *)pmm_phys_to_virt(iphys);
+    memset_x(ictx, 0, sizeof(xhci_input_ctx_t));
+
+    ictx->icc.add_flags = (1u << 0) | (1u << dci);
+
+    /* Copy and update slot context */
+    memcpy_x(&ictx->dev.slot, &g.dev_ctx[slot]->slot, sizeof(xhci_slot_ctx_t));
+    ictx->dev.slot.dw0 = (ictx->dev.slot.dw0 & ~(0x1Fu << 27)) | ((uint32_t)dci << 27);
+
+    /* Interrupt-IN transfer ring */
+    g.xfer[slot] = ring_alloc(XFER_ENTRIES);
+    ring_link(&g.xfer[slot]);
+
+    /* xHCI interval: FS bInterval (ms) → log2(bInterval * 8 microframes) */
+    uint8_t xi = 3;
+    if (interval >= 1) {
+        uint32_t mf = (uint32_t)interval * 8u;
+        uint8_t  lg = 0;
+        while ((1u << lg) < mf && lg < 15) lg++;
+        xi = lg;
+    }
+
+    ictx->dev.ep[dci - 1].dw0 = (uint32_t)xi << 16;
+    ictx->dev.ep[dci - 1].dw1 = (7u << 3) | (1u << 6) | ((uint32_t)ep_mps << 16);
+    ictx->dev.ep[dci - 1].tr_dequeue_ptr = g.xfer[slot].phys | 1u;
+    ictx->dev.ep[dci - 1].dw4 = 8u;
+
+    ring_enqueue(&g.cmd, iphys, 0, TRB_TYPE(TRB_CONFIG_EP) | TRB_SLOT(slot));
+    ring_doorbell(0, 0);
+
+    uint32_t cc = 0;
+    if (!wait_event(TRB_EV_CMD, &cc, NULL, NULL)) return false;
+    return (cc == CC_SUCCESS);
+}
+
+/* ── Minimal USB descriptor structs ──────────────────────────────────────── */
 
 typedef struct {
-    uint8_t  bLength;
-    uint8_t  bDescriptorType;
+    uint8_t  bLength, bDescriptorType;
     uint16_t bcdUSB;
-    uint8_t  bDeviceClass;
-    uint8_t  bDeviceSubClass;
-    uint8_t  bDeviceProtocol;
-    uint8_t  bMaxPacketSize0;
-    uint16_t idVendor;
-    uint16_t idProduct;
-    uint16_t bcdDevice;
-    uint8_t  iManufacturer;
-    uint8_t  iProduct;
-    uint8_t  iSerialNumber;
-    uint8_t  bNumConfigurations;
+    uint8_t  bDeviceClass, bDeviceSubClass, bDeviceProtocol, bMaxPacketSize0;
+    uint16_t idVendor, idProduct, bcdDevice;
+    uint8_t  iManufacturer, iProduct, iSerialNumber, bNumConfigurations;
 } __attribute__((packed)) usb_dev_desc_t;
 
 typedef struct {
-    uint8_t  bLength;
-    uint8_t  bDescriptorType;
+    uint8_t  bLength, bDescriptorType;
     uint16_t wTotalLength;
-    uint8_t  bNumInterfaces;
-    uint8_t  bConfigurationValue;
-    uint8_t  iConfiguration;
-    uint8_t  bmAttributes;
-    uint8_t  bMaxPower;
+    uint8_t  bNumInterfaces, bConfigurationValue, iConfiguration,
+             bmAttributes, bMaxPower;
 } __attribute__((packed)) usb_cfg_desc_t;
 
 typedef struct {
-    uint8_t  bLength;
-    uint8_t  bDescriptorType;
-    uint8_t  bInterfaceNumber;
-    uint8_t  bAlternateSetting;
-    uint8_t  bNumEndpoints;
-    uint8_t  bInterfaceClass;
-    uint8_t  bInterfaceSubClass;
-    uint8_t  bInterfaceProtocol;
-    uint8_t  iInterface;
+    uint8_t  bLength, bDescriptorType;
+    uint8_t  bInterfaceNumber, bAlternateSetting, bNumEndpoints,
+             bInterfaceClass, bInterfaceSubClass, bInterfaceProtocol, iInterface;
 } __attribute__((packed)) usb_intf_desc_t;
 
 typedef struct {
-    uint8_t  bLength;
-    uint8_t  bDescriptorType;
-    uint8_t  bEndpointAddress;
-    uint8_t  bmAttributes;
+    uint8_t  bLength, bDescriptorType;
+    uint8_t  bEndpointAddress, bmAttributes;
     uint16_t wMaxPacketSize;
     uint8_t  bInterval;
 } __attribute__((packed)) usb_ep_desc_t;
 
-/* ── Enumerate a keyboard device ─────────────────────────────────────────── */
+/* USB Hub descriptor (class-specific, type 0x29) */
+typedef struct {
+    uint8_t  bLength, bDescriptorType;
+    uint8_t  bNbrPorts;
+    uint16_t wHubCharacteristics;
+    uint8_t  bPwrOn2PwrGood;   /* * 2ms = port power-on time */
+    uint8_t  bHubContrCurrent;
+    uint8_t  DeviceRemovable[4];
+} __attribute__((packed)) usb_hub_desc_t;
 
-static bool enumerate_keyboard(uint8_t slot, uint8_t port1, uint8_t speed) {
-    /* 1. Address Device (open slot at address 0 with assumed 8-byte EP0 MPS) */
-    if (!address_device(slot, port1, speed)) {
-        kprintf("[xhci] address_device slot %u failed\n", slot);
-        return false;
+/* Hub class requests */
+#define HUB_SET_FEATURE     0x03
+#define HUB_CLEAR_FEATURE   0x01
+#define HUB_GET_STATUS      0x00
+#define HUB_PORT_POWER      8
+#define HUB_PORT_RESET      4
+#define HUB_C_PORT_CONN     16
+#define HUB_C_PORT_RESET    20
+
+/* ── Try to enumerate one device as a HID boot keyboard ──────────────────── */
+/*
+ * slot:        already-enabled xHCI slot
+ * root_port1:  1-based root hub port (or same as parent's root port for hub children)
+ * speed:       PORTSC speed code
+ * route:       20-bit route string (0 for root, hub_port in bits 3:0 for tier-1 hub)
+ * hub_slot:    parent hub slot (0 = no hub)
+ * hub_port:    1-based port on parent hub (0 = no hub)
+ *
+ * Returns: 0=not a keyboard, 1=keyboard set up OK, -1=error
+ */
+static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
+                              uint32_t route, uint8_t hub_slot, uint8_t hub_port) {
+    /* Choose EP0 MPS based on speed: LS=8, FS=8, HS=64 */
+    uint16_t ep0_mps = (speed == 3) ? 64 : 8;
+
+    if (!cmd_address_device(slot, route, speed, root_port1,
+                             hub_slot, hub_port, ep0_mps)) {
+        return -1;
     }
 
-    /* Allocate a scratch buffer for descriptors */
+    /* Allocate descriptor buffer */
     uint64_t buf_phys = pmm_alloc_page();
-    if (!buf_phys) return false;
+    if (!buf_phys) return -1;
     uint8_t *buf = (uint8_t *)pmm_phys_to_virt(buf_phys);
+
+    /* GET_DESCRIPTOR: device descriptor (8 bytes to get class + MPS) */
     memset_x(buf, 0, 4096);
+    if (!ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 8), buf_phys, 8, true))
+        return -1;
 
-    /* 2. GET_DESCRIPTOR: device descriptor (just first 8 bytes to get bMaxPacketSize0) */
-    if (!ctrl_xfer(slot,
-                   usb_setup(0x80, 6, 0x0100, 0, 8),
-                   buf_phys, 8, true)) {
-        kprintf("[xhci] GET_DESCRIPTOR (dev) failed\n");
-        return false;
-    }
+    usb_dev_desc_t *dd = (usb_dev_desc_t *)buf;
+    uint8_t dev_class = dd->bDeviceClass;
 
-    /* 3. GET_DESCRIPTOR: full configuration descriptor (256 bytes max) */
-    memset_x(buf, 0, 256);
-    if (!ctrl_xfer(slot,
-                   usb_setup(0x80, 6, 0x0200, 0, 255),
-                   buf_phys, 255, true)) {
-        kprintf("[xhci] GET_DESCRIPTOR (cfg) failed\n");
-        return false;
-    }
+    /* Class 0x09 = Hub (caller handles this) */
+    if (dev_class == 0x09) return 0;
 
-    /* Parse config descriptor to find HID keyboard interface and EP */
-    uint8_t  cfg_val   = 1;
-    uint8_t  ep_addr   = 0x81;  /* default: EP1 IN */
-    uint16_t ep_mps    = 8;
-    uint8_t  ep_interval = 10;
-    bool     found_kbd = false;
+    /* GET_DESCRIPTOR: full configuration descriptor */
+    memset_x(buf, 0, 255);
+    if (!ctrl_xfer(slot, usb_setup(0x80, 6, 0x0200, 0, 255), buf_phys, 255, true))
+        return -1;
 
-    usb_cfg_desc_t *cfg = (usb_cfg_desc_t *)buf;
-    if (cfg->bDescriptorType == 2) {
-        cfg_val = cfg->bConfigurationValue;
-        uint16_t total = cfg->wTotalLength;
-        if (total > 255) total = 255;
-        uint16_t off = cfg->bLength;
-        while (off < total) {
-            uint8_t len  = buf[off];
-            uint8_t type = buf[off + 1];
-            if (len < 2) break;
-            if (type == 4) {  /* Interface descriptor */
-                usb_intf_desc_t *intf = (usb_intf_desc_t *)(buf + off);
-                /* HID class=3, subclass=1 (boot), protocol=1 (keyboard) */
-                if (intf->bInterfaceClass == 3 && intf->bInterfaceSubClass == 1
-                    && intf->bInterfaceProtocol == 1) {
-                    found_kbd = true;
-                }
-            } else if (type == 5 && found_kbd) {  /* Endpoint descriptor */
-                usb_ep_desc_t *ep = (usb_ep_desc_t *)(buf + off);
-                if ((ep->bEndpointAddress & 0x80u) &&
-                    (ep->bmAttributes & 3u) == 3u) {  /* IN + interrupt */
-                    ep_addr     = ep->bEndpointAddress;
-                    ep_mps      = ep->wMaxPacketSize;
-                    ep_interval = ep->bInterval;
-                    break;
-                }
+    /* Parse for HID boot keyboard interface + interrupt-IN endpoint */
+    usb_cfg_desc_t *cd = (usb_cfg_desc_t *)buf;
+    if (cd->bDescriptorType != 2) return 0;
+
+    uint8_t  cfg_val    = cd->bConfigurationValue;
+    uint8_t  ep_addr    = 0x81;
+    uint16_t ep_mps     = 8;
+    uint8_t  ep_iv      = 10;
+    bool     found_kbd  = false;
+    uint16_t total      = cd->wTotalLength;
+    if (total > 255) total = 255;
+    uint16_t off = cd->bLength;
+
+    while (off < total) {
+        uint8_t len  = buf[off];
+        uint8_t type = buf[off + 1];
+        if (len < 2) break;
+        if (type == 4) {
+            usb_intf_desc_t *id = (usb_intf_desc_t *)(buf + off);
+            if (id->bInterfaceClass == 3 &&
+                id->bInterfaceSubClass == 1 &&
+                id->bInterfaceProtocol == 1)
+                found_kbd = true;
+            else
+                found_kbd = false;
+        } else if (type == 5 && found_kbd) {
+            usb_ep_desc_t *ep = (usb_ep_desc_t *)(buf + off);
+            if ((ep->bEndpointAddress & 0x80u) && (ep->bmAttributes & 3u) == 3u) {
+                ep_addr = ep->bEndpointAddress;
+                ep_mps  = ep->wMaxPacketSize;
+                ep_iv   = ep->bInterval;
+                break;
             }
-            off = (uint16_t)(off + len);
         }
+        off = (uint16_t)(off + len);
     }
+    if (!found_kbd) return 0;  /* Not a keyboard */
 
-    if (!found_kbd) {
-        kprintf("[xhci] no HID boot keyboard interface found\n");
-        return false;
-    }
+    /* SET_CONFIGURATION */
+    if (!ctrl_xfer(slot, usb_setup(0x00, 9, cfg_val, 0, 0), 0, 0, false))
+        return -1;
 
-    /* 4. SET_CONFIGURATION */
-    if (!ctrl_xfer(slot,
-                   usb_setup(0x00, 9, cfg_val, 0, 0),
-                   0, 0, false)) {
-        kprintf("[xhci] SET_CONFIGURATION failed\n");
-        return false;
-    }
+    /* SET_PROTOCOL = 0 (boot protocol) */
+    if (!ctrl_xfer(slot, usb_setup(0x21, 0x0B, 0, 0, 0), 0, 0, false))
+        return -1;
 
-    /* 5. SET_PROTOCOL = 0 (boot protocol) */
-    if (!ctrl_xfer(slot,
-                   usb_setup(0x21, 0x0B, 0, 0, 0),
-                   0, 0, false)) {
-        kprintf("[xhci] SET_PROTOCOL failed\n");
-        return false;
-    }
+    /* Configure interrupt-IN endpoint */
+    if (!cmd_config_ep(slot, ep_addr, ep_iv, ep_mps)) return -1;
 
-    /* 6. Configure interrupt-IN endpoint */
-    if (!config_kbd_ep(slot, ep_addr, ep_interval, ep_mps)) {
-        kprintf("[xhci] configure EP failed\n");
-        return false;
-    }
-
-    /* 7. Allocate 8-byte data buffers and queue Normal TRBs */
+    /* Queue Normal TRBs */
     ring_t *xr = &g.xfer[slot];
     for (uint32_t i = 0; i < KBD_BUFS; i++) {
         g.kbd_data_phys[i] = pmm_alloc_page();
         g.kbd_data[i]      = (uint8_t *)pmm_phys_to_virt(g.kbd_data_phys[i]);
         memset_x(g.kbd_data[i], 0, 4096);
         ring_enqueue(xr, g.kbd_data_phys[i], 8u,
-                     TRB_TYPE(TRB_TYPE_NORMAL) | TRB_IOC);
+                     TRB_TYPE(TRB_NORMAL) | TRB_IOC);
     }
     ring_doorbell((uint8_t)slot, (uint8_t)g.kbd_ep_dci);
 
-    kprintf("[xhci] USB HID keyboard ready on slot %u port %u\n", slot, port1);
-    return true;
+    return 1;  /* keyboard ready */
 }
 
-/* ── HID boot-protocol keycode → ASCII translation ───────────────────────── */
+/* ── Enumerate a USB hub and search for keyboard on its ports ────────────── */
 
-static const uint8_t hid_to_ascii[256] = {
-    /* 0x00 */ 0, 0, 0, 0,
-    /* 0x04 a-z */
-    'a','b','c','d','e','f','g','h','i','j','k','l','m',
-    'n','o','p','q','r','s','t','u','v','w','x','y','z',
-    /* 0x1E 1-9,0 */
-    '1','2','3','4','5','6','7','8','9','0',
-    /* 0x28 */ '\n',  /* Enter */
-    /* 0x29 */ 27,    /* Escape */
-    /* 0x2A */ '\b',  /* Backspace */
-    /* 0x2B */ '\t',  /* Tab */
-    /* 0x2C */ ' ',   /* Space */
-    /* 0x2D */ '-',
-    /* 0x2E */ '=',
-    /* 0x2F */ '[',
-    /* 0x30 */ ']',
-    /* 0x31 */ '\\',
-    /* 0x32 */ 0,     /* Non-US # */
-    /* 0x33 */ ';',
-    /* 0x34 */ '\'',
-    /* 0x35 */ '`',
-    /* 0x36 */ ',',
-    /* 0x37 */ '.',
-    /* 0x38 */ '/',
-    /* 0x39 */ 0,     /* Caps Lock */
-    /* 0x3A-0x45 F1-F12 */ 0,0,0,0,0,0,0,0,0,0,0,0,
-    /* 0x46-0x4E misc */ 0,0,0,0,0,0,0,0,0,
-    /* 0x4F */ KEY_RIGHT,
-    /* 0x50 */ KEY_LEFT,
-    /* 0x51 */ KEY_DOWN,
-    /* 0x52 */ KEY_UP,
-    /* rest: 0 */
-};
-
-static const uint8_t hid_to_ascii_shift[256] = {
-    0, 0, 0, 0,
-    'A','B','C','D','E','F','G','H','I','J','K','L','M',
-    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
-    '!','@','#','$','%','^','&','*','(',')',
-    '\n', 27, '\b', '\t', ' ',
-    '_', '+', '{', '}', '|', 0, ':', '"', '~', '<', '>', '?',
-    0,  /* Caps Lock */
-    0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,
-    KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP,
-};
-
-static void process_hid_report(const uint8_t *report) {
-    uint8_t mods     = report[0];
-    bool    shift    = (mods & 0x22u) != 0;   /* L/R Shift */
-    bool    ctrl     = (mods & 0x11u) != 0;   /* L/R Ctrl */
-
-    for (int i = 2; i < 8; i++) {
-        uint8_t kc = report[i];
-        if (kc == 0 || kc == 1) continue;  /* 0=no key, 1=rollover */
-
-        /* check if this key was already down last report */
-        bool was_down = false;
-        for (int j = 2; j < 8; j++) {
-            if (g.last_keys[j - 2] == kc) { was_down = true; break; }
-        }
-        if (was_down) continue;
-
-        uint8_t ch = shift ? hid_to_ascii_shift[kc] : hid_to_ascii[kc];
-        if (!ch) continue;
-
-        if (ctrl && ch >= 'a' && ch <= 'z') {
-            keyboard_on_scancode(0);  /* dummy - handled below */
-            /* push Ctrl+key as control code */
-            (void)ch;
-            /* re-decode: lowercase version */
-            uint8_t lc = shift ? hid_to_ascii[kc] : ch;
-            if (lc >= 'a' && lc <= 'z') {
-                /* push control code via keyboard_on_scancode equivalent */
-                /* We call keyboard_on_scancode with a fake PS/2 scancode that
-                 * represents this ASCII control code — but it doesn't map cleanly.
-                 * Instead just push directly via a helper approach: call the
-                 * internal kbd_push equivalent. Since keyboard_on_scancode takes
-                 * PS/2 scancodes, we can't use it for control codes directly.
-                 * For now, push the printable character; Ctrl handling is a v1.1 task. */
-                keyboard_on_scancode(/* placeholder */ 0x1Du); /* Ctrl down */
-            }
-        } else {
-            /* For special keys (arrows, etc.), keyboard_on_scancode won't work
-             * since it expects PS/2 scancodes. We directly push via the public
-             * keyboard_on_scancode() which handles KEY_* values when ch >= 0x80. */
-            if (ch >= 0x80) {
-                /* Special key: push value directly into ring */
-                /* keyboard_on_scancode can't push KEY_* directly, but we can
-                 * abuse the fact that the existing PS/2 handler uses kbd_push()
-                 * which is internal. We reach the same ring buffer through a trick:
-                 * keyboard_on_scancode(0xE0) sets ext_e0 flag, then we'd need the
-                 * right extended scancode. Instead, we'll use a thin shim we add. */
-                /* For now use the extended key path in keyboard_on_scancode:
-                 * E0 followed by the right scancode for arrows. */
-                uint8_t ext = 0;
-                switch (ch) {
-                    case KEY_LEFT:   ext = 0x4Bu; break;
-                    case KEY_RIGHT:  ext = 0x4Du; break;
-                    case KEY_UP:     ext = 0x48u; break;
-                    case KEY_DOWN:   ext = 0x50u; break;
-                    case KEY_DELETE: ext = 0x53u; break;
-                    case KEY_HOME:   ext = 0x47u; break;
-                    case KEY_END:    ext = 0x4Fu; break;
-                }
-                if (ext) {
-                    keyboard_on_scancode(0xE0);
-                    keyboard_on_scancode(ext);
-                }
-            } else {
-                /* Normal printable ASCII — find PS/2 scancode for it.
-                 * Rather than a full reverse-lookup table, we expose a
-                 * direct character inject path. Since we only have
-                 * keyboard_on_scancode(), we use a small inline lookup
-                 * of the most important scancodes (letters, digits, common
-                 * punctuation). */
-                /* For simplicity: we already have the final ASCII character.
-                 * Use keyboard_on_scancode with matching PS/2 scan code.
-                 *
-                 * Better approach: add keyboard_push_ascii() to keyboard.c.
-                 * We'll call the raw ring directly via the existing scancode
-                 * path. The scancode path is complex and error-prone for
-                 * this reverse lookup, so we add a new function below. */
-                keyboard_push_char(ch);
-            }
-        }
+static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_speed) {
+    /* SET_CONFIGURATION 1 */
+    if (!ctrl_xfer(hub_slot, usb_setup(0x00, 9, 1, 0, 0), 0, 0, false)) {
+        kprintf("[xhci] hub SET_CONFIG failed\n");
+        return false;
     }
 
-    /* Save current keycodes for next iteration */
-    for (int i = 0; i < 6; i++) g.last_keys[i] = report[i + 2];
+    /* GET_DESCRIPTOR: Hub descriptor (type 0x29) */
+    uint64_t buf_phys = pmm_alloc_page();
+    if (!buf_phys) return false;
+    uint8_t *buf = (uint8_t *)pmm_phys_to_virt(buf_phys);
+    memset_x(buf, 0, 64);
+
+    if (!ctrl_xfer(hub_slot, usb_setup(0xA0, 6, 0x2900, 0, 8), buf_phys, 8, true)) {
+        kprintf("[xhci] hub GET_DESCRIPTOR failed\n");
+        return false;
+    }
+    usb_hub_desc_t *hd = (usb_hub_desc_t *)buf;
+    uint8_t nports     = hd->bNbrPorts;
+    uint32_t pwr_delay = (uint32_t)hd->bPwrOn2PwrGood * 2u + 50u; /* ms */
+    if (nports == 0 || nports > 15) nports = 8;
+    if (pwr_delay < 50) pwr_delay = 50;
+
+    kprintf("[xhci] hub slot %u has %u ports, pwr_delay=%ums\n",
+            hub_slot, nports, pwr_delay);
+
+    /* Power each downstream port */
+    for (uint8_t p = 1; p <= nports; p++) {
+        ctrl_xfer(hub_slot, usb_setup(0x23, HUB_SET_FEATURE, HUB_PORT_POWER, p, 0),
+                  0, 0, false);
+    }
+    udelay(pwr_delay * 1000u);  /* wait for power-on */
+
+    /* Check each port and try to find keyboard */
+    for (uint8_t p = 1; p <= nports; p++) {
+        /* GET_STATUS for this port */
+        memset_x(buf, 0, 8);
+        if (!ctrl_xfer(hub_slot,
+                       usb_setup(0xA3, HUB_GET_STATUS, 0, p, 4),
+                       buf_phys, 4, true))
+            continue;
+
+        uint32_t port_status = *(uint32_t *)buf;
+        if (!(port_status & 1u)) continue;  /* CCS = bit 0 */
+
+        uint8_t pspeed = (port_status & (1u << 9)) ? 2u  /* LS */
+                       : (port_status & (1u << 10)) ? 3u /* HS */
+                       : 1u;                             /* FS */
+
+        kprintf("[xhci] hub port %u: device connected speed=%u\n", p, pspeed);
+
+        /* Reset the hub port */
+        ctrl_xfer(hub_slot, usb_setup(0x23, HUB_SET_FEATURE, HUB_PORT_RESET, p, 0),
+                  0, 0, false);
+        udelay(60000);  /* 60ms reset */
+
+        /* Clear C_PORT_RESET */
+        ctrl_xfer(hub_slot, usb_setup(0x23, HUB_CLEAR_FEATURE, HUB_C_PORT_RESET, p, 0),
+                  0, 0, false);
+        udelay(5000);
+
+        /* Enable a slot for this device */
+        uint8_t slot = 0;
+        if (!cmd_enable_slot(&slot)) {
+            kprintf("[xhci] hub port %u: enable_slot failed\n", p);
+            continue;
+        }
+
+        /* Route string: tier-1 = hub port number in bits 3:0 */
+        uint32_t route = p & 0xFu;
+
+        int r = try_enumerate_kbd(slot, root_port1, pspeed,
+                                  route, hub_slot, p);
+        if (r == 1) {
+            kprintf("[xhci] USB HID keyboard on hub slot %u port %u\n", hub_slot, p);
+            g.kbd_slot = slot;
+            return true;
+        }
+    }
+    return false;
 }
 
-/* ── Port detection and reset ─────────────────────────────────────────────── */
+/* ── Root port reset ─────────────────────────────────────────────────────── */
 
-static bool port_reset(uint8_t port0) {
+static bool root_port_reset(uint8_t port0, uint8_t *speed_out) {
     uint32_t sc = mmio_r32(g.op, OP_PORTSC(port0));
+    if (!(sc & PORTSC_CCS)) return false;
 
-    if (!(sc & PORTSC_CCS)) return false;    /* nothing connected */
+    /* Assert port reset (clear W1C bits first) */
+    sc = (sc & ~PORTSC_W1C_BITS) | PORTSC_PR;
+    mmio_w32(g.op, OP_PORTSC(port0), sc);
+    udelay(60000);  /* 60ms */
 
-    /* Write PP=1 just in case, then assert PR */
-    sc |= PORTSC_PP;
-    sc &= ~(PORTSC_CSC | PORTSC_PEC | PORTSC_PRC | PORTSC_WRC); /* clear W1C bits */
-    mmio_w32(g.op, OP_PORTSC(port0), sc | PORTSC_PR);
-    udelay(50000);  /* 50ms reset time */
-
-    /* Wait for PRC (Port Reset Change) */
+    /* Wait for PRC */
     for (int i = 0; i < 100; i++) {
         sc = mmio_r32(g.op, OP_PORTSC(port0));
         if (sc & PORTSC_PRC) break;
         udelay(2000);
     }
-
-    /* Clear status change bits */
-    mmio_w32(g.op, OP_PORTSC(port0), sc | PORTSC_CSC | PORTSC_PEC | PORTSC_PRC);
+    /* Clear W1C */
+    mmio_w32(g.op, OP_PORTSC(port0), sc & ~PORTSC_W1C_BITS | PORTSC_W1C_BITS);
     udelay(2000);
 
     sc = mmio_r32(g.op, OP_PORTSC(port0));
-    return (sc & PORTSC_PED) != 0;  /* port must be enabled after reset */
+    *speed_out = (uint8_t)PORTSC_SPEED(sc);
+    return (sc & PORTSC_PED) != 0;
+}
+
+/* ── HID boot-protocol key translation ───────────────────────────────────── */
+
+static const uint8_t hid2asc[256] = {
+    /* 0x00 */ 0,0,0,0,
+    /* 0x04 a..z */ 'a','b','c','d','e','f','g','h','i','j','k','l','m',
+                    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    /* 0x1E 1..0 */ '1','2','3','4','5','6','7','8','9','0',
+    /* 0x28 */'\n', 27, '\b', '\t', ' ',
+    /* 0x2D */'-','=','[',']','\\',0,';','\'','`',',','.','/',
+    /* 0x39 Caps */ 0,
+    /* 0x3A-0x45 F1-F12 */ 0,0,0,0,0,0,0,0,0,0,0,0,
+    /* 0x46-0x4E */ 0,0,0,0,0,0,0,0,0,
+    /* 0x4F */ KEY_RIGHT,
+    /* 0x50 */ KEY_LEFT,
+    /* 0x51 */ KEY_DOWN,
+    /* 0x52 */ KEY_UP,
+};
+
+static const uint8_t hid2asc_sh[256] = {
+    0,0,0,0,
+    'A','B','C','D','E','F','G','H','I','J','K','L','M',
+    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+    '!','@','#','$','%','^','&','*','(',')',
+    '\n', 27, '\b', '\t', ' ',
+    '_','+','{','}','|',0,':','"','~','<','>','?',
+    0,
+    0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,
+    KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP,
+};
+
+static void process_hid_report(const uint8_t *rep) {
+    uint8_t mods  = rep[0];
+    bool    shift = (mods & 0x22u) != 0;
+    bool    ctrl  = (mods & 0x11u) != 0;
+
+    for (int i = 2; i < 8; i++) {
+        uint8_t kc = rep[i];
+        if (!kc || kc == 1) continue;
+        bool was_down = false;
+        for (int j = 0; j < 6; j++) { if (g.last_keys[j] == kc) { was_down = true; break; } }
+        if (was_down) continue;
+
+        uint8_t ch = shift ? hid2asc_sh[kc] : hid2asc[kc];
+        if (!ch) continue;
+
+        if (ch >= 0x80) {
+            /* Special key: inject via PS/2 extended scancode path */
+            uint8_t ext = 0;
+            switch (ch) {
+                case KEY_LEFT:   ext = 0x4Bu; break;
+                case KEY_RIGHT:  ext = 0x4Du; break;
+                case KEY_UP:     ext = 0x48u; break;
+                case KEY_DOWN:   ext = 0x50u; break;
+                case KEY_DELETE: ext = 0x53u; break;
+                case KEY_HOME:   ext = 0x47u; break;
+                case KEY_END:    ext = 0x4Fu; break;
+            }
+            if (ext) { keyboard_on_scancode(0xE0); keyboard_on_scancode(ext); }
+        } else if (ctrl && ch >= 'a' && ch <= 'z') {
+            keyboard_push_char((uint8_t)(ch - 'a' + 1));
+        } else {
+            keyboard_push_char(ch);
+        }
+    }
+    for (int i = 0; i < 6; i++) g.last_keys[i] = rep[i + 2];
 }
 
 /* ── xhci_init ────────────────────────────────────────────────────────────── */
@@ -867,151 +777,147 @@ void xhci_init(void) {
     memset_x(&g, 0, sizeof(g));
     g.kbd_slot = -1;
 
-    /* Find XHCI controller: class 0x0C, subclass 0x03, prog-if 0x30 */
     uint8_t bus, dev, fn;
     if (!pci_find_class(0x0C, 0x03, 0x30, &bus, &dev, &fn)) {
         kprintf("[xhci] no XHCI controller found\n");
         return;
     }
-    kprintf("[xhci] found controller at %02x:%02x.%x\n", bus, dev, fn);
+    kprintf("[xhci] found controller at %u:%u.%u\n", bus, dev, fn);
 
-    /* Get MMIO base (64-bit BAR0) */
     uint64_t mmio_phys = pci_bar_base64(bus, dev, fn, 0);
-    if (!mmio_phys) {
-        kprintf("[xhci] BAR0 invalid\n");
-        return;
-    }
+    if (!mmio_phys) { kprintf("[xhci] bad BAR0\n"); return; }
 
-    /* Map 64KB of MMIO into kernel virtual space */
-    uint64_t mmio_virt = 0xFFFFFF0040000000ULL;  /* fixed kernel MMIO VA */
-    if (!vmm_map_range(mmio_virt, mmio_phys, 0x10000,
-                       VMM_WRITE)) {
-        kprintf("[xhci] MMIO map failed\n");
-        return;
+    uint64_t mmio_virt = 0xFFFFFF0040000000ULL;
+    if (!vmm_map_range(mmio_virt, mmio_phys, 0x10000, VMM_WRITE)) {
+        kprintf("[xhci] MMIO map failed\n"); return;
     }
-
-    /* Enable PCI bus-master + memory decode */
     pci_enable(bus, dev, fn);
 
     g.cap = mmio_virt;
-    uint8_t  cap_len = (uint8_t)mmio_r32(g.cap, CAP_CAPLENGTH);
+    uint8_t cap_len = (uint8_t)mmio_r32(g.cap, CAP_CAPLENGTH);
     g.op  = g.cap + cap_len;
+    g.db  = g.cap + (mmio_r32(g.cap, CAP_DBOFF) & ~3u);
+    g.rt  = g.cap + (mmio_r32(g.cap, CAP_RTSOFF) & ~0x1Fu);
 
-    uint32_t dboff  = mmio_r32(g.cap, CAP_DBOFF) & ~3u;
-    uint32_t rtsoff = mmio_r32(g.cap, CAP_RTSOFF) & ~0x1Fu;
-    g.db  = g.cap + dboff;
-    g.rt  = g.cap + rtsoff;
-
-    uint32_t hcs1   = mmio_r32(g.cap, CAP_HCSPARAMS1);
-    g.max_slots     = (uint8_t)(hcs1 & 0xFFu);
-    g.max_ports     = (uint8_t)(hcs1 >> 24);
+    uint32_t hcs1 = mmio_r32(g.cap, CAP_HCSPARAMS1);
+    g.max_slots   = (uint8_t)((hcs1) & 0xFFu);
+    g.max_ports   = (uint8_t)(hcs1 >> 24);
     if (g.max_slots > MAX_SLOTS) g.max_slots = (uint8_t)MAX_SLOTS;
-    if (g.max_ports > MAX_PORTS) g.max_ports = (uint8_t)MAX_PORTS;
 
-    kprintf("[xhci] MMIO phys=%p virt=%p caplength=%u maxslots=%u maxports=%u\n",
-            (void *)mmio_phys, (void *)mmio_virt,
-            cap_len, g.max_slots, g.max_ports);
+    kprintf("[xhci] phys=%p maxslots=%u maxports=%u\n",
+            (void *)mmio_phys, g.max_slots, g.max_ports);
 
-    /* Reset controller */
-    if (!ctrl_reset()) {
-        kprintf("[xhci] controller reset timed out\n");
-        return;
-    }
+    if (!ctrl_reset()) { kprintf("[xhci] reset timed out\n"); return; }
 
-    /* Set MaxSlotsEn in CONFIG */
     mmio_w32(g.op, OP_CONFIG, g.max_slots);
 
-    /* Allocate DCBAA (1 page, 4K-aligned, zeroed) */
+    /* DCBAA */
     g.dcbaa_phys = pmm_alloc_page();
     g.dcbaa      = (uint64_t *)pmm_phys_to_virt(g.dcbaa_phys);
     memset_x(g.dcbaa, 0, 4096);
 
-    /* Check if scratchpad buffers are needed */
+    /* Scratchpad buffers */
     uint32_t hcs2 = mmio_r32(g.cap, CAP_HCSPARAMS2);
-    uint32_t max_scratchpad = ((hcs2 >> 27) & 0x1Fu) | (((hcs2 >> 21) & 0x1Fu) << 5);
-    if (max_scratchpad > 0) {
-        /* Allocate scratchpad pointer array */
-        uint64_t sp_arr_phys = pmm_alloc_page();
-        uint64_t *sp_arr = (uint64_t *)pmm_phys_to_virt(sp_arr_phys);
+    uint32_t nsp  = ((hcs2 >> 27) & 0x1Fu) | (((hcs2 >> 21) & 0x1Fu) << 5);
+    if (nsp > 0) {
+        uint64_t sp_phys = pmm_alloc_page();
+        uint64_t *sp_arr = (uint64_t *)pmm_phys_to_virt(sp_phys);
         memset_x(sp_arr, 0, 4096);
-        for (uint32_t i = 0; i < max_scratchpad && i < 512u; i++) {
+        for (uint32_t i = 0; i < nsp && i < 512u; i++)
             sp_arr[i] = pmm_alloc_page();
-        }
-        g.dcbaa[0] = sp_arr_phys;
+        g.dcbaa[0] = sp_phys;
     }
-
     mmio_w64(g.op, OP_DCBAAP, g.dcbaa_phys);
 
-    /* Allocate and set up Command Ring */
+    /* Command ring */
     g.cmd = ring_alloc(RING_ENTRIES);
     ring_link(&g.cmd);
-    mmio_w64(g.op, OP_CRCR, g.cmd.phys | 1u);  /* RCS=1 */
+    mmio_w64(g.op, OP_CRCR, g.cmd.phys | 1u);
 
-    /* Allocate Event Ring segment */
-    g.evt = ring_alloc(RING_ENTRIES);
-    g.evt.cycle = 1;   /* consumer starts expecting cycle=1 */
-
-    /* Allocate ERST (1 entry) */
+    /* Event ring + ERST */
+    g.evt       = ring_alloc(RING_ENTRIES);
+    g.evt.cycle = 1;
     g.erst_phys = pmm_alloc_page();
     g.erst      = (xhci_erst_t *)pmm_phys_to_virt(g.erst_phys);
     memset_x(g.erst, 0, 4096);
     g.erst[0].base = g.evt.phys;
     g.erst[0].size = (uint16_t)g.evt.size;
 
-    /* Configure interrupter 0 */
     uint64_t ir0 = g.rt + 0x20u;
     mmio_w32(ir0, IR_ERSTSZ, 1u);
     mmio_w64(ir0, IR_ERSTBA, g.erst_phys);
-    mmio_w64(ir0, IR_ERDP, g.evt.phys | (1u << 3));
+    mmio_w64(ir0, IR_ERDP,   g.evt.phys | (1u << 3));
 
-    /* Start controller */
-    if (!ctrl_start()) {
-        kprintf("[xhci] controller failed to start\n");
-        return;
-    }
-
+    if (!ctrl_start()) { kprintf("[xhci] start failed\n"); return; }
     g.present = true;
     kprintf("[xhci] controller running\n");
 
-    /* Scan ports for connected devices */
+    /* Power all ports and wait for devices to appear */
     for (uint8_t p = 0; p < g.max_ports; p++) {
         uint32_t sc = mmio_r32(g.op, OP_PORTSC(p));
-        if (!(sc & PORTSC_CCS)) continue;
-
-        uint8_t speed = (uint8_t)PORTSC_SPEED(sc);
-        /* Skip SuperSpeed (4) — keyboards are FS/LS/HS */
-        if (speed == 4) {
-            /* May need to give it a moment and re-read */
+        if (!(sc & PORTSC_PP)) {
+            mmio_w32(g.op, OP_PORTSC(p), (sc & ~PORTSC_W1C_BITS) | PORTSC_PP);
         }
+    }
+    udelay(300000);  /* 300ms for port power + device enumeration */
 
-        kprintf("[xhci] port %u: CCS speed=%u\n", p, speed);
+    /* Retry port scan up to 5 times with 100ms gaps */
+    for (int attempt = 0; attempt < 5 && g.kbd_slot < 0; attempt++) {
+        if (attempt > 0) udelay(100000);
 
-        /* Reset port to get it into Enabled state */
-        if (!port_reset(p)) {
-            kprintf("[xhci] port %u reset failed or no PED\n", p);
-            continue;
-        }
+        for (uint8_t p = 0; p < g.max_ports; p++) {
+            if (g.kbd_slot >= 0) break;
+            uint32_t sc = mmio_r32(g.op, OP_PORTSC(p));
+            if (!(sc & PORTSC_CCS)) continue;
 
-        /* Re-read speed after reset */
-        sc    = mmio_r32(g.op, OP_PORTSC(p));
-        speed = (uint8_t)PORTSC_SPEED(sc);
+            uint8_t speed = 0;
+            if (!root_port_reset(p, &speed)) {
+                kprintf("[xhci] port %u reset failed (sc=%x)\n", p,
+                        mmio_r32(g.op, OP_PORTSC(p)));
+                continue;
+            }
+            kprintf("[xhci] port %u: device speed=%u\n", p, speed);
 
-        /* Enable a slot */
-        uint8_t slot = 0;
-        if (!enable_slot(&slot)) {
-            kprintf("[xhci] enable_slot failed on port %u\n", p);
-            continue;
-        }
+            uint8_t slot = 0;
+            if (!cmd_enable_slot(&slot)) {
+                kprintf("[xhci] port %u: enable_slot failed\n", p);
+                continue;
+            }
 
-        if (enumerate_keyboard(slot, (uint8_t)(p + 1), speed)) {
-            g.kbd_slot = slot;
-            break;  /* Found a keyboard, stop scanning */
+            /* First: try direct keyboard enumeration */
+            int r = try_enumerate_kbd(slot, (uint8_t)(p + 1), speed,
+                                      0, 0, 0);
+            if (r == 1) {
+                kprintf("[xhci] USB HID keyboard ready on slot %u port %u\n",
+                        slot, p + 1);
+                g.kbd_slot = slot;
+                break;
+            }
+
+            /* Not a keyboard — check if it's a hub */
+            /* Re-get device descriptor to check class */
+            uint64_t buf_phys = pmm_alloc_page();
+            uint8_t *buf = (uint8_t *)pmm_phys_to_virt(buf_phys);
+            memset_x(buf, 0, 64);
+
+            /* address_device was already called inside try_enumerate_kbd,
+             * so we can reuse the existing EP0 control pipe for this slot */
+            if (ctrl_xfer(slot, usb_setup(0x80, 6, 0x0100, 0, 8),
+                          buf_phys, 8, true)) {
+                usb_dev_desc_t *dd = (usb_dev_desc_t *)buf;
+                if (dd->bDeviceClass == 0x09) {
+                    kprintf("[xhci] port %u: USB hub detected, scanning...\n", p);
+                    if (enumerate_hub(slot, (uint8_t)(p + 1), speed)) {
+                        /* kbd_slot set inside enumerate_hub */
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    if (g.kbd_slot < 0) {
-        kprintf("[xhci] no USB keyboard found on boot\n");
-    }
+    if (g.kbd_slot < 0)
+        kprintf("[xhci] no USB keyboard found\n");
 }
 
 /* ── xhci_poll ─ called from pit_on_tick() ───────────────────────────────── */
@@ -1019,40 +925,27 @@ void xhci_init(void) {
 void xhci_poll(void) {
     if (!g.present || g.kbd_slot < 0) return;
 
-    /* Walk the event ring consuming Transfer Events for our keyboard slot */
     for (int limit = 0; limit < 16; limit++) {
         xhci_trb_t *ev = &g.evt.trbs[g.evt.deq];
         if ((ev->control & 1u) != (uint32_t)g.evt.cycle) break;
 
         uint8_t type = (uint8_t)((ev->control >> 10) & 0x3Fu);
-        if (type == TRB_TYPE_EV_XFER) {
-            uint8_t slot = (uint8_t)(ev->control >> 24);
-            if (slot == (uint8_t)g.kbd_slot) {
-                /* Find which data buffer this TRB corresponds to */
-                uint64_t trb_phys = ev->param;
-                for (uint32_t i = 0; i < KBD_BUFS; i++) {
-                    if (trb_phys == g.kbd_data_phys[i]) {
-                        process_hid_report(g.kbd_data[i]);
-                        /* Re-queue this buffer */
-                        ring_enqueue(&g.xfer[slot],
-                                     g.kbd_data_phys[i], 8u,
-                                     TRB_TYPE(TRB_TYPE_NORMAL) | TRB_IOC);
-                        ring_doorbell((uint8_t)slot, (uint8_t)g.kbd_ep_dci);
-                        break;
-                    }
+        if (type == TRB_EV_XFER && (uint8_t)(ev->control >> 24) == (uint8_t)g.kbd_slot) {
+            uint64_t trb_phys = ev->param;
+            for (uint32_t i = 0; i < KBD_BUFS; i++) {
+                if (trb_phys == g.kbd_data_phys[i]) {
+                    process_hid_report(g.kbd_data[i]);
+                    ring_enqueue(&g.xfer[g.kbd_slot], g.kbd_data_phys[i], 8u,
+                                 TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+                    ring_doorbell((uint8_t)g.kbd_slot, (uint8_t)g.kbd_ep_dci);
+                    break;
                 }
             }
         }
 
-        /* Advance event ring */
         g.evt.deq++;
-        if (g.evt.deq >= g.evt.size) {
-            g.evt.deq   = 0;
-            g.evt.cycle ^= 1;
-        }
-        /* Update ERDP */
-        uint64_t ir0 = g.rt + 0x20u;
-        mmio_w64(ir0, IR_ERDP,
+        if (g.evt.deq >= g.evt.size) { g.evt.deq = 0; g.evt.cycle ^= 1; }
+        mmio_w64(g.rt + 0x20u, IR_ERDP,
                  g.evt.phys + g.evt.deq * 16u | (1u << 3));
     }
 }
