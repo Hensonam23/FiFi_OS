@@ -610,9 +610,10 @@ case SYS_UPTIME:
 
 
         case SYS_EXEC: {
-            /* rdi = path, rsi = user argv ptr (NULL-terminated array, or 0) */
+            /* rdi = path, rsi = user argv ptr, rdx = user envp ptr (both NULL-term, 0 ok) */
             uint64_t upath = ctx->rdi;
             uint64_t uargv = ctx->rsi;
+            uint64_t uenvp = ctx->rdx;
             char path_raw[256], path[256];
             if (copyin_str(path_raw, sizeof(path_raw), upath) < 0) {
                 ctx->rax = (uint64_t)-1;
@@ -642,7 +643,27 @@ case SYS_UPTIME:
             }
             argv_k[argc_k] = (const char*)0;
 
-            int r = exec_load(ctx, path, argc_k, argv_k);
+            /* Copy envp strings from user space */
+            #define EXEC_KMAX_ENVP 24
+            #define EXEC_KENV_LEN  192
+            char env_store[EXEC_KMAX_ENVP][EXEC_KENV_LEN];
+            const char *envp_k[EXEC_KMAX_ENVP + 1];
+            int envc_k = 0;
+
+            if (uenvp != 0) {
+                for (int i = 0; i < EXEC_KMAX_ENVP; i++) {
+                    uint64_t uptr_addr = uenvp + (uint64_t)i * 8;
+                    if (!vmm_user_accessible(uptr_addr, 8, false)) break;
+                    uint64_t ustr = *(volatile uint64_t*)(uintptr_t)uptr_addr;
+                    if (ustr == 0) break;
+                    if (copyin_str(env_store[envc_k], EXEC_KENV_LEN, ustr) < 0) break;
+                    envp_k[envc_k] = env_store[envc_k];
+                    envc_k++;
+                }
+            }
+            envp_k[envc_k] = (const char*)0;
+
+            int r = exec_load(ctx, path, argc_k, argv_k, envc_k, envp_k);
             if (r < 0) ctx->rax = (uint64_t)-1;
             /* on success exec_load modified ctx for iretq to new program */
             break;

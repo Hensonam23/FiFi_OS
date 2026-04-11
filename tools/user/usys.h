@@ -98,15 +98,21 @@ static inline long sys_readfile(const char *path, void *out_buf, uint64_t cap) {
 }
 
 
-/* exec(path): replace this process with the ELF at path (no arguments). */
-static inline long sys_exec(const char *path) {
-    return sys_call2(SYS_EXEC, (long)(uintptr_t)path, 0L);
+/* execve(path, argv, envp): replace this process; argv and envp are
+ * NULL-terminated pointer arrays (pass NULL for either if not needed). */
+static inline long sys_execve(const char *path,
+                               const char *const *argv,
+                               const char *const *envp) {
+    return sys_call3(SYS_EXEC, (long)(uintptr_t)path,
+                     (long)(uintptr_t)argv, (long)(uintptr_t)envp);
 }
 
-/* execv(path, argv): replace this process; argv is a NULL-terminated array
- * of string pointers (argv[0] is conventionally the program name). */
+/* Convenience wrappers */
+static inline long sys_exec(const char *path) {
+    return sys_execve(path, (void*)0, (void*)0);
+}
 static inline long sys_execv(const char *path, const char *const *argv) {
-    return sys_call2(SYS_EXEC, (long)(uintptr_t)path, (long)(uintptr_t)argv);
+    return sys_execve(path, argv, (void*)0);
 }
 
 static inline long sys_fork(void) {
