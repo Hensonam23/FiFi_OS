@@ -22,6 +22,7 @@
 #include "pmm.h"
 #include "heap.h"
 #include "kprintf.h"
+#include "pit.h"
 
 /* ── on-disk structures ───────────────────────────────────────────────────── */
 
@@ -721,6 +722,12 @@ int ext2_write_file(const char *path, const void *data, uint32_t size) {
         remaining -= chunk;
     }
     inode.i_size = size;
+    {
+        uint32_t now = (uint32_t)(pit_get_ticks() / 100);
+        inode.i_mtime = now;
+        inode.i_atime = now;
+        if (is_new) inode.i_ctime = now;
+    }
 
     if (!e2_write_inode(ino, &inode)) goto fail;
 
@@ -845,6 +852,12 @@ int ext2_mkdir(const char *path) {
     inode.i_size        = g.block_size;
     inode.i_blocks      = g.block_size / 512;
     inode.i_block[0]    = blk;
+    {
+        uint32_t now = (uint32_t)(pit_get_ticks() / 100);
+        inode.i_ctime = now;
+        inode.i_mtime = now;
+        inode.i_atime = now;
+    }
 
     if (!e2_write_inode(ino, &inode)) { e2_free_inode(ino); e2_free_block(blk); return -1; }
 

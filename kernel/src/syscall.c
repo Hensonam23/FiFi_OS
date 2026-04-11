@@ -197,6 +197,7 @@ static uint32_t pipe_ring_read(pipe_t *p, uint8_t *dst, uint32_t n) {
 #define FD_TYPE_PIPE_R 1
 #define FD_TYPE_PIPE_W 2
 #define FD_TYPE_RAMW   3   /* write-only fd backed by a ramfs_entry_t */
+#define FD_TYPE_NULL   4   /* /dev/null: reads return EOF, writes succeed silently */
 
 #define SYS_FD_MAX 32
 
@@ -253,6 +254,34 @@ static int fd_alloc(uint64_t tid, const uint8_t *data, uint64_t size) {
         }
     }
     return -1;
+}
+
+/* Allocate a /dev/null fd — reads return EOF, writes succeed silently. */
+static int fd_alloc_null(uint64_t tid) {
+    int fd_num = fd_next_num(tid);
+    if (fd_num < 0) return -1;
+    for (int i = 0; i < SYS_FD_MAX; i++) {
+        if (!g_fds[i].used) {
+            g_fds[i].used      = 1;
+            g_fds[i].fd_num    = fd_num;
+            g_fds[i].owner_tid = tid;
+            g_fds[i].type      = FD_TYPE_NULL;
+            g_fds[i].data      = (const uint8_t*)0;
+            g_fds[i].size      = 0;
+            g_fds[i].off       = 0;
+            g_fds[i].pipe      = (pipe_t*)0;
+            g_fds[i].ramfile   = (ramfs_entry_t*)0;
+            return fd_num;
+        }
+    }
+    return -1;
+}
+
+/* Returns 1 if the already-resolved absolute path is /dev/null. */
+static int is_devnull(const char *path) {
+    return (path[0]=='/' && path[1]=='d' && path[2]=='e' && path[3]=='v' &&
+            path[4]=='/' && path[5]=='n' && path[6]=='u' && path[7]=='l' &&
+            path[8]=='l' && path[9]=='\0');
 }
 
 /* Decrement pipe refcounts; zero the entry. */
@@ -429,6 +458,11 @@ case SYS_UPTIME:
                 return;
             }
 
+            if (wf && wf->type == FD_TYPE_NULL) {
+                ctx->rax = (uint64_t)n;  /* discard, report success */
+                return;
+            }
+
             if (wf && wf->type == FD_TYPE_RAMW && wf->ramfile) {
                 /* Write to ramfs buffer (output redirection) */
                 ramfs_entry_t *rf = wf->ramfile;
@@ -469,6 +503,12 @@ case SYS_UPTIME:
                 ctx->rax = (uint64_t)-1; return;
             }
 
+            if (is_devnull(path)) {
+                int nfd = fd_alloc_null(thread_current_tid());
+                ctx->rax = (nfd >= 0) ? (uint64_t)nfd : (uint64_t)-1;
+                return;
+            }
+
             const void *data = 0;
             uint64_t size = 0;
             int rc = vfs_read(path, &data, &size);
@@ -495,6 +535,8 @@ case SYS_UPTIME:
             uint64_t tid = thread_current_tid();
             sys_fd_t *f = fd_get(tid, rd_fd);
             if (!f) { ctx->rax = (uint64_t)-1; return; }
+
+            if (f->type == FD_TYPE_NULL) { ctx->rax = 0; return; }  /* EOF */
 
             if (f->type == FD_TYPE_PIPE_R) {
                 /* Blocking pipe read — wait until data available or write end closed */
@@ -871,6 +913,10 @@ case SYS_UPTIME:
             if (path_resolve(creat_path, sizeof(creat_path), creat_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
             }
+            if (is_devnull(creat_path)) {
+                int nfd = fd_alloc_null(thread_current_tid());
+                ctx->rax = (nfd >= 0) ? (uint64_t)nfd : (uint64_t)-1; return;
+            }
             ramfs_entry_t *rf = ramfs_creat(creat_path);
             if (!rf) { ctx->rax = (uint64_t)-1; return; }
 
@@ -932,6 +978,10 @@ case SYS_UPTIME:
             }
             if (path_resolve(ow_path, sizeof(ow_path), ow_raw) < 0) {
                 ctx->rax = (uint64_t)-1; return;
+            }
+            if (is_devnull(ow_path)) {
+                int nfd = fd_alloc_null(thread_current_tid());
+                ctx->rax = (nfd >= 0) ? (uint64_t)nfd : (uint64_t)-1; return;
             }
             /* ramfs_creat truncates — use it then pre-load existing content */
             ramfs_entry_t *ow_rf = ramfs_creat(ow_path);
