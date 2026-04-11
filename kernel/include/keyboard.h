@@ -31,5 +31,9 @@ void keyboard_push_char(uint8_t c);
 // Call once after PIC is set up. Safe on systems without a real 8042.
 void keyboard_ps2_init(void);
 
+// Poll PS/2 port directly — fallback when IRQ1 isn't delivering.
+// Call from pit_on_tick() at 100Hz. Safe alongside IRQ1 handler.
+void keyboard_ps2_poll(void);
+
 #endif
 void keyboard_irq_handler(void);

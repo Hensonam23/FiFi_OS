@@ -140,93 +140,165 @@ void keyboard_push_char(uint8_t c) {
     kbd_push(c);
 }
 
-/* Initialize the 8042 PS/2 controller.
- * On real hardware the keyboard interface may start disabled or need
- * the interrupt enabled explicitly. Safe to call even on systems without
- * a real 8042 (the port writes are ignored). */
-void keyboard_ps2_init(void) {
-    /* Flush any pending output from the controller */
-    for (int i = 0; i < 16; i++) {
-        if (!(inb(0x64) & 0x01)) break;
-        (void)inb(0x60);
+static volatile bool ps2_present = false;
+
+/* Helper: wait for i8042 input buffer empty (safe to send command) */
+static bool i8042_wait_write(void) {
+    for (int i = 0; i < 100000; i++) {
+        if (!(inb(0x64) & 0x02)) return true;
     }
+    return false;
+}
 
-    /* Read current controller configuration byte */
-    /* Command: 0x20 = read config byte */
-    /* Wait for input buffer empty (bit 1 of status = 0) */
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x64, 0x20);
-    for (int i = 0; i < 10000; i++) { if (inb(0x64) & 0x01) break; }
-    uint8_t cfg = inb(0x60);
+/* Helper: wait for i8042 output buffer full (data ready to read) */
+static bool i8042_wait_read(void) {
+    for (int i = 0; i < 100000; i++) {
+        if (inb(0x64) & 0x01) return true;
+    }
+    return false;
+}
 
-    /* Set bit 0 (enable keyboard interrupt) and bit 6 (scancode translation) */
-    /* Clear bit 4 (keyboard clock disable) if set */
-    cfg |=  (1u << 0) | (1u << 6);
-    cfg &= ~(1u << 4);
-
-    /* Write back: command 0x60 = write config byte */
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x64, 0x60);
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x60, cfg);
-
-    /* Enable keyboard interface: command 0xAE */
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x64, 0xAE);
-
-    /* Small settle delay after enabling interface */
-    for (volatile int i = 0; i < 50000; i++) __asm__ volatile("pause");
-
-    /* Flush any bytes the controller/keyboard generated during enable */
+/* Helper: flush all pending bytes from i8042 output buffer */
+static void i8042_flush(void) {
     for (int i = 0; i < 32; i++) {
         if (!(inb(0x64) & 0x01)) break;
         (void)inb(0x60);
     }
+}
 
-    /* Send 0xF4 (Enable Scanning) to the keyboard device itself.
-     * Required on real hardware — QEMU auto-enables scanning, but laptop
-     * ECs and real i8042 controllers keep scanning disabled until told. */
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x60, 0xF4);
+/* Initialize the 8042 PS/2 controller.
+ * Comprehensive init for both QEMU and real hardware (laptops with EC). */
+void keyboard_ps2_init(void) {
+    uint8_t st = inb(0x64);
+    kprintf("[ps2] probe: status=0x%x\n", (unsigned)st);
 
-    /* Wait for ACK (0xFA) from keyboard */
-    bool got_ack = false;
-    for (int i = 0; i < 100000; i++) {
-        if (inb(0x64) & 0x01) {
+    /* If status is 0xFF, the i8042 controller doesn't exist */
+    if (st == 0xFF) {
+        kprintf("[ps2] NO i8042 controller (status=0xFF)\n");
+        ps2_present = false;
+        return;
+    }
+
+    i8042_flush();
+
+    /* Controller self-test: command 0xAA, expect response 0x55 */
+    if (i8042_wait_write()) {
+        outb(0x64, 0xAA);
+        if (i8042_wait_read()) {
             uint8_t r = inb(0x60);
-            if (r == 0xFA) { got_ack = true; break; }
-            if (r == 0xFE) break;   /* resend request — give up */
+            kprintf("[ps2] self-test: 0x%x %s\n", (unsigned)r,
+                    r == 0x55 ? "PASS" : "FAIL");
+            if (r != 0x55) {
+                /* Controller exists but self-test failed — try anyway */
+            }
+        } else {
+            kprintf("[ps2] self-test: no response\n");
         }
     }
 
+    i8042_flush();
+
+    /* Keyboard interface test: command 0xAB, expect 0x00 */
+    if (i8042_wait_write()) {
+        outb(0x64, 0xAB);
+        if (i8042_wait_read()) {
+            uint8_t r = inb(0x60);
+            kprintf("[ps2] kbd test: 0x%x %s\n", (unsigned)r,
+                    r == 0x00 ? "OK" : "FAIL");
+        } else {
+            kprintf("[ps2] kbd test: no response\n");
+        }
+    }
+
+    i8042_flush();
+
+    /* Read current controller configuration byte */
+    uint8_t cfg = 0;
+    if (i8042_wait_write()) {
+        outb(0x64, 0x20);
+        if (i8042_wait_read()) {
+            cfg = inb(0x60);
+            kprintf("[ps2] config byte: 0x%x\n", (unsigned)cfg);
+        } else {
+            kprintf("[ps2] config read: no response\n");
+        }
+    }
+
+    /* Set bit 0 (enable keyboard interrupt) and bit 6 (scancode translation)
+     * Clear bit 4 (keyboard clock disable) */
+    cfg |=  (1u << 0) | (1u << 6);
+    cfg &= ~(1u << 4);
+
+    /* Write config back */
+    if (i8042_wait_write()) outb(0x64, 0x60);
+    if (i8042_wait_write()) outb(0x60, cfg);
+
+    /* Enable keyboard interface */
+    if (i8042_wait_write()) outb(0x64, 0xAE);
+
+    /* Small settle delay */
+    for (volatile int i = 0; i < 100000; i++) __asm__ volatile("pause");
+    i8042_flush();
+
+    /* Reset keyboard: command 0xFF → expect ACK (0xFA) then self-test (0xAA) */
+    kprintf("[ps2] resetting keyboard...\n");
+    if (i8042_wait_write()) {
+        outb(0x60, 0xFF);
+        bool got_fa = false, got_aa = false;
+        for (int i = 0; i < 500000; i++) {  /* up to ~500ms */
+            if (inb(0x64) & 0x01) {
+                uint8_t r = inb(0x60);
+                if (r == 0xFA) got_fa = true;
+                else if (r == 0xAA) { got_aa = true; break; }
+            }
+        }
+        kprintf("[ps2] reset: ack=%s selftest=%s\n",
+                got_fa ? "yes" : "no", got_aa ? "yes" : "no");
+    }
+
+    i8042_flush();
+
+    /* Enable scanning: command 0xF4 → expect ACK (0xFA) */
+    bool got_ack = false;
+    if (i8042_wait_write()) {
+        outb(0x60, 0xF4);
+        for (int i = 0; i < 100000; i++) {
+            if (inb(0x64) & 0x01) {
+                uint8_t r = inb(0x60);
+                if (r == 0xFA) { got_ack = true; break; }
+                if (r == 0xFE) break;
+            }
+        }
+    }
     kprintf("[ps2] enable scanning: %s\n", got_ack ? "ACK" : "no response");
 
-    /* Also set scan code set 2 (translated to set 1 by bit 6 of config byte).
-     * Some laptop ECs need this explicitly. */
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x60, 0xF0);   /* Set Scan Code Set command */
-    for (int i = 0; i < 50000; i++) {
-        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
-    }
-    for (int i = 0; i < 10000; i++) { if (!(inb(0x64) & 0x02)) break; }
-    outb(0x60, 0x02);   /* Scan code set 2 */
-    for (int i = 0; i < 50000; i++) {
-        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
-    }
+    i8042_flush();
 
-    /* Final flush */
-    for (int i = 0; i < 16; i++) {
-        if (!(inb(0x64) & 0x01)) break;
-        (void)inb(0x60);
-    }
+    /* Re-read and log final status */
+    st = inb(0x64);
+    kprintf("[ps2] final status=0x%x cfg=0x%x\n", (unsigned)st, (unsigned)cfg);
 
-    kprintf("[ps2] i8042 status=0x%x cfg=0x%x\n",
-            (unsigned)inb(0x64), (unsigned)cfg);
+    ps2_present = true;
+}
+
+/* Poll PS/2 port directly — called from pit_on_tick() at 100Hz.
+ * Works even when IRQ1 isn't delivering interrupts (APIC routing,
+ * missing i8042, EC quirks, etc). */
+void keyboard_ps2_poll(void) {
+    for (int i = 0; i < 8; i++) {
+        uint8_t st = inb(0x64);
+        if (!(st & 0x01)) break;           /* OBF empty — nothing to read */
+        if (st & 0x20) { (void)inb(0x60); continue; }  /* mouse byte — discard */
+        uint8_t sc = inb(0x60);
+        g_kbd_irq_count++;
+        keyboard_on_scancode(sc);
+    }
 }
 
 void keyboard_irq_handler(void) {
-    // IRQ1: read scancode
     g_kbd_irq_count++;
+    /* Check OBF to avoid reading stale data (safe alongside polling) */
+    if (!(inb(0x64) & 0x01)) return;
     uint8_t sc = inb(0x60);
     keyboard_on_scancode(sc);
 }

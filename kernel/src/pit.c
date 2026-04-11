@@ -1,6 +1,7 @@
 #include "pit.h"
 #include "io.h"
 #include "xhci.h"
+#include "keyboard.h"
 
 static volatile uint64_t g_pit_ticks = 0;
 static volatile uint32_t g_pit_hz = 0;
@@ -17,6 +18,7 @@ uint64_t pit_ticks(void) {
 /* This will be called by the IRQ0 handler */
 void pit_on_tick(void) {
     g_ticks++;
+    keyboard_ps2_poll();  /* PS/2 fallback — works even without IRQ1 */
     xhci_poll();
 }
 
