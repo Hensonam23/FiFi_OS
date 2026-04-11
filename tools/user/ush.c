@@ -133,9 +133,32 @@ static int ush_tokenise(char *buf, char *toks[], int maxtok) {
 
 /* ── exec helper ─────────────────────────────────────────────────────────── */
 
-/* Try name as-is, then name + ".elf". argv[0] stays as the user typed it. */
+/* Build a NULL-terminated envp array from the current shell environment.
+ * Returns a pointer to a static envp[] ready to pass to sys_execve. */
+#define USH_ENVSTR_MAX (ENV_KEY_MAX + 1 + ENV_VAL_MAX)
+static char        g_envp_strs[ENV_MAX][USH_ENVSTR_MAX];
+static const char *g_envp[ENV_MAX + 1];
+
+static const char *const *ush_build_envp(void) {
+    int n = 0;
+    for (int i = 0; i < g_env_n && i < ENV_MAX; i++) {
+        char *p = g_envp_strs[i];
+        int j = 0;
+        while (g_env_keys[i][j] && j < ENV_KEY_MAX - 1) *p++ = g_env_keys[i][j++];
+        *p++ = '=';
+        j = 0;
+        while (g_env_vals[i][j] && j < ENV_VAL_MAX - 1) *p++ = g_env_vals[i][j++];
+        *p = '\0';
+        g_envp[n++] = g_envp_strs[i];
+    }
+    g_envp[n] = (char*)0;
+    return g_envp;
+}
+
+/* Try name as-is, then name + ".elf". Passes current environment to child. */
 static long ush_execv(const char *name, const char *const *argv) {
-    long r = sys_execv(name, argv);
+    const char *const *envp = ush_build_envp();
+    long r = sys_execve(name, argv, envp);
     if (r == 0) return 0;
 
     static char path[LINEMAX + 8];
@@ -143,7 +166,7 @@ static long ush_execv(const char *name, const char *const *argv) {
     while (name[i] && i < LINEMAX - 1) { path[i] = name[i]; i++; }
     path[i++] = '.'; path[i++] = 'e'; path[i++] = 'l'; path[i++] = 'f';
     path[i] = '\0';
-    return sys_execv(path, argv);
+    return sys_execve(path, argv, envp);
 }
 
 /* ── forward declaration (source builtin needs this) ─────────────────────── */
