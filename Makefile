@@ -175,6 +175,24 @@ runinstall: $(DISK)
 clean:
 	rm -rf $(BUILD)
 
+# Package a release zip: fifi.iso + all platform installers
+RELEASE_DIR := $(BUILD)/release
+RELEASE_ZIP := $(BUILD)/fifi-os-release.zip
+
+release: iso
+	rm -rf $(RELEASE_DIR)
+	mkdir -p $(RELEASE_DIR)
+	cp $(ISO)      $(RELEASE_DIR)/fifi.iso
+	cp install.sh  $(RELEASE_DIR)/install.sh
+	cp install.ps1 $(RELEASE_DIR)/install.ps1
+	cp install.bat $(RELEASE_DIR)/install.bat
+	printf "FiFi OS\n\nLinux/macOS: chmod +x install.sh && ./install.sh\nWindows:     right-click install.bat -> Run as administrator\n" \
+	    > $(RELEASE_DIR)/README.txt
+	cd $(BUILD) && zip -r fifi-os-release.zip release/
+	@echo ""
+	@echo "Release ready: $(RELEASE_ZIP)"
+	@echo "Upload to: https://github.com/Hensonam23/FiFi_OS/releases/new"
+
 $(BUILD)/pic.o: kernel/src/pic.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
