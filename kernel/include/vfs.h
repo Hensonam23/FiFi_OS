@@ -29,3 +29,6 @@ int vfs_mkdir(const char *path);
 
 /* Return file size in bytes, or -1 if not found. */
 int vfs_filesize(const char *path);
+
+/* Returns 1 if path is a directory, 0 otherwise. */
+int vfs_isdir(const char *path);

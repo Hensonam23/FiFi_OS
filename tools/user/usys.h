@@ -177,6 +177,16 @@ static inline long sys_mkdir(const char *path) {
     return sys_call1(SYS_MKDIR, (long)(uintptr_t)path);
 }
 
+/* getcwd(buf, size): copy cwd into buf.  Returns length, or -1 on error. */
+static inline long sys_getcwd(char *buf, unsigned long size) {
+    return sys_call2(SYS_GETCWD, (long)(uintptr_t)buf, (long)size);
+}
+
+/* chdir(path): change working directory.  Returns 0 on success, -1 on error. */
+static inline long sys_chdir(const char *path) {
+    return sys_call1(SYS_CHDIR, (long)(uintptr_t)path);
+}
+
 /* sbrk(n): grow heap by n bytes, return pointer to start of new region.
  * Returns (void*)-1 on failure. */
 static inline void *sys_sbrk(unsigned long n) {

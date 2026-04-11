@@ -63,6 +63,7 @@ typedef struct {
     uint32_t parent_tid;   /* TID of parent (0 = no parent, exit goes T_DEAD) */
     volatile int exit_code;/* stored before thread_exit; read by waitpid */
     volatile int sig_pending; /* non-zero = SIGINT pending (set by Ctrl-C handler) */
+    char cwd[256];            /* current working directory, absolute path */
     thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
 } thread_t;
 
@@ -207,6 +208,7 @@ void thread_init(void) {
 
     g_cur->state = T_RUNNING;
     g_cur->prio = 1;
+    g_cur->cwd[0] = '/'; g_cur->cwd[1] = '\0';
     name_copy(g_cur->name, "main");
 
     g_boot_tick = pit_get_ticks();
@@ -275,6 +277,7 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->user_brk = 0;
     t->parent_tid = 0;
     t->exit_code = 0;
+    t->cwd[0] = '/'; t->cwd[1] = '\0';
     thread_user_maps_zero(t);
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
 
@@ -1060,6 +1063,27 @@ uint64_t thread_get_brk(void) {
 void thread_set_brk(uint64_t brk) {
     if (!g_cur) return;
     g_cur->user_brk = brk;
+}
+
+/* Working directory accessors */
+const char *thread_get_cwd(void) {
+    return (g_cur && g_cur->cwd[0]) ? g_cur->cwd : "/";
+}
+
+void thread_set_cwd(const char *path) {
+    if (!g_cur || !path) return;
+    size_t i = 0;
+    while (path[i] && i < sizeof(g_cur->cwd) - 1) { g_cur->cwd[i] = path[i]; i++; }
+    g_cur->cwd[i] = '\0';
+}
+
+void thread_copy_cwd_to_slot(int slot, const char *cwd) {
+    if (slot < 0 || slot >= THREAD_MAX || !cwd) return;
+    size_t i = 0;
+    while (cwd[i] && i < sizeof(g_threads[slot].cwd) - 1) {
+        g_threads[slot].cwd[i] = cwd[i]; i++;
+    }
+    g_threads[slot].cwd[i] = '\0';
 }
 
 /* Return the TID assigned to a given thread slot (0 if invalid/unused). */

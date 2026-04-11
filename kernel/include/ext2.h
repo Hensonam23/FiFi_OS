@@ -36,3 +36,6 @@ int ext2_mkdir(const char *path);
  * path must be "/filename".
  * Returns 0 on success, -1 if not found or error. */
 int ext2_delete_file(const char *path);
+
+/* Returns 1 if path is a directory, 0 if not found or not a directory. */
+int ext2_isdir(const char *path);

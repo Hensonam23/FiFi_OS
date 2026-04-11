@@ -35,4 +35,6 @@ enum {
     SYS_OPENW     = 22,  /* open for append-write (RAMW fd pre-loaded with existing content) */
     SYS_FILESIZE  = 23,  /* return file size in bytes, or -1 */
     SYS_MKDIR     = 24,  /* create a directory */
+    SYS_GETCWD    = 25,  /* get current working directory */
+    SYS_CHDIR     = 26,  /* change working directory */
 };
