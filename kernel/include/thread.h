@@ -85,6 +85,34 @@ void        thread_copy_cwd_to_slot(int slot, const char *cwd);
 /* Send SIGINT to all user threads that were forked (parent_tid != 0).
  * Sleeping threads are woken so they can exit promptly. */
 void thread_signal_children(void);
-/* If the current thread has a pending signal, set exit_code=130 and exit.
- * Call this in blocking syscall loops after each sleep. */
+/* Send SIGTSTP to all user children (Ctrl-Z). */
+void thread_sigtstp_children(void);
+/* If the current thread has a pending signal, act on it.
+ * Fatal signals exit with 128+sig; SIGTSTP stops the thread. */
 void thread_check_signal(void);
+
+/* Signal handler table for current thread. handler=0:SIG_DFL, 1:SIG_IGN, else user VA. */
+uint64_t thread_get_sig_handler(int sig);
+void     thread_set_sig_handler(int sig, uint64_t handler_va);
+/* Atomically take and clear sig_pending; returns signal number or 0. */
+int      thread_take_pending_sig(void);
+/* Send signal to thread by TID. */
+void     thread_kill_by_tid(uint32_t tid, int sig);
+/* Stop current thread (SIGTSTP default action); resumes on SIGCONT. */
+void     thread_do_stop(void);
+/* Resume a stopped thread. */
+void     thread_cont_by_tid(uint32_t tid);
+
+/* Process group support */
+uint32_t thread_get_pgid(uint32_t tid);       /* 0 = not found */
+void     thread_set_pgid(uint32_t tid, uint32_t pgid);
+/* Copy pgid from current thread to a named slot. */
+void     thread_copy_pgid_to_slot(int slot, uint32_t pgid);
+
+/* mmap watermark per thread */
+uint64_t thread_get_mmap_next(void);
+void     thread_set_mmap_next(uint64_t addr);
+
+/* Check if any child of par_tid is stopped (not zombie).
+ * Returns child TID and sets *code_out to WSTOPPED status, or 0. */
+long     thread_check_stopped_child(uint32_t par_tid, uint32_t child_tid, int *code_out);

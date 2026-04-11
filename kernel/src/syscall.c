@@ -1083,10 +1083,206 @@ case SYS_UPTIME:
             return;
         }
 
+        case SYS_KILL: {
+            /* rdi = target TID, rsi = signal number */
+            uint32_t tid = (uint32_t)(uint64_t)ctx->rdi;
+            int sig = (int)(int64_t)ctx->rsi;
+            if (sig < 0 || sig >= 32) { ctx->rax = (uint64_t)-1; return; }
+            thread_kill_by_tid(tid, sig);
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_SIGNAL: {
+            /* rdi = signal number, rsi = handler VA (0=SIG_DFL, 1=SIG_IGN, else user VA) */
+            int sig = (int)(int64_t)ctx->rdi;
+            if (sig < 1 || sig >= 32) { ctx->rax = (uint64_t)-1; return; }
+            uint64_t old_handler = thread_get_sig_handler(sig);
+            thread_set_sig_handler(sig, ctx->rsi);
+            ctx->rax = old_handler;
+            return;
+        }
+
+        case SYS_MMAP: {
+            /* rdi = hint addr (0=auto), rsi = length, rdx = prot flags */
+            uint64_t hint   = ctx->rdi;
+            uint64_t length = ctx->rsi;
+            /* rdx: PROT_READ=1 PROT_WRITE=2 PROT_EXEC=4 */
+            int prot = (int)(int64_t)ctx->rdx;
+
+            const uint64_t PAGE = 0x1000ULL;
+            length = (length + PAGE - 1) & ~(PAGE - 1);
+            if (length == 0 || length > (256ULL * 1024 * 1024)) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+
+            /* Choose VA */
+            uint64_t va;
+            if (hint != 0 && (hint & (PAGE - 1)) == 0 &&
+                hint >= PAGE && hint < (uint64_t)FIFI_USER_STACK_BASE) {
+                va = hint;
+            } else {
+                va = thread_get_mmap_next();
+                if (va == 0) va = 0x0000600000000000ULL;
+            }
+
+            /* Clamp to user space (below stack) */
+            if (va + length >= (uint64_t)FIFI_USER_STACK_BASE) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+
+            /* Build VMM flags */
+            vmm_flags_t flags = VMM_USER;
+            if (prot & 2) flags |= VMM_WRITE;
+            if (!(prot & 4)) flags |= VMM_NX;
+
+            /* Allocate and map pages */
+            uint64_t v = va;
+            for (; v < va + length; v += PAGE) {
+                uint64_t phys = pmm_alloc_page();
+                if (!phys) goto mmap_fail;
+                if (!vmm_map_page(v, phys, flags)) {
+                    pmm_free_page(phys); goto mmap_fail;
+                }
+                /* Zero the page */
+                volatile uint8_t *p = (volatile uint8_t*)(uintptr_t)v;
+                for (uint64_t b = 0; b < PAGE; b++) p[b] = 0;
+            }
+            thread_user_map_add(va, length);
+            thread_set_mmap_next(va + length);
+            ctx->rax = va;
+            return;
+
+        mmap_fail:
+            /* Unmap what we managed before failure */
+            vmm_unmap_range_and_free(va, v - va);
+            ctx->rax = (uint64_t)-1;
+            return;
+        }
+
+        case SYS_MUNMAP: {
+            /* rdi = addr, rsi = length */
+            uint64_t addr   = ctx->rdi;
+            uint64_t length = ctx->rsi;
+            const uint64_t PAGE = 0x1000ULL;
+            addr   = addr   & ~(PAGE - 1);
+            length = (length + PAGE - 1) & ~(PAGE - 1);
+            if (length == 0) { ctx->rax = 0; return; }
+            vmm_unmap_range_and_free(addr, (size_t)length);
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_SETPGID: {
+            /* rdi = tid (0=self), rsi = pgid (0=same as tid) */
+            uint32_t tid  = (uint32_t)(uint64_t)ctx->rdi;
+            uint32_t pgid = (uint32_t)(uint64_t)ctx->rsi;
+            uint32_t self = thread_current_tid();
+            if (tid == 0) tid = self;
+            if (pgid == 0) pgid = tid;
+            thread_set_pgid(tid, pgid);
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_LISTDIR: {
+            /* rdi = path string, rsi = buf, rdx = cap */
+            uint64_t upath = ctx->rdi;
+            uint64_t ubuf  = ctx->rsi;
+            uint64_t cap   = ctx->rdx;
+            if (!ubuf || cap == 0) { ctx->rax = (uint64_t)-1; return; }
+            if (cap > 8192) cap = 8192;
+
+            char ld_path[256];
+            if (upath == 0) {
+                ld_path[0] = '/'; ld_path[1] = '\0';
+            } else if (copyin_str(ld_path, sizeof(ld_path), upath) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+
+            static char ld_kbuf[8192];
+            size_t ld_n = vfs_listdir(ld_path, ld_kbuf, (size_t)cap);
+            if (copyout_bytes(ubuf, (const uint8_t*)ld_kbuf, ld_n) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            ctx->rax = (uint64_t)ld_n;
+            return;
+        }
+
+        case SYS_WAITFLAGS: {
+            /* rdi = child TID (-1=any), rsi = user int* for status, rdx = flags
+             * flags: WUNTRACED=1, WNOHANG=2 */
+            uint32_t child_tid = (uint32_t)(uint64_t)ctx->rdi;
+            uint64_t ucode     = ctx->rsi;
+            int      flags     = (int)(int64_t)ctx->rdx;
+            int      wuntraced = (flags & 1) != 0;
+            int      wnohang   = (flags & 2) != 0;
+            uint32_t me        = thread_current_tid();
+            int      attempts  = wnohang ? 1 : 500;
+
+            for (int attempt = 0; attempt < attempts; attempt++) {
+                int code = 0;
+                long reaped = thread_reap_zombie_child(me, child_tid, &code);
+                if (reaped > 0) {
+                    if (ucode) copyout_bytes(ucode, (const uint8_t*)&code, sizeof(int));
+                    ctx->rax = (uint64_t)(uint32_t)reaped;
+                    return;
+                }
+                if (reaped == -2L) {
+                    ctx->rax = (uint64_t)-1; return;
+                }
+                if (wuntraced) {
+                    long stopped = thread_check_stopped_child(me, child_tid, &code);
+                    if (stopped > 0) {
+                        if (ucode) copyout_bytes(ucode, (const uint8_t*)&code, sizeof(int));
+                        ctx->rax = (uint64_t)(uint32_t)stopped;
+                        return;
+                    }
+                }
+                if (wnohang) { ctx->rax = 0; return; }
+                thread_sleep_ms(10);
+                thread_check_signal();
+            }
+            ctx->rax = (uint64_t)-1;
+            return;
+        }
+
         default:
             kprintf("[syscall] unknown n=%p (ctx->rax=%p)\n", (void*)n, (void*)ctx->rax);
             ctx->rax = (uint64_t)-1;
             return;
 
+    }
+
+    /* ── Deliver any pending signal on return to user mode ── */
+    if ((ctx->cs & 3) == 3) {
+        int sig = thread_take_pending_sig();
+        if (sig > 0 && sig < 32) {
+            uint64_t handler = thread_get_sig_handler(sig);
+            if (handler == 1) {
+                /* SIG_IGN: discard */
+            } else if (handler > 1) {
+                /* User-space handler: push return address on user stack,
+                 * redirect RIP to handler with sig in rdi. */
+                uint64_t *ursp_ptr = &((uint64_t *)(ctx + 1))[0];
+                uint64_t  ursp     = *ursp_ptr - 8;
+                if (vmm_user_accessible(ursp, 8, true)) {
+                    *(uint64_t*)(uintptr_t)ursp = ctx->rip;
+                    *ursp_ptr  = ursp;
+                    ctx->rdi   = (uint64_t)(uint32_t)sig;
+                    ctx->rip   = handler;
+                }
+                /* if stack not accessible, fall through to default */
+            } else { /* SIG_DFL */
+                if (sig == 19) { /* SIGTSTP */
+                    thread_do_stop();
+                } else if (sig == 18) { /* SIGCONT: already resumed */
+                    /* nothing */
+                } else {
+                    thread_set_exit_code(128 + sig);
+                    thread_exit();
+                }
+            }
+        }
     }
 }

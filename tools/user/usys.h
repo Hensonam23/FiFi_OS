@@ -202,3 +202,73 @@ static inline void *sys_sbrk(unsigned long n) {
     if (new_brk != cur + n && new_brk == cur) return (void*)-1UL;
     return (void*)cur;
 }
+
+/* ── signal constants ────────────────────────────────────────────────────── */
+#define SIG_DFL  ((void*)0UL)   /* default action */
+#define SIG_IGN  ((void*)1UL)   /* ignore signal */
+#define SIGINT   2
+#define SIGQUIT  3
+#define SIGKILL  9
+#define SIGTERM  15
+#define SIGCONT  18
+#define SIGTSTP  19
+
+/* ── wait flags ──────────────────────────────────────────────────────────── */
+#define WUNTRACED 1   /* also return if child stopped */
+#define WNOHANG   2   /* return immediately if no child changed state */
+
+/* POSIX-like status inspection */
+#define WIFSTOPPED(s)  (((s) & 0xFF) == 0x7F)
+#define WSTOPSIG(s)    (((s) >> 8) & 0xFF)
+#define WIFSIGNALED(s) (!WIFSTOPPED(s) && (s) >= 128)
+#define WTERMSIG(s)    ((s) - 128)
+#define WIFEXITED(s)   (!WIFSTOPPED(s) && (s) < 128)
+#define WEXITSTATUS(s) (s)
+
+/* ── mmap prot flags ─────────────────────────────────────────────────────── */
+#define PROT_NONE  0
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+
+/* kill(tid, sig): send signal to thread. Returns 0 on success, -1 on error. */
+static inline int sys_kill(unsigned long tid, int sig) {
+    return (int)sys_call2(SYS_KILL, (long)tid, (long)sig);
+}
+
+/* signal(sig, handler): install user-space signal handler.
+ * handler: SIG_DFL(NULL) = default, SIG_IGN((void*)1) = ignore, else user VA.
+ * Returns previous handler. */
+static inline void *sys_signal(int sig, void *handler) {
+    return (void *)(uintptr_t)sys_call2(SYS_SIGNAL, (long)sig, (long)(uintptr_t)handler);
+}
+
+/* mmap(addr, length, prot): map anonymous pages. addr=0 lets kernel choose.
+ * Returns mapped virtual address or (void*)-1 on failure. */
+static inline void *sys_mmap(void *addr, unsigned long length, int prot) {
+    return (void *)(uintptr_t)sys_call3(SYS_MMAP,
+                                         (long)(uintptr_t)addr, (long)length, (long)prot);
+}
+
+/* munmap(addr, length): unmap previously mapped region. Returns 0 on success. */
+static inline int sys_munmap(void *addr, unsigned long length) {
+    return (int)sys_call2(SYS_MUNMAP, (long)(uintptr_t)addr, (long)length);
+}
+
+/* setpgid(tid, pgid): set process group. 0 for either = self/tid. */
+static inline int sys_setpgid(unsigned long tid, unsigned long pgid) {
+    return (int)sys_call2(SYS_SETPGID, (long)tid, (long)pgid);
+}
+
+/* listdir(path, buf, cap): list directory entries as "name\n" lines.
+ * Returns bytes written, or -1 on error. */
+static inline long sys_listdir(const char *path, char *buf, unsigned long cap) {
+    return sys_call3(SYS_LISTDIR, (long)(uintptr_t)path, (long)(uintptr_t)buf, (long)cap);
+}
+
+/* waitpid_flags(child_tid, &status, flags): extended waitpid.
+ * flags: WUNTRACED=1, WNOHANG=2
+ * Returns child TID on state change, 0 on WNOHANG with no change, -1 on error. */
+static inline long sys_waitpid_flags(unsigned long child_tid, int *status, int flags) {
+    return sys_call3(SYS_WAITFLAGS, (long)child_tid, (long)(uintptr_t)status, (long)flags);
+}

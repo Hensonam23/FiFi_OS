@@ -37,4 +37,12 @@ enum {
     SYS_MKDIR     = 24,  /* create a directory */
     SYS_GETCWD    = 25,  /* get current working directory */
     SYS_CHDIR     = 26,  /* change working directory */
+
+    SYS_KILL      = 27,  /* kill(tid, sig): send signal to thread */
+    SYS_SIGNAL    = 28,  /* signal(sig, handler): install user handler */
+    SYS_MMAP      = 29,  /* mmap(addr, len, prot): map anon pages */
+    SYS_MUNMAP    = 30,  /* munmap(addr, len): unmap pages */
+    SYS_SETPGID   = 31,  /* setpgid(tid, pgid): set process group */
+    SYS_LISTDIR   = 32,  /* listdir(path, buf, cap): list directory entries */
+    SYS_WAITFLAGS = 33,  /* waitpid with WUNTRACED / WNOHANG flags */
 };

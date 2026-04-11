@@ -21,6 +21,9 @@ int ext2_file_size(const char *path);
 /* Write "name\n" entries for root directory into buf. Returns bytes written. */
 size_t ext2_ls_buf(char *buf, size_t cap);
 
+/* Write "name\n" entries for a specific directory into buf. Returns bytes written. */
+size_t ext2_ls_buf_at(const char *path, char *buf, size_t cap);
+
 /* Create or overwrite a root-level file on disk.
  * path must be "/filename" (no subdirectories).
  * Supports files up to 12 * block_size bytes (direct blocks only).

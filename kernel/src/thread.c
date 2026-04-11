@@ -30,6 +30,7 @@ typedef enum {
     T_SLEEPING,
     T_DEAD,
     T_ZOMBIE,   /* exited; waiting for parent to collect exit status */
+    T_STOPPED,  /* suspended by SIGTSTP; resumes on SIGCONT */
 } thread_state_t;
 
 #define THREAD_USER_MAP_MAX 8
@@ -62,9 +63,14 @@ typedef struct {
     uint64_t user_brk;     /* current program break (heap top), 0 = not set */
     uint32_t parent_tid;   /* TID of parent (0 = no parent, exit goes T_DEAD) */
     volatile int exit_code;/* stored before thread_exit; read by waitpid */
-    volatile int sig_pending; /* non-zero = SIGINT pending (set by Ctrl-C handler) */
+    volatile int sig_pending; /* signal number pending (0=none, 2=SIGINT, 19=SIGTSTP…) */
     char cwd[256];            /* current working directory, absolute path */
     thread_user_map_t user_maps[THREAD_USER_MAP_MAX];
+    uint32_t pgid;            /* process group ID (0 = same as tid) */
+    uint8_t  stop_reported;   /* 1 = T_STOPPED already returned by waitflags */
+    uint8_t  _pad[3];
+    uint64_t sig_handlers[32];/* user-space handler VAs (0=SIG_DFL, 1=SIG_IGN, else VA) */
+    uint64_t mmap_next;       /* next anon mmap VA for this thread */
 } thread_t;
 
 static thread_t g_threads[THREAD_MAX];
@@ -198,6 +204,10 @@ void thread_init(void) {
         g_threads[i].user_brk = 0;
         g_threads[i].parent_tid = 0;
         g_threads[i].exit_code = 0;
+        g_threads[i].pgid = 0;
+        g_threads[i].stop_reported = 0;
+        for (int j = 0; j < 32; j++) g_threads[i].sig_handlers[j] = 0;
+        g_threads[i].mmap_next = 0x0000600000000000ULL;
         thread_user_maps_zero(&g_threads[i]);
     }
 
@@ -277,6 +287,10 @@ int thread_create(const char *name, thread_entry_t entry, void *arg) {
     t->user_brk = 0;
     t->parent_tid = 0;
     t->exit_code = 0;
+    t->pgid = 0;
+    t->stop_reported = 0;
+    for (int j = 0; j < 32; j++) t->sig_handlers[j] = 0;
+    t->mmap_next = 0x0000600000000000ULL;
     t->cwd[0] = '/'; t->cwd[1] = '\0';
     thread_user_maps_zero(t);
     t->kstack_top = (uint64_t)(uintptr_t)stack + (uint64_t)THREAD_STACK_SIZE;
@@ -496,6 +510,7 @@ static const char *state_str(thread_state_t s) {
         case T_SLEEPING: return "SLEEPING";
         case T_DEAD:     return "DEAD";
         case T_ZOMBIE:   return "ZOMBIE";
+        case T_STOPPED:  return "STOPPED";
         default:         return "?";
     }
 }
@@ -841,6 +856,7 @@ void thread_jobs(void) {
             case T_SLEEPING: st = "SLEEP";   break;
             case T_DEAD:     st = "DEAD";    break;
             case T_ZOMBIE:   st = "ZOMBIE";  break;
+            case T_STOPPED:  st = "STOPPED"; break;
         }
 
         const char *cur = (t == g_cur) ? "*" : " ";
@@ -916,6 +932,7 @@ static const char* thread_state_name(thread_state_t s) {
         case T_SLEEPING: return "SLEEP";
         case T_DEAD:     return "DEAD";
         case T_ZOMBIE:   return "ZOMBIE";
+        case T_STOPPED:  return "STOPPED";
         default:         return "?";
     }
 }
@@ -1144,19 +1161,140 @@ void thread_signal_children(void) {
             continue;
         if (!t->is_user) continue;
         if (t->parent_tid == 0) continue;   /* skip ush — no fork parent */
-        t->sig_pending = 1;
+        t->sig_pending = 2; /* SIGINT */
         if (t->state == T_SLEEPING) t->state = T_READY;  /* wake to die */
     }
 }
 
+void thread_sigtstp_children(void) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->state == T_UNUSED || t->state == T_DEAD || t->state == T_ZOMBIE)
+            continue;
+        if (!t->is_user) continue;
+        if (t->parent_tid == 0) continue;
+        if (t->sig_pending == 0) t->sig_pending = 19; /* SIGTSTP */
+        if (t->state == T_SLEEPING) t->state = T_READY;
+    }
+}
+
 /*
- * Check whether the current thread has a pending signal.
- * If so, set exit_code = 130 (128 + SIGINT) and call thread_exit().
- * Call this in blocking kernel loops after each sleep, and at syscall entry.
+ * Check pending signal in blocking kernel loops.
+ * SIGINT/SIGTERM → exit; SIGTSTP → stop; others → exit with 128+sig.
  */
 void thread_check_signal(void) {
     if (!g_cur || !g_cur->sig_pending) return;
+    int sig = g_cur->sig_pending;
     g_cur->sig_pending = 0;
-    g_cur->exit_code   = 130;  /* 128 + SIGINT(2) — conventional Unix value */
+    if (sig == 19 /* SIGTSTP */) {
+        thread_do_stop();
+        return;
+    }
+    g_cur->exit_code = 128 + sig;
     thread_exit();
+}
+
+/* ── New signal/pgid/mmap functions ─────────────────────────────────────── */
+
+int thread_take_pending_sig(void) {
+    if (!g_cur) return 0;
+    int sig = g_cur->sig_pending;
+    g_cur->sig_pending = 0;
+    return sig;
+}
+
+uint64_t thread_get_sig_handler(int sig) {
+    if (!g_cur || sig < 0 || sig >= 32) return 0;
+    return g_cur->sig_handlers[sig];
+}
+
+void thread_set_sig_handler(int sig, uint64_t handler_va) {
+    if (!g_cur || sig < 0 || sig >= 32) return;
+    g_cur->sig_handlers[sig] = handler_va;
+}
+
+void thread_kill_by_tid(uint32_t tid, int sig) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->tid != tid) continue;
+        if (t->state == T_UNUSED || t->state == T_DEAD) continue;
+        t->sig_pending = sig;
+        if (t->state == T_SLEEPING) t->state = T_READY;
+        if (sig == 18 /* SIGCONT */ && t->state == T_STOPPED) {
+            t->state = T_READY;
+            t->stop_reported = 0;
+        }
+        return;
+    }
+}
+
+void thread_do_stop(void) {
+    if (!g_cur) return;
+    k_cli();
+    g_cur->state = T_STOPPED;
+    k_sti();
+    thread_yield();
+    /* execution resumes here after SIGCONT */
+}
+
+void thread_cont_by_tid(uint32_t tid) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->tid != tid) continue;
+        if (t->state == T_STOPPED) {
+            t->state = T_READY;
+            t->stop_reported = 0;
+        }
+        /* also clear any pending SIGTSTP */
+        if (t->sig_pending == 19) t->sig_pending = 0;
+        return;
+    }
+}
+
+uint32_t thread_get_pgid(uint32_t tid) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].tid == tid &&
+            g_threads[i].state != T_UNUSED) {
+            uint32_t pg = g_threads[i].pgid;
+            return pg ? pg : tid;  /* default pgid = tid */
+        }
+    }
+    return 0;
+}
+
+void thread_set_pgid(uint32_t tid, uint32_t pgid) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        if (g_threads[i].tid == tid &&
+            g_threads[i].state != T_UNUSED) {
+            g_threads[i].pgid = pgid;
+            return;
+        }
+    }
+}
+
+void thread_copy_pgid_to_slot(int slot, uint32_t pgid) {
+    if (slot < 0 || slot >= THREAD_MAX) return;
+    g_threads[slot].pgid = pgid;
+}
+
+uint64_t thread_get_mmap_next(void) {
+    return g_cur ? g_cur->mmap_next : 0x0000600000000000ULL;
+}
+
+void thread_set_mmap_next(uint64_t addr) {
+    if (g_cur) g_cur->mmap_next = addr;
+}
+
+long thread_check_stopped_child(uint32_t par_tid, uint32_t child_tid, int *code_out) {
+    for (int i = 0; i < THREAD_MAX; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->parent_tid != par_tid) continue;
+        if (child_tid != (uint32_t)-1 && t->tid != child_tid) continue;
+        if (t->state == T_STOPPED && !t->stop_reported) {
+            t->stop_reported = 1;
+            if (code_out) *code_out = (19 << 8) | 0x7F; /* WIFSTOPPED(19) */
+            return (long)t->tid;
+        }
+    }
+    return 0;
 }
