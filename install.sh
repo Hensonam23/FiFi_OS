@@ -7,6 +7,16 @@ ISO="$SCRIPT_DIR/build/fifi.iso"
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"; clear' EXIT INT TERM
 
+# ── argument parsing ──────────────────────────────────────────────────────────
+# --target DEVICE  bypass the drive picker and use this device directly
+FORCED_TARGET=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) FORCED_TARGET="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
 # ── dependency check ──────────────────────────────────────────────────────────
 for cmd in dialog lsblk dd mkfs.ext2 parted partprobe; do
     command -v "$cmd" &>/dev/null || {
@@ -79,45 +89,51 @@ msg " Step 1 of 4 — Image Ready " \
 Click \ZbNext\Zb to choose a target drive."
 
 # ── STEP 3: Drive selection ───────────────────────────────────────────────────
-while true; do
-    # Build menu entries: exclude loop devices and any drive with a mounted partition
-    ENTRIES=()
-    while IFS='|' read -r name size model tran; do
-        name="${name// /}"
-        # skip if any partition of this disk is mounted
-        if lsblk -ln -o MOUNTPOINT "/dev/$name" 2>/dev/null | grep -q .; then
-            continue
-        fi
-        [[ -z "$model" ]] && model="Unknown device"
-        model="${model//  / }"
-        label="$(printf "%-6s  %s" "$size" "$model")"
-        [[ -n "$tran" ]] && label="$label  [$tran]"
-        ENTRIES+=("/dev/$name" "$label")
-    done < <(lsblk -d -n -o NAME,SIZE,MODEL,TRAN | grep -v '^loop')
+if [[ -n "$FORCED_TARGET" ]]; then
+    # --target bypasses the picker; trust the caller (e.g. test_install.sh)
+    TARGET="$FORCED_TARGET"
+else
+    while true; do
+        # Build menu entries: exclude loop devices and any drive with a mounted partition
+        ENTRIES=()
+        while IFS='|' read -r name size model tran; do
+            name="${name// /}"
+            # skip if any partition of this disk is mounted
+            if lsblk -ln -o MOUNTPOINT "/dev/$name" 2>/dev/null | grep -q .; then
+                continue
+            fi
+            [[ -z "$model" ]] && model="Unknown device"
+            model="${model//  / }"
+            label="$(printf "%-6s  %s" "$size" "$model")"
+            [[ -n "$tran" ]] && label="$label  [$tran]"
+            ENTRIES+=("/dev/$name" "$label")
+        done < <(lsblk -d -n -o NAME,SIZE,MODEL,TRAN | grep -v '^loop')
 
-    if [[ ${#ENTRIES[@]} -eq 0 ]]; then
-        confirm "No Drives Found" \
+        if [[ ${#ENTRIES[@]} -eq 0 ]]; then
+            confirm "No Drives Found" \
 "No eligible drives were found.\n\n\
 Drives with mounted filesystems are excluded\n\
 for safety.\n\n\
 Plug in a USB drive, then click \ZbRetry\Zb." "Retry" || exit 1
-        continue
-    fi
+            continue
+        fi
 
-    dlg --title " Step 2 of 4 — Select Target Drive " \
-        --ok-label "Select >" --cancel-label "Exit" \
-        --menu \
+        dlg --title " Step 2 of 4 — Select Target Drive " \
+            --ok-label "Select >" --cancel-label "Exit" \
+            --menu \
 "\ZbChoose the drive to install FiFi OS onto.\Zn\n\
 \Z1All existing data will be erased.\Zn\n" \
-        $H $W 8 "${ENTRIES[@]}" || exit 0
+            $H $W 8 "${ENTRIES[@]}" || exit 0
 
-    TARGET=$(result)
-    [[ -n "$TARGET" ]] && break
-done
+        TARGET=$(result)
+        [[ -n "$TARGET" ]] && break
+    done
+fi
 
-DRIVE_SIZE=$(lsblk -d -n -o SIZE "$TARGET" 2>/dev/null || echo "?")
-DRIVE_MODEL=$(lsblk -d -n -o MODEL "$TARGET" 2>/dev/null | xargs || echo "Unknown")
+DRIVE_SIZE=$(lsblk -d -n -o SIZE "$TARGET" 2>/dev/null | xargs || echo "?")
+DRIVE_MODEL=$(lsblk -d -n -o MODEL "$TARGET" 2>/dev/null | xargs || echo "")
 DRIVE_TRAN=$(lsblk -d -n -o TRAN "$TARGET" 2>/dev/null | xargs || echo "")
+[[ -z "$DRIVE_MODEL" ]] && DRIVE_MODEL="(loop/raw device)"
 
 # ── STEP 4: Confirm ───────────────────────────────────────────────────────────
 dialog --colors \

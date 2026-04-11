@@ -163,6 +163,15 @@ run: iso $(DISK)
 rundbg: iso $(DISK)
 	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) -serial stdio -no-shutdown
 
+# Boot from an image written by install.sh (via test_install.sh)
+TEST_USB := build/test_usb.img
+runinstall: $(DISK)
+	@test -f $(TEST_USB) || (echo "Run ./test_install.sh first to create the installed image." && exit 1)
+	qemu-system-x86_64 -M q35 -m 256M -smp 1 \
+	    -drive file=$(TEST_USB),format=raw,if=ide,index=0 \
+	    $(QEMU_DISK) \
+	    -serial stdio -no-reboot -no-shutdown
+
 clean:
 	rm -rf $(BUILD)
 
