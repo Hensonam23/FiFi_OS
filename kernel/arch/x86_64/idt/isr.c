@@ -80,70 +80,21 @@ static const char *exc_names[32] = {
 
 void isr_common_handler(isr_ctx_t *ctx) {
     
-    /* Step 9: Page fault (#PF) diagnostics */
     if (ctx->vector == 14) {
+        int cpl = (int)(ctx->cs & 3);
+        if (cpl == 3) {
+            kprintf("Segmentation fault\n");
+            ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
+            ctx->rax = (uint64_t)SYS_EXIT;
+            ctx->rdi = 139;
+            return;
+        }
         uint64_t cr2 = 0;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-        uint64_t err = ctx->error;
-        int p    = (int)((err >> 0) & 1); /* present (1=protection, 0=non-present) */
-        int wr   = (int)((err >> 1) & 1); /* 1=write, 0=read */
-        int us   = (int)((err >> 2) & 1); /* 1=user, 0=kernel */
-        int rsvd = (int)((err >> 3) & 1); /* reserved-bit violation */
-        int id   = (int)((err >> 4) & 1); /* instruction fetch */
-        int cpl  = (int)(ctx->cs & 3);
-
-        kprintf("\n=== FiFi OS PAGE FAULT (#PF) ===\n");
-        kprintf("CR2=%p\n", (void*)cr2);
-        kprintf("RIP=%p  CS=%p (CPL=%d)  RFLAGS=%p\n",
-                (void*)ctx->rip, (void*)ctx->cs, cpl, (void*)ctx->rflags);
-
-        kprintf("ERR=%p  bits: P=%d WR=%d US=%d RSVD=%d ID=%d\n",
-                (void*)err, p, wr, us, rsvd, id);
-
-        kprintf("meaning: %s %s %s %s %s\n",
-            p    ? "PROT"  : "NP",
-            wr   ? "WRITE" : "READ",
-            us   ? "USER"  : "KERN",
-            rsvd ? "RSVD"  : "-",
-            id   ? "INSTR" : "-"
-        );
-
-                  if (cpl == 3) {
-              kprintf("[EXC] user page fault -> redirect to SYS_EXIT\n");
-
-              // DEBUG: dump bytes at RIP + some regs so we can see what user is executing
-              {
-                  uint64_t rip = (uint64_t)ctx->rip;
-                  uint64_t phys = vmm_translate(rip);
-
-                  serial_write("[EXC] user RIP="); print_hex_u64(rip);
-                  serial_write(" phys=");          print_hex_u64(phys);
-                  serial_write("\n");
-
-                  // These regs exist because syscalls use ctx->rax/ctx->rdi
-                  serial_write("[EXC] user RAX="); print_hex_u64((uint64_t)ctx->rax);
-                  serial_write(" RDI=");           print_hex_u64((uint64_t)ctx->rdi);
-                  serial_write("\n");
-
-                  if (phys) {
-                      serial_write("[EXC] RIP bytes:");
-                      volatile uint8_t *ip = (volatile uint8_t*)(uintptr_t)rip;
-                      for (int i = 0; i < 16; i++) {
-                          serial_write(" ");
-                          print_hex_u64((uint64_t)ip[i]);
-                      }
-                      serial_write("\n");
-                  } else {
-                      serial_write("[EXC] RIP not mapped (translate=0)\n");
-                  }
-              }
-              ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
-              ctx->rax = (uint64_t)SYS_EXIT;
-              ctx->rdi = (((uint64_t)ctx->vector) << 32) | (uint64_t)ctx->error;
-              return;
-          }
-
-          panic("page fault");
+        kprintf("\n=== KERNEL PAGE FAULT ===\n");
+        kprintf("CR2=%p RIP=%p err=%p\n",
+                (void*)cr2, (void*)ctx->rip, (void*)ctx->error);
+        panic("kernel page fault");
     }
 
 
@@ -174,6 +125,7 @@ void isr_common_handler(isr_ctx_t *ctx) {
 
         /* Keyboard (IRQ1) */
         pic_send_eoi(irq);
+        thread_check_resched();
         return;
     }
 
@@ -191,28 +143,13 @@ void isr_common_handler(isr_ctx_t *ctx) {
     kprintf("RIP=%p CS=%p RFLAGS=%p\n",
             (void*)ctx->rip, (void*)ctx->cs, (void*)ctx->rflags);
 
-    
-  // ---- FiFi OS: usermode-safe exceptions ----
-  // If the fault happened in ring3 (CS RPL=3), do NOT panic the kernel.
-  // Instead redirect RIP to a mapped user trampoline page that will do SYS_EXIT.
   if (fifi_cs_is_user(ctx->cs)) {
-    // Keep your existing dump printing (it should run before this panic in your code).
-    // Then force the current user task to exit via a known-mapped trampoline.
+    kprintf("Segmentation fault\n");
     ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
-
-    // Syscall ABI: rax = syscall number, rdi = arg0
-    // We assume your dispatcher already uses these (SYS_LOG works).
-    // NOTE: if your syscall number constant is named differently, fix it in syscall header.    // We won't reference SYS_EXIT symbol directly here (to avoid link issues).
-    // Instead we set a number in rax AFTER you add SYS_EXIT in your syscall dispatcher step.
-    // For now, set rax to 0; we'll patch this value in the syscall step if needed.
     ctx->rax = (uint64_t)SYS_EXIT;
-
-    // Put something useful as exit code: (vec << 32) | ctx->error
-    ctx->rdi = (((uint64_t)vec) << 32) | (uint64_t)ctx->error;
-
+    ctx->rdi = 139;
     return;
   }
-  // ------------------------------------------
 
   panic("Unhandled CPU exception");
 }
