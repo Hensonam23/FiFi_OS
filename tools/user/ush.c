@@ -11,6 +11,15 @@
 
 #define LINEMAX  256
 #define MAXARGS  16
+#define HIST_MAX 20
+
+/* Special key codes from the keyboard driver (matches kernel/include/keyboard.h) */
+#define KEY_UP   0x82
+#define KEY_DOWN 0x83
+
+/* ── command history ─────────────────────────────────────────────────────── */
+static char g_hist_buf[HIST_MAX][LINEMAX];
+static int  g_hist_n = 0;
 
 /* ── environment variables ───────────────────────────────────────────────── */
 
@@ -91,11 +100,33 @@ static char g_exp_store[MAXARGS][LINEMAX];
 
 static int ush_readline(char *buf, int cap) {
     int n = 0;
+    int hist_pos = -1;  /* -1 = live input, else index into g_hist_buf */
     for (;;) {
         int c = sys_getchar();
         if (c == '\r' || c == '\n') {
             sys_write("\n", 1);
             buf[n] = '\0';
+            /* Save non-empty lines to history (skip exact duplicate of last entry) */
+            if (n > 0) {
+                int dup = (g_hist_n > 0 && strcmp(g_hist_buf[g_hist_n - 1], buf) == 0);
+                if (!dup) {
+                    if (g_hist_n < HIST_MAX) {
+                        int i = 0;
+                        while (buf[i] && i < LINEMAX - 1) { g_hist_buf[g_hist_n][i] = buf[i]; i++; }
+                        g_hist_buf[g_hist_n][i] = '\0';
+                        g_hist_n++;
+                    } else {
+                        /* Ring buffer: drop oldest, shift everything down */
+                        for (int i = 0; i < HIST_MAX - 1; i++) {
+                            int j = 0;
+                            while ((g_hist_buf[i][j] = g_hist_buf[i+1][j])) j++;
+                        }
+                        int i = 0;
+                        while (buf[i] && i < LINEMAX - 1) { g_hist_buf[HIST_MAX-1][i] = buf[i]; i++; }
+                        g_hist_buf[HIST_MAX-1][i] = '\0';
+                    }
+                }
+            }
             return n;
         }
         if (c == 3) {            /* Ctrl-C: cancel current line */
@@ -105,6 +136,33 @@ static int ush_readline(char *buf, int cap) {
         }
         if (c == '\b' || c == 127) {
             if (n > 0) { n--; sys_write("\b \b", 3); }
+            continue;
+        }
+        /* History navigation */
+        if (c == KEY_UP || c == KEY_DOWN) {
+            int new_pos;
+            if (c == KEY_UP) {
+                if (g_hist_n == 0) continue;
+                new_pos = (hist_pos < 0) ? g_hist_n - 1
+                                         : (hist_pos > 0 ? hist_pos - 1 : 0);
+            } else {
+                new_pos = (hist_pos < 0) ? -1
+                        : (hist_pos + 1 < g_hist_n ? hist_pos + 1 : -1);
+            }
+            /* Erase what's currently on screen */
+            for (int i = 0; i < n; i++) sys_write("\b \b", 3);
+            hist_pos = new_pos;
+            if (hist_pos < 0) {
+                n = 0;
+                buf[0] = '\0';
+            } else {
+                n = 0;
+                while (g_hist_buf[hist_pos][n] && n < cap - 1) {
+                    buf[n] = g_hist_buf[hist_pos][n]; n++;
+                }
+                buf[n] = '\0';
+                sys_write(buf, (uint64_t)n);
+            }
             continue;
         }
         if ((unsigned char)c < 32 || (unsigned char)c >= 128) continue;

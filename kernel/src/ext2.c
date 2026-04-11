@@ -656,25 +656,60 @@ static bool e2_add_dirent(uint32_t dir_ino, const char *name, uint32_t name_len,
 }
 
 /*
- * ext2_write_file — create or overwrite a root-level file on the ext2 disk.
+ * e2_split_path — split "/a/b/c" into parent="/a/b" and name="c".
+ * For root-level paths like "/foo", parent="/" and name="foo".
+ * Returns name_len (> 0) on success, 0 on error.
+ */
+static uint32_t e2_split_path(const char *path,
+                               char *parent_out, uint32_t parent_cap,
+                               const char **name_out) {
+    if (!path || path[0] != '/') return 0;
+
+    /* Find last '/' */
+    int last = 0;
+    for (int i = 0; path[i]; i++)
+        if (path[i] == '/') last = i;
+
+    if (last == 0) {
+        if (parent_cap < 2) return 0;
+        parent_out[0] = '/';
+        parent_out[1] = '\0';
+    } else {
+        if ((uint32_t)last + 1 > parent_cap) return 0;
+        for (int i = 0; i < last; i++) parent_out[i] = path[i];
+        parent_out[last] = '\0';
+    }
+
+    *name_out = path + last + 1;
+    uint32_t name_len = 0;
+    while ((*name_out)[name_len] && name_len < 255) name_len++;
+    return name_len;
+}
+
+/*
+ * ext2_write_file — create or overwrite a file on the ext2 disk.
  *
- * path must be "/filename" with no embedded slashes.
- * Handles files up to 12 × block_size bytes (direct blocks only).
+ * path may contain subdirectory components (e.g. "/a/b/c").
+ * The parent directory must already exist.
+ * Handles files up to (12 + block_size/4) × block_size bytes.
  * Overwrites: frees old data blocks, writes new data.
  * Returns 0 on success, -1 on error.
  */
 int ext2_write_file(const char *path, const void *data, uint32_t size) {
     if (!g.ready || !path || path[0] != '/') return -1;
 
-    const char *name = path + 1;
-    uint32_t name_len = 0;
-    while (name[name_len] && name_len < 255) name_len++;
+    char parent[256];
+    const char *name;
+    uint32_t name_len = e2_split_path(path, parent, sizeof(parent), &name);
     if (name_len == 0) return -1;
-    for (uint32_t i = 0; i < name_len; i++)
-        if (name[i] == '/') return -1;
 
-    /* Cap at 12 direct blocks */
-    uint32_t max_size = 12u * g.block_size;
+    uint32_t parent_ino = e2_resolve(parent);
+    if (parent_ino == 0) return -1;
+
+    /* Cap at 12 direct blocks + single indirect */
+    uint32_t max_direct   = 12u * g.block_size;
+    uint32_t max_indirect = (g.block_size / 4u) * g.block_size;
+    uint32_t max_size     = max_direct + max_indirect;
     if (size > max_size) size = max_size;
 
     /* Does the file already exist? */
@@ -685,11 +720,25 @@ int ext2_write_file(const char *path, const void *data, uint32_t size) {
     if (!is_new) {
         if (!e2_read_inode(ino, &inode)) return -1;
         if ((inode.i_mode & 0xF000u) != EXT2_IMODE_FILE) return -1;
-        /* Free existing data blocks so they can be reused */
+        /* Free existing direct data blocks */
         for (int b = 0; b < 12; b++) {
             if (inode.i_block[b] == 0) break;
             e2_free_block(inode.i_block[b]);
             inode.i_block[b] = 0;
+        }
+        /* Free existing indirect block and its children */
+        if (inode.i_block[12] != 0) {
+            uint8_t *ibuf = (uint8_t*)pmm_phys_to_virt(g.ind_phys);
+            if (e2_read_block(inode.i_block[12], ibuf)) {
+                uint32_t *ptrs = (uint32_t*)ibuf;
+                uint32_t nptrs = g.block_size / 4;
+                for (uint32_t i = 0; i < nptrs; i++) {
+                    if (ptrs[i] == 0) break;
+                    e2_free_block(ptrs[i]);
+                }
+            }
+            e2_free_block(inode.i_block[12]);
+            inode.i_block[12] = 0;
         }
         inode.i_blocks = 0;
         inode.i_size   = 0;
@@ -701,7 +750,7 @@ int ext2_write_file(const char *path, const void *data, uint32_t size) {
         inode.i_links_count = 1;
     }
 
-    /* Write data blocks */
+    /* Write direct data blocks */
     const uint8_t *src       = (const uint8_t*)data;
     uint32_t       remaining = size;
     uint32_t       offset    = 0;
@@ -721,6 +770,37 @@ int ext2_write_file(const char *path, const void *data, uint32_t size) {
         offset    += chunk;
         remaining -= chunk;
     }
+
+    /* Write singly-indirect block if more data remains */
+    if (remaining > 0) {
+        uint32_t *ptrs  = (uint32_t*)pmm_phys_to_virt(g.ind_phys);
+        uint32_t nptrs  = g.block_size / 4;
+        e2_memset(ptrs, 0, g.block_size);
+
+        uint32_t ind_blk = e2_alloc_block();
+        if (!ind_blk) goto fail;
+
+        for (uint32_t i = 0; i < nptrs && remaining > 0; i++) {
+            uint32_t blk = e2_alloc_block();
+            if (!blk) goto fail;
+
+            uint32_t chunk = (remaining < g.block_size) ? remaining : g.block_size;
+            e2_memset(buf, 0, g.block_size);
+            e2_memcpy(buf, src + offset, chunk);
+            if (!e2_write_block(blk, buf)) goto fail;
+
+            ptrs[i]           = blk;
+            inode.i_blocks   += g.block_size / 512;
+            offset    += chunk;
+            remaining -= chunk;
+        }
+
+        /* Write the pointer block (uses ind_phys, separate from io_phys) */
+        if (!e2_write_block(ind_blk, (uint8_t*)ptrs)) goto fail;
+        inode.i_block[12]  = ind_blk;
+        inode.i_blocks    += g.block_size / 512;
+    }
+
     inode.i_size = size;
     {
         uint32_t now = (uint32_t)(pit_get_ticks() / 100);
@@ -734,7 +814,7 @@ int ext2_write_file(const char *path, const void *data, uint32_t size) {
     /* For new files, add the directory entry last (so a partial write
      * doesn't leave a dangling directory entry). */
     if (is_new) {
-        if (!e2_add_dirent(2, name, name_len, ino, 1 /*EXT2_FT_REG_FILE*/))
+        if (!e2_add_dirent(parent_ino, name, name_len, ino, 1 /*EXT2_FT_REG_FILE*/))
             goto fail;
     }
 
@@ -796,19 +876,20 @@ static bool e2_remove_dirent(uint32_t dir_ino, const char *name) {
 /* ── mkdir support ────────────────────────────────────────────────────────── */
 
 /*
- * ext2_mkdir — create a root-level directory on the ext2 disk.
- * path must be "/dirname" (no subdirectories).
+ * ext2_mkdir — create a directory on the ext2 disk.
+ * path may contain subdirectory components; the parent must already exist.
  * Returns 0 on success, -1 on error.
  */
 int ext2_mkdir(const char *path) {
     if (!g.ready || !path || path[0] != '/') return -1;
 
-    const char *name = path + 1;
-    uint32_t name_len = 0;
-    while (name[name_len] && name_len < 255) name_len++;
+    char parent[256];
+    const char *name;
+    uint32_t name_len = e2_split_path(path, parent, sizeof(parent), &name);
     if (name_len == 0) return -1;
-    for (uint32_t i = 0; i < name_len; i++)
-        if (name[i] == '/') return -1;
+
+    uint32_t parent_ino = e2_resolve(parent);
+    if (parent_ino == 0) return -1;
 
     /* Already exists? */
     if (e2_resolve(path) != 0) return -1;
@@ -835,7 +916,7 @@ int ext2_mkdir(const char *path) {
 
     /* '..' entry: rec_len = rest of block */
     ext2_dirent_t *dotdot = (ext2_dirent_t*)(buf + 12);
-    dotdot->inode     = 2; /* parent = root */
+    dotdot->inode     = parent_ino;
     dotdot->rec_len   = (uint16_t)(g.block_size - 12);
     dotdot->name_len  = 2;
     dotdot->file_type = 2;
@@ -861,8 +942,8 @@ int ext2_mkdir(const char *path) {
 
     if (!e2_write_inode(ino, &inode)) { e2_free_inode(ino); e2_free_block(blk); return -1; }
 
-    /* Add directory entry to root */
-    if (!e2_add_dirent(2, name, name_len, ino, 2 /*EXT2_FT_DIR*/)) {
+    /* Add directory entry to parent */
+    if (!e2_add_dirent(parent_ino, name, name_len, ino, 2 /*EXT2_FT_DIR*/)) {
         e2_free_inode(ino); e2_free_block(blk); return -1;
     }
 
@@ -872,19 +953,21 @@ int ext2_mkdir(const char *path) {
 /* ── delete support ───────────────────────────────────────────────────────── */
 
 /*
- * ext2_delete_file — remove a root-level file from the ext2 disk.
- * path must be "/filename".  Frees data blocks and inode.
+ * ext2_delete_file — remove a file from the ext2 disk.
+ * path may contain subdirectory components.  Frees data blocks and inode.
  * Returns 0 on success, -1 if not found or not a regular file.
  */
 int ext2_delete_file(const char *path) {
     if (!g.ready || !path || path[0] != '/') return -1;
 
-    const char *name = path + 1;
-    uint32_t name_len = 0;
-    while (name[name_len] && name_len < 255) name_len++;
+    char parent[256];
+    const char *name;
+    uint32_t name_len = e2_split_path(path, parent, sizeof(parent), &name);
     if (name_len == 0) return -1;
-    for (uint32_t i = 0; i < name_len; i++)
-        if (name[i] == '/') return -1;
+    (void)name_len;
+
+    uint32_t parent_ino = e2_resolve(parent);
+    if (parent_ino == 0) return -1;
 
     uint32_t ino = e2_resolve(path);
     if (ino == 0) return -1;
@@ -899,8 +982,22 @@ int ext2_delete_file(const char *path) {
         e2_free_block(inode.i_block[b]);
     }
 
+    /* Free indirect block and its children */
+    if (inode.i_block[12] != 0) {
+        uint8_t *ibuf = (uint8_t*)pmm_phys_to_virt(g.ind_phys);
+        if (e2_read_block(inode.i_block[12], ibuf)) {
+            uint32_t *ptrs = (uint32_t*)ibuf;
+            uint32_t nptrs = g.block_size / 4;
+            for (uint32_t i = 0; i < nptrs; i++) {
+                if (ptrs[i] == 0) break;
+                e2_free_block(ptrs[i]);
+            }
+        }
+        e2_free_block(inode.i_block[12]);
+    }
+
     /* Remove directory entry first (so partial failures leave no dangling ref) */
-    if (!e2_remove_dirent(2, name)) return -1;
+    if (!e2_remove_dirent(parent_ino, name)) return -1;
 
     /* Free the inode */
     e2_free_inode(ino);
