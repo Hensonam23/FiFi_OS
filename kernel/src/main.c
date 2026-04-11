@@ -222,6 +222,7 @@ heap_init();
     pic_unmask_irq(1);
     kprintf("FiFi OS: PIC unmasked IRQ1 (keyboard)\n");
     __asm__ volatile ("sti");
+    keyboard_ps2_init();
 
 
     serial_write("FiFi OS: IDT loaded\n");

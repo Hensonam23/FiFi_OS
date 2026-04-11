@@ -595,7 +595,7 @@ static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
 
 /* ── Enumerate a USB hub and search for keyboard on its ports ────────────── */
 
-static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_speed) {
+static bool enumerate_hub(uint8_t hub_slot, uint8_t root_port1, uint8_t hub_speed __attribute__((unused))) {
     /* SET_CONFIGURATION 1 */
     if (!ctrl_xfer(hub_slot, usb_setup(0x00, 9, 1, 0, 0), 0, 0, false)) {
         kprintf("[xhci] hub SET_CONFIG failed\n");
@@ -695,7 +695,7 @@ static bool root_port_reset(uint8_t port0, uint8_t *speed_out) {
         udelay(2000);
     }
     /* Clear W1C */
-    mmio_w32(g.op, OP_PORTSC(port0), sc & ~PORTSC_W1C_BITS | PORTSC_W1C_BITS);
+    mmio_w32(g.op, OP_PORTSC(port0), (sc & ~PORTSC_W1C_BITS) | PORTSC_W1C_BITS);
     udelay(2000);
 
     sc = mmio_r32(g.op, OP_PORTSC(port0));
@@ -771,25 +771,20 @@ static void process_hid_report(const uint8_t *rep) {
     for (int i = 0; i < 6; i++) g.last_keys[i] = rep[i + 2];
 }
 
-/* ── xhci_init ────────────────────────────────────────────────────────────── */
+/* ── Per-controller init (called for each XHCI PCI device found) ─────────── */
 
-void xhci_init(void) {
-    memset_x(&g, 0, sizeof(g));
-    g.kbd_slot = -1;
-
-    uint8_t bus, dev, fn;
-    if (!pci_find_class(0x0C, 0x03, 0x30, &bus, &dev, &fn)) {
-        kprintf("[xhci] no XHCI controller found\n");
-        return;
-    }
-    kprintf("[xhci] found controller at %u:%u.%u\n", bus, dev, fn);
+static bool xhci_init_one(uint8_t bus, uint8_t dev, uint8_t fn) {
+    kprintf("[xhci] trying controller %u:%u.%u\n", bus, dev, fn);
 
     uint64_t mmio_phys = pci_bar_base64(bus, dev, fn, 0);
-    if (!mmio_phys) { kprintf("[xhci] bad BAR0\n"); return; }
+    if (!mmio_phys) { kprintf("[xhci] bad BAR0\n"); return false; }
 
-    uint64_t mmio_virt = 0xFFFFFF0040000000ULL;
+    /* Each controller gets its own 64KB MMIO window */
+    static uint64_t mmio_virt_next = 0xFFFFFF0040000000ULL;
+    uint64_t mmio_virt = mmio_virt_next;
+    mmio_virt_next += 0x10000ULL;
     if (!vmm_map_range(mmio_virt, mmio_phys, 0x10000, VMM_WRITE)) {
-        kprintf("[xhci] MMIO map failed\n"); return;
+        kprintf("[xhci] MMIO map failed\n"); return false;
     }
     pci_enable(bus, dev, fn);
 
@@ -807,7 +802,7 @@ void xhci_init(void) {
     kprintf("[xhci] phys=%p maxslots=%u maxports=%u\n",
             (void *)mmio_phys, g.max_slots, g.max_ports);
 
-    if (!ctrl_reset()) { kprintf("[xhci] reset timed out\n"); return; }
+    if (!ctrl_reset()) { kprintf("[xhci] reset timed out\n"); return false; }
 
     mmio_w32(g.op, OP_CONFIG, g.max_slots);
 
@@ -848,7 +843,7 @@ void xhci_init(void) {
     mmio_w64(ir0, IR_ERSTBA, g.erst_phys);
     mmio_w64(ir0, IR_ERDP,   g.evt.phys | (1u << 3));
 
-    if (!ctrl_start()) { kprintf("[xhci] start failed\n"); return; }
+    if (!ctrl_start()) { kprintf("[xhci] start failed\n"); return false; }
     g.present = true;
     kprintf("[xhci] controller running\n");
 
@@ -917,7 +912,35 @@ void xhci_init(void) {
     }
 
     if (g.kbd_slot < 0)
-        kprintf("[xhci] no USB keyboard found\n");
+        kprintf("[xhci] no USB keyboard on this controller\n");
+
+    return (g.kbd_slot >= 0);
+}
+
+/* ── xhci_init ────────────────────────────────────────────────────────────── */
+
+void xhci_init(void) {
+    memset_x(&g, 0, sizeof(g));
+    g.kbd_slot = -1;
+
+    /* Collect all XHCI controllers (AMD Ryzen has 2: one external, one internal) */
+    uint8_t all_bus[8], all_dev[8], all_fn[8];
+    uint32_t n = pci_find_all_class(0x0C, 0x03, 0x30,
+                                     all_bus, all_dev, all_fn, 8);
+    if (n == 0) {
+        kprintf("[xhci] no XHCI controller found\n");
+        return;
+    }
+    kprintf("[xhci] found %u XHCI controller(s)\n", (unsigned)n);
+
+    for (uint32_t i = 0; i < n; i++) {
+        /* Reset global state for each controller attempt */
+        memset_x(&g, 0, sizeof(g));
+        g.kbd_slot = -1;
+        if (xhci_init_one(all_bus[i], all_dev[i], all_fn[i]))
+            return;  /* keyboard found, stop */
+    }
+    kprintf("[xhci] no USB keyboard found on any controller\n");
 }
 
 /* ── xhci_poll ─ called from pit_on_tick() ───────────────────────────────── */
