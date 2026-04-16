@@ -7,6 +7,7 @@
 
 #include "net.h"
 #include "arp.h"
+#include "ip.h"
 #include "virtio_net.h"
 #include "kprintf.h"
 
@@ -19,12 +20,6 @@ uint32_t net_gateway = (10u  << 24) | (0u  << 16) | (2u << 8) | 2u;   /* 10.0.2.
 /* ── Scratch RX buffer ────────────────────────────────────────────────────── */
 #define RX_BUF_SIZE 1536u
 static uint8_t rx_buf[RX_BUF_SIZE];
-
-/* ── Weak stub for ip_recv — replaced when IP layer is added ──────────────── */
-__attribute__((weak))
-void ip_recv(const void *payload, size_t len, const uint8_t src_mac[6]) {
-    (void)payload; (void)len; (void)src_mac;
-}
 
 /* ── net_init ─────────────────────────────────────────────────────────────── */
 void net_init(void) {
@@ -84,7 +79,7 @@ void net_poll(void) {
             arp_recv(payload, plen);
             break;
         case ETH_PROTO_IP:
-            ip_recv(payload, plen, hdr->src);
+            ip4_recv(payload, plen, hdr->src);
             break;
         default:
             break;

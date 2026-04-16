@@ -16,6 +16,7 @@
 #include "virtio_net.h"
 #include "net.h"
 #include "arp.h"
+#include "ip.h"
 #include "ext2.h"
 #include "xhci.h"
 
@@ -1366,6 +1367,47 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
 
     if (streq_simple(argv[0], "arp")) {
         arp_print_cache();
+        return;
+    }
+
+    if (streq_simple(argv[0], "ping")) {
+        if (argc < 2) {
+            kprintf("usage: ping <ip> [count]\n");
+            return;
+        }
+        /* Parse dotted-decimal IPv4 address */
+        uint32_t ip = 0;
+        int octet = 0, dots = 0;
+        bool ok = true;
+        for (const char *p = argv[1]; *p || dots == 3; ) {
+            if (*p >= '0' && *p <= '9') {
+                octet = octet * 10 + (*p - '0');
+                p++;
+            } else if (*p == '.' || *p == '\0') {
+                if (octet > 255) { ok = false; break; }
+                ip = (ip << 8) | (uint32_t)octet;
+                octet = 0;
+                if (*p == '.') { dots++; p++; }
+                else break;
+            } else {
+                ok = false; break;
+            }
+        }
+        if (!ok || dots != 3) {
+            kprintf("ping: bad IP address\n");
+            return;
+        }
+        uint16_t count = 4;
+        if (argc >= 3) {
+            count = 0;
+            for (const char *p = argv[2]; *p; p++) {
+                if (*p < '0' || *p > '9') { kprintf("ping: bad count\n"); return; }
+                count = (uint16_t)(count * 10 + (*p - '0'));
+            }
+            if (count == 0) count = 1;
+            if (count > 100) count = 100;
+        }
+        icmp_ping(ip, count, 100);   /* 100 ticks = 1 second per ping */
         return;
     }
 

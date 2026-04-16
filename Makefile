@@ -57,6 +57,7 @@ OBJS := \
     $(BUILD)/virtio_net.o \
     $(BUILD)/net.o \
     $(BUILD)/arp.o \
+    $(BUILD)/ip.o \
     $(BUILD)/ext2.o \
     $(BUILD)/xhci.o \
     $(BUILD)/ramfs.o \
@@ -263,6 +264,9 @@ $(BUILD)/net.o: kernel/src/net.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/arp.o: kernel/src/arp.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/ip.o: kernel/src/ip.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/xhci.o: kernel/src/xhci.c | $(BUILD)
