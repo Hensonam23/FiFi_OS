@@ -1346,7 +1346,7 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
     }
 
     if (streq_simple(argv[0], "ifconfig")) {
-        if (!virtio_net_present()) {
+        if (!net_nic_present()) {
             kprintf("ifconfig: no network device\n");
             return;
         }

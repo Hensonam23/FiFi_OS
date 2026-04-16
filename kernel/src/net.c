@@ -23,7 +23,7 @@ static size_t net_nic_recv(void *buf, size_t buf_len) {
     if (rtl8168_present())    return rtl8168_recv(buf, buf_len);
     return 0;
 }
-static bool net_nic_present(void) {
+bool net_nic_present(void) {
     return virtio_net_present() || rtl8168_present();
 }
 
