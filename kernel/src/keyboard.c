@@ -157,11 +157,7 @@ static volatile bool ps2_present = false;
 
 /* Diagnostic results saved for later display */
 static uint8_t ps2_diag_status   = 0xFF;
-static uint8_t ps2_diag_selftest = 0xFF;
-static uint8_t ps2_diag_kbdtest  = 0xFF;
 static uint8_t ps2_diag_config   = 0xFF;
-static bool    ps2_diag_reset_ack = false;
-static bool    ps2_diag_reset_aa  = false;
 static bool    ps2_diag_scan_ack  = false;
 
 /* Helper: wait for i8042 input buffer empty (safe to send command) */

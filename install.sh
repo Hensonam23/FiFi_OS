@@ -3,7 +3,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISO="$SCRIPT_DIR/fifi.iso"
+# Look for ISO in build/ first (where make puts it), then repo root
+if [[ -f "$SCRIPT_DIR/build/fifi.iso" ]]; then
+    ISO="$SCRIPT_DIR/build/fifi.iso"
+else
+    ISO="$SCRIPT_DIR/fifi.iso"
+fi
 TMPFILE=$(mktemp)
 OS=$(uname -s)   # Linux or Darwin
 
@@ -227,10 +232,6 @@ This wizard will:\n\
 "Begin" || exit 0
 
 # ── STEP 2: Locate ISO ────────────────────────────────────────────────────────
-if [[ ! -f "$ISO" ]]; then
-    # Try same directory as script
-    ISO="$SCRIPT_DIR/fifi.iso"
-fi
 if [[ ! -f "$ISO" ]]; then
     ui_msg "Image Not Found" \
 "\Z1fifi.iso not found.\Zn\n\n\
