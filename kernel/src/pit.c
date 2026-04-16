@@ -3,6 +3,7 @@
 #include "xhci.h"
 #include "keyboard.h"
 #include "acpi.h"
+#include "net.h"
 
 static volatile uint64_t g_pit_ticks = 0;
 static volatile uint32_t g_pit_hz = 0;
@@ -22,6 +23,7 @@ void pit_on_tick(void) {
     keyboard_ps2_poll();  /* PS/2 fallback — works even without IRQ1 */
     acpi_ec_poll();       /* EC SCI drain — reads + query only, safe */
     xhci_poll();
+    net_poll();           /* drain virtio-net RX queue, dispatch ARP/IP */
 }
 
 /* Set PIT frequency */

@@ -55,22 +55,30 @@
 #define VQ_TX   1
 
 /* ── Virtqueue geometry ───────────────────────────────────────────────────── */
-#define VQ_SIZE     64u      /* descriptors per queue — power of 2 */
+/*
+ * VQ_SIZE MUST equal the queue size the device reports via QUEUE_SIZE.
+ * QEMU virtio-net (and blk) reports 256.  The device computes ring offsets as:
+ *   avail_ring = queue_pfn*4096 + queue_size*16
+ *   used_ring  = next page boundary after avail_ring
+ * If VQ_SIZE mismatches the device's queue size, ring layouts are misaligned
+ * and packets are never processed.
+ */
+#define VQ_SIZE     256u     /* MUST match device-reported queue size */
 #define PAGE_SIZE   4096u
 
 /*
- * Per-queue memory layout for VQ_SIZE=64:
- *   desc table:   64 * 16 = 1024 bytes  (at offset 0)
- *   avail ring:   6 + 64*2 = 134 bytes  (at offset 1024)
+ * Per-queue memory layout for VQ_SIZE=256:
+ *   desc table:   256 * 16 = 4096 bytes  (page 0)
+ *   avail ring:   4 + 256*2 = 516 bytes  (page 1, offset 4096)
  *   <pad to next page boundary>
- *   used ring:    6 + 64*8 = 518 bytes  (at offset 4096)
+ *   used ring:    4 + 256*8 = 2052 bytes (page 2, offset 8192)
  *
- * Total: 2 pages (8 KiB) per queue.
+ * Total: 3 pages (12 KiB) per queue.
  */
 #define DESC_TABLE_SZ   (VQ_SIZE * 16u)
-#define AVAIL_RING_OFF  DESC_TABLE_SZ          /* right after desc table */
-#define USED_RING_OFF   PAGE_SIZE              /* page-aligned */
-#define VQ_PAGES        2u                     /* 8 KiB per queue */
+#define AVAIL_RING_OFF  DESC_TABLE_SZ          /* = 4096, on page boundary */
+#define USED_RING_OFF   (2u * PAGE_SIZE)       /* = 8192, on page boundary */
+#define VQ_PAGES        3u                     /* 12 KiB per queue */
 
 /* ── Virtqueue structs ───────────────────────────────────────────────────── */
 typedef struct __attribute__((packed)) {
@@ -176,10 +184,10 @@ static bool vq_setup(vq_t *vq, uint16_t qidx) {
         kprintf("[virtio-net] queue %u size=0\n", (unsigned)qidx);
         return false;
     }
-    if (qsz < VQ_SIZE) {
-        kprintf("[virtio-net] queue %u: device size %u < VQ_SIZE %u\n",
+    if (qsz != VQ_SIZE) {
+        kprintf("[virtio-net] WARNING: queue %u device size %u != VQ_SIZE %u — ring layout mismatch\n",
                 (unsigned)qidx, (unsigned)qsz, (unsigned)VQ_SIZE);
-        return false;
+        /* Mismatch is fatal: continue anyway, but TX/RX likely broken */
     }
 
     uint64_t phys = pmm_alloc_pages(VQ_PAGES);
