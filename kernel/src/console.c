@@ -136,86 +136,105 @@ static const uint8_t fifi_font8x16[128][16] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* 127 */
 };
 
+/* ── Cell buffer ─────────────────────────────────────────────────────────
+ * All text is stored in a RAM cell buffer. Scrolling shifts the cell buffer
+ * (fast — it's regular RAM) and re-renders to the framebuffer using WRITE-ONLY
+ * access. This avoids reading from video RAM, which is extremely slow on real
+ * hardware (every read is an uncached PCIe round-trip that causes visible
+ * "raster scanning" artifacts during scroll). */
+
+#define CELL_MAX_COLS 240
+#define CELL_MAX_ROWS 135   /* enough for 1920x1080 at 8x16 = 67 rows */
+
 static struct {
     volatile uint32_t *pix;
     uint64_t pitch32;
     uint64_t w, h;
 
-    uint64_t cx, cy; /* cursor in character cells */
+    uint64_t cx, cy;        /* cursor in character cells */
+    uint64_t cols, rows;    /* visible cell grid dimensions */
     uint32_t fg;
     uint32_t bg;
     bool initialized;
 } con;
 
-static void put_pixel(uint64_t x, uint64_t y, uint32_t c) {
-    if (x >= con.w || y >= con.h) return;
-    con.pix[y * con.pitch32 + x] = c;
-}
+static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 
-static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c) {
-    for (uint64_t yy = 0; yy < h; yy++)
-        for (uint64_t xx = 0; xx < w; xx++)
-            put_pixel(x + xx, y + yy, c);
-}
+/* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
-static void memmove_bytes(void *dst, const void *src, size_t n) {
-    uint8_t *d = (uint8_t *)dst;
-    const uint8_t *s = (const uint8_t *)src;
-    if (s == d || n == 0) return;
+static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
+    const uint64_t px = cell_x * 8;
+    const uint64_t py = cell_y * 16;
+    if (px + 8 > con.w || py + 16 > con.h) return;
 
-    if (s > d) {
-        for (size_t i = 0; i < n; i++) d[i] = s[i];
-    } else {
-        for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
+    for (uint64_t y = 0; y < 16; y++) {
+        volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
+        uint8_t bits = fifi_font8x16[uc][y];
+        row[0] = (bits & 0x01) ? con.fg : con.bg;
+        row[1] = (bits & 0x02) ? con.fg : con.bg;
+        row[2] = (bits & 0x04) ? con.fg : con.bg;
+        row[3] = (bits & 0x08) ? con.fg : con.bg;
+        row[4] = (bits & 0x10) ? con.fg : con.bg;
+        row[5] = (bits & 0x20) ? con.fg : con.bg;
+        row[6] = (bits & 0x40) ? con.fg : con.bg;
+        row[7] = (bits & 0x80) ? con.fg : con.bg;
     }
 }
 
+static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c) {
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        volatile uint32_t *row = con.pix + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+            row[xx] = c;
+    }
+}
+
+/* ── Scroll: shift cell buffer in RAM, re-render to framebuffer ─────────── */
+
 static void scroll_one_line(void) {
-    const uint64_t char_h = 16;
-    const uint64_t bytes_per_row = con.pitch32 * 4;
+    if (con.rows <= 1) return;
 
-    if (con.h <= char_h) return;
+    uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
+    uint64_t vr = (con.rows < CELL_MAX_ROWS) ? con.rows : CELL_MAX_ROWS;
 
-    uint8_t *dst = (uint8_t *)con.pix;
-    uint8_t *src = (uint8_t *)con.pix + (char_h * bytes_per_row);
-    size_t move_bytes = (size_t)((con.h - char_h) * bytes_per_row);
+    /* Shift cell buffer up by one row (fast — regular RAM, not video memory) */
+    for (uint64_t r = 0; r + 1 < vr; r++)
+        for (uint64_t c = 0; c < vc; c++)
+            cell_buf[r][c] = cell_buf[r + 1][c];
 
-    memmove_bytes(dst, src, move_bytes);
+    /* Clear last row in cell buffer */
+    for (uint64_t c = 0; c < vc; c++)
+        cell_buf[vr - 1][c] = ' ';
 
-    /* clear last character row */
-    fill_rect(0, con.h - char_h, con.w, char_h, con.bg);
+    /* Re-render entire screen from cell buffer (write-only to framebuffer) */
+    for (uint64_t r = 0; r < vr; r++)
+        for (uint64_t c = 0; c < vc; c++)
+            render_char(c, r, cell_buf[r][c]);
+
+    /* Clear any fractional pixel rows below the last cell row */
+    uint64_t used_h = vr * 16;
+    if (used_h < con.h)
+        fill_rect(0, used_h, con.w, con.h - used_h, con.bg);
 }
 
 static void ensure_cursor_visible(void) {
-    const uint64_t char_w = 8, char_h = 16;
-    const uint64_t cols = con.w / char_w;
-    const uint64_t rows = con.h / char_h;
+    if (con.cols == 0 || con.rows == 0) return;
 
-    if (cols == 0 || rows == 0) return;
-
-    if (con.cx >= cols) {
+    if (con.cx >= con.cols) {
         con.cx = 0;
         con.cy++;
     }
 
-    while (con.cy >= rows) {
+    while (con.cy >= con.rows) {
         scroll_one_line();
-        con.cy = rows - 1;
+        con.cy = con.rows - 1;
     }
 }
 
 static void draw_char_at(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
-    const uint64_t char_w = 8, char_h = 16;
-    const uint64_t px = cell_x * char_w;
-    const uint64_t py = cell_y * char_h;
-
-    for (uint64_t y = 0; y < 16; y++) {
-        uint8_t row = fifi_font8x16[uc][y];
-        for (uint64_t x = 0; x < 8; x++) {
-            uint32_t col = (row & (1u << x)) ? con.fg : con.bg;
-            put_pixel(px + x, py + y, col);
-        }
-    }
+    if (cell_x < CELL_MAX_COLS && cell_y < CELL_MAX_ROWS)
+        cell_buf[cell_y][cell_x] = uc;
+    render_char(cell_x, cell_y, uc);
 }
 
 bool console_ready(void) {
@@ -232,6 +251,9 @@ void console_clear(void) {
     fill_rect(0, 0, con.w, con.h, con.bg);
     con.cx = 0;
     con.cy = 0;
+    for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
+        for (uint64_t c = 0; c < CELL_MAX_COLS; c++)
+            cell_buf[r][c] = ' ';
 }
 
 void console_init(struct limine_framebuffer *fb) {
@@ -239,8 +261,13 @@ void console_init(struct limine_framebuffer *fb) {
     con.pitch32 = fb->pitch / 4;
     con.w = fb->width;
     con.h = fb->height;
+    con.cols = con.w / 8;
+    con.rows = con.h / 16;
     con.cx = 0;
     con.cy = 0;
+
+    if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
+    if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
 
     con.fg = 0x00FFFFFF; /* white */
     con.bg = 0x00101010; /* near-black */
@@ -252,20 +279,10 @@ void console_init(struct limine_framebuffer *fb) {
 void console_putc(char c) {
     if (!con.initialized) return;
 
-    // backspace: move cursor left (erase is done by printing " ")
-    if (c == '') {
+    if (c == '\x7f' || c == '\b') {
         if (con.cx > 0) con.cx--;
         return;
     }
-
-    if (c == '\b') {
-        // Move cursor left (no erase). Shell can erase with "\b \b".
-        if (con.cx > 0) {
-            con.cx--;
-        }
-        return;
-    }
-
 
     if (c == '\n') {
         con.cx = 0;
@@ -280,7 +297,6 @@ void console_putc(char c) {
     }
 
     if (c == '\t') {
-        /* tab = 4 spaces */
         for (int i = 0; i < 4; i++) console_putc(' ');
         return;
     }
@@ -296,24 +312,15 @@ void console_write(const char *s) {
     for (size_t i = 0; s[i]; i++) console_putc(s[i]);
 }
 
-
 void console_get_cursor(uint32_t *x, uint32_t *y) {
-    if (x) *x = con.cx;
-    if (y) *y = con.cy;
+    if (x) *x = (uint32_t)con.cx;
+    if (y) *y = (uint32_t)con.cy;
 }
 
 void console_set_cursor(uint32_t x, uint32_t y) {
-    // clamp a bit (character cells)
-    uint32_t cols = con.w / 8;
-    uint32_t rows = con.h / 16;
-
-    if (cols == 0) cols = 1;
-    if (rows == 0) rows = 1;
-
-    if (x >= cols) x = cols - 1;
-    if (y >= rows) y = rows - 1;
-
+    if (con.cols == 0 || con.rows == 0) return;
+    if (x >= con.cols) x = (uint32_t)(con.cols - 1);
+    if (y >= con.rows) y = (uint32_t)(con.rows - 1);
     con.cx = x;
     con.cy = y;
-    ensure_cursor_visible();
 }

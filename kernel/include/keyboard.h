@@ -35,5 +35,17 @@ void keyboard_ps2_init(void);
 // Call from pit_on_tick() at 100Hz. Safe alongside IRQ1 handler.
 void keyboard_ps2_poll(void);
 
+// Print PS/2 diagnostic summary (call after boot to see results)
+void keyboard_ps2_diag(void);
+
+/* Full i8042 init with self-test and keyboard reset */
+void keyboard_ps2_full_init(void);
+
+/* Raw capture mode — accepts ALL bytes from i8042 including AUX */
+void keyboard_set_raw_capture(int on);
+uint32_t keyboard_raw_total(void);
+uint32_t keyboard_raw_aux(void);
+int keyboard_has_data(void);
+
 #endif
 void keyboard_irq_handler(void);

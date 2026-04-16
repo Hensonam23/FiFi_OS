@@ -77,6 +77,27 @@ void kvprintf(const char *fmt, va_list args) {
 
         if (*p == '%') { putc_('%'); continue; }
 
+        /* Parse flags and width: supports %0Nd, %0Nx, %Ns, %.Ns */
+        int zero_pad = 0;
+        int width = 0;
+        int precision = -1;
+
+        if (*p == '0') { zero_pad = 1; p++; }
+        while (*p >= '0' && *p <= '9') {
+            width = width * 10 + (*p - '0');
+            p++;
+        }
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            while (*p >= '0' && *p <= '9') {
+                precision = precision * 10 + (*p - '0');
+                p++;
+            }
+        }
+
+        if (*p == 0) break;
+
         if (*p == 'c') {
             char c = (char)va_arg(args, int);
             putc_(c);
@@ -85,15 +106,27 @@ void kvprintf(const char *fmt, va_list args) {
 
         if (*p == 's') {
             const char *s = va_arg(args, const char *);
-            puts_(s);
+            if (!s) s = "(null)";
+            if (precision >= 0) {
+                for (int i = 0; i < precision && s[i]; i++)
+                    putc_(s[i]);
+            } else {
+                puts_(s);
+            }
             continue;
         }
 
         if (*p == 'd') {
             int64_t v = (int64_t)va_arg(args, int);
-            if (v < 0) { putc_('-'); v = -v; }
             char buf[32];
+            int neg = 0;
+            if (v < 0) { neg = 1; v = -v; }
             utoa_dec((uint64_t)v, buf);
+            int len = 0;
+            while (buf[len]) len++;
+            if (neg) putc_('-');
+            for (int i = len; i < width; i++)
+                putc_(zero_pad ? '0' : ' ');
             puts_(buf);
             continue;
         }
@@ -102,6 +135,10 @@ void kvprintf(const char *fmt, va_list args) {
             uint64_t v = (uint64_t)va_arg(args, unsigned int);
             char buf[32];
             utoa_dec(v, buf);
+            int len = 0;
+            while (buf[len]) len++;
+            for (int i = len; i < width; i++)
+                putc_(zero_pad ? '0' : ' ');
             puts_(buf);
             continue;
         }
@@ -110,6 +147,10 @@ void kvprintf(const char *fmt, va_list args) {
             uint64_t v = (uint64_t)va_arg(args, unsigned int);
             char buf[32];
             utoa_hex(v, buf);
+            int len = 0;
+            while (buf[len]) len++;
+            for (int i = len; i < width; i++)
+                putc_(zero_pad ? '0' : ' ');
             puts_(buf);
             continue;
         }

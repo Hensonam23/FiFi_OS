@@ -14,6 +14,7 @@
 #include "gdt.h"
 #include "virtio_blk.h"
 #include "ext2.h"
+#include "xhci.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1317,6 +1318,19 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
                 kprintf("%x%x ", b >> 4, b & 0xF);
             }
             kprintf("\n");
+        }
+        return;
+    }
+
+    if (streq_simple(argv[0], "xhci-log")) {
+        uint32_t sz = xhci_log_size();
+        if (sz == 0) {
+            kprintf("xhci-log: empty (no XHCI controller found, or boot log cleared)\n");
+        } else {
+            kprintf("--- XHCI boot log (%u bytes) ---\n", (unsigned)sz);
+            kprintf("%s", xhci_log_get());
+            if (xhci_log_get()[sz - 1] != '\n') kprintf("\n");
+            kprintf("--- end xhci log ---\n");
         }
         return;
     }

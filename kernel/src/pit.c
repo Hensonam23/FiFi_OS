@@ -2,6 +2,7 @@
 #include "io.h"
 #include "xhci.h"
 #include "keyboard.h"
+#include "acpi.h"
 
 static volatile uint64_t g_pit_ticks = 0;
 static volatile uint32_t g_pit_hz = 0;
@@ -19,6 +20,7 @@ uint64_t pit_ticks(void) {
 void pit_on_tick(void) {
     g_ticks++;
     keyboard_ps2_poll();  /* PS/2 fallback — works even without IRQ1 */
+    acpi_ec_poll();       /* EC SCI drain — reads + query only, safe */
     xhci_poll();
 }
 
