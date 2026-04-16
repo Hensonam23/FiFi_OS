@@ -25,6 +25,8 @@
 #include "virtio_blk.h"
 #include "ext2.h"
 #include "xhci.h"
+#include "isr.h"
+#include "pci.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -91,6 +93,7 @@ static void pic_mask_all(void) {
     outb(0x21, 0xFF);
     outb(0xA1, 0xFF);
 }
+
 
 void kmain(void) {
     uint64_t hhdm_off = 0;
@@ -220,10 +223,11 @@ heap_init();
     serial_write("FiFi OS: enabling interrupts (sti)\n");
     pic_unmask_irq(0);
     pic_unmask_irq(1);
-    kprintf("FiFi OS: PIC unmasked IRQ1 (keyboard)\n");
+    pic_unmask_irq(2);   /* cascade — required for slave PIC (IRQ 8-15) */
+    pic_unmask_irq(9);   /* ACPI SCI — EC delivers keyboard data here */
+    kprintf("FiFi OS: PIC unmasked IRQ0,1,2,9\n");
     __asm__ volatile ("sti");
     keyboard_ps2_init();
-
 
     serial_write("FiFi OS: IDT loaded\n");
     console_write("IDT loaded. Exceptions will panic cleanly.\n\n");
@@ -244,6 +248,7 @@ heap_init();
     ext2_init();
     xhci_init();
 
+    acpi_init();
     thread_init();
     {
         uint64_t t = pmm_get_total_pages(), f = pmm_get_free_pages(), u = pmm_get_used_pages();

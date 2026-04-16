@@ -12,6 +12,8 @@
 #define PTE_P   (1ULL << 0)   /* present */
 #define PTE_RW  (1ULL << 1)   /* writable */
 #define PTE_US  (1ULL << 2)   /* user */
+#define PTE_PWT (1ULL << 3)   /* page write-through */
+#define PTE_PCD (1ULL << 4)   /* page cache disable — REQUIRED for MMIO */
 #define PTE_NX  (1ULL << 63)  /* no-execute (if supported) */
 
 static inline void *phys_to_virt(uint64_t phys) {
@@ -65,9 +67,10 @@ static uint64_t *ensure_table(uint64_t *parent, uint16_t index, bool user) {
 static inline uint64_t make_pte_flags(vmm_flags_t flags) {
     uint64_t f = PTE_P; /* map_page always creates a present mapping */
 
-    if (flags & VMM_WRITE) f |= PTE_RW;
-    if (flags & VMM_USER)  f |= PTE_US;
-    if (flags & VMM_NX)    f |= PTE_NX;
+    if (flags & VMM_WRITE)   f |= PTE_RW;
+    if (flags & VMM_USER)    f |= PTE_US;
+    if (flags & VMM_UNCACHE) f |= PTE_PCD | PTE_PWT;  /* strong uncacheable for MMIO */
+    if (flags & VMM_NX)      f |= PTE_NX;
 
     return f;
 }

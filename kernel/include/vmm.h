@@ -16,9 +16,10 @@
 typedef uint64_t vmm_flags_t;
 
 enum {
-    VMM_WRITE = (1ULL << 1),
-    VMM_USER  = (1ULL << 2),
-    VMM_NX    = (1ULL << 63),
+    VMM_WRITE   = (1ULL << 1),
+    VMM_USER    = (1ULL << 2),
+    VMM_UNCACHE = (1ULL << 4),   /* PCD — cache-disable, required for MMIO */
+    VMM_NX      = (1ULL << 63),
 };
 
 void vmm_init(uint64_t hhdm_offset);

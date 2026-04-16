@@ -15,3 +15,6 @@ typedef struct isr_ctx {
 
 void isr_common_handler(isr_ctx_t *ctx);
 extern void *isr_stub_table[];
+
+uint32_t isr_get_irq_count(uint8_t irq);
+void isr_reset_irq_counts(void);

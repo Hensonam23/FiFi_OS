@@ -11,6 +11,7 @@
 #include "syscall.h"
 #include "serial.h"
 #include "vmm.h"
+#include "acpi.h"
 
 
 /* ---- exception debug helpers (auto-generated) ---- */
@@ -42,6 +43,9 @@ static void isr_print_exception_dump(unsigned int vec, const void *ctx_void) {
 }
 /* ---- end helpers ---- */
 
+
+/* Per-IRQ event counters for diagnostics */
+static volatile uint32_t irq_counters[16] = {0};
 
 static const char *exc_names[32] = {
     "Divide-by-zero",
@@ -114,6 +118,7 @@ void isr_common_handler(isr_ctx_t *ctx) {
     /* IRQs after PIC remap live at vectors 32-47 */
     if (vec >= 32 && vec < 48) {
         uint8_t irq = (uint8_t)(vec - 32);
+        if (irq < 16) irq_counters[irq]++;
         if (irq == 1) keyboard_irq_handler();
 
         /* Timer tick (IRQ0) */
@@ -123,7 +128,9 @@ void isr_common_handler(isr_ctx_t *ctx) {
             pit_on_tick();
         }
 
-        /* Keyboard (IRQ1) */
+        /* ACPI SCI (IRQ9) — EC keyboard data delivery */
+        if (irq == 9) acpi_sci_handler();
+
         pic_send_eoi(irq);
         thread_check_resched();
         return;
@@ -152,4 +159,12 @@ void isr_common_handler(isr_ctx_t *ctx) {
   }
 
   panic("Unhandled CPU exception");
+}
+
+uint32_t isr_get_irq_count(uint8_t irq) {
+    return (irq < 16) ? irq_counters[irq] : 0;
+}
+
+void isr_reset_irq_counts(void) {
+    for (int i = 0; i < 16; i++) irq_counters[i] = 0;
 }
