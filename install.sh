@@ -12,7 +12,7 @@ fi
 TMPFILE=$(mktemp)
 OS=$(uname -s)   # Linux or Darwin
 
-trap 'rm -f "$TMPFILE"; [[ $USE_DIALOG == true ]] && clear || true' EXIT INT TERM
+trap 'rm -f "$TMPFILE"' EXIT INT TERM
 
 # ── argument parsing ──────────────────────────────────────────────────────────
 FORCED_TARGET=""
@@ -43,6 +43,41 @@ else
 fi
 
 H=15; W=65
+
+# ── dialog color theme — fixes washed-out/cyan button highlight ───────────────
+if [[ $USE_DIALOG == true ]]; then
+    _DRC=$(mktemp)
+    cat > "$_DRC" << 'DIALOGRC_EOF'
+screen_color         = (WHITE,BLUE,ON)
+shadow_color         = (BLACK,BLACK,ON)
+dialog_color         = (BLACK,WHITE,OFF)
+title_color          = (BLUE,WHITE,ON)
+border_color         = (BLUE,WHITE,ON)
+border2_color        = (BLACK,WHITE,OFF)
+button_active_color       = (WHITE,BLUE,ON)
+button_inactive_color     = (BLACK,WHITE,OFF)
+button_key_active_color   = (YELLOW,BLUE,ON)
+button_key_inactive_color = (RED,WHITE,OFF)
+button_label_active_color   = (WHITE,BLUE,ON)
+button_label_inactive_color = (BLACK,WHITE,OFF)
+menubox_color        = (BLACK,WHITE,OFF)
+menubox_border_color = (BLUE,WHITE,ON)
+item_color           = (BLACK,WHITE,OFF)
+item_selected_color  = (WHITE,BLUE,ON)
+tag_color            = (BLUE,WHITE,ON)
+tag_selected_color   = (WHITE,BLUE,ON)
+tag_key_color        = (RED,WHITE,OFF)
+tag_key_selected_color = (YELLOW,BLUE,ON)
+inputbox_color       = (BLACK,WHITE,OFF)
+check_color          = (BLACK,WHITE,OFF)
+check_selected_color = (WHITE,BLUE,ON)
+gauge_color          = (WHITE,BLUE,ON)
+uarrow_color         = (BLUE,WHITE,ON)
+darrow_color         = (BLUE,WHITE,ON)
+DIALOGRC_EOF
+    export DIALOGRC="$_DRC"
+    trap 'rm -f "$TMPFILE" "$_DRC"; [[ $USE_DIALOG == true ]] && clear || true' EXIT INT TERM
+fi
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 _b='\033[1m'; _r='\033[31m'; _g='\033[32m'; _y='\033[33m'; _c='\033[36m'; _x='\033[0m'
