@@ -40,6 +40,3 @@ void net_poll(void);    /* call from pit_on_tick — processes incoming frames *
 /* Send a raw Ethernet frame (builds eth header for you). */
 bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
                   const void *payload, size_t payload_len);
-
-/* Receive hook — called by net_poll for each non-ARP frame. */
-void ip_recv(const void *payload, size_t len, const uint8_t src_mac[6]);
