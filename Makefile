@@ -58,6 +58,7 @@ OBJS := \
     $(BUILD)/net.o \
     $(BUILD)/arp.o \
     $(BUILD)/ip.o \
+    $(BUILD)/rtl8168.o \
     $(BUILD)/ext2.o \
     $(BUILD)/xhci.o \
     $(BUILD)/ramfs.o \
@@ -267,6 +268,9 @@ $(BUILD)/arp.o: kernel/src/arp.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/ip.o: kernel/src/ip.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/rtl8168.o: kernel/src/rtl8168.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/xhci.o: kernel/src/xhci.c | $(BUILD)
