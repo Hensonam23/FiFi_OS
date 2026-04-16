@@ -54,6 +54,7 @@ OBJS := \
     $(BUILD)/fork.o \
     $(BUILD)/pci.o \
     $(BUILD)/virtio_blk.o \
+    $(BUILD)/virtio_net.o \
     $(BUILD)/ext2.o \
     $(BUILD)/xhci.o \
     $(BUILD)/ramfs.o \
@@ -157,12 +158,13 @@ disk: $(DISK)
 
 QEMU_COMMON := -M q35 -m 256M -smp 1 -cdrom $(ISO) -no-reboot
 QEMU_DISK   := -drive file=$(DISK),format=raw,if=virtio
+QEMU_NET    := -netdev user,id=net0 -device virtio-net-pci,netdev=net0
 
 run: iso $(DISK)
-	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) -serial file:serial.log -no-shutdown
+	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) $(QEMU_NET) -serial file:serial.log -no-shutdown
 
 rundbg: iso $(DISK)
-	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) -serial stdio -no-shutdown
+	qemu-system-x86_64 $(QEMU_COMMON) $(QEMU_DISK) $(QEMU_NET) -serial stdio -no-shutdown
 
 # Boot from an image written by install.sh (via test_install.sh)
 TEST_USB := build/test_usb.img
@@ -250,6 +252,9 @@ $(BUILD)/pci.o: kernel/src/pci.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/virtio_blk.o: kernel/src/virtio_blk.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/virtio_net.o: kernel/src/virtio_net.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/xhci.o: kernel/src/xhci.c | $(BUILD)
