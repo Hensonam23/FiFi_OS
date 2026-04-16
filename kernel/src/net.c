@@ -9,7 +9,23 @@
 #include "arp.h"
 #include "ip.h"
 #include "virtio_net.h"
+#include "rtl8168.h"
 #include "kprintf.h"
+
+/* ── Active NIC dispatch ──────────────────────────────────────────────────── */
+static bool net_nic_send(const void *frame, size_t len) {
+    if (virtio_net_present()) return virtio_net_send(frame, len);
+    if (rtl8168_present())    return rtl8168_send(frame, len);
+    return false;
+}
+static size_t net_nic_recv(void *buf, size_t buf_len) {
+    if (virtio_net_present()) return virtio_net_recv(buf, buf_len);
+    if (rtl8168_present())    return rtl8168_recv(buf, buf_len);
+    return 0;
+}
+static bool net_nic_present(void) {
+    return virtio_net_present() || rtl8168_present();
+}
 
 /* ── Network configuration — QEMU user-networking defaults ───────────────── */
 uint8_t  net_mac[6]  = {0};
@@ -23,10 +39,11 @@ static uint8_t rx_buf[RX_BUF_SIZE];
 
 /* ── net_init ─────────────────────────────────────────────────────────────── */
 void net_init(void) {
-    if (!virtio_net_present()) return;
+    if (!net_nic_present()) return;
 
-    /* Copy MAC from virtio device */
-    virtio_net_mac(net_mac);
+    /* Copy MAC from whichever NIC is active */
+    if (virtio_net_present())    virtio_net_mac(net_mac);
+    else if (rtl8168_present())  rtl8168_mac(net_mac);
 
     kprintf("[net] IP  %u.%u.%u.%u  mask %u.%u.%u.%u  gw %u.%u.%u.%u\n",
             (unsigned)(net_ip      >> 24), (unsigned)((net_ip      >> 16) & 0xFF),
@@ -56,16 +73,16 @@ bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
     uint8_t *dst = frame + ETH_HLEN;
     for (size_t i = 0; i < payload_len; i++) dst[i] = src[i];
 
-    return virtio_net_send(frame, ETH_HLEN + payload_len);
+    return net_nic_send(frame, ETH_HLEN + payload_len);
 }
 
 /* ── net_poll ─────────────────────────────────────────────────────────────── */
 void net_poll(void) {
-    if (!virtio_net_present()) return;
+    if (!net_nic_present()) return;
 
     /* Drain up to 8 frames per tick to avoid spending too long in IRQ context */
     for (int limit = 0; limit < 8; limit++) {
-        size_t len = virtio_net_recv(rx_buf, RX_BUF_SIZE);
+        size_t len = net_nic_recv(rx_buf, RX_BUF_SIZE);
         if (len == 0) break;
         if (len < ETH_HLEN) continue;
 
