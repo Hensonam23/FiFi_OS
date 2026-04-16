@@ -23,6 +23,7 @@
 #include "thread.h"
 #include "gdt.h"
 #include "virtio_blk.h"
+#include "virtio_net.h"
 #include "ext2.h"
 #include "xhci.h"
 #include "isr.h"
@@ -245,6 +246,7 @@ heap_init();
     initrd_init();
     initrd_cat("motd.txt");
     virtio_blk_init();
+    virtio_net_init();
     ext2_init();
     xhci_init();
 
