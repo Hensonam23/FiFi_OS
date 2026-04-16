@@ -13,6 +13,9 @@
 #include "usermode.h"
 #include "gdt.h"
 #include "virtio_blk.h"
+#include "virtio_net.h"
+#include "net.h"
+#include "arp.h"
 #include "ext2.h"
 #include "xhci.h"
 
@@ -1338,6 +1341,31 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
     if (streq_simple(argv[0], "ai")) {
         kprintf("AI agent: not installed yet.\n");
         kprintf("Plan: docs/ai-agent-plan.md\n");
+        return;
+    }
+
+    if (streq_simple(argv[0], "ifconfig")) {
+        if (!virtio_net_present()) {
+            kprintf("ifconfig: no network device\n");
+            return;
+        }
+        kprintf("eth0  MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+                (unsigned)net_mac[0], (unsigned)net_mac[1],
+                (unsigned)net_mac[2], (unsigned)net_mac[3],
+                (unsigned)net_mac[4], (unsigned)net_mac[5]);
+        kprintf("      inet %u.%u.%u.%u  mask %u.%u.%u.%u\n",
+                (unsigned)(net_ip   >> 24), (unsigned)((net_ip   >> 16) & 0xFF),
+                (unsigned)((net_ip  >>  8) & 0xFF), (unsigned)(net_ip   & 0xFF),
+                (unsigned)(net_mask >> 24), (unsigned)((net_mask >> 16) & 0xFF),
+                (unsigned)((net_mask >>  8) & 0xFF), (unsigned)(net_mask & 0xFF));
+        kprintf("      gw   %u.%u.%u.%u\n",
+                (unsigned)(net_gateway >> 24), (unsigned)((net_gateway >> 16) & 0xFF),
+                (unsigned)((net_gateway >>  8) & 0xFF), (unsigned)(net_gateway & 0xFF));
+        return;
+    }
+
+    if (streq_simple(argv[0], "arp")) {
+        arp_print_cache();
         return;
     }
 
