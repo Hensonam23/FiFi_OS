@@ -37,6 +37,9 @@ extern uint32_t net_gateway;   /* gateway IP, host byte order  (default: 10.0.2.
 void net_init(void);    /* call after virtio_net_init() */
 void net_poll(void);    /* call from pit_on_tick — processes incoming frames */
 
+/* Returns true if any NIC (virtio-net or RTL8168) is active. */
+bool net_nic_present(void);
+
 /* Send a raw Ethernet frame (builds eth header for you). */
 bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
                   const void *payload, size_t payload_len);

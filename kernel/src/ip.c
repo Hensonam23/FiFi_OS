@@ -25,7 +25,6 @@
 #include "arp.h"
 #include "kprintf.h"
 #include "pit.h"
-#include "virtio_net.h"
 
 /* ── Convenience macro for printing an IP address (host byte order) ───────── */
 #define IP_A(ip) \
@@ -79,7 +78,7 @@ static uint16_t g_ip_id = 0;
 
 /* ── ip4_send ─────────────────────────────────────────────────────────────── */
 bool ip4_send(uint32_t dst_ip, uint8_t proto, const void *payload, size_t plen) {
-    if (!virtio_net_present()) return false;
+    if (!net_nic_present()) return false;
     if (plen > ETH_MAX_PAYLOAD - IP4_HDR_LEN) return false;
 
     /* Resolve next hop: use gateway for off-subnet destinations */
@@ -192,7 +191,7 @@ void ip4_recv(const void *payload, size_t len, const uint8_t src_mac[6]) {
 
 /* ── icmp_ping ───────────────────────────────────────────────────────────── */
 bool icmp_ping(uint32_t dst_ip, uint16_t count, uint32_t timeout_ticks) {
-    if (!virtio_net_present()) {
+    if (!net_nic_present()) {
         kprintf("ping: no network device\n");
         return false;
     }
