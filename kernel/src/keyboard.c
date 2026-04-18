@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "keyboard.h"
+#include "mouse.h"
 #include "thread.h"
 #include "io.h"
 #include "kprintf.h"
@@ -237,6 +238,27 @@ void keyboard_ps2_init(void) {
     i8042_flush();
     kprintf("[ps2] final status=0x%x\n", (unsigned)inb(0x64));
     ps2_present = true;
+
+    /* Enable PS/2 AUX port (mouse) */
+    if (i8042_wait_write()) outb(0x64, 0xA8);     /* enable AUX port */
+
+    /* Read config and enable AUX IRQ12, clear AUX clock-disable bit */
+    uint8_t mcfg = 0;
+    if (i8042_wait_write()) outb(0x64, 0x20);
+    if (i8042_wait_read())  mcfg = inb(0x60);
+    mcfg |=  (1u << 1);   /* enable AUX interrupt */
+    mcfg &= ~(1u << 5);   /* clear AUX clock disable */
+    if (i8042_wait_write()) outb(0x64, 0x60);
+    if (i8042_wait_write()) outb(0x60, mcfg);
+
+    /* Send 0xF4 (enable data reporting) to mouse via AUX prefix 0xD4 */
+    if (i8042_wait_write()) outb(0x64, 0xD4);
+    if (i8042_wait_write()) outb(0x60, 0xF4);
+    for (int mi = 0; mi < 100000; mi++) {
+        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
+    }
+    i8042_flush();
+    kprintf("[ps2] mouse enabled\n");
 }
 
 /* Poll PS/2 port directly — called from pit_on_tick() at 100Hz.
@@ -254,7 +276,7 @@ void keyboard_ps2_poll(void) {
             g_kbd_irq_count++;
             keyboard_on_scancode(sc);
         } else {
-            if (st & 0x20) { (void)inb(0x60); continue; }  /* mouse byte — discard */
+            if (st & 0x20) { mouse_on_byte(inb(0x60)); continue; }
             uint8_t sc = inb(0x60);
             g_kbd_irq_count++;
             keyboard_on_scancode(sc);

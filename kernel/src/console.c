@@ -333,8 +333,10 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
     }
 }
 
-uint64_t console_fb_width(void)  { return con.w; }
-uint64_t console_fb_height(void) { return con.h; }
+uint64_t console_fb_width(void)           { return con.w; }
+uint64_t console_fb_height(void)          { return con.h; }
+volatile uint32_t *console_fb_ptr(void)   { return con.pix; }
+uint64_t           console_pitch32(void)  { return con.pitch32; }
 
 /* Render a glyph at (scale)x size — each font pixel becomes a scale×scale block. */
 void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
