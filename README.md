@@ -126,8 +126,8 @@ test_install.sh VM install test (loop device)
 - **v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
 - **v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
 - **v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
-- **v3.0** — TCP, wget/HTTP client, DNS
-- **v4.0** — framebuffer GUI
+- **v2.x** — incremental releases building toward v3.0 (TCP, DNS, HTTP + framebuffer GUI, in development together)
+- **v3.0** — next big release: full TCP/IP stack, wget/HTTP, DNS, and a framebuffer GUI
 
 ---
 
