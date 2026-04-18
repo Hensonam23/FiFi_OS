@@ -63,6 +63,11 @@ bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
                   const void *payload, size_t payload_len) {
     if (payload_len > ETH_MAX_PAYLOAD) return false;
 
+    /* Guard the static TX buffer: an IRQ firing mid-fill could drive net_poll()
+     * which re-enters net_send_eth() and clobber the frame being built. */
+    uint64_t flags;
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+
     eth_hdr_t *hdr = (eth_hdr_t *)s_eth_tx;
     for (int i = 0; i < 6; i++) hdr->dst[i] = dst_mac[i];
     for (int i = 0; i < 6; i++) hdr->src[i] = net_mac[i];
@@ -72,7 +77,10 @@ bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
     uint8_t       *dst = s_eth_tx + ETH_HLEN;
     for (size_t i = 0; i < payload_len; i++) dst[i] = src[i];
 
-    return net_nic_send(s_eth_tx, ETH_HLEN + payload_len);
+    bool ok = net_nic_send(s_eth_tx, ETH_HLEN + payload_len);
+
+    if (flags & (1ULL << 9)) __asm__ __volatile__("sti" ::: "memory");
+    return ok;
 }
 
 /* ── net_poll ─────────────────────────────────────────────────────────────── */

@@ -125,7 +125,7 @@ static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip,
     p = (const uint16_t *)seg;
     size_t n = seg_len;
     while (n > 1) { sum += *p++; n -= 2; }
-    if (n) sum += (uint16_t)*(const uint8_t *)p;
+    if (n) sum += (uint16_t)((uint16_t)*(const uint8_t *)p << 8); /* odd byte = high byte per RFC */
 
     while (sum >> 16) sum = (sum & 0xFFFFu) + (sum >> 16);
     return (uint16_t)~sum;
