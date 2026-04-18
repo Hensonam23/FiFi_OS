@@ -29,8 +29,6 @@
 
 #define STATUS_H  20u           /* must match statusbar.c                   */
 #define SCALE     4u            /* title scale: each font pixel → 4×4 block */
-#define CHAR_W    (8u  * SCALE) /* 32 px per character                      */
-#define CHAR_H    (16u * SCALE) /* 64 px per character                      */
 
 /* ── String helpers ──────────────────────────────────────────────────────── */
 
@@ -51,14 +49,15 @@ static size_t sp_cat(char *dst, size_t pos, const char *src) {
 
 /* ── Pixel-coord string — bypasses cell buffer, used for centred lines ───── */
 static void px_str(uint64_t px, uint64_t py, const char *s, uint32_t fg) {
+    uint64_t cw = (uint64_t)console_font_width();
     for (size_t i = 0; s[i]; i++)
-        console_render_glyph(px + (uint64_t)i * 8u, py,
+        console_render_glyph(px + (uint64_t)i * cw, py,
                              (unsigned char)s[i], fg, S_BG);
 }
 
 /* Centre a string horizontally in pixels. */
 static uint64_t centre_x(uint64_t fw, const char *s) {
-    uint64_t w = (uint64_t)sp_len(s) * 8u;
+    uint64_t w = (uint64_t)sp_len(s) * (uint64_t)console_font_width();
     return (fw > w) ? (fw - w) / 2u : 4u;
 }
 
@@ -79,7 +78,11 @@ static void info_row(uint32_t row, const char *label, const char *value) {
 /* ── Public ──────────────────────────────────────────────────────────────── */
 
 void splash_show(void) {
-    uint64_t fw = console_fb_width();
+    uint64_t fw   = console_fb_width();
+    uint64_t ffw  = (uint64_t)console_font_width();
+    uint64_t ffh  = (uint64_t)console_font_height();
+    uint64_t char_w = ffw * SCALE;
+    uint64_t char_h = ffh * SCALE;
 
     /* Fill text area with the navy background and clear cell buffer */
     console_set_colors(S_TITLE, S_BG);
@@ -88,18 +91,18 @@ void splash_show(void) {
     /* ── Large "FiFi OS" title ───────────────────────────────────────────── */
     const char *title = "FiFi OS";
     uint64_t    tlen  = (uint64_t)sp_len(title);
-    uint64_t    tw    = tlen * CHAR_W;
+    uint64_t    tw    = tlen * char_w;
     uint64_t    tx    = (fw > tw) ? (fw - tw) / 2u : 4u;
     uint64_t    ty    = STATUS_H + 24u;   /* ~1.5 rows below status bar */
 
     for (uint64_t i = 0; i < tlen; i++)
-        console_render_glyph_scaled(tx + i * CHAR_W, ty,
+        console_render_glyph_scaled(tx + i * char_w, ty,
                                     (unsigned char)title[i],
                                     SCALE, S_TITLE, S_BG);
 
     /* ── Subtitle — centred, dimmed ─────────────────────────────────────── */
     const char *sub   = "Alpha v4.0  |  x86_64  |  freestanding";
-    uint64_t    sub_y = ty + CHAR_H + 8u;
+    uint64_t    sub_y = ty + char_h + 8u;
     px_str(centre_x(fw, sub), sub_y, sub, S_DIM);
 
     /* ── Separator line ──────────────────────────────────────────────────── */
@@ -109,8 +112,7 @@ void splash_show(void) {
     console_fill_rect(sep_x, sep_y, sep_w, 2u, S_SEP);
 
     /* ── Info block — first cell row below separator ─────────────────────── */
-    /* sep_y + 14 lands inside the next available cell row */
-    uint32_t row = (uint32_t)((sep_y + 14u - STATUS_H) / 16u);
+    uint32_t row = (uint32_t)((sep_y + ffh / 2u - STATUS_H) / ffh);
 
     info_row(row++, "OS:",      "FiFi OS Alpha v4.0");
     info_row(row++, "Arch:",    "x86_64");

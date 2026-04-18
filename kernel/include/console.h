@@ -22,3 +22,9 @@ void     console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32
 void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch, uint64_t scale, uint32_t fg, uint32_t bg);
 uint64_t console_fb_width(void);
 uint64_t console_fb_height(void);
+
+/* PSF font loading — loads a .psf file from VFS into the console renderer */
+bool        console_load_psf(const char *path);
+uint32_t    console_font_width(void);
+uint32_t    console_font_height(void);
+const char *console_font_name(void);

@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "console.h"
+#include "vfs.h"
 
 /* Auto-generated tiny 8x16 bitmap font (ASCII 0..127).
    Each glyph is 16 rows, each row is 8 bits (bit 7 = leftmost pixel). */
@@ -136,6 +137,20 @@ static const uint8_t fifi_font8x16[128][16] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* 127 */
 };
 
+/* ── Dynamic font state ──────────────────────────────────────────────────
+ * Defaults to the built-in 8×16 LSB-first font.  Replaced by console_load_psf(). */
+
+#define FONT_BUF_SIZE 65536u
+static uint8_t   g_font_buf[FONT_BUF_SIZE];
+
+static uint32_t       g_fw      = 8u;
+static uint32_t       g_fh      = 16u;
+static uint32_t       g_fbpg    = 16u;   /* bytes per glyph */
+static uint32_t       g_fglyphs = 128u;
+static bool           g_fmsb    = false; /* false=LSB-first (built-in), true=MSB-first (PSF) */
+static const uint8_t *g_fdata   = (const uint8_t *)fifi_font8x16;
+static char           g_fname[64] = "default";
+
 /* ── Cell buffer ─────────────────────────────────────────────────────────
  * All text is stored in a RAM cell buffer. Scrolling shifts the cell buffer
  * (fast — it's regular RAM) and re-renders to the framebuffer using WRITE-ONLY
@@ -164,21 +179,23 @@ static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 /* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
-    const uint64_t px = cell_x * 8;
-    const uint64_t py = cell_y * 16 + con.y_offset;
-    if (px + 8 > con.w || py + 16 > con.h) return;
+    const uint64_t px = cell_x * g_fw;
+    const uint64_t py = cell_y * g_fh + con.y_offset;
+    if (px + g_fw > con.w || py + g_fh > con.h) return;
 
-    for (uint64_t y = 0; y < 16; y++) {
+    uint32_t gi = (uc < (uint8_t)g_fglyphs) ? uc : ('?' < g_fglyphs ? '?' : 0u);
+    const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
+    uint32_t bpr = (g_fw + 7u) / 8u;
+
+    for (uint32_t y = 0; y < g_fh; y++) {
         volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
-        uint8_t bits = fifi_font8x16[uc][y];
-        row[0] = (bits & 0x01) ? con.fg : con.bg;
-        row[1] = (bits & 0x02) ? con.fg : con.bg;
-        row[2] = (bits & 0x04) ? con.fg : con.bg;
-        row[3] = (bits & 0x08) ? con.fg : con.bg;
-        row[4] = (bits & 0x10) ? con.fg : con.bg;
-        row[5] = (bits & 0x20) ? con.fg : con.bg;
-        row[6] = (bits & 0x40) ? con.fg : con.bg;
-        row[7] = (bits & 0x80) ? con.fg : con.bg;
+        const uint8_t *scan = glyph + y * bpr;
+        for (uint32_t x = 0; x < g_fw; x++) {
+            uint8_t b = scan[x >> 3];
+            uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                  : ((b >>        (x & 7u) ) & 1u);
+            row[x] = bit ? con.fg : con.bg;
+        }
     }
 }
 
@@ -213,7 +230,7 @@ static void scroll_one_line(void) {
             render_char(c, r, cell_buf[r][c]);
 
     /* Clear any fractional pixel rows below the last cell row */
-    uint64_t used_h = vr * 16;
+    uint64_t used_h = vr * g_fh;
     uint64_t text_h = con.h - con.y_offset;
     if (used_h < text_h)
         fill_rect(0, con.y_offset + used_h, con.w, text_h - used_h, con.bg);
@@ -264,8 +281,8 @@ void console_init(struct limine_framebuffer *fb) {
     con.w = fb->width;
     con.h = fb->height;
     con.y_offset = 0;
-    con.cols = con.w / 8;
-    con.rows = con.h / 16;
+    con.cols = con.w / g_fw;
+    con.rows = con.h / g_fh;
     con.cx = 0;
     con.cy = 0;
 
@@ -284,7 +301,7 @@ void console_init(struct limine_framebuffer *fb) {
 void console_set_y_offset(uint64_t offset) {
     if (!con.initialized) return;
     con.y_offset = offset;
-    con.rows = (con.h - offset) / 16;
+    con.rows = (con.h - offset) / g_fh;
     if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
     if (con.cy >= con.rows && con.rows > 0) con.cy = con.rows - 1;
     /* Re-render cell buffer at the new pixel offset */
@@ -300,19 +317,19 @@ void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t 
 /* Render a single glyph at absolute pixel coordinates (bypasses cell buffer). */
 void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg) {
     if (!con.initialized) return;
-    if (ch >= 128) ch = '?';
-    if (px + 8 > con.w || py + 16 > con.h) return;
-    for (uint64_t y = 0; y < 16; y++) {
+    uint32_t gi = (ch < (uint8_t)g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
+    if (px + g_fw > con.w || py + g_fh > con.h) return;
+    const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
+    uint32_t bpr = (g_fw + 7u) / 8u;
+    for (uint32_t y = 0; y < g_fh; y++) {
         volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
-        uint8_t bits = fifi_font8x16[ch][y];
-        row[0] = (bits & 0x01) ? fg : bg;
-        row[1] = (bits & 0x02) ? fg : bg;
-        row[2] = (bits & 0x04) ? fg : bg;
-        row[3] = (bits & 0x08) ? fg : bg;
-        row[4] = (bits & 0x10) ? fg : bg;
-        row[5] = (bits & 0x20) ? fg : bg;
-        row[6] = (bits & 0x40) ? fg : bg;
-        row[7] = (bits & 0x80) ? fg : bg;
+        const uint8_t *scan = glyph + y * bpr;
+        for (uint32_t x = 0; x < g_fw; x++) {
+            uint8_t b = scan[x >> 3];
+            uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                  : ((b >>        (x & 7u) ) & 1u);
+            row[x] = bit ? fg : bg;
+        }
     }
 }
 
@@ -323,15 +340,20 @@ uint64_t console_fb_height(void) { return con.h; }
 void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
                                   uint64_t scale, uint32_t fg, uint32_t bg) {
     if (!con.initialized || scale == 0) return;
-    if (ch >= 128) ch = '?';
-    for (uint64_t row = 0; row < 16; row++) {
-        uint8_t bits = fifi_font8x16[ch][row];
-        for (uint64_t col = 0; col < 8; col++) {
-            uint32_t color = (bits & (1u << col)) ? fg : bg;
+    uint32_t gi = (ch < (uint8_t)g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
+    const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
+    uint32_t bpr = (g_fw + 7u) / 8u;
+    for (uint32_t r = 0; r < g_fh; r++) {
+        const uint8_t *scan = glyph + r * bpr;
+        for (uint32_t col = 0; col < g_fw; col++) {
+            uint8_t b = scan[col >> 3];
+            uint32_t bit = g_fmsb ? ((b >> (7u - (col & 7u))) & 1u)
+                                  : ((b >>        (col & 7u) ) & 1u);
+            uint32_t color = bit ? fg : bg;
             for (uint64_t dy = 0; dy < scale; dy++) {
                 for (uint64_t dx = 0; dx < scale; dx++) {
                     uint64_t ppx = px + col * scale + dx;
-                    uint64_t ppy = py + row * scale + dy;
+                    uint64_t ppy = py + r   * scale + dy;
                     if (ppx < con.w && ppy < con.h)
                         con.pix[ppy * con.pitch32 + ppx] = color;
                 }
@@ -387,4 +409,78 @@ void console_set_cursor(uint32_t x, uint32_t y) {
     if (y >= con.rows) y = (uint32_t)(con.rows - 1);
     con.cx = x;
     con.cy = y;
+}
+
+uint32_t    console_font_width(void)  { return g_fw; }
+uint32_t    console_font_height(void) { return g_fh; }
+const char *console_font_name(void)   { return g_fname; }
+
+bool console_load_psf(const char *path) {
+    const void *raw = NULL;
+    uint64_t raw_size = 0;
+    if (vfs_read(path, &raw, &raw_size) != 0 || !raw || raw_size < 4)
+        return false;
+
+    const uint8_t *d = (const uint8_t *)raw;
+    uint32_t new_fw, new_fh, new_fbpg, new_nglyphs, data_off;
+
+    if (d[0] == 0x36u && d[1] == 0x04u) {
+        /* PSF1: 4-byte header, always 8px wide */
+        if (raw_size < 4u) return false;
+        new_fw      = 8u;
+        new_fh      = d[3];                       /* charsize = height */
+        new_fbpg    = d[3];
+        new_nglyphs = (d[2] & 0x01u) ? 512u : 256u;
+        data_off    = 4u;
+    } else if (d[0] == 0x72u && d[1] == 0xb5u && d[2] == 0x4au && d[3] == 0x86u) {
+        /* PSF2: 32-byte header */
+        if (raw_size < 32u) return false;
+        /* fields are little-endian uint32 */
+        #define LE32(off) ((uint32_t)d[off] | ((uint32_t)d[(off)+1]<<8) | \
+                           ((uint32_t)d[(off)+2]<<16) | ((uint32_t)d[(off)+3]<<24))
+        data_off    = LE32(8);
+        new_nglyphs = LE32(16);
+        new_fbpg    = LE32(20);
+        new_fh      = LE32(24);
+        new_fw      = LE32(28);
+        #undef LE32
+    } else {
+        return false;
+    }
+
+    if (new_fw == 0u || new_fw > 64u) return false;
+    if (new_fh == 0u || new_fh > 64u) return false;
+    if (new_nglyphs == 0u || new_nglyphs > 512u) return false;
+    uint64_t glyph_bytes = (uint64_t)new_nglyphs * new_fbpg;
+    if ((uint64_t)data_off + glyph_bytes > raw_size) return false;
+    if (glyph_bytes > FONT_BUF_SIZE) return false;
+
+    const uint8_t *src = d + data_off;
+    for (uint64_t i = 0; i < glyph_bytes; i++)
+        g_font_buf[i] = src[i];
+
+    g_fw      = new_fw;
+    g_fh      = new_fh;
+    g_fbpg    = new_fbpg;
+    g_fglyphs = new_nglyphs;
+    g_fmsb    = true;
+    g_fdata   = g_font_buf;
+
+    /* store basename as display name */
+    const char *base = path;
+    for (const char *p = path; *p; p++) if (*p == '/') base = p + 1;
+    uint32_t ni = 0;
+    while (base[ni] && ni < 63u) { g_fname[ni] = base[ni]; ni++; }
+    g_fname[ni] = '\0';
+
+    /* recalculate grid and redraw */
+    if (con.initialized) {
+        con.cols = con.w / g_fw;
+        con.rows = (con.h - con.y_offset) / g_fh;
+        if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
+        if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
+        con.cx = 0; con.cy = 0;
+        console_clear();
+    }
+    return true;
 }
