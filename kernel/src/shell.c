@@ -18,6 +18,7 @@
 #include "arp.h"
 #include "ip.h"
 #include "dhcp.h"
+#include "dns.h"
 #include "ext2.h"
 #include "xhci.h"
 
@@ -1417,6 +1418,16 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
 
     if (streq_simple(argv[0], "dhcp")) {
         dhcp_request();
+        return;
+    }
+
+    if (streq_simple(argv[0], "dns")) {
+        if (argc < 2) { kprintf("usage: dns <hostname>\n"); return; }
+        uint32_t ip = 0;
+        if (dns_resolve(argv[1], &ip))
+            kprintf("%s -> %u.%u.%u.%u\n", argv[1],
+                    (unsigned)(ip >> 24), (unsigned)((ip >> 16) & 0xFF),
+                    (unsigned)((ip >>  8) & 0xFF), (unsigned)(ip & 0xFF));
         return;
     }
 
