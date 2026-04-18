@@ -130,13 +130,12 @@ test_install.sh VM install test (loop device)
 - **v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
 - **v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
 - **v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
-- **v3.0** — TCP stack, DNS resolver, HTTP client, wget, framebuffer status bar + boot splash ✓
-- **v4.0** — optimization pass: heap large-alloc fix, consolidated PIT, auto-DHCP at boot, ARP pre-resolution, main.c cleanup ✓
-- **v5.0** — process isolation (per-process page tables), ext2 write support, more complete syscall table, repo cleanup
-- **v6.0** — framebuffer GUI, mouse input, better fonts, audio driver
-- **v7.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls
-- **v8.0** — gaming optimization: low-latency scheduler, gaming mode, gamepad input, performance profiling
-- **v9.0+** — custom FiFi bootloader, local AI agent, GPU driver
+- **v3.0** — TCP stack, DNS resolver, HTTP client, wget, status bar, auto-DHCP, heap/PIT fixes, full optimization pass ✓
+- **v4.0** — process isolation (per-process page tables), ext2 write support, more complete syscall table, repo cleanup
+- **v5.0** — framebuffer GUI, mouse input, better fonts, audio driver
+- **v6.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls
+- **v7.0** — gaming optimization: low-latency scheduler, gaming mode, gamepad input, performance profiling
+- **v8.0+** — custom FiFi bootloader, local AI agent, GPU driver
 
 ---
 
