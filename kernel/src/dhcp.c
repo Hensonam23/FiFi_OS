@@ -68,6 +68,7 @@ static volatile uint32_t s_dhcp_yiaddr = 0;
 static volatile uint32_t s_dhcp_srv    = 0;   /* option 54: server identifier */
 static volatile uint32_t s_dhcp_mask   = 0;   /* option 1: subnet mask */
 static volatile uint32_t s_dhcp_gw     = 0;   /* option 3: router */
+static volatile uint32_t s_dhcp_dns    = 0;   /* option 6: DNS server */
 static uint32_t          s_dhcp_xid    = 0;
 
 /* ── Parse a 4-byte big-endian IP from an option value pointer ───────────── */
@@ -97,7 +98,7 @@ static void dhcp_recv(uint32_t src_ip, uint16_t src_port,
 
     /* Parse options */
     uint8_t  msg_type = 0;
-    uint32_t mask = 0, gw = 0, srv = 0;
+    uint32_t mask = 0, gw = 0, srv = 0, dns = 0;
 
     while (p < end) {
         uint8_t code = *p++;
@@ -111,6 +112,7 @@ static void dhcp_recv(uint32_t src_ip, uint16_t src_port,
         case 53: if (olen >= 1) msg_type = p[0]; break;
         case  1: if (olen >= 4) mask = opt_ip(p); break;
         case  3: if (olen >= 4) gw   = opt_ip(p); break;
+        case  6: if (olen >= 4) dns  = opt_ip(p); break;
         case 54: if (olen >= 4) srv  = opt_ip(p); break;
         }
         p += olen;
@@ -121,6 +123,7 @@ static void dhcp_recv(uint32_t src_ip, uint16_t src_port,
     s_dhcp_srv    = srv ? srv : ntohl(hdr->siaddr);
     s_dhcp_mask   = mask;
     s_dhcp_gw     = gw;
+    s_dhcp_dns    = dns;
     s_dhcp_got    = true;
 }
 
@@ -208,6 +211,7 @@ bool dhcp_request(void) {
     uint32_t srv_ip       = s_dhcp_srv;
     uint32_t offered_mask = s_dhcp_mask;
     uint32_t offered_gw   = s_dhcp_gw;
+    uint32_t offered_dns  = s_dhcp_dns;
 
     kprintf("dhcp: OFFER %u.%u.%u.%u from %u.%u.%u.%u\n",
             DIP(offered_ip), DIP(srv_ip));
@@ -251,11 +255,13 @@ bool dhcp_request(void) {
     net_ip      = offered_ip;
     net_mask    = s_dhcp_mask ? s_dhcp_mask : (offered_mask ? offered_mask : net_mask);
     net_gateway = s_dhcp_gw  ? s_dhcp_gw   : (offered_gw  ? offered_gw   : net_gateway);
+    if (s_dhcp_dns)   net_dns = s_dhcp_dns;
+    else if (offered_dns) net_dns = offered_dns;
 
     arp_announce();   /* tell the LAN our new IP/MAC */
 
-    kprintf("dhcp: %u.%u.%u.%u mask %u.%u.%u.%u gw %u.%u.%u.%u\n",
-            DIP(net_ip), DIP(net_mask), DIP(net_gateway));
+    kprintf("dhcp: %u.%u.%u.%u mask %u.%u.%u.%u gw %u.%u.%u.%u dns %u.%u.%u.%u\n",
+            DIP(net_ip), DIP(net_mask), DIP(net_gateway), DIP(net_dns));
 
     udp_unbind(DHCP_CLIENT_PORT);
     return true;
