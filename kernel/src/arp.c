@@ -145,7 +145,7 @@ void arp_recv(const void *pkt_raw, size_t len) {
 /* Rate-limit ARP requests: send at most one request per ARP_REQ_INTERVAL ticks.
  * Without this, callers in tight poll loops (e.g. icmp_ping's ARP wait) would
  * flood TX with thousands of ARP broadcasts per second, exhausting TX descriptors. */
-#define ARP_REQ_INTERVAL  50u   /* 500 ms at 100 Hz — wait this long between retries */
+#define ARP_REQ_INTERVAL  20u   /* 200 ms at 100 Hz — retry interval between ARP requests */
 static uint32_t s_last_req_ip   = 0;
 static uint64_t s_last_req_tick = 0;
 

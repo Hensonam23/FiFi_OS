@@ -17,7 +17,6 @@
 #include "splash.h"
 #include "console.h"
 #include "net.h"
-#include "pit.h"
 #include "pmm.h"
 
 /* ── Colors — identical to statusbar.c ──────────────────────────────────── */
@@ -145,18 +144,6 @@ void splash_show(void) {
         info_row(row++, "Network:", ip);
     }
 
-    /* Uptime */
-    {
-        char up[24] = {0}; size_t up_p = 0;
-        uint64_t secs = pit_ticks() / 100u;
-        uint64_t mins = secs / 60u; secs %= 60u;
-        uint64_t hrs  = mins / 60u; mins %= 60u;
-        char num[8];
-        if (hrs > 0u) { sp_udec(num, hrs);  up_p = sp_cat(up, up_p, num); up_p = sp_cat(up, up_p, "h "); }
-        sp_udec(num, mins); up_p = sp_cat(up, up_p, num); up_p = sp_cat(up, up_p, "m ");
-        sp_udec(num, secs); sp_cat(up, up_p, num);
-        info_row(row++, "Uptime:", up);
-    }
 
     /* ── Decorative colour chips ─────────────────────────────────────────── */
     row++;   /* blank row */
