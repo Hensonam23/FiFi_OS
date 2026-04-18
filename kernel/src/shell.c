@@ -17,6 +17,7 @@
 #include "net.h"
 #include "arp.h"
 #include "ip.h"
+#include "dhcp.h"
 #include "ext2.h"
 #include "xhci.h"
 
@@ -705,6 +706,30 @@ __attribute__((unused)) static void shell_print_prompt(void) {
     kprintf("FiFi> ");
 }
 
+/* Parse a dotted-decimal IPv4 string into host byte order.
+ * Returns true on success, false if the string is malformed. */
+static bool parse_ip4(const char *s, uint32_t *out) {
+    uint32_t ip = 0;
+    int octet = 0, dots = 0;
+    for (; *s || dots == 3; ) {
+        if (*s >= '0' && *s <= '9') {
+            octet = octet * 10 + (*s - '0');
+            s++;
+        } else if (*s == '.' || *s == '\0') {
+            if (octet > 255) return false;
+            ip = (ip << 8) | (uint32_t)octet;
+            octet = 0;
+            if (*s == '.') { dots++; s++; }
+            else break;
+        } else {
+            return false;
+        }
+    }
+    if (dots != 3) return false;
+    *out = ip;
+    return true;
+}
+
 static int streq_simple(const char *a, const char *b) {
     while (*a && *b) {
         if (*a != *b) return 0;
@@ -1350,6 +1375,26 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
             kprintf("ifconfig: no network device\n");
             return;
         }
+        /* ifconfig eth0 <ip> <mask> <gw> — set network config */
+        if (argc == 5) {
+            uint32_t new_ip, new_mask, new_gw;
+            if (!parse_ip4(argv[2], &new_ip) ||
+                !parse_ip4(argv[3], &new_mask) ||
+                !parse_ip4(argv[4], &new_gw)) {
+                kprintf("usage: ifconfig eth0 <ip> <mask> <gw>\n");
+                return;
+            }
+            net_ip      = new_ip;
+            net_mask    = new_mask;
+            net_gateway = new_gw;
+            arp_announce();   /* tell the LAN our new IP/MAC mapping */
+            kprintf("eth0 configured\n");
+        } else if (argc != 1) {
+            kprintf("usage: ifconfig\n");
+            kprintf("       ifconfig eth0 <ip> <mask> <gw>\n");
+            return;
+        }
+        /* Show current config */
         kprintf("eth0  MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
                 (unsigned)net_mac[0], (unsigned)net_mac[1],
                 (unsigned)net_mac[2], (unsigned)net_mac[3],
@@ -1370,30 +1415,18 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         return;
     }
 
+    if (streq_simple(argv[0], "dhcp")) {
+        dhcp_request();
+        return;
+    }
+
     if (streq_simple(argv[0], "ping")) {
         if (argc < 2) {
             kprintf("usage: ping <ip> [count]\n");
             return;
         }
-        /* Parse dotted-decimal IPv4 address */
         uint32_t ip = 0;
-        int octet = 0, dots = 0;
-        bool ok = true;
-        for (const char *p = argv[1]; *p || dots == 3; ) {
-            if (*p >= '0' && *p <= '9') {
-                octet = octet * 10 + (*p - '0');
-                p++;
-            } else if (*p == '.' || *p == '\0') {
-                if (octet > 255) { ok = false; break; }
-                ip = (ip << 8) | (uint32_t)octet;
-                octet = 0;
-                if (*p == '.') { dots++; p++; }
-                else break;
-            } else {
-                ok = false; break;
-            }
-        }
-        if (!ok || dots != 3) {
+        if (!parse_ip4(argv[1], &ip)) {
             kprintf("ping: bad IP address\n");
             return;
         }

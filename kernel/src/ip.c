@@ -1,7 +1,7 @@
 /*
  * ip.c — IPv4 receive/send and ICMP echo (ping).
  *
- * Sits above the Ethernet layer (net.c) and below future transport layers.
+ * Sits above the Ethernet layer (net.c) and below transport layers (udp.c).
  *
  * What's here:
  *   - IPv4 header parsing and checksum verification
@@ -14,6 +14,8 @@
  *     ip4_send can be called from interrupt context via icmp_recv.
  *   - Single-core, no preemption: static buffers are safe because ip4_send
  *     always runs to completion before net_poll is called again.
+ *   - dst_ip == 0xFFFFFFFF (broadcast) bypasses ARP and uses Ethernet
+ *     broadcast MAC directly — required for DHCP DISCOVER/REQUEST.
  */
 
 #include <stdint.h>
@@ -23,6 +25,7 @@
 #include "ip.h"
 #include "net.h"
 #include "arp.h"
+#include "udp.h"
 #include "kprintf.h"
 #include "pit.h"
 
@@ -81,12 +84,16 @@ bool ip4_send(uint32_t dst_ip, uint8_t proto, const void *payload, size_t plen) 
     if (!net_nic_present()) return false;
     if (plen > ETH_MAX_PAYLOAD - IP4_HDR_LEN) return false;
 
-    /* Resolve next hop: use gateway for off-subnet destinations */
-    uint32_t next_hop = ((dst_ip & net_mask) == (net_ip & net_mask))
-                        ? dst_ip : net_gateway;
-
     uint8_t dst_mac[6];
-    if (!arp_resolve(next_hop, dst_mac)) return false;   /* ARP request queued */
+    if (dst_ip == 0xFFFFFFFFu) {
+        /* IP broadcast → Ethernet broadcast; skip ARP */
+        for (int i = 0; i < 6; i++) dst_mac[i] = 0xFFu;
+    } else {
+        /* Resolve next hop: use gateway for off-subnet destinations */
+        uint32_t next_hop = ((dst_ip & net_mask) == (net_ip & net_mask))
+                            ? dst_ip : net_gateway;
+        if (!arp_resolve(next_hop, dst_mac)) return false;   /* ARP request queued */
+    }
 
     /* Build IPv4 header in s_ip_tx */
     ip4_hdr_t *iph = (ip4_hdr_t *)s_ip_tx;
@@ -184,8 +191,11 @@ void ip4_recv(const void *payload, size_t len, const uint8_t src_mac[6]) {
     case IP_PROTO_ICMP:
         icmp_recv(src_ip, data, data_len);
         break;
+    case IP_PROTO_UDP:
+        udp_recv(src_ip, data, data_len);
+        break;
     default:
-        break;   /* TCP/UDP: not yet implemented */
+        break;
     }
 }
 
@@ -251,7 +261,6 @@ bool icmp_ping(uint32_t dst_ip, uint16_t count, uint32_t timeout_ticks) {
             continue;
         }
 
-        /* Wait for echo reply */
         uint64_t deadline = pit_ticks() + timeout_ticks;
         while (pit_ticks() < deadline) {
             net_poll();
