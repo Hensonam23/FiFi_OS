@@ -19,6 +19,7 @@
 #include "ip.h"
 #include "dhcp.h"
 #include "dns.h"
+#include "http.h"
 #include "ext2.h"
 #include "xhci.h"
 
@@ -1428,6 +1429,27 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
             kprintf("%s -> %u.%u.%u.%u\n", argv[1],
                     (unsigned)(ip >> 24), (unsigned)((ip >> 16) & 0xFF),
                     (unsigned)((ip >>  8) & 0xFF), (unsigned)(ip & 0xFF));
+        return;
+    }
+
+    if (streq_simple(argv[0], "wget")) {
+        if (argc < 2) { kprintf("usage: wget <url> [filename]\n"); return; }
+        /* Derive filename from URL if not given */
+        const char *url  = argv[1];
+        const char *save = (argc >= 3) ? argv[2] : NULL;
+        char fname[128];
+        if (!save) {
+            /* Find last '/' in URL */
+            const char *slash = url;
+            for (const char *p = url; *p; p++) if (*p == '/') slash = p;
+            save = (*slash == '/' && slash[1]) ? slash + 1 : "index.html";
+            /* Copy into fname in case argv memory is reused */
+            size_t fi = 0;
+            while (save[fi] && fi < sizeof(fname) - 1) { fname[fi] = save[fi]; fi++; }
+            fname[fi] = 0;
+            save = fname;
+        }
+        http_get(url, save);
         return;
     }
 
