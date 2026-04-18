@@ -22,6 +22,7 @@
 #include "http.h"
 #include "ext2.h"
 #include "xhci.h"
+#include "splash.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1717,6 +1718,8 @@ void shell_run(void) {
 
     // helpers (inline style)
     // (C doesn't have real local functions; we do comparisons inline below.)
+
+    splash_show();
 
     line[0] = 0;
     kprintf("%s", prompt);

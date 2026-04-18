@@ -153,6 +153,7 @@ static struct {
 
     uint64_t cx, cy;        /* cursor in character cells */
     uint64_t cols, rows;    /* visible cell grid dimensions */
+    uint64_t y_offset;      /* reserved pixel rows at top (status bar) */
     uint32_t fg;
     uint32_t bg;
     bool initialized;
@@ -164,7 +165,7 @@ static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
     const uint64_t px = cell_x * 8;
-    const uint64_t py = cell_y * 16;
+    const uint64_t py = cell_y * 16 + con.y_offset;
     if (px + 8 > con.w || py + 16 > con.h) return;
 
     for (uint64_t y = 0; y < 16; y++) {
@@ -213,8 +214,9 @@ static void scroll_one_line(void) {
 
     /* Clear any fractional pixel rows below the last cell row */
     uint64_t used_h = vr * 16;
-    if (used_h < con.h)
-        fill_rect(0, used_h, con.w, con.h - used_h, con.bg);
+    uint64_t text_h = con.h - con.y_offset;
+    if (used_h < text_h)
+        fill_rect(0, con.y_offset + used_h, con.w, text_h - used_h, con.bg);
 }
 
 static void ensure_cursor_visible(void) {
@@ -248,7 +250,7 @@ void console_set_colors(uint32_t fg, uint32_t bg) {
 
 void console_clear(void) {
     if (!con.initialized) return;
-    fill_rect(0, 0, con.w, con.h, con.bg);
+    fill_rect(0, con.y_offset, con.w, con.h - con.y_offset, con.bg);
     con.cx = 0;
     con.cy = 0;
     for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
@@ -261,6 +263,7 @@ void console_init(struct limine_framebuffer *fb) {
     con.pitch32 = fb->pitch / 4;
     con.w = fb->width;
     con.h = fb->height;
+    con.y_offset = 0;
     con.cols = con.w / 8;
     con.rows = con.h / 16;
     con.cx = 0;
@@ -274,6 +277,67 @@ void console_init(struct limine_framebuffer *fb) {
 
     con.initialized = true;
     console_clear();
+}
+
+/* ── Status bar support ───────────────────────────────────────────────────── */
+
+void console_set_y_offset(uint64_t offset) {
+    if (!con.initialized) return;
+    con.y_offset = offset;
+    con.rows = (con.h - offset) / 16;
+    if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
+    if (con.cy >= con.rows && con.rows > 0) con.cy = con.rows - 1;
+    /* Re-render cell buffer at the new pixel offset */
+    for (uint64_t r = 0; r < con.rows; r++)
+        for (uint64_t c = 0; c < con.cols; c++)
+            render_char(c, r, cell_buf[r][c]);
+}
+
+void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color) {
+    fill_rect(x, y, w, h, color);
+}
+
+/* Render a single glyph at absolute pixel coordinates (bypasses cell buffer). */
+void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg) {
+    if (!con.initialized) return;
+    if (ch >= 128) ch = '?';
+    if (px + 8 > con.w || py + 16 > con.h) return;
+    for (uint64_t y = 0; y < 16; y++) {
+        volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
+        uint8_t bits = fifi_font8x16[ch][y];
+        row[0] = (bits & 0x01) ? fg : bg;
+        row[1] = (bits & 0x02) ? fg : bg;
+        row[2] = (bits & 0x04) ? fg : bg;
+        row[3] = (bits & 0x08) ? fg : bg;
+        row[4] = (bits & 0x10) ? fg : bg;
+        row[5] = (bits & 0x20) ? fg : bg;
+        row[6] = (bits & 0x40) ? fg : bg;
+        row[7] = (bits & 0x80) ? fg : bg;
+    }
+}
+
+uint64_t console_fb_width(void)  { return con.w; }
+uint64_t console_fb_height(void) { return con.h; }
+
+/* Render a glyph at (scale)x size — each font pixel becomes a scale×scale block. */
+void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
+                                  uint64_t scale, uint32_t fg, uint32_t bg) {
+    if (!con.initialized || scale == 0) return;
+    if (ch >= 128) ch = '?';
+    for (uint64_t row = 0; row < 16; row++) {
+        uint8_t bits = fifi_font8x16[ch][row];
+        for (uint64_t col = 0; col < 8; col++) {
+            uint32_t color = (bits & (1u << col)) ? fg : bg;
+            for (uint64_t dy = 0; dy < scale; dy++) {
+                for (uint64_t dx = 0; dx < scale; dx++) {
+                    uint64_t ppx = px + col * scale + dx;
+                    uint64_t ppy = py + row * scale + dy;
+                    if (ppx < con.w && ppy < con.h)
+                        con.pix[ppy * con.pitch32 + ppx] = color;
+                }
+            }
+        }
+    }
 }
 
 void console_putc(char c) {

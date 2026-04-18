@@ -63,6 +63,8 @@ OBJS := \
     $(BUILD)/dns.o \
     $(BUILD)/tcp.o \
     $(BUILD)/http.o \
+    $(BUILD)/statusbar.o \
+    $(BUILD)/splash.o \
     $(BUILD)/rtl8168.o \
     $(BUILD)/ext2.o \
     $(BUILD)/xhci.o \
@@ -288,6 +290,12 @@ $(BUILD)/tcp.o: kernel/src/tcp.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/http.o: kernel/src/http.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/statusbar.o: kernel/src/statusbar.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/splash.o: kernel/src/splash.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/rtl8168.o: kernel/src/rtl8168.c | $(BUILD)
