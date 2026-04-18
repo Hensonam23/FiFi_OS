@@ -3,8 +3,8 @@
 #include <stddef.h>
 
 #define RAMFS_MAX_FILES  8
-#define RAMFS_NAME_MAX   64
-#define RAMFS_WR_MAX     (64u * 1024u)  /* max write-redirect buffer (64 KB) */
+#define RAMFS_NAME_MAX   256
+#define RAMFS_WR_MAX     (256u * 1024u)  /* max write-redirect buffer (256 KB) */
 
 /*
  * data is heap-allocated on write so the BSS stays small regardless of

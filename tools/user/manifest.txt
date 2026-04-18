@@ -8,7 +8,10 @@ ucat
 uread
 uexec
 ufork
+ufork2
+usegv
 uheap
+uwrite_test
 umalloc_test
 uinfo
 uwait

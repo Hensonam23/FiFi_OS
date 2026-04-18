@@ -98,7 +98,7 @@ void splash_show(void) {
                                     SCALE, S_TITLE, S_BG);
 
     /* ── Subtitle — centred, dimmed ─────────────────────────────────────── */
-    const char *sub   = "v2.9  |  x86_64  |  freestanding";
+    const char *sub   = "Alpha v4.0  |  x86_64  |  freestanding";
     uint64_t    sub_y = ty + CHAR_H + 8u;
     px_str(centre_x(fw, sub), sub_y, sub, S_DIM);
 
@@ -112,7 +112,7 @@ void splash_show(void) {
     /* sep_y + 14 lands inside the next available cell row */
     uint32_t row = (uint32_t)((sep_y + 14u - STATUS_H) / 16u);
 
-    info_row(row++, "OS:",      "FiFi OS v2.9");
+    info_row(row++, "OS:",      "FiFi OS Alpha v4.0");
     info_row(row++, "Arch:",    "x86_64");
     info_row(row++, "Shell:",   "fifi shell");
     info_row(row++, "Kernel:",  "freestanding, Limine / UEFI");

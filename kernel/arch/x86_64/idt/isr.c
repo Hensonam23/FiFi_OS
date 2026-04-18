@@ -87,6 +87,18 @@ void isr_common_handler(isr_ctx_t *ctx) {
     if (ctx->vector == 14) {
         int cpl = (int)(ctx->cs & 3);
         if (cpl == 3) {
+            uint64_t handler = thread_get_sig_handler(11); /* SIGSEGV */
+            if (handler > 1) {
+                uint64_t *ursp_ptr = &((uint64_t *)(ctx + 1))[0];
+                uint64_t ursp = *ursp_ptr - 8;
+                if (vmm_user_accessible(ursp, 8, true)) {
+                    *(uint64_t *)(uintptr_t)ursp = ctx->rip;
+                    *ursp_ptr  = ursp;
+                    ctx->rdi   = 11;
+                    ctx->rip   = handler;
+                    return;
+                }
+            }
             kprintf("Segmentation fault\n");
             ctx->rip = (uint64_t)FIFI_USER_TRAMPOLINE_VA;
             ctx->rax = (uint64_t)SYS_EXIT;
