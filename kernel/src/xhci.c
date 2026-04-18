@@ -1879,7 +1879,36 @@ void xhci_init(void) {
 /* ── xhci_poll ─ called from pit_on_tick() ───────────────────────────────── */
 
 void xhci_poll(void) {
-    if (!g.present || g.kbd_slot < 0) return;
+    if (!g.present) return;
+
+    if (g.kbd_slot < 0) {
+        /* Hotplug detection: check every 100 ticks (1 s at 100 Hz) for a
+         * newly-connected port and attempt enumeration.  Covers the case
+         * where the keyboard was plugged in after xhci_init ran.
+         * wait_event() is pure MMIO polling so this is safe in IRQ context;
+         * the stall while enumerating (~1-2 s) is acceptable because the
+         * keyboard is non-functional anyway.                                */
+        static uint32_t s_hp_ticks = 0;
+        static uint32_t s_hp_prev  = 0;   /* CCS bitmask seen last check */
+        if (++s_hp_ticks < 100u) return;
+        s_hp_ticks = 0;
+
+        uint32_t cur = 0;
+        for (uint8_t p = 0; p < g.max_ports && p < 32; p++)
+            if (mmio_r32(g.op, OP_PORTSC(p)) & PORTSC_CCS)
+                cur |= (1u << p);
+
+        uint32_t newly = cur & ~s_hp_prev;
+        s_hp_prev = cur;
+        if (!newly) return;   /* nothing new since last check */
+
+        kprintf("[xhci] hotplug: new connection(s) detected, enumerating\n");
+        drain_events();
+        enumerate_ports();
+        if (g.kbd_slot >= 0)
+            kprintf("[xhci] USB keyboard ready (slot %d)\n", g.kbd_slot);
+        return;
+    }
 
     for (int limit = 0; limit < 16; limit++) {
         xhci_trb_t *ev = &g.evt.trbs[g.evt.deq];
