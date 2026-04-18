@@ -177,15 +177,25 @@ int vfs_delete(const char *path) {
 }
 
 int vfs_write(const char *path, const void *data, uint64_t size) {
-    if (!ext2_present()) return -1;
     const char *n = vfs_norm_path(path);
     if (!n || !*n) return -1;
-    char full[258];
-    full[0] = '/';
-    size_t i = 0;
-    while (n[i] && i < 256) { full[i + 1] = n[i]; i++; }
-    full[i + 1] = '\0';
-    return ext2_write_file(full, data, (uint32_t)size);
+
+    /* Persist to ext2 when available */
+    if (ext2_present()) {
+        char full[258];
+        full[0] = '/';
+        size_t i = 0;
+        while (n[i] && i < 256) { full[i + 1] = n[i]; i++; }
+        full[i + 1] = '\0';
+        return ext2_write_file(full, data, (uint32_t)size);
+    }
+
+    /* No disk — fall back to heap-backed in-memory ramfs (survives until reboot) */
+    if (ramfs_write(n, data, (uint32_t)size) != 0) {
+        kprintf("vfs: ramfs write failed (out of memory or table full)\n");
+        return -1;
+    }
+    return 0;
 }
 
 /* Returns 1 if path is a directory (initrd and ramfs are flat, so only ext2 +
