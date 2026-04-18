@@ -14,7 +14,9 @@ Boots on real hardware. Has a shell. Saves files. Runs programs. Pings things. T
 - **Signals** — `kill`, `signal()`, Ctrl-C / Ctrl-Z, user-space handlers
 - **Memory mapping** — `mmap` / `munmap` with per-process VA watermark
 - **ELF loader** — runs statically-linked user-space programs from the initrd
-- **Networking** — Ethernet, ARP, IPv4, ICMP ping, UDP, DHCP; works on QEMU (virtio-net) and real hardware (RTL8168 GbE)
+- **Networking** — Ethernet, ARP, IPv4, ICMP ping, UDP, DHCP, TCP, DNS, HTTP; `wget` downloads files; works on QEMU (virtio-net) and real hardware (RTL8168 GbE)
+- **Auto-DHCP** — IP address is acquired automatically at boot on both QEMU and real hardware
+- **Status bar** — always-visible HH:MM:SS clock and IP address at the top of the screen
 - **USB keyboard** — XHCI driver; works on real laptops with built-in USB keyboards
 - **USB installer** — write to a USB drive and boot on real hardware (Linux, macOS, Windows)
 
@@ -33,7 +35,7 @@ make rundbg  # run in QEMU (serial → terminal)
 make run     # run in QEMU (serial → serial.log)
 ```
 
-Once booted, the network is up automatically on QEMU. On real hardware, run `dhcp` to get an IP address.
+Once booted, DHCP runs automatically and the network is ready. You can run `dhcp` manually at any time to renew.
 
 ---
 
@@ -94,8 +96,10 @@ make release  # package fifi.iso + installers into build/fifi-os-release.zip
 | `bg [%n]` | resume job in background |
 | `kill [-SIG] tid` | send signal to process |
 | `ping <ip> [count]` | send ICMP echo requests |
+| `wget <url> [file]` | download file over HTTP |
+| `dns <hostname>` | resolve hostname to IP |
 | `ifconfig [eth0 ip mask gw]` | show or set network config |
-| `dhcp` | get IP address from DHCP server |
+| `dhcp` | renew IP address from DHCP server |
 | `arp` | show ARP cache |
 | `help` | list builtins |
 
@@ -126,8 +130,8 @@ test_install.sh VM install test (loop device)
 - **v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
 - **v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
 - **v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
-- **v2.x** — incremental releases building toward v3.0 (TCP, DNS, HTTP + framebuffer GUI, in development together)
-- **v3.0** — next big release: full TCP/IP stack, wget/HTTP, DNS, and a framebuffer GUI
+- **v3.0** — TCP stack, DNS resolver, HTTP client, wget, framebuffer status bar + boot splash ✓
+- **v4.0** — optimization pass: heap large-alloc fix, consolidated PIT, auto-DHCP at boot, ARP pre-resolution, main.c cleanup ✓
 
 ---
 
