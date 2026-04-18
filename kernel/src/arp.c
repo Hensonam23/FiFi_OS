@@ -92,17 +92,19 @@ static void arp_send(uint16_t oper,
     net_send_eth(dst_eth, ETH_PROTO_ARP, &pkt, ARP_PKT_LEN);
 }
 
-/* ── arp_init ─────────────────────────────────────────────────────────────── */
-void arp_init(void) {
-    for (uint32_t i = 0; i < ARP_CACHE_SIZE; i++) arp_cache[i].valid = false;
-
-    /* Gratuitous ARP: tell everyone on the LAN our IP/MAC mapping.
-     * Helps routers and hosts update their caches immediately. */
+/* ── arp_announce ─────────────────────────────────────────────────────────── */
+void arp_announce(void) {
     static const uint8_t zero_mac[6] = {0};
     arp_send(ARP_REQUEST, MAC_BCAST, zero_mac, net_ip);
     kprintf("[arp] gratuitous ARP sent for %u.%u.%u.%u\n",
             (unsigned)(net_ip >> 24), (unsigned)((net_ip >> 16) & 0xFF),
             (unsigned)((net_ip >>  8) & 0xFF), (unsigned)(net_ip & 0xFF));
+}
+
+/* ── arp_init ─────────────────────────────────────────────────────────────── */
+void arp_init(void) {
+    for (uint32_t i = 0; i < ARP_CACHE_SIZE; i++) arp_cache[i].valid = false;
+    arp_announce();
 }
 
 /* ── arp_recv ─────────────────────────────────────────────────────────────── */
@@ -128,10 +130,25 @@ void arp_recv(const void *pkt_raw, size_t len) {
         /* Someone is asking for our MAC — send a unicast reply */
         arp_send(ARP_REPLY, p->sha, p->sha, sender_ip);
     }
-    /* ARP replies are handled by the cache_store above */
+
+    if (oper == ARP_REPLY) {
+        kprintf("[arp] reply: %u.%u.%u.%u is at %02x:%02x:%02x:%02x:%02x:%02x\n",
+                (unsigned)(sender_ip >> 24), (unsigned)((sender_ip >> 16) & 0xFF),
+                (unsigned)((sender_ip >>  8) & 0xFF), (unsigned)(sender_ip & 0xFF),
+                (unsigned)p->sha[0], (unsigned)p->sha[1], (unsigned)p->sha[2],
+                (unsigned)p->sha[3], (unsigned)p->sha[4], (unsigned)p->sha[5]);
+    }
 }
 
 /* ── arp_resolve ──────────────────────────────────────────────────────────── */
+
+/* Rate-limit ARP requests: send at most one request per ARP_REQ_INTERVAL ticks.
+ * Without this, callers in tight poll loops (e.g. icmp_ping's ARP wait) would
+ * flood TX with thousands of ARP broadcasts per second, exhausting TX descriptors. */
+#define ARP_REQ_INTERVAL  50u   /* 500 ms at 100 Hz — wait this long between retries */
+static uint32_t s_last_req_ip   = 0;
+static uint64_t s_last_req_tick = 0;
+
 bool arp_resolve(uint32_t ip, uint8_t mac_out[6]) {
     uint64_t now = pit_ticks();
 
@@ -148,7 +165,14 @@ bool arp_resolve(uint32_t ip, uint8_t mac_out[6]) {
         }
     }
 
-    /* Not cached — send ARP request. Caller should retry after ~100ms. */
+    /* Rate-limit: don't spam ARP requests for the same IP.
+     * Only send a new request if the IP changed or the interval has elapsed. */
+    if (s_last_req_ip == ip && (now - s_last_req_tick) < ARP_REQ_INTERVAL)
+        return false;
+
+    s_last_req_ip   = ip;
+    s_last_req_tick = now;
+
     static const uint8_t zero_mac[6] = {0};
     arp_send(ARP_REQUEST, MAC_BCAST, zero_mac, ip);
     return false;

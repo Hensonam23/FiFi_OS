@@ -10,6 +10,11 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm_offset);
 uint64_t pmm_alloc_page(void);
 void pmm_free_page(uint64_t phys);
 
+/* Allocate a page guaranteed to be below 4 GiB (for 32-bit DMA devices).
+ * Draws from a separate low-memory zone initialized at PMM init.
+ * Returns 0 if no low memory is available.                               */
+uint64_t pmm_alloc_dma32_page(void);
+
 /* Returns physical address of a contiguous run of pages, or 0 on failure */
 uint64_t pmm_alloc_pages(size_t count);
 

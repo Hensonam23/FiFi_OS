@@ -6,6 +6,9 @@
 /* Initialize ARP — sends a gratuitous ARP to announce our presence. */
 void arp_init(void);
 
+/* Send a gratuitous ARP for the current net_ip (call after IP changes). */
+void arp_announce(void);
+
 /*
  * Handle an incoming ARP packet (payload after the Ethernet header).
  * Replies to ARP requests for our IP and updates the cache from replies.
