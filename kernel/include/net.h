@@ -29,10 +29,10 @@ typedef struct __attribute__((packed)) {
 
 /* ── Network config (set by net_init, can be changed before calling) ──────── */
 extern uint8_t  net_mac[6];    /* our MAC (from virtio device) */
-extern uint32_t net_ip;        /* our IP, host byte order  (default: 10.0.2.15) */
-extern uint32_t net_mask;      /* subnet mask, host byte order (default: 255.255.255.0) */
-extern uint32_t net_gateway;   /* gateway IP, host byte order  (default: 10.0.2.2) */
-extern uint32_t net_dns;       /* DNS server IP, host byte order (default: 8.8.8.8) */
+extern uint32_t net_ip;        /* our IP, host byte order  (0 until DHCP) */
+extern uint32_t net_mask;      /* subnet mask, host byte order (0 until DHCP) */
+extern uint32_t net_gateway;   /* gateway IP, host byte order  (0 until DHCP) */
+extern uint32_t net_dns;       /* DNS server, host byte order  (8.8.8.8 fallback) */
 
 /* ── Network init and poll ────────────────────────────────────────────────── */
 void net_init(void);    /* call after virtio_net_init() */

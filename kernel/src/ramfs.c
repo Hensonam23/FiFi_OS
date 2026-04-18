@@ -39,6 +39,15 @@ ramfs_entry_t *ramfs_creat(const char *name) {
     return (ramfs_entry_t*)0;
 }
 
+int ramfs_preallocate(ramfs_entry_t *e, uint32_t cap) {
+    if (!e || cap == 0) return -1;
+    if (e->data) return 0;   /* already has a buffer */
+    e->data = (uint8_t *)kmalloc(cap);
+    if (!e->data) return -1;
+    e->size = 0;
+    return 0;
+}
+
 int ramfs_write(const char *name, const void *data, uint32_t len) {
     if (!name || (!data && len > 0)) return -1;
 

@@ -4,6 +4,7 @@
 
 #define RAMFS_MAX_FILES  8
 #define RAMFS_NAME_MAX   64
+#define RAMFS_WR_MAX     (64u * 1024u)  /* max write-redirect buffer (64 KB) */
 
 /*
  * data is heap-allocated on write so the BSS stays small regardless of
@@ -18,6 +19,9 @@ typedef struct {
 
 /* Create or truncate a named slot (no data allocated yet). */
 ramfs_entry_t *ramfs_creat(const char *name);
+
+/* Pre-allocate a write buffer of cap bytes so incremental writes work. */
+int ramfs_preallocate(ramfs_entry_t *e, uint32_t cap);
 
 /* Write data to a named file (heap-allocates the buffer). */
 int  ramfs_write(const char *name, const void *data, uint32_t len);

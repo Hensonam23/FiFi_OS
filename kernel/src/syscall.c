@@ -466,7 +466,7 @@ case SYS_UPTIME:
             if (wf && wf->type == FD_TYPE_RAMW && wf->ramfile) {
                 /* Write to ramfs buffer (output redirection) */
                 ramfs_entry_t *rf = wf->ramfile;
-                uint32_t room = (uint32_t)RAMFS_FILE_SIZE - rf->size;
+                uint32_t room = (uint32_t)RAMFS_WR_MAX - rf->size;
                 uint32_t w = (uint32_t)n;
                 if (w > room) w = room;
                 for (uint32_t i = 0; i < w; i++) rf->data[rf->size + i] = wr_buf[i];
@@ -987,11 +987,13 @@ case SYS_UPTIME:
             ramfs_entry_t *ow_rf = ramfs_creat(ow_path);
             if (!ow_rf) { ctx->rax = (uint64_t)-1; return; }
 
-            /* Pre-populate with existing content if the file exists */
+            /* Pre-allocate the write buffer, then pre-populate with existing content */
+            ramfs_preallocate(ow_rf, RAMFS_WR_MAX);
             const void *existing_data; uint64_t existing_size;
-            if (vfs_read(ow_path, &existing_data, &existing_size) == 0
+            if (ow_rf->data
+                    && vfs_read(ow_path, &existing_data, &existing_size) == 0
                     && existing_size > 0
-                    && existing_size <= (uint64_t)RAMFS_FILE_SIZE) {
+                    && existing_size <= (uint64_t)RAMFS_WR_MAX) {
                 const uint8_t *src = (const uint8_t*)existing_data;
                 for (uint64_t bi = 0; bi < existing_size; bi++)
                     ow_rf->data[bi] = src[bi];

@@ -19,7 +19,7 @@ static inline uint64_t read_rsp_u64(void) {
 
 extern void ctx_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 
-#define THREAD_MAX        16
+#define THREAD_MAX        32
 #define THREAD_NAME_MAX   24
 #define THREAD_STACK_SIZE (16 * 1024)
 

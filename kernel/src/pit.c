@@ -6,17 +6,15 @@
 #include "net.h"
 #include "statusbar.h"
 
-static volatile uint64_t g_pit_ticks = 0;
-static volatile uint32_t g_pit_hz = 0;
-
-#define PIT_CH0     0x40
-#define PIT_CMD     0x43
+#define PIT_CH0  0x40
+#define PIT_CMD  0x43
 
 static volatile uint64_t g_ticks = 0;
+static uint32_t g_pit_hz = 100;
 
-uint64_t pit_ticks(void) {
-    return g_ticks;
-}
+uint64_t pit_ticks(void)     { return g_ticks; }
+uint64_t pit_get_ticks(void) { return g_ticks; }
+uint32_t pit_get_hz(void)    { return g_pit_hz; }
 
 /* This will be called by the IRQ0 handler */
 void pit_on_tick(void) {
@@ -28,12 +26,9 @@ void pit_on_tick(void) {
     statusbar_on_tick();  /* redraw bar once per second */
 }
 
-/* Set PIT frequency */
 void pit_init(uint32_t hz) {
-    g_pit_ticks = 0;
-    g_pit_hz = 100;
-
     if (hz == 0) hz = 100;
+    g_pit_hz = hz;
 
     uint32_t divisor = 1193182u / hz;
 
@@ -43,9 +38,5 @@ void pit_init(uint32_t hz) {
 }
 
 
-uint64_t pit_get_ticks(void) { return g_pit_ticks; }
-uint32_t pit_get_hz(void) { return g_pit_hz ? g_pit_hz : 100; }
-void pit_on_irq0(void) {
-    g_pit_ticks++;
-}
+void pit_on_irq0(void) { /* tick counted in pit_on_tick; kept for isr.c call site */ }
 

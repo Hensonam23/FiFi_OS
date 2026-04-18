@@ -9,8 +9,9 @@ typedef struct {
     void *arg;
 } wq_item_t;
 
-static volatile uint32_t wq_head = 0;
-static volatile uint32_t wq_tail = 0;
+static volatile uint32_t wq_head    = 0;
+static volatile uint32_t wq_tail    = 0;
+static volatile uint32_t wq_dropped = 0;   /* items dropped because queue was full */
 static wq_item_t wq[WQ_MAX];
 
 static inline uint64_t irq_save(void) {
@@ -32,8 +33,9 @@ int workqueue_push(work_fn_t fn, void *arg) {
 
     uint32_t next = (wq_head + 1) % WQ_MAX;
     if (next == wq_tail) {
+        wq_dropped++;
         irq_restore(f);
-        return -1; // full
+        return -1;
     }
 
     wq[wq_head].fn = fn;
@@ -43,6 +45,8 @@ int workqueue_push(work_fn_t fn, void *arg) {
     irq_restore(f);
     return 0;
 }
+
+uint32_t workqueue_dropped(void) { return wq_dropped; }
 
 void workqueue_run(void) {
     for (;;) {
