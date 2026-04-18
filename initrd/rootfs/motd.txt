@@ -1,4 +1,4 @@
-FiFi OS Alpha v4.0
+FiFi OS Alpha v3.9
 
 Type: help
 
