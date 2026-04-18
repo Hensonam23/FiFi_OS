@@ -31,6 +31,7 @@
 #include "isr.h"
 #include "pci.h"
 #include "statusbar.h"
+#include "dhcp.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -253,6 +254,7 @@ heap_init();
     virtio_net_init();
     rtl8168_init();
     net_init();
+    if (net_nic_present()) dhcp_request();
     ext2_init();
     xhci_init();
 
