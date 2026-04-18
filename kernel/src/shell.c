@@ -763,6 +763,7 @@ static void shell_help(void) {
     kprintf("  sys <nop|uptime|yield|log> [message]\n");
     kprintf("  tss\n");
     kprintf("  int80\n");
+    kprintf("  font [name]        — show or load a PSF font from /fonts/\n");
 }
 
 
@@ -1064,6 +1065,33 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
             } else {
                 kprintf("type: data/text\n");
             }
+        }
+        return;
+    }
+
+    if (streq_simple(argv[0], "font")) {
+        if (argc < 2) {
+            kprintf("font: %s  %ux%u px\n",
+                    console_font_name(),
+                    (unsigned)console_font_width(),
+                    (unsigned)console_font_height());
+            kprintf("  usage: font <name>   (loads /fonts/<name>.psf)\n");
+            return;
+        }
+        char path[80];
+        /* build "/fonts/<name>.psf" */
+        size_t pi = 0;
+        const char *pre = "/fonts/"; for (size_t i = 0; pre[i]; i++) path[pi++] = pre[i];
+        for (size_t i = 0; argv[1][i] && pi < 75; i++) path[pi++] = argv[1][i];
+        const char *suf = ".psf"; for (size_t i = 0; suf[i]; i++) path[pi++] = suf[i];
+        path[pi] = '\0';
+        if (console_load_psf(path)) {
+            kprintf("font loaded: %s (%ux%u)\n",
+                    console_font_name(),
+                    (unsigned)console_font_width(),
+                    (unsigned)console_font_height());
+        } else {
+            kprintf("font: failed to load %s\n", path);
         }
         return;
     }
