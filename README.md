@@ -127,15 +127,18 @@ test_install.sh VM install test (loop device)
 
 ## Roadmap
 
-- **v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
-- **v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
-- **v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
-- **v3.0** — TCP stack, DNS resolver, HTTP client, wget, status bar, auto-DHCP, heap/PIT fixes, full optimization pass ✓
-- **v4.0** — process isolation (per-process page tables), ext2 write support, more complete syscall table, repo cleanup
-- **v5.0** — framebuffer GUI, mouse input, better fonts, audio driver
-- **v6.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls
-- **v7.0** — gaming optimization: low-latency scheduler, gaming mode, gamepad input, performance profiling
-- **v8.0+** — custom FiFi bootloader, local AI agent, GPU driver
+> FiFi OS is in active alpha development. Releases are versioned as **Alpha vX.x** until the OS is stable, feature-complete, and ready for general use — at which point it will ship as **v1.0**.
+
+- **Alpha v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
+- **Alpha v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
+- **Alpha v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
+- **Alpha v3.0** — TCP stack, DNS resolver, HTTP client, wget, status bar, auto-DHCP, heap/PIT fixes, full optimization pass ✓
+- **Alpha v4.0** — process isolation (per-process page tables), ext2 write support, more complete syscall table, repo cleanup
+- **Alpha v5.0** — framebuffer GUI, mouse input, better fonts, audio driver
+- **Alpha v6.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls
+- **Alpha v7.0** — gaming optimization: low-latency scheduler, gaming mode, gamepad input, performance profiling
+- **Alpha v8.0+** — custom FiFi bootloader, local AI agent, GPU driver
+- **v1.0** — stable, complete, ready for general use
 
 ---
 
