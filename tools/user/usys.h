@@ -272,3 +272,43 @@ static inline long sys_listdir(const char *path, char *buf, unsigned long cap) {
 static inline long sys_waitpid_flags(unsigned long child_tid, int *status, int flags) {
     return sys_call3(SYS_WAITFLAGS, (long)child_tid, (long)(uintptr_t)status, (long)flags);
 }
+
+/* getpid(): return current process group ID (or TID if not in a group). */
+static inline unsigned long sys_getpid(void) {
+    return (unsigned long)sys_call0(SYS_GETPID);
+}
+
+/* getppid(): return parent thread ID, or 0 if no parent. */
+static inline unsigned long sys_getppid(void) {
+    return (unsigned long)sys_call0(SYS_GETPPID);
+}
+
+/* rename(old, new): rename/move a file. Returns 0 on success, -1 on failure. */
+static inline long sys_rename(const char *old, const char *new) {
+    return sys_call2(SYS_RENAME, (long)(uintptr_t)old, (long)(uintptr_t)new);
+}
+
+/* stat(path, st): fill fifi_stat with file info. Returns 0 on success, -1 if not found. */
+static inline long sys_stat(const char *path, struct fifi_stat *st) {
+    return sys_call2(SYS_STAT, (long)(uintptr_t)path, (long)(uintptr_t)st);
+}
+
+/* fstat(fd, st): fill fifi_stat from open fd. Returns 0 on success, -1 on failure. */
+static inline long sys_fstat(int fd, struct fifi_stat *st) {
+    return sys_call2(SYS_FSTAT, (long)fd, (long)(uintptr_t)st);
+}
+
+/* time(): seconds since boot. */
+static inline unsigned long sys_time(void) {
+    return (unsigned long)sys_call0(SYS_TIME);
+}
+
+/* dup(fd): duplicate fd to lowest available fd. Returns new fd, or -1 on failure. */
+static inline long sys_dup(int fd) {
+    return sys_call1(SYS_DUP, (long)fd);
+}
+
+/* uname(buf): fill fifi_utsname with OS info. Returns 0 on success. */
+static inline long sys_uname(struct fifi_utsname *buf) {
+    return sys_call1(SYS_UNAME, (long)(uintptr_t)buf);
+}

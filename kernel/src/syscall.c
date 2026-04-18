@@ -1246,6 +1246,115 @@ case SYS_UPTIME:
             return;
         }
 
+        case SYS_GETPID: {
+            uint32_t pgid = thread_get_pgid(thread_current_tid());
+            ctx->rax = pgid ? (uint64_t)pgid : (uint64_t)thread_current_tid();
+            return;
+        }
+
+        case SYS_GETPPID: {
+            ctx->rax = (uint64_t)thread_get_parent_tid();
+            return;
+        }
+
+        case SYS_RENAME: {
+            char old_path[256], new_path[256];
+            if (copyin_str(old_path, sizeof(old_path), ctx->rdi) < 0 ||
+                copyin_str(new_path, sizeof(new_path), ctx->rsi) < 0) {
+                ctx->rax = (uint64_t)-1; return;
+            }
+            const void *data; uint64_t size;
+            if (vfs_read(old_path, &data, &size) < 0) { ctx->rax = (uint64_t)-1; return; }
+            static uint8_t rename_buf[256 * 1024];
+            uint64_t to_copy = size < sizeof(rename_buf) ? size : sizeof(rename_buf);
+            const uint8_t *src = (const uint8_t *)data;
+            for (uint64_t i = 0; i < to_copy; i++) rename_buf[i] = src[i];
+            if (vfs_write(new_path, rename_buf, to_copy) < 0) { ctx->rax = (uint64_t)-1; return; }
+            vfs_delete(old_path);
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_STAT: {
+            char path[256];
+            if (copyin_str(path, sizeof(path), ctx->rdi) < 0) { ctx->rax = (uint64_t)-1; return; }
+            uint64_t ustat = ctx->rsi;
+            struct fifi_stat st = {0, 0, 0};
+            if (vfs_isdir(path)) {
+                st.mode = 1;
+            } else {
+                int sz = vfs_filesize(path);
+                if (sz < 0) { ctx->rax = (uint64_t)-1; return; }
+                st.size = (uint64_t)sz;
+            }
+            copyout_bytes(ustat, (const uint8_t *)&st, sizeof(st));
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_FSTAT: {
+            uint64_t tid = thread_current_tid();
+            int fd_num = (int)(int64_t)ctx->rdi;
+            uint64_t ustat = ctx->rsi;
+            sys_fd_t *f = fd_get(tid, fd_num);
+            if (!f) { ctx->rax = (uint64_t)-1; return; }
+            struct fifi_stat st = {0, 0, 0};
+            if (f->type == FD_TYPE_RAMW && f->ramfile) {
+                st.size = (uint64_t)f->ramfile->size;
+            } else if (f->type == FD_TYPE_PIPE_R || f->type == FD_TYPE_PIPE_W) {
+                st.mode = 2;
+            } else {
+                st.size = f->size;
+            }
+            copyout_bytes(ustat, (const uint8_t *)&st, sizeof(st));
+            ctx->rax = 0;
+            return;
+        }
+
+        case SYS_TIME: {
+            uint64_t hz = timer_hz();
+            ctx->rax = hz ? timer_ticks() / hz : 0;
+            return;
+        }
+
+        case SYS_DUP: {
+            uint64_t tid = thread_current_tid();
+            int old_fd = (int)(int64_t)ctx->rdi;
+            sys_fd_t *src = fd_get(tid, old_fd);
+            if (!src) { ctx->rax = (uint64_t)-1; return; }
+            int new_num = fd_next_num(tid);
+            if (new_num < 0) { ctx->rax = (uint64_t)-1; return; }
+            for (int i = 0; i < SYS_FD_MAX; i++) {
+                if (!g_fds[i].used) {
+                    g_fds[i]        = *src;
+                    g_fds[i].fd_num = new_num;
+                    ctx->rax = (uint64_t)new_num;
+                    return;
+                }
+            }
+            ctx->rax = (uint64_t)-1;
+            return;
+        }
+
+        case SYS_UNAME: {
+            uint64_t ubuf = ctx->rdi;
+            struct fifi_utsname u;
+            for (size_t i = 0; i < sizeof(u); i++) ((uint8_t *)&u)[i] = 0;
+            const char *sysname  = "FiFi OS";
+            const char *nodename = "fifi";
+            const char *release  = "Alpha v4.0";
+            const char *version  = __DATE__ " " __TIME__;
+            const char *machine  = "x86_64";
+            for (int i = 0; sysname[i]  && i < 31; i++) u.sysname[i]  = sysname[i];
+            for (int i = 0; nodename[i] && i < 31; i++) u.nodename[i] = nodename[i];
+            for (int i = 0; release[i]  && i < 31; i++) u.release[i]  = release[i];
+            for (int i = 0; version[i]  && i < 63; i++) u.version[i]  = version[i];
+            for (int i = 0; machine[i]  && i < 31; i++) u.machine[i]  = machine[i];
+            copyout_bytes(ubuf, (const uint8_t *)&u, sizeof(u));
+            ctx->rax = 0;
+            return;
+        }
+
         default:
             kprintf("[syscall] unknown n=%p (ctx->rax=%p)\n", (void*)n, (void*)ctx->rax);
             ctx->rax = (uint64_t)-1;
