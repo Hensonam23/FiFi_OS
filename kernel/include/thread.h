@@ -113,6 +113,10 @@ void     thread_copy_pgid_to_slot(int slot, uint32_t pgid);
 uint64_t thread_get_mmap_next(void);
 void     thread_set_mmap_next(uint64_t addr);
 
+/* Copy all fork-inheritable state from current thread to child slot.
+ * Must be called after thread_create() and before the child runs. */
+void thread_fork_inherit_slot(int child_slot);
+
 /* Check if any child of par_tid is stopped (not zombie).
  * Returns child TID and sets *code_out to WSTOPPED status, or 0. */
 long     thread_check_stopped_child(uint32_t par_tid, uint32_t child_tid, int *code_out);

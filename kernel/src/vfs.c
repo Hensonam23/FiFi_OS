@@ -176,6 +176,23 @@ int vfs_delete(const char *path) {
     return ext2_delete_file(full);
 }
 
+/* Create all missing parent directories for path (absolute, e.g. "/a/b/c"). */
+static void vfs_mkdirs(const char *path) {
+    char tmp[258];
+    size_t i = 0;
+    while (path[i] && i < sizeof(tmp) - 1) { tmp[i] = path[i]; i++; }
+    tmp[i] = '\0';
+
+    /* Walk components, mkdir each one that doesn't exist yet. */
+    for (size_t j = 1; j < i; j++) {
+        if (tmp[j] != '/') continue;
+        tmp[j] = '\0';
+        if (!ext2_isdir(tmp))
+            ext2_mkdir(tmp);
+        tmp[j] = '/';
+    }
+}
+
 int vfs_write(const char *path, const void *data, uint64_t size) {
     const char *n = vfs_norm_path(path);
     if (!n || !*n) return -1;
@@ -187,6 +204,7 @@ int vfs_write(const char *path, const void *data, uint64_t size) {
         size_t i = 0;
         while (n[i] && i < 256) { full[i + 1] = n[i]; i++; }
         full[i + 1] = '\0';
+        vfs_mkdirs(full);   /* ensure parent directories exist */
         return ext2_write_file(full, data, (uint32_t)size);
     }
 

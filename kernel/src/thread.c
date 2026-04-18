@@ -1285,6 +1285,19 @@ void thread_set_mmap_next(uint64_t addr) {
     if (g_cur) g_cur->mmap_next = addr;
 }
 
+void thread_fork_inherit_slot(int child_slot) {
+    if (!g_cur) return;
+    if (child_slot < 0 || child_slot >= THREAD_MAX) return;
+    thread_t *c = &g_threads[child_slot];
+    c->user_brk  = g_cur->user_brk;
+    c->mmap_next = g_cur->mmap_next;
+    c->is_user   = 1;
+    for (int i = 0; i < THREAD_USER_MAP_MAX; i++)
+        c->user_maps[i] = g_cur->user_maps[i];
+    for (int i = 0; i < 32; i++)
+        c->sig_handlers[i] = g_cur->sig_handlers[i];
+}
+
 long thread_check_stopped_child(uint32_t par_tid, uint32_t child_tid, int *code_out) {
     for (int i = 0; i < THREAD_MAX; i++) {
         thread_t *t = &g_threads[i];

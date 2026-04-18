@@ -288,18 +288,10 @@ static int is_devnull(const char *path) {
 static void fd_close_entry(sys_fd_t *f) {
     if (f->type == FD_TYPE_PIPE_R && f->pipe) { f->pipe->ropen--; }
     if (f->type == FD_TYPE_PIPE_W && f->pipe) { f->pipe->wopen--; }
-    /* Flush RAMW files to ext2 on close so redirected output survives reboot. */
-    if (f->type == FD_TYPE_RAMW && f->ramfile && f->ramfile->size > 0) {
-        char path[RAMFS_NAME_MAX + 2];
-        path[0] = '/';
-        size_t i = 0;
-        while (f->ramfile->name[i] && i < (size_t)(RAMFS_NAME_MAX - 1)) {
-            path[i + 1] = f->ramfile->name[i];
-            i++;
-        }
-        path[i + 1] = '\0';
-        vfs_write(path, f->ramfile->data, (uint64_t)f->ramfile->size);
-    }
+    /* Flush RAMW files to ext2 on close so redirected output survives reboot.
+     * ramfile->name is always an absolute path (starts with '/') from path_resolve. */
+    if (f->type == FD_TYPE_RAMW && f->ramfile && f->ramfile->size > 0)
+        vfs_write(f->ramfile->name, f->ramfile->data, (uint64_t)f->ramfile->size);
     f->used = 0; f->fd_num = 0; f->owner_tid = 0;
     f->type = 0; f->data = 0; f->size = 0; f->off = 0; f->pipe = 0; f->ramfile = 0;
 }
@@ -466,6 +458,9 @@ case SYS_UPTIME:
             if (wf && wf->type == FD_TYPE_RAMW && wf->ramfile) {
                 /* Write to ramfs buffer (output redirection) */
                 ramfs_entry_t *rf = wf->ramfile;
+                if (!rf->data && ramfs_preallocate(rf, RAMFS_WR_MAX) < 0) {
+                    ctx->rax = (uint64_t)-1; return;
+                }
                 uint32_t room = (uint32_t)RAMFS_WR_MAX - rf->size;
                 uint32_t w = (uint32_t)n;
                 if (w > room) w = room;
