@@ -260,6 +260,17 @@ bool dhcp_request(void) {
 
     arp_announce();   /* tell the LAN our new IP/MAC */
 
+    /* Pre-resolve gateway MAC — cached before user runs wget/dns */
+    if (net_gateway) {
+        uint8_t dummy[6];
+        arp_resolve(net_gateway, dummy);          /* send first request */
+        uint64_t dl = pit_ticks() + 400u;         /* wait up to 4 seconds */
+        while (pit_ticks() < dl) {
+            net_poll();
+            if (arp_resolve(net_gateway, dummy)) break;
+        }
+    }
+
     kprintf("dhcp: %u.%u.%u.%u mask %u.%u.%u.%u gw %u.%u.%u.%u dns %u.%u.%u.%u\n",
             DIP(net_ip), DIP(net_mask), DIP(net_gateway), DIP(net_dns));
 
