@@ -20,8 +20,10 @@ void     console_set_y_offset(uint64_t pixels);
 void     console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color);
 void     console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg);
 void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch, uint64_t scale, uint32_t fg, uint32_t bg);
-uint64_t console_fb_width(void);
-uint64_t console_fb_height(void);
+uint64_t           console_fb_width(void);
+uint64_t           console_fb_height(void);
+volatile uint32_t *console_fb_ptr(void);
+uint64_t           console_pitch32(void);
 
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);

@@ -32,6 +32,7 @@
 #include "pci.h"
 #include "statusbar.h"
 #include "dhcp.h"
+#include "mouse.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -191,5 +192,6 @@ void kmain(void) {
         serial_write(pbuf);
     }
 
+    mouse_init();
     shell_run();
 }
