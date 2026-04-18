@@ -4,6 +4,7 @@
 #include "keyboard.h"
 #include "acpi.h"
 #include "net.h"
+#include "statusbar.h"
 
 static volatile uint64_t g_pit_ticks = 0;
 static volatile uint32_t g_pit_hz = 0;
@@ -24,6 +25,7 @@ void pit_on_tick(void) {
     acpi_ec_poll();       /* EC SCI drain — reads + query only, safe */
     xhci_poll();
     net_poll();           /* drain virtio-net RX queue, dispatch ARP/IP */
+    statusbar_on_tick();  /* redraw bar once per second */
 }
 
 /* Set PIT frequency */

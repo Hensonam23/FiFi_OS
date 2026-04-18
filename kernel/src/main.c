@@ -30,6 +30,7 @@
 #include "xhci.h"
 #include "isr.h"
 #include "pci.h"
+#include "statusbar.h"
 /* Base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -134,6 +135,7 @@ void kmain(void) {
     initrd_cat("motd.txt");
 struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     console_init(fb);
+    statusbar_init(fb->width);
 
     /* FiFi OS: memmap summary (after console_init so kprintf works) */
     console_write("\nFiFi OS: memmap summary...\n");
