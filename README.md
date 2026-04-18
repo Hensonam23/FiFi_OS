@@ -2,7 +2,7 @@
 
 A hobby x86-64 operating system built from scratch in C and assembly.
 
-Boots on real hardware. Has a shell. Saves files. Runs programs. That's the point.
+Boots on real hardware. Has a shell. Saves files. Runs programs. Pings things. That's the point.
 
 ---
 
@@ -14,6 +14,8 @@ Boots on real hardware. Has a shell. Saves files. Runs programs. That's the poin
 - **Signals** — `kill`, `signal()`, Ctrl-C / Ctrl-Z, user-space handlers
 - **Memory mapping** — `mmap` / `munmap` with per-process VA watermark
 - **ELF loader** — runs statically-linked user-space programs from the initrd
+- **Networking** — Ethernet, ARP, IPv4, ICMP ping, UDP, DHCP; works on QEMU (virtio-net) and real hardware (RTL8168 GbE)
+- **USB keyboard** — XHCI driver; works on real laptops with built-in USB keyboards
 - **USB installer** — write to a USB drive and boot on real hardware (Linux, macOS, Windows)
 
 ---
@@ -30,6 +32,8 @@ make         # build fifi.iso + disk.img
 make rundbg  # run in QEMU (serial → terminal)
 make run     # run in QEMU (serial → serial.log)
 ```
+
+Once booted, the network is up automatically on QEMU. On real hardware, run `dhcp` to get an IP address.
 
 ---
 
@@ -89,6 +93,10 @@ make release  # package fifi.iso + installers into build/fifi-os-release.zip
 | `fg [%n]` | bring job to foreground |
 | `bg [%n]` | resume job in background |
 | `kill [-SIG] tid` | send signal to process |
+| `ping <ip> [count]` | send ICMP echo requests |
+| `ifconfig [eth0 ip mask gw]` | show or set network config |
+| `dhcp` | get IP address from DHCP server |
+| `arp` | show ARP cache |
 | `help` | list builtins |
 
 ---
@@ -116,9 +124,10 @@ test_install.sh VM install test (loop device)
 ## Roadmap
 
 - **v1.0** — interactive shell, persistent ext2, signals, job control, mmap, USB installer ✓
-- **v1.1** — text editor, partition-level installer, more shell builtins
-- **v2.0** — networking (virtio-net, ARP, IP, TCP, ping, fetch)
-- **v3.0** — local AI daemon, framebuffer GUI
+- **v1.1** — XHCI USB keyboard driver; boots and types on real laptops ✓
+- **v2.0** — Ethernet, ARP, IPv4/ICMP, UDP, DHCP; ping works on real LAN hardware ✓
+- **v3.0** — TCP, wget/HTTP client, DNS
+- **v4.0** — framebuffer GUI
 
 ---
 
