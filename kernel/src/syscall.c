@@ -983,17 +983,19 @@ case SYS_UPTIME:
                 int nfd = fd_alloc_null(thread_current_tid());
                 ctx->rax = (nfd >= 0) ? (uint64_t)nfd : (uint64_t)-1; return;
             }
-            /* ramfs_creat truncates — use it then pre-load existing content */
+            /* Read existing content BEFORE ramfs_creat, because creat shadows
+             * the ext2 layer — vfs_read after creat would find the empty ramfs
+             * entry instead of the file on disk, breaking >> append. */
+            const void *existing_data = (const void*)0;
+            uint64_t existing_size = 0;
+            vfs_read(ow_path, &existing_data, &existing_size);
+            if (existing_size > (uint64_t)RAMFS_WR_MAX) existing_size = 0;
+
             ramfs_entry_t *ow_rf = ramfs_creat(ow_path);
             if (!ow_rf) { ctx->rax = (uint64_t)-1; return; }
 
-            /* Pre-allocate the write buffer, then pre-populate with existing content */
             ramfs_preallocate(ow_rf, RAMFS_WR_MAX);
-            const void *existing_data; uint64_t existing_size;
-            if (ow_rf->data
-                    && vfs_read(ow_path, &existing_data, &existing_size) == 0
-                    && existing_size > 0
-                    && existing_size <= (uint64_t)RAMFS_WR_MAX) {
+            if (ow_rf->data && existing_data && existing_size > 0) {
                 const uint8_t *src = (const uint8_t*)existing_data;
                 for (uint64_t bi = 0; bi < existing_size; bi++)
                     ow_rf->data[bi] = src[bi];
