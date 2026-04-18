@@ -61,6 +61,8 @@ OBJS := \
     $(BUILD)/udp.o \
     $(BUILD)/dhcp.o \
     $(BUILD)/dns.o \
+    $(BUILD)/tcp.o \
+    $(BUILD)/http.o \
     $(BUILD)/rtl8168.o \
     $(BUILD)/ext2.o \
     $(BUILD)/xhci.o \
@@ -280,6 +282,12 @@ $(BUILD)/dhcp.o: kernel/src/dhcp.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/dns.o: kernel/src/dns.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/tcp.o: kernel/src/tcp.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/http.o: kernel/src/http.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/rtl8168.o: kernel/src/rtl8168.c | $(BUILD)

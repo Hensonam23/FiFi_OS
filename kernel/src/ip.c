@@ -26,6 +26,7 @@
 #include "net.h"
 #include "arp.h"
 #include "udp.h"
+#include "tcp.h"
 #include "kprintf.h"
 #include "pit.h"
 
@@ -193,6 +194,9 @@ void ip4_recv(const void *payload, size_t len, const uint8_t src_mac[6]) {
         break;
     case IP_PROTO_UDP:
         udp_recv(src_ip, data, data_len);
+        break;
+    case IP_PROTO_TCP:
+        tcp_recv_ip(src_ip, data, data_len);
         break;
     default:
         break;
