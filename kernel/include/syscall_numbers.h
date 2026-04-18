@@ -45,4 +45,27 @@ enum {
     SYS_SETPGID   = 31,  /* setpgid(tid, pgid): set process group */
     SYS_LISTDIR   = 32,  /* listdir(path, buf, cap): list directory entries */
     SYS_WAITFLAGS = 33,  /* waitpid with WUNTRACED / WNOHANG flags */
+
+    SYS_GETPID    = 34,  /* getpid(): return current process group ID */
+    SYS_GETPPID   = 35,  /* getppid(): return parent thread ID */
+    SYS_RENAME    = 36,  /* rename(old, new): rename/move a file */
+    SYS_STAT      = 37,  /* stat(path, struct fifi_stat*): file info by path */
+    SYS_FSTAT     = 38,  /* fstat(fd, struct fifi_stat*): file info by fd */
+    SYS_TIME      = 39,  /* time(): seconds since boot */
+    SYS_DUP       = 40,  /* dup(fd): duplicate to lowest available fd */
+    SYS_UNAME     = 41,  /* uname(struct fifi_utsname*): OS info */
+};
+
+struct fifi_stat {
+    uint64_t size;   /* file size in bytes (0 for dirs) */
+    uint32_t mode;   /* 0=file, 1=dir, 2=pipe */
+    uint32_t _pad;
+};
+
+struct fifi_utsname {
+    char sysname[32];
+    char nodename[32];
+    char release[32];
+    char version[64];
+    char machine[32];
 };

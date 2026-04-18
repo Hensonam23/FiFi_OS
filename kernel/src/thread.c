@@ -1120,6 +1120,11 @@ void thread_set_parent_for_slot(int slot, uint32_t ptid) {
     g_threads[slot].parent_tid = ptid;
 }
 
+uint32_t thread_get_parent_tid(void) {
+    if (!g_cur) return 0;
+    return g_cur->parent_tid;
+}
+
 /*
  * Search for a zombie child whose parent_tid == parent_tid.
  * child_tid == (uint32_t)-1 matches any child.

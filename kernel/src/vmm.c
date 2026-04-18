@@ -82,8 +82,7 @@ void vmm_init(uint64_t hhdm_offset) {
     (void)hhdm_offset;
 
     uint64_t pml4_phys = read_cr3_phys();
-    g_kernel_cr3 = pml4_phys;   /* save kernel CR3 before any user maps exist */
-    kprintf("VMM init: CR3=%p\n", (void*)pml4_phys);
+    g_kernel_cr3 = pml4_phys;
 
 #ifdef FIFI_VMM_API_TEST
     kprintf("VMM test: starting API self-test...\n");

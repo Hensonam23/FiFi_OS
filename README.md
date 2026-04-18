@@ -135,7 +135,7 @@ test_install.sh VM install test (loop device)
 - **Alpha v3.0** — TCP stack, DNS resolver, HTTP client, wget, status bar, auto-DHCP, heap/PIT fixes, full optimization pass ✓
 - **Alpha v4.0** — process isolation (per-process page tables), ext2 write support, more complete syscall table, repo cleanup
 - **Alpha v5.0** — framebuffer GUI, mouse input, better fonts, audio driver
-- **Alpha v6.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls
+- **Alpha v6.0** — HTTPS/TLS, HTTP server, package fetcher, more POSIX syscalls, WiFi (802.11) driver
 - **Alpha v7.0** — gaming optimization: low-latency scheduler, gaming mode, gamepad input, performance profiling
 - **Alpha v8.0+** — custom FiFi bootloader, local AI agent, GPU driver
 - **v1.0** — stable, complete, ready for general use

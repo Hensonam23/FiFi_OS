@@ -531,9 +531,11 @@ static int ush_builtin(int argc, char *argv[]) {
 
     if (strcmp(argv[0], "stat") == 0) {
         if (argc < 2) { printf("usage: stat <file>\n"); return 1; }
-        long sz = sys_filesize(argv[1]);
-        if (sz < 0) printf("stat: not found: %s\n", argv[1]);
-        else        printf("%s: %ld byte%s\n", argv[1], sz, sz == 1 ? "" : "s");
+        struct fifi_stat st;
+        if (sys_stat(argv[1], &st) < 0) { printf("stat: not found: %s\n", argv[1]); return 1; }
+        const char *type = st.mode == 1 ? "directory" : st.mode == 2 ? "pipe" : "file";
+        printf("%s: %s, %llu byte%s\n", argv[1], type,
+               (unsigned long long)st.size, st.size == 1 ? "" : "s");
         return 1;
     }
 
@@ -550,13 +552,8 @@ static int ush_builtin(int argc, char *argv[]) {
 
     if (strcmp(argv[0], "mv") == 0) {
         if (argc < 3) { printf("usage: mv <src> <dst>\n"); return 1; }
-        long n = sys_readfile(argv[1], cat_buf, (uint64_t)(sizeof(cat_buf) - 1));
-        if (n < 0) { printf("mv: cannot read: %s\n", argv[1]); return 1; }
-        long fd = sys_creat(argv[2]);
-        if (fd < 0) { printf("mv: cannot create: %s\n", argv[2]); return 1; }
-        sys_fdwrite((int)fd, cat_buf, (uint64_t)n);
-        sys_close((int)fd);
-        sys_unlink(argv[1]);
+        if (sys_rename(argv[1], argv[2]) < 0)
+            printf("mv: failed: %s\n", argv[1]);
         return 1;
     }
 
