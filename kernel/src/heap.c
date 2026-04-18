@@ -42,7 +42,8 @@ static uint64_t next_page_virt = 0;
  * The 'next' pointer is stored in the first 8 bytes of the user area
  * while the block is on the free list (safe — user isn't using it).
  */
-#define HEAP_MAGIC 0xF1F10A110DEAD000ULL
+#define HEAP_MAGIC       0xF1F10A110DEAD000ULL
+#define HEAP_MAGIC_LARGE 0xF1F10A110DEAD001ULL  /* large alloc — not recycled by free list */
 
 typedef struct {
     size_t   size;   /* usable bytes after this header */
@@ -91,8 +92,6 @@ static void heap_map_fresh_page(void) {
     cur_page_virt = next_page_virt;
     cur_off = 0;
     next_page_virt += PAGE_SIZE;
-
-    kprintf("Heap page: phys=%p virt=%p\n", (void*)phys, (void*)cur_page_virt);
 }
 
 #ifdef FIFI_HEAP_TEST
@@ -185,7 +184,8 @@ void *kmalloc_aligned(size_t size, size_t align) {
     if (align < 16) align = 16;
     if (align & (align - 1)) panic("kmalloc_aligned: align not power-of-two");
 
-    /* Large alloc: bypass free list, map whole pages. No header — not tracked for free. */
+    /* Large alloc: whole pages, with a header so kfree() doesn't panic.
+     * Returns ptr+16 (still 16-byte aligned). Pages are not reclaimed on free. */
     if (size >= PAGE_SIZE) {
         size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         uint64_t bytes = (uint64_t)pages * PAGE_SIZE;
@@ -196,7 +196,12 @@ void *kmalloc_aligned(size_t size, size_t align) {
         if (!phys) return 0;
         if (!vmm_map_range(v, phys, bytes, VMM_WRITE)) panic("heap: vmm_map_range failed");
         next_page_virt = vend;
-        return (void*)(uintptr_t)v;
+        heap_hdr_t *hdr = (heap_hdr_t *)(uintptr_t)v;
+        hdr->size  = (size_t)(bytes - sizeof(heap_hdr_t));
+        hdr->magic = HEAP_MAGIC_LARGE;
+        void *usr = (void *)(uintptr_t)(v + sizeof(heap_hdr_t));
+        memzero(usr, hdr->size < size ? hdr->size : size);
+        return usr;
     }
 
     /* Standard alloc: check free list first (16-byte align only). */
@@ -233,15 +238,15 @@ void *kmalloc_aligned(size_t size, size_t align) {
 
 void *kmalloc(size_t size) { return kmalloc_aligned(size, 16); }
 
-void *kzalloc(size_t size) {
-    void *p = kmalloc(size);
-    if (p) memzero(p, size);
-    return p;
-}
+void *kzalloc(size_t size) { return kmalloc(size); }  /* kmalloc already zeroes */
 
 void kfree(void *ptr) {
     if (!ptr) return;
     heap_hdr_t *hdr = (heap_hdr_t*)ptr - 1;
+    if (hdr->magic == HEAP_MAGIC_LARGE) {
+        hdr->magic = 0;   /* prevent double-free */
+        return;            /* pages stay mapped; not worth the VMM complexity to unmap */
+    }
     if (hdr->magic != HEAP_MAGIC)
         panic("kfree: bad magic (double-free or corrupt pointer)");
     hdr->magic = 0;

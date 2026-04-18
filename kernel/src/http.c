@@ -21,7 +21,7 @@
 #include "vfs.h"
 #include "kprintf.h"
 
-#define HTTP_MAX_BODY   (256u * 1024u)   /* 256 KB download limit */
+#define HTTP_MAX_BODY   (64u * 1024u)    /* 64 KB download limit */
 #define HTTP_HDR_BUF    4096u            /* response header buffer */
 #define HTTP_READ_TICKS 500u             /* 5 second read timeout */
 
@@ -176,7 +176,10 @@ bool http_get(const char *url, const char *local_path) {
     /* Parse status code */
     int status = parse_status((const char *)s_hdr_buf, hdr_len);
     if (status != 200) {
-        kprintf("wget: HTTP %d\n", status);
+        if (status == 301 || status == 302)
+            kprintf("wget: HTTP %d (redirect — use the full URL with http://)\n", status);
+        else
+            kprintf("wget: HTTP %d\n", status);
         tcp_close();
         return false;
     }

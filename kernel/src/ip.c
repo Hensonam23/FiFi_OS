@@ -222,7 +222,7 @@ bool icmp_ping(uint32_t dst_ip, uint16_t count, uint32_t timeout_ticks) {
                         ? dst_ip : net_gateway;
     uint8_t dummy_mac[6];
     if (!arp_resolve(next_hop, dummy_mac)) {
-        uint64_t arp_deadline = pit_ticks() + 200u;   /* 2 seconds @ 100Hz */
+        uint64_t arp_deadline = pit_ticks() + 400u;   /* 4 seconds @ 100Hz */
         while (pit_ticks() < arp_deadline) {
             net_poll();
             if (arp_resolve(next_hop, dummy_mac)) break;

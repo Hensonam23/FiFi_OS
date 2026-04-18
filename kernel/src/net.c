@@ -27,16 +27,17 @@ bool net_nic_present(void) {
     return virtio_net_present() || rtl8168_present();
 }
 
-/* ── Network configuration — QEMU user-networking defaults ───────────────── */
+/* ── Network configuration — zeroed until DHCP assigns values ────────────── */
 uint8_t  net_mac[6]  = {0};
-uint32_t net_ip      = (10u  << 24) | (0u  << 16) | (2u << 8) | 15u;  /* 10.0.2.15  */
-uint32_t net_mask    = (255u << 24) | (255u<< 16) | (255u<<8) | 0u;   /* 255.255.255.0 */
-uint32_t net_gateway = (10u  << 24) | (0u  << 16) | (2u << 8) | 2u;   /* 10.0.2.2   */
-uint32_t net_dns     = (8u   << 24) | (8u  << 16) | (8u  << 8) | 8u;  /* 8.8.8.8    */
+uint32_t net_ip      = 0;
+uint32_t net_mask    = 0;
+uint32_t net_gateway = 0;
+uint32_t net_dns     = (8u << 24) | (8u << 16) | (8u << 8) | 8u;  /* 8.8.8.8 fallback */
 
-/* ── Scratch RX buffer ────────────────────────────────────────────────────── */
+/* ── Static buffers — avoid large stack frames in the tick handler ────────── */
 #define RX_BUF_SIZE 1536u
 static uint8_t rx_buf[RX_BUF_SIZE];
+static uint8_t s_eth_tx[ETH_HLEN + ETH_MAX_PAYLOAD];
 
 /* ── net_init ─────────────────────────────────────────────────────────────── */
 void net_init(void) {
@@ -62,19 +63,16 @@ bool net_send_eth(const uint8_t dst_mac[6], uint16_t ethertype,
                   const void *payload, size_t payload_len) {
     if (payload_len > ETH_MAX_PAYLOAD) return false;
 
-    /* Build frame in a local buffer: eth header + payload */
-    uint8_t frame[ETH_HLEN + ETH_MAX_PAYLOAD];
-    eth_hdr_t *hdr = (eth_hdr_t *)frame;
-
+    eth_hdr_t *hdr = (eth_hdr_t *)s_eth_tx;
     for (int i = 0; i < 6; i++) hdr->dst[i] = dst_mac[i];
     for (int i = 0; i < 6; i++) hdr->src[i] = net_mac[i];
     hdr->ethertype = htons(ethertype);
 
     const uint8_t *src = (const uint8_t *)payload;
-    uint8_t *dst = frame + ETH_HLEN;
+    uint8_t       *dst = s_eth_tx + ETH_HLEN;
     for (size_t i = 0; i < payload_len; i++) dst[i] = src[i];
 
-    return net_nic_send(frame, ETH_HLEN + payload_len);
+    return net_nic_send(s_eth_tx, ETH_HLEN + payload_len);
 }
 
 /* ── net_poll ─────────────────────────────────────────────────────────────── */

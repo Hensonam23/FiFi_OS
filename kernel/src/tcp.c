@@ -263,7 +263,7 @@ bool tcp_connect(uint32_t dst_ip, uint16_t dst_port) {
                         ? dst_ip : net_gateway;
     uint8_t dummy[6];
     if (!arp_resolve(next_hop, dummy)) {
-        uint64_t dl = pit_ticks() + 200u;
+        uint64_t dl = pit_ticks() + 400u;
         while (pit_ticks() < dl) {
             net_poll();
             if (arp_resolve(next_hop, dummy)) break;

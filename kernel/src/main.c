@@ -43,14 +43,11 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 0
 };
 
-
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST_ID,
     .revision = 0
 };
-
-
 
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
@@ -93,12 +90,10 @@ int memcmp(const void *s1, const void *s2, size_t n) {
     return 0;
 }
 
-
 static void pic_mask_all(void) {
     outb(0x21, 0xFF);
     outb(0xA1, 0xFF);
 }
-
 
 void kmain(void) {
     uint64_t hhdm_off = 0;
@@ -123,18 +118,10 @@ void kmain(void) {
         panic("no framebuffer available");
     }
     serial_write("FiFi OS: framebuffer OK\n");
-    {
-        struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-        kprintf("FiFi OS: fb addr=%p %ux%u pitch=%u bpp=%u\n",
-            fb->address,
-            (unsigned)fb->width,
-            (unsigned)fb->height,
-            (unsigned)fb->pitch,
-            (unsigned)fb->bpp);
-    }
-    initrd_init();
-    initrd_cat("motd.txt");
-struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    kprintf("FiFi OS: fb addr=%p %ux%u pitch=%u bpp=%u\n",
+        fb->address, (unsigned)fb->width, (unsigned)fb->height,
+        (unsigned)fb->pitch, (unsigned)fb->bpp);
     console_init(fb);
     statusbar_init(fb->width);
 
@@ -166,19 +153,14 @@ struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     /* FiFi OS: hhdm offset */
     serial_write("FiFi OS: hhdm offset...\n");
     if (!hhdm_request.response) {
-        serial_write("FiFi OS: hhdm missing\n");
-    } else {
-        kprintf("FiFi OS: hhdm offset=%p\n", (void*)(uintptr_t)hhdm_request.response->offset);
-}
+        panic("HHDM response missing — cannot map physical memory");
+    }
+    hhdm_off = hhdm_request.response->offset;
+    kprintf("FiFi OS: hhdm offset=%p\n", (void*)(uintptr_t)hhdm_off);
 
     /* FiFi OS: init PMM (simple bump allocator) */
-    if (hhdm_request.response) {
-        hhdm_off = hhdm_request.response->offset;
-    }
     pmm_init(memmap_request.response, hhdm_off);
-        kprintf("FiFi OS: ACPI autoinit disabled (boot is stable).\n");
-        kprintf("FiFi OS: (Re-enable later after ACPI uses HHDM-safe pointers.)\n");
-heap_init();
+    heap_init();
     vmm_init(hhdm_off);
     /* VMM map test */
     uint64_t test_phys = pmm_alloc_page();
@@ -266,17 +248,4 @@ heap_init();
                 (unsigned)t, (unsigned)f, (unsigned)u);
     }
     shell_run();
-
-    serial_write("FiFi OS: entering idle loop (hlt)\n");
-
-    uint64_t start = pit_ticks();
-    while ((pit_ticks() - start) < 100) {        }
-        __asm__ volatile ("hlt");
-    
-    serial_write("FiFi OS: timer confirmed\n");
-    serial_write("FiFi OS: entering idle loop (hlt)\n");
-    for (;;) {
-        __asm__ volatile ("hlt");
-        (void)pit_ticks();
-    }
 }
