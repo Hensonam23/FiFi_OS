@@ -5,6 +5,7 @@
 #include "acpi.h"
 #include "net.h"
 #include "statusbar.h"
+#include "i2c_hid.h"
 
 #define PIT_CH0  0x40
 #define PIT_CMD  0x43
@@ -19,11 +20,13 @@ uint32_t pit_get_hz(void)    { return g_pit_hz; }
 /* This will be called by the IRQ0 handler */
 void pit_on_tick(void) {
     g_ticks++;
-    keyboard_ps2_poll();  /* PS/2 fallback — works even without IRQ1 */
+    keyboard_ps2_poll();   /* PS/2 fallback — works even without IRQ1 */
+    keyboard_repeat_tick(); /* fire held-key repeat events */
     acpi_ec_poll();       /* EC SCI drain — reads + query only, safe */
     xhci_poll();
     net_poll();           /* drain virtio-net RX queue, dispatch ARP/IP */
     statusbar_on_tick();  /* redraw bar once per second */
+    i2c_hid_poll();       /* I2C-HID touchpad motion */
 }
 
 void pit_init(uint32_t hz) {

@@ -12,6 +12,7 @@
 #include "serial.h"
 #include "vmm.h"
 #include "acpi.h"
+#include "mouse.h"
 
 
 /* ---- exception debug helpers (auto-generated) ---- */
@@ -131,7 +132,8 @@ void isr_common_handler(isr_ctx_t *ctx) {
     if (vec >= 32 && vec < 48) {
         uint8_t irq = (uint8_t)(vec - 32);
         if (irq < 16) irq_counters[irq]++;
-        if (irq == 1) keyboard_irq_handler();
+        if (irq == 1)  keyboard_irq_handler();
+        if (irq == 12) mouse_irq_handler();
 
         /* Timer tick (IRQ0) */
         if (irq == 0) {

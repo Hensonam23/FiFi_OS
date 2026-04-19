@@ -15,7 +15,10 @@
 #include "virtio_blk.h"
 #include "virtio_net.h"
 #include "net.h"
+#include "udp.h"
+#include "isr.h"
 #include "arp.h"
+#include "pit.h"
 #include "ip.h"
 #include "dhcp.h"
 #include "dns.h"
@@ -23,6 +26,8 @@
 #include "ext2.h"
 #include "xhci.h"
 #include "splash.h"
+#include "i2c_hid.h"
+#include "pci.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1395,6 +1400,36 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         return;
     }
 
+    if (streq_simple(argv[0], "touchpad")) {
+        i2c_hid_status();
+        return;
+    }
+
+    if (streq_simple(argv[0], "pci-scan")) {
+        kprintf("Bus:Dev.Fn  VenID:DevID  Class Sub  PI\n");
+        for (uint32_t bus = 0; bus < 256; bus++) {
+            for (uint32_t dev = 0; dev < 32; dev++) {
+                uint32_t id0 = pci_read32((uint8_t)bus, (uint8_t)dev, 0, 0x00);
+                if ((id0 & 0xFFFF) == 0xFFFF) continue;
+                uint8_t hdr = pci_read8((uint8_t)bus, (uint8_t)dev, 0, 0x0E);
+                uint8_t fns = (hdr & 0x80) ? 8 : 1;
+                for (uint8_t fn = 0; fn < fns; fn++) {
+                    uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x00);
+                    if ((id & 0xFFFF) == 0xFFFF) continue;
+                    uint32_t cr = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x08);
+                    uint16_t vid = (uint16_t)(id & 0xFFFF);
+                    uint16_t did = (uint16_t)(id >> 16);
+                    uint8_t  cls = (uint8_t)(cr >> 24);
+                    uint8_t  sub = (uint8_t)(cr >> 16);
+                    uint8_t  pi  = (uint8_t)(cr >>  8);
+                    kprintf("%02x:%02x.%x  %04x:%04x  0x%02x  0x%02x 0x%02x\n",
+                            bus, dev, fn, vid, did, cls, sub, pi);
+                }
+            }
+        }
+        return;
+    }
+
     if (streq_simple(argv[0], "ai")) {
         kprintf("AI agent: not installed yet.\n");
         kprintf("Plan: docs/ai-agent-plan.md\n");
@@ -1448,6 +1483,98 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
 
     if (streq_simple(argv[0], "dhcp")) {
         dhcp_request();
+        return;
+    }
+
+    if (streq_simple(argv[0], "report")) {
+        /* Collect keyboard + system diagnostics and send as UDP text to a host.
+         * Usage: report [ip]   (default: gateway)
+         * On the receiving machine run:  nc -ulk 7777
+         *
+         * Minimal buffer builder — no snprintf in this kernel. */
+        static char rbuf[1400];
+        int rn = 0;
+#define RB_CH(c) do { if (rn < (int)sizeof(rbuf)-1) rbuf[rn++] = (c); } while(0)
+#define RB_STR(s) do { const char *_s=(s); while(*_s && rn<(int)sizeof(rbuf)-1) rbuf[rn++]=*_s++; } while(0)
+#define RB_U32(v) do { \
+    uint32_t _v=(uint32_t)(v); char _t[12]; int _i=0; \
+    if(!_v){_t[_i++]='0';}else{while(_v){_t[_i++]=(char)('0'+_v%10);_v/=10;}} \
+    while(_i>0){RB_CH(_t[--_i]);} } while(0)
+#define RB_HEX(v) do { \
+    uint32_t _v=(uint32_t)(v); RB_STR("0x"); \
+    for(int _b=28;_b>=0;_b-=4){int _d=(_v>>_b)&0xF; RB_CH(_d<10?'0'+_d:'a'+_d-10);} } while(0)
+#define RB_IP(ip) do { uint32_t _ip=(ip); \
+    RB_U32((_ip>>24)&0xFF); RB_CH('.'); RB_U32((_ip>>16)&0xFF); RB_CH('.'); \
+    RB_U32((_ip>>8)&0xFF);  RB_CH('.'); RB_U32(_ip&0xFF); } while(0)
+
+        RB_STR("=== FiFi OS Keyboard Report ===\n");
+
+        /* PS/2 diagnostic */
+        RB_STR("PS/2 IRQ count: "); RB_U32(keyboard_irq_count()); RB_CH('\n');
+        RB_STR("IRQ0 ticks: ");     RB_U32(isr_get_irq_count(0));  RB_CH('\n');
+        RB_STR("IRQ1 kbd:   ");     RB_U32(isr_get_irq_count(1));  RB_CH('\n');
+        RB_STR("IRQ12 aux:  ");     RB_U32(isr_get_irq_count(12)); RB_CH('\n');
+
+        /* Scancode activity — list every code with >0 makes */
+        RB_STR("Scancode make/break counts (non-zero):\n");
+        for (int sc = 0; sc < 128; sc++) {
+            uint32_t m = keyboard_sc_make((uint8_t)sc);
+            uint32_t b = keyboard_sc_break((uint8_t)sc);
+            if (!m && !b) continue;
+            RB_STR("  sc="); RB_HEX(sc);
+            RB_STR(" make="); RB_U32(m);
+            RB_STR(" break="); RB_U32(b);
+            /* flag if makes >> breaks (ghost with no break) or rapid cycling */
+            if (m > b + 5)       RB_STR(" [GHOST-NOBREAK]");
+            else if (m > 20)     RB_STR(" [HIGH-RATE]");
+            RB_CH('\n');
+        }
+
+        /* Network */
+        RB_STR("Network IP: "); RB_IP(net_ip);      RB_CH('\n');
+        RB_STR("Gateway:    "); RB_IP(net_gateway); RB_CH('\n');
+        rbuf[rn] = '\0';
+
+        /* Print to screen always */
+        kprintf("%s", rbuf);
+
+        /* Send via UDP if NIC present */
+        uint32_t dst = net_gateway;
+        if (argc >= 2 && !parse_ip4(argv[1], &dst)) {
+            kprintf("report: bad IP, using gateway\n");
+            dst = net_gateway;
+        }
+        if (!dst) {
+            kprintf("report: no gateway — can't send UDP. Output shown above.\n");
+            kprintf("Hint: run 'dhcp' first, or: report <homeserver-ip>\n");
+        } else if (!net_nic_present()) {
+            kprintf("report: no NIC detected. Data printed above.\n");
+        } else {
+            /* Resolve ARP before sending UDP — first packet would be dropped otherwise */
+            uint8_t arp_mac[6];
+            if (!arp_resolve(dst, arp_mac)) {
+                kprintf("report: waiting for ARP...\n");
+                uint64_t deadline = pit_ticks() + 400u;  /* 4s @ 100Hz */
+                while (pit_ticks() < deadline) {
+                    net_poll();
+                    if (arp_resolve(dst, arp_mac)) break;
+                }
+            }
+            if (udp_send(dst, 7777, 7777, rbuf, (size_t)rn)) {
+                kprintf("report: sent %d bytes to ", rn);
+                kprintf("%u.%u.%u.%u", (unsigned)(dst>>24),(unsigned)((dst>>16)&0xFF),
+                        (unsigned)((dst>>8)&0xFF),(unsigned)(dst&0xFF));
+                kprintf(":7777\n");
+                kprintf("(run 'nc -ulk 7777' on homeserver to receive)\n");
+            } else {
+                kprintf("report: UDP send failed. Data printed above.\n");
+            }
+        }
+#undef RB_CH
+#undef RB_STR
+#undef RB_U32
+#undef RB_HEX
+#undef RB_IP
         return;
     }
 
@@ -1748,6 +1875,11 @@ void shell_run(void) {
     // (C doesn't have real local functions; we do comparisons inline below.)
 
     splash_show();
+
+    /* Discard all EC boot-time ghost key injections before the user sees the prompt.
+     * The EC injects PS/2 makes without breaks during hardware init, leaving stuck
+     * held-key bits and garbage in the ring buffer. */
+    keyboard_clear_state();
 
     line[0] = 0;
     kprintf("%s", prompt);

@@ -1062,6 +1062,7 @@ static int try_enumerate_kbd(uint8_t slot, uint8_t root_port1, uint8_t speed,
                          TRB_TYPE(TRB_NORMAL) | TRB_IOC);
         }
         ring_doorbell((uint8_t)slot, (uint8_t)g.kbd_ep_dci);
+        keyboard_set_hid_present();   /* suppress EC PS/2 ghost injections */
         return 1;  /* keyboard ready */
     }
 
@@ -1480,11 +1481,42 @@ static const uint8_t hid2asc_sh[256] = {
     KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP,
 };
 
+static uint8_t hid_ext_sc(uint8_t ch) {
+    switch (ch) {
+        case KEY_LEFT:   return 0x4Bu;
+        case KEY_RIGHT:  return 0x4Du;
+        case KEY_UP:     return 0x48u;
+        case KEY_DOWN:   return 0x50u;
+        case KEY_DELETE: return 0x53u;
+        case KEY_HOME:   return 0x47u;
+        case KEY_END:    return 0x4Fu;
+        default:         return 0;
+    }
+}
+
 static void process_hid_report(const uint8_t *rep) {
     uint8_t mods  = rep[0];
     bool    shift = (mods & 0x22u) != 0;
     bool    ctrl  = (mods & 0x11u) != 0;
 
+    /* Detect key releases: fire break events for keys no longer in report */
+    for (int j = 0; j < 6; j++) {
+        uint8_t kc = g.last_keys[j];
+        if (!kc) continue;
+        bool still_down = false;
+        for (int i = 2; i < 8; i++) { if (rep[i] == kc) { still_down = true; break; } }
+        if (still_down) continue;
+        uint8_t rch = hid2asc[kc];
+        if (!rch) continue;
+        if (rch >= 0x80u) {
+            uint8_t ext = hid_ext_sc(rch);
+            if (ext) { keyboard_on_scancode(0xE0); keyboard_on_scancode(ext | 0x80u); }
+        } else {
+            keyboard_hid_break(kc);
+        }
+    }
+
+    /* Process new key presses */
     for (int i = 2; i < 8; i++) {
         uint8_t kc = rep[i];
         if (!kc || kc == 1) continue;
@@ -1496,22 +1528,13 @@ static void process_hid_report(const uint8_t *rep) {
         if (!ch) continue;
 
         if (ch >= 0x80) {
-            /* Special key: inject via PS/2 extended scancode path */
-            uint8_t ext = 0;
-            switch (ch) {
-                case KEY_LEFT:   ext = 0x4Bu; break;
-                case KEY_RIGHT:  ext = 0x4Du; break;
-                case KEY_UP:     ext = 0x48u; break;
-                case KEY_DOWN:   ext = 0x50u; break;
-                case KEY_DELETE: ext = 0x53u; break;
-                case KEY_HOME:   ext = 0x47u; break;
-                case KEY_END:    ext = 0x4Fu; break;
-            }
+            /* Special key: inject via PS/2 extended scancode path (repeat handled there) */
+            uint8_t ext = hid_ext_sc(ch);
             if (ext) { keyboard_on_scancode(0xE0); keyboard_on_scancode(ext); }
         } else if (ctrl && ch >= 'a' && ch <= 'z') {
             keyboard_push_char((uint8_t)(ch - 'a' + 1));
         } else {
-            keyboard_push_char(ch);
+            keyboard_hid_make(kc, ch);
         }
     }
     for (int i = 0; i < 6; i++) g.last_keys[i] = rep[i + 2];
