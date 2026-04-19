@@ -34,6 +34,56 @@ static bool shift_down = false;
 static bool ctrl_down  = false;
 static bool ext_e0     = false;
 
+/* Per-scancode raw event counters (counted BEFORE any filtering, so they show
+ * what the hardware/EC is actually sending). */
+static volatile uint32_t sc_make_cnt[128]  = {0};
+static volatile uint32_t sc_break_cnt[128] = {0};
+
+uint32_t keyboard_sc_make(uint8_t sc)  { return sc < 128 ? (uint32_t)sc_make_cnt[sc]  : 0; }
+uint32_t keyboard_sc_break(uint8_t sc) { return sc < 128 ? (uint32_t)sc_break_cnt[sc] : 0; }
+
+/* Held-key bitmask: tracks which scancodes have been pressed but not yet released.
+ * Duplicate make codes (hardware autorepeat, EC ghost keys) are filtered here —
+ * only the FIRST make is processed; all subsequent makes without a break are dropped.
+ * Two 64-bit words cover scancodes 0x00-0x3F and 0x40-0x7F respectively.
+ * Extended (E0-prefixed) scancodes tracked separately in g_sc_held_ext. */
+static volatile uint64_t g_sc_held[2]  = {0, 0};
+static volatile uint64_t g_sc_held_ext = 0;
+
+/* Key repeat state */
+static volatile uint8_t  g_rep_char  = 0;
+static volatile uint8_t  g_rep_sc    = 0;
+static volatile bool     g_rep_ext   = false;
+static volatile uint64_t g_rep_start = 0;
+static volatile uint64_t g_rep_last  = 0;
+
+#define REP_DELAY_TICKS 45u   /* 450ms initial delay before first repeat */
+#define REP_RATE_TICKS   3u   /* 30ms between repeats (~33 chars/sec) */
+#define REP_MAX_TICKS  300u   /* 3s safety cap — clears stuck ghost keys */
+
+/* HID keycode currently driving repeat (0 = none / PS/2 path owns repeat) */
+static volatile uint8_t g_hid_rep_kc = 0;
+
+/* Set to true when a USB HID keyboard is detected. While true, non-extended
+ * non-modifier PS/2 makes are silently dropped — they are EC ghost injections. */
+static volatile bool g_hid_kb_present = false;
+
+void keyboard_set_hid_present(void) {
+    g_hid_kb_present = true;
+}
+
+/* Called once before the shell starts to discard all EC boot-time ghost injections. */
+void keyboard_clear_state(void) {
+    g_sc_held[0]  = 0;
+    g_sc_held[1]  = 0;
+    g_sc_held_ext = 0;
+    g_rep_char    = 0;
+    g_rep_sc      = 0;
+    g_rep_ext     = false;
+    g_hid_rep_kc  = 0;
+    kbd_tail      = kbd_head;   /* drain ring buffer */
+}
+
 static void kbd_push(uint8_t c) {
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
     if (next == kbd_tail) {
@@ -79,79 +129,148 @@ static const char map_shift[128] = {
     '*', 0,   ' ', 0,
 };
 
-void keyboard_on_scancode(uint8_t sc) {
-    // Handle E0 extended prefix
-    if (sc == 0xE0) {
-        ext_e0 = true;
+static void rep_set(uint8_t ch, uint8_t sc, bool is_ext) {
+    extern uint64_t pit_ticks(void);
+    uint64_t now = pit_ticks();
+    g_rep_char  = ch;
+    g_rep_sc    = sc;
+    g_rep_ext   = is_ext;
+    g_rep_start = now;
+    g_rep_last  = now;
+}
+
+void keyboard_repeat_tick(void) {
+    if (!g_rep_char) return;
+    extern uint64_t pit_ticks(void);
+    uint64_t now = pit_ticks();
+    if (now - g_rep_start >= REP_MAX_TICKS) {
+        /* Release the held-key bit so the key can be pressed again after ghost expires */
+        if (!g_rep_ext) g_sc_held[g_rep_sc >> 6] &= ~(1ULL << (g_rep_sc & 63));
+        else            g_sc_held_ext             &= ~(1ULL << (g_rep_sc & 63));
+        g_rep_char = 0;
         return;
     }
+    if (now - g_rep_start <  REP_DELAY_TICKS) return;
+    if (now - g_rep_last  <  REP_RATE_TICKS)  return;
+    kbd_push(g_rep_char);
+    g_rep_last = now;
+}
+
+void keyboard_on_scancode(uint8_t sc) {
+    if (sc == 0xE0) { ext_e0 = true; return; }
 
     bool released = (sc & 0x80) != 0;
-    uint8_t code = (uint8_t)(sc & 0x7F);
+    uint8_t code  = (uint8_t)(sc & 0x7F);
+    bool is_ext   = ext_e0;
 
-    // Update modifier state (press + release)
-    if (!ext_e0) {
-        // Shift make/break
-        if (code == 0x2A || code == 0x36) {
-            shift_down = !released;
-            return;
-        }
-        // Left Ctrl make/break
-        if (code == 0x1D) {
-            ctrl_down = !released;
-            return;
-        }
-    } else {
-        // Right Ctrl in set1 is typically E0 1D / E0 9D
-        if (code == 0x1D) {
-            ctrl_down = !released;
-            ext_e0 = false;
-            return;
-        }
+    /* Count every raw scancode before any filtering */
+    if (code < 128) {
+        if (released) sc_break_cnt[code]++;
+        else          sc_make_cnt[code]++;
     }
 
-    // Ignore BREAK scancodes for all non-modifier keys (THIS FIXES DOUBLE TYPING)
+    /* Modifiers handled separately — not subject to held-key filter */
+    if (!ext_e0) {
+        if (code == 0x2A || code == 0x36) { shift_down = !released; return; }
+        if (code == 0x1D)                 { ctrl_down  = !released; return; }
+    } else {
+        if (code == 0x1D) { ctrl_down = !released; ext_e0 = false; return; }
+    }
+
     if (released) {
+        /* Clear held-key bit so the key can be pressed again */
+        if (!is_ext) g_sc_held[code >> 6] &= ~(1ULL << (code & 63));
+        else         g_sc_held_ext        &= ~(1ULL << (code & 63));
+        /* Stop repeat */
+        if (code == g_rep_sc && is_ext == g_rep_ext) g_rep_char = 0;
         ext_e0 = false;
         return;
     }
 
-    // Handle extended keys (arrows/home/end/delete)
-    if (ext_e0) {
-        ext_e0 = false;
-        switch (code) {
-            case 0x4B: kbd_push(KEY_LEFT);   return; // left
-            case 0x4D: kbd_push(KEY_RIGHT);  return; // right
-            case 0x48: kbd_push(KEY_UP);     return; // up
-            case 0x50: kbd_push(KEY_DOWN);   return; // down
-            case 0x53: kbd_push(KEY_DELETE); return; // delete
-            case 0x47: kbd_push(KEY_HOME);   return; // home
-            case 0x4F: kbd_push(KEY_END);    return; // end
-            default: return;
-        }
+    /* When a USB HID keyboard is present, non-extended non-modifier makes are
+     * EC ghost injections (scancode without a matching break). Drop them silently
+     * so they cannot insert characters or drive the repeat engine. */
+    if (!is_ext && g_hid_kb_present) {
+        return;
     }
 
-    // Normal ASCII mapping
+    /* Duplicate-make filter: EC ghost keys and hardware autorepeat both send
+     * repeated make codes without an intervening break. The first make sets the
+     * held bit; all subsequent makes until a break are silently dropped.
+     * Software repeat (keyboard_repeat_tick) handles the actual repetition. */
+    if (!is_ext) {
+        uint64_t bit = 1ULL << (code & 63);
+        if (g_sc_held[code >> 6] & bit) return;   /* already held — drop */
+        g_sc_held[code >> 6] |= bit;
+    } else {
+        uint64_t bit = 1ULL << (code & 63);
+        if (g_sc_held_ext & bit) { ext_e0 = false; return; }
+        g_sc_held_ext |= bit;
+    }
+
+    /* Extended keys (arrows / home / end / delete) */
+    if (ext_e0) {
+        ext_e0 = false;
+        uint8_t kc = 0;
+        switch (code) {
+            case 0x4B: kc = KEY_LEFT;   break;
+            case 0x4D: kc = KEY_RIGHT;  break;
+            case 0x48: kc = KEY_UP;     break;
+            case 0x50: kc = KEY_DOWN;   break;
+            case 0x53: kc = KEY_DELETE; break;
+            case 0x47: kc = KEY_HOME;   break;
+            case 0x4F: kc = KEY_END;    break;
+            default: ext_e0 = false; return;   /* unknown ext scancode — clear flag */
+        }
+        kbd_push(kc);
+        rep_set(kc, code, true);
+        return;
+    }
+
+    /* Normal ASCII */
     char c = shift_down ? map_shift[code] : map_norm[code];
     if (!c) return;
 
-    /* Ctrl combos → ASCII control codes (Ctrl+A=1 … Ctrl+Z=26) */
+    /* Ctrl combos — no repeat */
     if (ctrl_down) {
         char lc = c;
         if (lc >= 'A' && lc <= 'Z') lc = (char)(lc - 'A' + 'a');
         if (lc >= 'a' && lc <= 'z') {
-            if (lc == 'c') thread_signal_children();   /* Ctrl-C: SIGINT to children */
-            if (lc == 'z') thread_sigtstp_children();  /* Ctrl-Z: SIGTSTP to children */
-            kbd_push((uint8_t)(lc - 'a' + 1));         /* also buffer control code for readline */
+            if (lc == 'c') thread_signal_children();
+            if (lc == 'z') thread_sigtstp_children();
+            kbd_push((uint8_t)(lc - 'a' + 1));
+            g_rep_char = 0;
             return;
         }
     }
 
     kbd_push((uint8_t)c);
+    rep_set((uint8_t)c, code, false);
 }
 
 void keyboard_push_char(uint8_t c) {
     kbd_push(c);
+}
+
+/* USB HID key pressed: push char and arm repeat (bypasses PS/2 scancode path). */
+void keyboard_hid_make(uint8_t kc, uint8_t ch) {
+    extern uint64_t pit_ticks(void);
+    uint64_t now = pit_ticks();
+    kbd_push(ch);
+    g_hid_rep_kc = kc;
+    g_rep_char   = ch;
+    g_rep_sc     = 0;
+    g_rep_ext    = false;
+    g_rep_start  = now;
+    g_rep_last   = now;
+}
+
+/* USB HID key released: stop repeat if this key was driving it. */
+void keyboard_hid_break(uint8_t kc) {
+    if (g_hid_rep_kc == kc) {
+        g_rep_char   = 0;
+        g_hid_rep_kc = 0;
+    }
 }
 
 static volatile bool ps2_present = false;
@@ -239,26 +358,69 @@ void keyboard_ps2_init(void) {
     kprintf("[ps2] final status=0x%x\n", (unsigned)inb(0x64));
     ps2_present = true;
 
-    /* Enable PS/2 AUX port (mouse) */
-    if (i8042_wait_write()) outb(0x64, 0xA8);     /* enable AUX port */
+    /* Probe for a PS/2 AUX device before enabling the port.
+     * Some laptops have I2C touchpads that don't respond to PS/2 commands.
+     * If we enable data reporting (0xF4) blindly, the AUX port can inject
+     * garbage bytes into the keyboard stream and cause phantom keypresses.
+     *
+     * Strategy:
+     *   1. Enable AUX port temporarily (0xA8)
+     *   2. Send 0xF5 (disable reporting) — any PS/2 device must ACK this
+     *   3. If no ACK within timeout → no PS/2 AUX device → disable port again
+     *   4. If ACK → real PS/2 mouse/touchpad → enable reporting (0xF4) + IRQ12
+     */
+    if (i8042_wait_write()) outb(0x64, 0xA8);  /* enable AUX port */
+    i8042_flush();
 
-    /* Read config and enable AUX IRQ12, clear AUX clock-disable bit */
-    uint8_t mcfg = 0;
-    if (i8042_wait_write()) outb(0x64, 0x20);
-    if (i8042_wait_read())  mcfg = inb(0x60);
-    mcfg |=  (1u << 1);   /* enable AUX interrupt */
-    mcfg &= ~(1u << 5);   /* clear AUX clock disable */
-    if (i8042_wait_write()) outb(0x64, 0x60);
-    if (i8042_wait_write()) outb(0x60, mcfg);
-
-    /* Send 0xF4 (enable data reporting) to mouse via AUX prefix 0xD4 */
+    /* Probe: send 0xF5 (disable reporting) and listen for ACK */
+    bool aux_present = false;
     if (i8042_wait_write()) outb(0x64, 0xD4);
-    if (i8042_wait_write()) outb(0x60, 0xF4);
-    for (int mi = 0; mi < 100000; mi++) {
-        if (inb(0x64) & 0x01) { (void)inb(0x60); break; }
+    if (i8042_wait_write()) outb(0x60, 0xF5);
+    for (int mi = 0; mi < 200000; mi++) {
+        if (inb(0x64) & 0x01) {
+            uint8_t r = inb(0x60);
+            if (r == 0xFA) { aux_present = true; break; }
+            if (r == 0xFE) break;
+        }
     }
     i8042_flush();
-    kprintf("[ps2] mouse enabled\n");
+
+    if (!aux_present) {
+        /* No PS/2 device: disable AUX port to prevent ghost bytes from leaking
+         * into the keyboard stream. I2C touchpads use a separate driver. */
+        if (i8042_wait_write()) outb(0x64, 0xA7);  /* disable AUX port */
+        uint8_t xcfg = 0;
+        if (i8042_wait_write()) outb(0x64, 0x20);
+        if (i8042_wait_read())  xcfg = inb(0x60);
+        xcfg &= ~(1u << 1);  /* clear IRQ12 enable */
+        xcfg |=  (1u << 5);  /* set AUX clock disable */
+        if (i8042_wait_write()) outb(0x64, 0x60);
+        if (i8042_wait_write()) outb(0x60, xcfg);
+        kprintf("[ps2] no PS/2 AUX device (I2C touchpad?) — AUX port disabled\n");
+    } else {
+        /* PS/2 device present: enable IRQ12 + enable data reporting */
+        uint8_t mcfg = 0;
+        if (i8042_wait_write()) outb(0x64, 0x20);
+        if (i8042_wait_read())  mcfg = inb(0x60);
+        mcfg |=  (1u << 1);  /* enable IRQ12 */
+        mcfg &= ~(1u << 5);  /* clear AUX clock disable */
+        if (i8042_wait_write()) outb(0x64, 0x60);
+        if (i8042_wait_write()) outb(0x60, mcfg);
+
+        bool mouse_ack = false;
+        if (i8042_wait_write()) outb(0x64, 0xD4);
+        if (i8042_wait_write()) outb(0x60, 0xF4);  /* enable reporting */
+        for (int mi = 0; mi < 100000; mi++) {
+            if (inb(0x64) & 0x01) {
+                uint8_t r = inb(0x60);
+                if (r == 0xFA) { mouse_ack = true; break; }
+                if (r == 0xFE) break;
+            }
+        }
+        i8042_flush();
+        kprintf("[ps2] PS/2 AUX device present: reporting %s\n",
+                mouse_ack ? "enabled" : "enable failed");
+    }
 }
 
 /* Poll PS/2 port directly — called from pit_on_tick() at 100Hz.

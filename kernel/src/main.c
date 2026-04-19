@@ -33,6 +33,7 @@
 #include "statusbar.h"
 #include "dhcp.h"
 #include "mouse.h"
+#include "i2c_hid.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
@@ -152,6 +153,7 @@ void kmain(void) {
     pic_unmask_irq(1);
     pic_unmask_irq(2);
     pic_unmask_irq(9);
+    pic_unmask_irq(12);
     __asm__ volatile ("sti");
     keyboard_ps2_init();
 
@@ -193,5 +195,6 @@ void kmain(void) {
     }
 
     mouse_init();
+    i2c_hid_init();
     shell_run();
 }
