@@ -168,7 +168,9 @@ static struct {
 
     uint64_t cx, cy;        /* cursor in character cells */
     uint64_t cols, rows;    /* visible cell grid dimensions */
-    uint64_t y_offset;      /* reserved pixel rows at top (status bar) */
+    uint64_t y_offset;      /* reserved pixel rows at top (status bar / window y) */
+    uint64_t x_off;         /* pixel x where text area starts */
+    uint64_t vp_h;          /* viewport height in pixels */
     uint32_t fg;
     uint32_t bg;
     bool initialized;
@@ -179,7 +181,7 @@ static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 /* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
-    const uint64_t px = cell_x * g_fw;
+    const uint64_t px = con.x_off + cell_x * g_fw;
     const uint64_t py = cell_y * g_fh + con.y_offset;
     if (px + g_fw > con.w || py + g_fh > con.h) return;
 
@@ -231,9 +233,9 @@ static void scroll_one_line(void) {
 
     /* Clear any fractional pixel rows below the last cell row */
     uint64_t used_h = vr * g_fh;
-    uint64_t text_h = con.h - con.y_offset;
-    if (used_h < text_h)
-        fill_rect(0, con.y_offset + used_h, con.w, text_h - used_h, con.bg);
+    if (used_h < con.vp_h)
+        fill_rect(con.x_off, con.y_offset + used_h,
+                  con.cols * g_fw, con.vp_h - used_h, con.bg);
 }
 
 static void ensure_cursor_visible(void) {
@@ -267,7 +269,7 @@ void console_set_colors(uint32_t fg, uint32_t bg) {
 
 void console_clear(void) {
     if (!con.initialized) return;
-    fill_rect(0, con.y_offset, con.w, con.h - con.y_offset, con.bg);
+    fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
     con.cx = 0;
     con.cy = 0;
     for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
@@ -281,6 +283,8 @@ void console_init(struct limine_framebuffer *fb) {
     con.w = fb->width;
     con.h = fb->height;
     con.y_offset = 0;
+    con.x_off = 0;
+    con.vp_h = con.h;
     con.cols = con.w / g_fw;
     con.rows = con.h / g_fh;
     con.cx = 0;
@@ -301,7 +305,10 @@ void console_init(struct limine_framebuffer *fb) {
 void console_set_y_offset(uint64_t offset) {
     if (!con.initialized) return;
     con.y_offset = offset;
-    con.rows = (con.h - offset) / g_fh;
+    con.vp_h = con.h - offset;
+    con.cols = (con.w - con.x_off) / g_fw;
+    con.rows = con.vp_h / g_fh;
+    if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
     if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
     if (con.cy >= con.rows && con.rows > 0) con.cy = con.rows - 1;
     /* Re-render cell buffer at the new pixel offset */
@@ -335,6 +342,8 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
 
 uint64_t console_fb_width(void)           { return con.w; }
 uint64_t console_fb_height(void)          { return con.h; }
+uint64_t console_viewport_x(void)         { return con.x_off; }
+uint64_t console_viewport_y(void)         { return con.y_offset; }
 volatile uint32_t *console_fb_ptr(void)   { return con.pix; }
 uint64_t           console_pitch32(void)  { return con.pitch32; }
 
@@ -477,12 +486,26 @@ bool console_load_psf(const char *path) {
 
     /* recalculate grid and redraw */
     if (con.initialized) {
-        con.cols = con.w / g_fw;
-        con.rows = (con.h - con.y_offset) / g_fh;
+        con.cols = (con.w - con.x_off) / g_fw;
+        con.rows = con.vp_h / g_fh;
         if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
         if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
         con.cx = 0; con.cy = 0;
         console_clear();
     }
     return true;
+}
+
+void console_set_viewport(uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!con.initialized) return;
+    con.x_off    = x;
+    con.y_offset = y;
+    con.vp_h     = h;
+    con.cols     = w / g_fw;
+    con.rows     = h / g_fh;
+    if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
+    if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
+    if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
+    if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
+    console_clear();
 }
