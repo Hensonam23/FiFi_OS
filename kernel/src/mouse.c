@@ -71,6 +71,10 @@ static int32_t m_x = 0, m_y = 0;
 static bool    m_lbtn = false, m_rbtn = false;
 static bool    m_active = false;
 
+/* ── Click detection (rising edge of left button) ────────────────────────── */
+static bool    m_clicked  = false;
+static int32_t m_click_x  = 0, m_click_y = 0;
+
 /* ── Internal helpers ────────────────────────────────────────────────────── */
 
 static void cursor_restore(void) {
@@ -180,12 +184,11 @@ void mouse_on_byte(uint8_t b) {
     if (m_pkt_idx < 3u) return;
     m_pkt_idx = 0u;
 
-    uint8_t  flags = m_pkt[0];
-    int32_t  dx    = (int32_t)m_pkt[1] - ((flags & 0x10u) ? 256 : 0);
-    int32_t  dy    = (int32_t)m_pkt[2] - ((flags & 0x20u) ? 256 : 0);
-
-    m_lbtn = (flags & 0x01u) != 0u;
-    m_rbtn = (flags & 0x02u) != 0u;
+    uint8_t  flags    = m_pkt[0];
+    int32_t  dx       = (int32_t)m_pkt[1] - ((flags & 0x10u) ? 256 : 0);
+    int32_t  dy       = (int32_t)m_pkt[2] - ((flags & 0x20u) ? 256 : 0);
+    bool     new_lbtn = (flags & 0x01u) != 0u;
+    bool     new_rbtn = (flags & 0x02u) != 0u;
 
     /* PS/2 Y is inverted: positive delta = upward on screen */
     int32_t nx = m_x + dx;
@@ -196,12 +199,29 @@ void mouse_on_byte(uint8_t b) {
     if (nx < 0) nx = 0; if (nx >= sw) nx = sw - 1;
     if (ny < 0) ny = 0; if (ny >= sh) ny = sh - 1;
 
+    /* rising edge of left button → record click */
+    if (new_lbtn && !m_lbtn) {
+        m_clicked = true;
+        m_click_x = nx;
+        m_click_y = ny;
+    }
+    m_lbtn = new_lbtn;
+    m_rbtn = new_rbtn;
+
     if (!m_active || nx != m_x || ny != m_y) {
         cursor_restore();
         m_x = nx; m_y = ny;
         cursor_draw(nx, ny);
         m_active = true;
     }
+}
+
+bool mouse_consume_click(int32_t *x, int32_t *y) {
+    if (!m_clicked) return false;
+    m_clicked = false;
+    if (x) *x = m_click_x;
+    if (y) *y = m_click_y;
+    return true;
 }
 
 void mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn) {
@@ -212,9 +232,6 @@ void mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn) {
 }
 
 void mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn) {
-    m_lbtn = lbtn;
-    m_rbtn = rbtn;
-
     int32_t nx = m_x + dx;
     int32_t ny = m_y + dy;
 
@@ -222,6 +239,15 @@ void mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn) {
     int32_t sh = (int32_t)console_fb_height();
     if (nx < 0) nx = 0; if (nx >= sw) nx = sw - 1;
     if (ny < 0) ny = 0; if (ny >= sh) ny = sh - 1;
+
+    /* rising edge of left button → record click at new position */
+    if (lbtn && !m_lbtn) {
+        m_clicked = true;
+        m_click_x = nx;
+        m_click_y = ny;
+    }
+    m_lbtn = lbtn;
+    m_rbtn = rbtn;
 
     if (!m_active || nx != m_x || ny != m_y) {
         cursor_restore();

@@ -640,9 +640,11 @@ void i2c_hid_poll(void) {
     if (rbuf[2] == 1u && dlen >= 3) {
         int32_t dx = (int32_t)(int8_t)data[1];
         int32_t dy = (int32_t)(int8_t)data[2];
-        if (dx || dy) {
+        bool lbtn = (data[0] & 0x01u) != 0u;
+        bool rbtn = (data[0] & 0x02u) != 0u;
+        if (dx || dy || lbtn || rbtn) {
             g_poll_push++;
-            mouse_push_rel(dx, dy, false, false);
+            mouse_push_rel(dx, dy, lbtn, rbtn);
         }
         g_was_touching = true;
         return;
