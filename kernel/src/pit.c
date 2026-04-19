@@ -6,6 +6,7 @@
 #include "net.h"
 #include "statusbar.h"
 #include "i2c_hid.h"
+#include "gui.h"
 
 #define PIT_CH0  0x40
 #define PIT_CMD  0x43
@@ -27,6 +28,7 @@ void pit_on_tick(void) {
     net_poll();           /* drain virtio-net RX queue, dispatch ARP/IP */
     statusbar_on_tick();  /* redraw bar once per second */
     i2c_hid_poll();       /* I2C-HID touchpad motion */
+    gui_on_tick();        /* process mouse clicks */
 }
 
 void pit_init(uint32_t hz) {
