@@ -89,11 +89,13 @@ void splash_show(void) {
     console_clear();
 
     /* ── Large "FiFi OS" title ───────────────────────────────────────────── */
+    uint64_t    vp_y  = console_viewport_y();
+    uint64_t    vp_x  = console_viewport_x();
     const char *title = "FiFi OS";
     uint64_t    tlen  = (uint64_t)sp_len(title);
     uint64_t    tw    = tlen * char_w;
     uint64_t    tx    = (fw > tw) ? (fw - tw) / 2u : 4u;
-    uint64_t    ty    = STATUS_H + 24u;   /* ~1.5 rows below status bar */
+    uint64_t    ty    = vp_y + 24u;
 
     for (uint64_t i = 0; i < tlen; i++)
         console_render_glyph_scaled(tx + i * char_w, ty,
@@ -112,7 +114,7 @@ void splash_show(void) {
     console_fill_rect(sep_x, sep_y, sep_w, 2u, S_SEP);
 
     /* ── Info block — first cell row below separator ─────────────────────── */
-    uint32_t row = (uint32_t)((sep_y + ffh / 2u - STATUS_H) / ffh);
+    uint32_t row = (uint32_t)((sep_y + ffh / 2u - vp_y) / ffh);
 
     info_row(row++, "OS:",      "FiFi OS Alpha v4.0");
     info_row(row++, "Arch:",    "x86_64");
@@ -151,8 +153,8 @@ void splash_show(void) {
     row++;   /* blank row */
     {
         /* Draw small filled rectangles in the theme palette */
-        uint64_t chip_y  = (uint64_t)(STATUS_H + row * 16u) + 3u;
-        uint64_t chip_x  = (uint64_t)(LABEL_COL * 8u);
+        uint64_t chip_y  = vp_y + (uint64_t)row * ffh + 3u;
+        uint64_t chip_x  = vp_x + (uint64_t)LABEL_COL * ffw;
         uint64_t chip_w  = 14u;
         uint64_t chip_h  = 10u;
         uint32_t chips[] = { 0x001a1a2eu, 0x003060c0u, 0x004888c8u,

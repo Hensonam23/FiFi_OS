@@ -66,6 +66,7 @@ OBJS := \
     $(BUILD)/statusbar.o \
     $(BUILD)/splash.o \
     $(BUILD)/mouse.o \
+    $(BUILD)/gui.o \
     $(BUILD)/i2c_hid.o \
     $(BUILD)/rtl8168.o \
     $(BUILD)/ext2.o \
@@ -301,6 +302,9 @@ $(BUILD)/splash.o: kernel/src/splash.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/mouse.o: kernel/src/mouse.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/gui.o: kernel/src/gui.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/i2c_hid.o: kernel/src/i2c_hid.c | $(BUILD)
