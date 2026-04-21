@@ -28,6 +28,7 @@
 #include "splash.h"
 #include "i2c_hid.h"
 #include "pci.h"
+#include "mouse.h"
 
 /* ---- minimal ELF64 defs ---- */
 #define EI_NIDENT 16
@@ -1854,6 +1855,28 @@ if (streq(argv[0], "sysnums")) {
 else if (streq(argv[0], "ps")) {
     thread_ps_dump();
 }
+
+    /* Mouse warp/click helpers for GUI testing */
+    if (streq_simple(argv[0], "mgoto")) {
+        if (argc < 3) { kprintf("usage: mgoto <x> <y>\n"); return; }
+        int32_t x = 0, y = 0;
+        for (const char *q = argv[1]; *q >= '0' && *q <= '9'; q++) x = x*10 + (*q-'0');
+        for (const char *q = argv[2]; *q >= '0' && *q <= '9'; q++) y = y*10 + (*q-'0');
+        mouse_warp(x, y);
+        kprintf("mgoto: cursor at (%d,%d)\n", x, y);
+        return;
+    }
+
+    if (streq_simple(argv[0], "mclick")) {
+        if (argc < 3) { kprintf("usage: mclick <x> <y>\n"); return; }
+        int32_t x = 0, y = 0;
+        for (const char *q = argv[1]; *q >= '0' && *q <= '9'; q++) x = x*10 + (*q-'0');
+        for (const char *q = argv[2]; *q >= '0' && *q <= '9'; q++) y = y*10 + (*q-'0');
+        mouse_click(x, y);
+        kprintf("mclick: clicked at (%d,%d)\n", x, y);
+        return;
+    }
+
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }

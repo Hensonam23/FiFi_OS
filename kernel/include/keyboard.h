@@ -2,6 +2,7 @@
 #define FIFI_KEYBOARD_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // Special keys returned by keyboard_try_getchar() (0x80..)
 #define KEY_LEFT    0x80
@@ -63,6 +64,10 @@ void keyboard_set_raw_capture(int on);
 uint32_t keyboard_raw_total(void);
 uint32_t keyboard_raw_aux(void);
 int keyboard_has_data(void);
+
+/* GUI keyboard capture — redirect chars away from shell ring buffer */
+void keyboard_set_gui_capture(bool on);
+int  keyboard_gui_try_getchar(void);
 
 #endif
 void keyboard_irq_handler(void);
