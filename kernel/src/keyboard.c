@@ -37,6 +37,7 @@ static volatile uint32_t raw_bytes_aux = 0;
 
 static bool shift_down = false;
 static bool ctrl_down  = false;
+static bool alt_down   = false;
 static bool ext_e0     = false;
 static bool key_f0     = false;  /* Set 2: 0xF0 break prefix received */
 
@@ -96,6 +97,7 @@ void keyboard_clear_state(void) {
     g_hid_rep_kc     = 0;
     shift_down       = false;
     ctrl_down        = false;
+    alt_down         = false;
     ext_e0           = false;
     key_f0           = false;
     g_last_ps2_tick  = pit_ticks();   /* anchor silence clock to now, not boot */
@@ -228,13 +230,14 @@ void keyboard_on_scancode(uint8_t sc) {
         else          sc_make_cnt[sc]++;
     }
 
-    /* Modifiers (Set 2 codes): LShift=0x12, RShift=0x59, LCtrl/RCtrl=0x14 */
+    /* Modifiers (Set 2 codes): LShift=0x12, RShift=0x59, LCtrl/RCtrl=0x14, LAlt=0x11 */
     if (!is_ext) {
         if (sc == 0x12 || sc == 0x59) { shift_down = !released; return; }
         if (sc == 0x14)               { ctrl_down  = !released; return; }
+        if (sc == 0x11)               { alt_down   = !released; return; }  /* LAlt */
     } else {
         if (sc == 0x14) { ctrl_down = !released; return; }  /* RCtrl */
-        if (sc == 0x11) { return; }                          /* RAlt — ignore */
+        if (sc == 0x11) { alt_down  = !released; return; }  /* RAlt */
     }
 
     if (released) {
@@ -275,10 +278,19 @@ void keyboard_on_scancode(uint8_t sc) {
             case 0x71: kc = KEY_DELETE; break;
             case 0x6C: kc = KEY_HOME;   break;
             case 0x69: kc = KEY_END;    break;
+            case 0x7D: kc = KEY_PGUP;   break;
+            case 0x7A: kc = KEY_PGDN;   break;
             default: return;
         }
         kbd_push(kc);
         rep_set(kc, sc, true);
+        return;
+    }
+
+    /* Alt+Tab: always push to GUI buffer so gui.c can handle it even without capture */
+    if (alt_down && sc == 0x0D) {  /* 0x0D = Tab in Set 2 */
+        uint32_t next = (gui_head + 1) % GUI_BUF_SIZE;
+        if (next != gui_tail) { gui_buf[gui_head] = KEY_ALTTAB; gui_head = next; }
         return;
     }
 
@@ -466,6 +478,47 @@ void keyboard_ps2_init(void) {
         if (i8042_wait_write()) outb(0x60, mcfg);
 
         i8042_flush();  /* clear any bytes from cfg write */
+
+        /* IntelliMouse scroll-wheel activation: set sample rate 200→100→80,
+         * then read device ID.  If ID=0x03, mouse sends 4-byte packets.
+         * Must run with interrupts disabled to prevent the mouse IRQ handler
+         * from consuming our response bytes from the i8042 FIFO. */
+        {
+            __asm__ volatile("cli");
+            static const uint8_t im_rates[] = {200, 100, 80};
+            for (int q = 0; q < 3; q++) {
+                /* send "set sample rate" command */
+                if (i8042_wait_write()) outb(0x64, 0xD4);
+                if (i8042_wait_write()) outb(0x60, 0xF3);
+                for (int t = 0; t < 300000; t++) {
+                    if (inb(0x64) & 0x01) { inb(0x60); break; }
+                }
+                /* send rate value */
+                if (i8042_wait_write()) outb(0x64, 0xD4);
+                if (i8042_wait_write()) outb(0x60, im_rates[q]);
+                for (int t = 0; t < 300000; t++) {
+                    if (inb(0x64) & 0x01) { inb(0x60); break; }
+                }
+            }
+            i8042_flush();   /* drain any leftover ACKs */
+            /* send "get device ID" */
+            if (i8042_wait_write()) outb(0x64, 0xD4);
+            if (i8042_wait_write()) outb(0x60, 0xF2);
+            uint8_t mouse_id = 0x00;
+            for (int t = 0; t < 600000; t++) {
+                if (!(inb(0x64) & 0x01)) continue;
+                uint8_t b = inb(0x60);
+                if (b == 0xFA) continue;   /* skip ACK, next byte is ID */
+                mouse_id = b; break;
+            }
+            i8042_flush();
+            __asm__ volatile("sti");
+            bool im = (mouse_id == 0x03 || mouse_id == 0x04);
+            mouse_set_intellimouse(im);
+            kprintf("[ps2] mouse id=0x%02x intellimouse=%s\n",
+                    (unsigned)mouse_id, im ? "yes" : "no");
+        }
+
         bool mouse_ack = false;
         __asm__ volatile("cli");
         if (i8042_wait_write()) outb(0x64, 0xD4);

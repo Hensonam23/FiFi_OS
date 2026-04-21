@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include "console.h"
 #include "vfs.h"
+#include "pmm.h"
 
 /* Auto-generated tiny 8x16 bitmap font (ASCII 0..127).
    Each glyph is 16 rows, each row is 8 bits (bit 7 = leftmost pixel). */
@@ -178,6 +179,12 @@ static struct {
 
 static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 
+/* ── Double buffer ───────────────────────────────────────────────────────────
+ * g_back: regular RAM mirror of the framebuffer.  All rendering goes here.
+ * console_flip_if_dirty() copies it to VRAM in one pass to eliminate tearing. */
+static uint32_t *g_back  = NULL;
+static bool      g_dirty = false;
+
 /* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
@@ -189,23 +196,46 @@ static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
 
-    for (uint32_t y = 0; y < g_fh; y++) {
-        volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
-        const uint8_t *scan = glyph + y * bpr;
-        for (uint32_t x = 0; x < g_fw; x++) {
-            uint8_t b = scan[x >> 3];
-            uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
-                                  : ((b >>        (x & 7u) ) & 1u);
-            row[x] = bit ? con.fg : con.bg;
+    if (g_back) {
+        g_dirty = true;
+        for (uint32_t y = 0; y < g_fh; y++) {
+            uint32_t *row = g_back + (py + y) * con.pitch32 + px;
+            const uint8_t *scan = glyph + y * bpr;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                      : ((b >>        (x & 7u) ) & 1u);
+                row[x] = bit ? con.fg : con.bg;
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < g_fh; y++) {
+            volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
+            const uint8_t *scan = glyph + y * bpr;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                      : ((b >>        (x & 7u) ) & 1u);
+                row[x] = bit ? con.fg : con.bg;
+            }
         }
     }
 }
 
 static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c) {
-    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
-        volatile uint32_t *row = con.pix + (y + yy) * con.pitch32 + x;
-        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
-            row[xx] = c;
+    if (g_back) {
+        g_dirty = true;
+        for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+            uint32_t *row = g_back + (y + yy) * con.pitch32 + x;
+            for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+                row[xx] = c;
+        }
+    } else {
+        for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+            volatile uint32_t *row = con.pix + (y + yy) * con.pitch32 + x;
+            for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+                row[xx] = c;
+        }
     }
 }
 
@@ -328,14 +358,28 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
     if (px + g_fw > con.w || py + g_fh > con.h) return;
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
-    for (uint32_t y = 0; y < g_fh; y++) {
-        volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
-        const uint8_t *scan = glyph + y * bpr;
-        for (uint32_t x = 0; x < g_fw; x++) {
-            uint8_t b = scan[x >> 3];
-            uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
-                                  : ((b >>        (x & 7u) ) & 1u);
-            row[x] = bit ? fg : bg;
+    if (g_back) {
+        g_dirty = true;
+        for (uint32_t y = 0; y < g_fh; y++) {
+            uint32_t *row = g_back + (py + y) * con.pitch32 + px;
+            const uint8_t *scan = glyph + y * bpr;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                      : ((b >>        (x & 7u) ) & 1u);
+                row[x] = bit ? fg : bg;
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < g_fh; y++) {
+            volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
+            const uint8_t *scan = glyph + y * bpr;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u)
+                                      : ((b >>        (x & 7u) ) & 1u);
+                row[x] = bit ? fg : bg;
+            }
         }
     }
 }
@@ -354,6 +398,8 @@ void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
     uint32_t gi = (ch < (uint8_t)g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
+    uint32_t *target_back = g_back;
+    if (target_back) g_dirty = true;
     for (uint32_t r = 0; r < g_fh; r++) {
         const uint8_t *scan = glyph + r * bpr;
         for (uint32_t col = 0; col < g_fw; col++) {
@@ -365,8 +411,12 @@ void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
                 for (uint64_t dx = 0; dx < scale; dx++) {
                     uint64_t ppx = px + col * scale + dx;
                     uint64_t ppy = py + r   * scale + dy;
-                    if (ppx < con.w && ppy < con.h)
-                        con.pix[ppy * con.pitch32 + ppx] = color;
+                    if (ppx < con.w && ppy < con.h) {
+                        if (target_back)
+                            target_back[ppy * con.pitch32 + ppx] = color;
+                        else
+                            con.pix[ppy * con.pitch32 + ppx] = color;
+                    }
                 }
             }
         }
@@ -527,4 +577,34 @@ void console_set_viewport_norender(uint64_t x, uint64_t y, uint64_t w, uint64_t 
     if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
     if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
     if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
+}
+
+/* Allocate the double-buffer from PMM.  Call after pmm_init() / vmm_init().
+ * Until this is called, fill_rect/render_char fall back to writing directly
+ * to VRAM (g_back == NULL branch). */
+void console_backbuf_init(void) {
+    if (!con.initialized || g_back) return;
+    uint64_t npix   = con.pitch32 * con.h;
+    uint64_t nbytes = npix * sizeof(uint32_t);
+    uint64_t npages = (nbytes + 4095u) / 4096u;
+    uint64_t phys   = pmm_alloc_pages(npages);
+    if (!phys) return;
+    g_back = (uint32_t *)pmm_phys_to_virt(phys);
+    /* Zero the backbuf */
+    for (uint64_t i = 0; i < npix; i++) g_back[i] = 0;
+    g_dirty = false;
+}
+
+/* Copy backbuf → VRAM if dirty.  Returns true when a flip happened. */
+bool console_flip_if_dirty(void) {
+    if (!g_back || !g_dirty) return false;
+    g_dirty = false;
+    uint64_t n = con.pitch32 * con.h;
+    const uint32_t *src = g_back;
+    /* Cast away volatile so the compiler can auto-vectorize the bulk copy.
+     * WC framebuffer writes are always visible; volatile is not needed here. */
+    uint32_t *dst = (uint32_t *)(uintptr_t)con.pix;
+    for (uint64_t i = 0; i < n; i++)
+        dst[i] = src[i];
+    return true;
 }

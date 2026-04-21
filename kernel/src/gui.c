@@ -7,6 +7,8 @@
 #include "heap.h"
 #include "vfs.h"
 #include "keyboard.h"
+#include "pit.h"
+#include "pmm.h"
 /* ── Layout ──────────────────────────────────────────────────────────── */
 #define STATUS_H        20u
 #define TASKBAR_H       32u
@@ -22,9 +24,13 @@
 #define RESIZE_MARGIN   6u
 #define MIN_WIN_W       300u
 #define MIN_WIN_H       180u
+#define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  2u
+#define LAUNCHER_ITEMS  3u
 #define LAUNCHER_W      100u
+#define CTX_W           110u
+#define CTX_ITEM_H      22u
+#define CTX_ITEMS       3u
 
 /* File browser layout */
 #define FB_TOOLBAR_H    ((console_font_height() + 10u) * 2u)  /* 2 rows */
@@ -88,7 +94,7 @@
 
 /* ── Types ───────────────────────────────────────────────────────────── */
 typedef enum { WIN_HIDDEN, WIN_NORMAL, WIN_MAXIMIZED } win_state_t;
-typedef enum { WIN_TERM, WIN_FILES, WIN_TEXT } win_type_t;
+typedef enum { WIN_TERM, WIN_FILES, WIN_TEXT, WIN_SETTINGS } win_type_t;
 
 typedef enum {
     RES_NONE,
@@ -106,6 +112,8 @@ typedef struct {
     uint64_t   size;
     int        scroll;
     int        total_lines;
+    int32_t    scroll_vel;
+    int32_t    scroll_acc;
 } text_state_t;
 
 #define FB_MAX_ENTRIES  96
@@ -126,11 +134,15 @@ typedef struct {
     /* search */
     char search_query[FB_SEARCH_MAX];
     int  search_len;
-    bool search_active;  /* search bar has keyboard focus */
+    bool search_active;
+    /* inertial scroll */
+    int32_t scroll_vel; /* fp16 velocity (1/16 lines per tick) */
+    int32_t scroll_acc; /* sub-line accumulator */
 } fb_state_t;
 
 typedef struct {
     bool        active;
+    bool        half_snapped;
     win_state_t state;
     win_type_t  type;
     const char *title;
@@ -144,12 +156,38 @@ typedef struct {
 #define MAX_WINS 4
 static window_t g_wins[MAX_WINS];
 
+/* ── Z-order ──────────────────────────────────────────────────────────── */
+static int g_z[MAX_WINS];  /* g_z[0]=bottom, g_z[MAX_WINS-1]=top */
+
+static void z_raise(int slot) {
+    /* Find slot in g_z, remove it, shift others down, place at top */
+    int pos = -1;
+    for (int i = 0; i < MAX_WINS; i++) {
+        if (g_z[i] == slot) { pos = i; break; }
+    }
+    if (pos < 0) return;
+    for (int i = pos; i < MAX_WINS - 1; i++)
+        g_z[i] = g_z[i + 1];
+    g_z[MAX_WINS - 1] = slot;
+}
+
 /* ── Drag / resize state ─────────────────────────────────────────────── */
-static bool      g_dragging   = false;
-static int       g_drag_win   = -1;
-static int32_t   g_drag_off_x = 0;
-static int32_t   g_drag_off_y = 0;
-static bool      g_prev_lbtn  = false;
+static bool      g_dragging    = false;
+static int       g_drag_win    = -1;
+static int32_t   g_drag_off_x  = 0;
+static int32_t   g_drag_off_y  = 0;
+static bool      g_prev_lbtn   = false;
+static int       g_snap_preview = 0; /* 0=none, 1=left-half, 2=right-half */
+
+/* Scrollbar drag state */
+static bool     g_sb_drag      = false;
+static int      g_sb_drag_win  = -1;
+static int32_t  g_sb_drag_y0   = 0;
+static int      g_sb_drag_s0   = 0;
+static uint64_t g_sb_drag_lh   = 0;  /* track height in pixels */
+static uint64_t g_sb_drag_ly   = 0;  /* track top y */
+static int      g_sb_drag_max  = 0;  /* max scroll value */
+static bool     g_sb_drag_text = false; /* true=text viewer, false=files */
 
 static bool         g_resizing   = false;
 static int          g_resize_win = -1;
@@ -162,6 +200,35 @@ static uint64_t     g_resize_ww0 = 0;
 static uint64_t     g_resize_wh0 = 0;
 
 static bool g_launcher_open = false;
+
+/* ── Chrome hover state ──────────────────────────────────────────────── */
+static int g_chrome_win = -1;
+static int g_chrome_btn = 0;  /* 0=none, 1=close, 2=max, 3=min */
+
+/* ── Double-click state ──────────────────────────────────────────────── */
+static uint64_t g_last_click_tick = 0;
+static int      g_last_click_win  = -1;
+
+/* ── Context menu state ──────────────────────────────────────────────── */
+static bool    g_ctx_open = false;
+static int32_t g_ctx_x = 0;
+static int32_t g_ctx_y = 0;
+
+/* ── Launcher hover ──────────────────────────────────────────────────── */
+static int g_launcher_hover = -1;
+
+/* ── Taskbar button hover (-1=none, 0=Terminal, 1=Files) ─────────────── */
+static int g_taskbtn_hover = -1;
+
+/* ── Context menu hover (-1=none, 0..CTX_ITEMS-1) ───────────────────── */
+static int g_ctx_hover = -1;
+
+/* ── Resize edge hover ───────────────────────────────────────────────── */
+static int          g_resize_hover_win = -1;
+static resize_dir_t g_resize_hover_dir = RES_NONE;
+
+/* ── GUI tick counter ────────────────────────────────────────────────── */
+static uint64_t g_gui_tick = 0;
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -215,6 +282,14 @@ static char *gui_itoa(int n, char *buf, int bufsz) {
     return buf;
 }
 
+/* Zero-pad 2-digit int into out[0..2] (null-terminated) */
+static void gui_itoa_pad2(uint64_t n, char *out) {
+    n %= 100;
+    out[0] = '0' + (int)(n / 10);
+    out[1] = '0' + (int)(n % 10);
+    out[2] = '\0';
+}
+
 /* ── Taskbar ─────────────────────────────────────────────────────────── */
 
 static void taskbar_draw_btn(int slot, const char *label) {
@@ -225,9 +300,14 @@ static void taskbar_draw_btn(int slot, const char *label) {
     uint64_t bx   = TASKBTN_X + (uint64_t)slot * (TASKBTN_W + TASKBTN_GAP);
     bool     vis  = (slot < MAX_WINS && g_wins[slot].active &&
                      g_wins[slot].state != WIN_HIDDEN);
-    uint32_t bg   = vis ? COL_TASKBTN_A : COL_TASKBTN;
+    bool     hov  = (g_taskbtn_hover == slot);
+    uint32_t bg   = vis  ? COL_TASKBTN_A :
+                    hov  ? 0x00283848u : COL_TASKBTN;
 
     console_fill_rect(bx, ty + 3u, TASKBTN_W, TASKBAR_H - 6u, bg);
+    /* Active indicator bar at bottom */
+    if (vis)
+        console_fill_rect(bx, ty + TASKBAR_H - 5u, TASKBTN_W, 3u, COL_BORDER);
     uint64_t llen = (uint64_t)gui_strlen(label);
     uint64_t lpx  = bx + (TASKBTN_W - llen * fw) / 2u;
     uint64_t lpy  = ty + (TASKBAR_H - fh) / 2u;
@@ -254,6 +334,7 @@ static void taskbar_draw(void) {
 
     taskbar_draw_btn(0, "Terminal");
     taskbar_draw_btn(1, "Files");
+    taskbar_draw_btn(2, "Settings");
 }
 
 /* ── Launcher popup ──────────────────────────────────────────────────── */
@@ -268,20 +349,53 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    static const char *items[] = { "Terminal", "Files" };
+    static const char *items[] = { "Terminal", "Files", "Settings" };
+
+    int32_t mx, my;
+    bool lbtn, rbtn;
+    mouse_get_state(&mx, &my, &lbtn, &rbtn);
 
     for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
         uint64_t ry = ly + (uint64_t)i * LAUNCHER_ITEM_H;
-        console_fill_rect(lx, ry, LAUNCHER_W, LAUNCHER_ITEM_H, COL_LAUNCH_BG);
+        bool hov = (g_launcher_hover == i);
+        uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
+        console_fill_rect(lx, ry, LAUNCHER_W, LAUNCHER_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(items[i]);
         uint64_t spx  = lx + (LAUNCHER_W - slen * fw) / 2u;
         uint64_t spy  = ry + (LAUNCHER_ITEM_H - fh) / 2u;
-        gui_draw_str(spx, spy, items[i], COL_LAUNCH_FG, COL_LAUNCH_BG);
+        gui_draw_str(spx, spy, items[i], COL_LAUNCH_FG, bg);
     }
     console_fill_rect(lx, ly, LAUNCHER_W, 1u, COL_LAUNCH_HL);
     console_fill_rect(lx, ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H, LAUNCHER_W, 1u, COL_LAUNCH_HL);
     console_fill_rect(lx, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
     console_fill_rect(lx + LAUNCHER_W - 1u, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
+}
+
+/* ── Context menu ────────────────────────────────────────────────────── */
+
+static void ctx_draw(void) {
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    static const char *ctx_items[] = { "Terminal", "Files", "Settings" };
+    int32_t cx = g_ctx_x;
+    int32_t cy = g_ctx_y;
+
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + CTX_ITEMS * CTX_ITEM_H + 1u, CTX_W, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx + CTX_W - 1u, (uint64_t)cy, 1u, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
+
+    for (int i = 0; i < (int)CTX_ITEMS; i++) {
+        uint64_t ry  = (uint64_t)cy + 1u + (uint64_t)i * CTX_ITEM_H;
+        bool hov     = (g_ctx_hover == i);
+        uint32_t bg  = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
+        console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, CTX_ITEM_H, bg);
+        uint64_t slen = (uint64_t)gui_strlen(ctx_items[i]);
+        uint64_t spx  = (uint64_t)cx + (CTX_W - slen * fw) / 2u;
+        uint64_t spy  = ry + (CTX_ITEM_H - fh) / 2u;
+        gui_draw_str(spx, spy, ctx_items[i], COL_LAUNCH_FG, bg);
+    }
 }
 
 /* ── Window chrome ───────────────────────────────────────────────────── */
@@ -290,29 +404,71 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
 
-    console_fill_rect(w->x, w->y, w->w, TITLE_H, COL_BORDER);
+    int slot = (int)(w - g_wins);
+    bool active = (g_z[MAX_WINS - 1] == slot);
+    uint32_t title_bg = active ? COL_BORDER : 0x00182840u;
 
-    uint64_t tlen = (uint64_t)gui_strlen(w->title);
-    uint64_t tpx  = w->x + (w->w - tlen * fw) / 2u;
-    uint64_t tpy  = w->y + (TITLE_H - fh) / 2u;
-    gui_draw_str(tpx, tpy, w->title, COL_TITLE_FG, COL_BORDER);
+    /* Subtle 1-px focus ring just outside the active window */
+    if (active) {
+        uint64_t fb_w = console_fb_width();
+        uint64_t dtop = desk_top();
+        uint64_t dbot = desk_bot();
+        uint32_t ring  = 0x00183a6au;
+        uint64_t rx    = w->x > 0u        ? w->x - 1u        : 0u;
+        uint64_t rw    = w->w + (w->x > 0u ? 2u : 1u);
+        if (w->x + w->w < fb_w) { /* clamp rw */ } else { rw = fb_w - rx; }
+        if (w->y > dtop)
+            console_fill_rect(rx, w->y - 1u, rw, 1u, ring);
+        if (w->y + w->h < dbot)
+            console_fill_rect(rx, w->y + w->h, rw, 1u, ring);
+        if (w->x > 0u)
+            console_fill_rect(w->x - 1u, w->y, 1u, w->h, ring);
+        if (w->x + w->w < fb_w)
+            console_fill_rect(w->x + w->w, w->y, 1u, w->h, ring);
+    }
 
+    console_fill_rect(w->x, w->y, w->w, TITLE_H, title_bg);
+
+    /* Compute button positions first so we know available title width */
     w->btn_cls_x = w->x + w->w - BTN_W;
     w->btn_max_x = w->btn_cls_x - BTN_W;
     w->btn_min_x = w->btn_max_x - BTN_W;
 
-    console_fill_rect(w->btn_cls_x, w->y, BTN_W, TITLE_H, COL_CLOSE);
-    console_render_glyph(w->btn_cls_x + (BTN_W - fw) / 2u, tpy,
-                         'x', COL_TITLE_FG, COL_CLOSE);
+    /* Title: centered if it fits, left-aligned+clipped if too wide */
+    uint64_t tlen     = (uint64_t)gui_strlen(w->title);
+    uint64_t tpy      = w->y + (TITLE_H - fh) / 2u;
+    uint64_t avail    = w->btn_min_x > w->x + 8u ? w->btn_min_x - w->x - 8u : 0u;
+    uint64_t max_ch   = fw > 0u ? avail / fw : 0u;
+    uint64_t tpx;
+    if (tlen <= max_ch) {
+        tpx = w->x + (w->w - tlen * fw) / 2u;
+        if (w->w < tlen * fw) tpx = w->x + 4u;  /* safety against wrap */
+    } else {
+        tpx = w->x + 4u;
+    }
+    gui_draw_str_clip(tpx, tpy, w->title, COL_TITLE_FG, title_bg, max_ch);
 
-    console_fill_rect(w->btn_max_x, w->y, BTN_W, TITLE_H, COL_BTN_BG);
+    /* Close button — with hover */
+    uint32_t cls_bg = (g_chrome_win == slot && g_chrome_btn == 1)
+                    ? 0x00cc3333u : COL_CLOSE;
+    console_fill_rect(w->btn_cls_x, w->y, BTN_W, TITLE_H, cls_bg);
+    console_render_glyph(w->btn_cls_x + (BTN_W - fw) / 2u, tpy,
+                         'x', COL_TITLE_FG, cls_bg);
+
+    /* Max button — with hover */
+    uint32_t max_bg = (g_chrome_win == slot && g_chrome_btn == 2)
+                    ? 0x004878a0u : COL_BTN_BG;
+    console_fill_rect(w->btn_max_x, w->y, BTN_W, TITLE_H, max_bg);
     console_render_glyph(w->btn_max_x + (BTN_W - fw) / 2u, tpy,
                          w->state == WIN_MAXIMIZED ? '-' : '+',
-                         COL_BTN_FG, COL_BTN_BG);
+                         COL_BTN_FG, max_bg);
 
-    console_fill_rect(w->btn_min_x, w->y, BTN_W, TITLE_H, COL_BTN_BG);
+    /* Min button — with hover */
+    uint32_t min_bg = (g_chrome_win == slot && g_chrome_btn == 3)
+                    ? 0x004878a0u : COL_BTN_BG;
+    console_fill_rect(w->btn_min_x, w->y, BTN_W, TITLE_H, min_bg);
     console_render_glyph(w->btn_min_x + (BTN_W - fw) / 2u, tpy,
-                         '_', COL_BTN_FG, COL_BTN_BG);
+                         '_', COL_BTN_FG, min_bg);
 
     console_fill_rect(w->x, w->y + TITLE_H,
                       BORDER, w->h - TITLE_H, COL_BORDER);
@@ -338,15 +494,6 @@ static void term_set_viewport(window_t *w) {
     uint64_t iw = w->w - 2u * BORDER;
     uint64_t ih = w->h - TITLE_H - BORDER;
     console_set_viewport(ix + PAD, iy + PAD, iw - 2u * PAD, ih - 2u * PAD);
-}
-
-static void term_set_viewport_norender(window_t *w) {
-    uint64_t ix = w->x + BORDER;
-    uint64_t iy = w->y + TITLE_H;
-    uint64_t iw = w->w - 2u * BORDER;
-    uint64_t ih = w->h - TITLE_H - BORDER;
-    console_set_viewport_norender(ix + PAD, iy + PAD,
-                                  iw - 2u * PAD, ih - 2u * PAD);
 }
 
 /* ── File browser ────────────────────────────────────────────────────── */
@@ -496,6 +643,7 @@ static void fb_draw_toolbar_btn(uint64_t bx, uint64_t by, uint64_t bw, uint64_t 
 
 /* Full file browser render */
 static void fb_render(window_t *w) {
+    win_draw_chrome(w, false);
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
     uint64_t ix   = w->x + BORDER;
@@ -768,9 +916,19 @@ static void text_render(window_t *w) {
         return;
     }
 
-    uint64_t content_w = iw - 12u;  /* leave room for scrollbar */
-    uint64_t max_cols  = (content_w > 2u * PAD) ? (content_w - 2u * PAD) / fw : 1u;
-    uint64_t max_rows  = (ih > 2u * PAD) ? (ih - 2u * PAD) / fh : 1u;
+    /* Line number gutter */
+    uint64_t gutter_chars = 1;
+    int tot = w->text.total_lines > 0 ? w->text.total_lines : 1;
+    while (tot >= 10) { tot /= 10; gutter_chars++; }
+    uint64_t gutter_w  = (gutter_chars + 2u) * fw;
+    uint64_t gutter_bg = 0x00090d14u;
+    console_fill_rect(ix, iy, gutter_w, ih, gutter_bg);
+    console_fill_rect(ix + gutter_w, iy, 1u, ih, 0x00202830u);
+
+    uint64_t tx        = ix + gutter_w + 1u;  /* text content start x */
+    uint64_t avail_w   = iw > gutter_w + 13u ? iw - gutter_w - 13u : 1u;
+    uint64_t max_cols  = avail_w > 2u * PAD ? (avail_w - 2u * PAD) / fw : 1u;
+    uint64_t max_rows  = ih > 2u * PAD ? (ih - 2u * PAD) / fh : 1u;
     if (max_cols < 1) max_cols = 1;
     if (max_rows < 1) max_rows = 1;
 
@@ -794,28 +952,37 @@ static void text_render(window_t *w) {
     /* Render lines */
     int row = 0;
     while (pos <= w->text.size && (uint64_t)row < max_rows) {
-        uint64_t py  = iy + PAD + (uint64_t)row * fh;
+        uint64_t py = iy + PAD + (uint64_t)row * fh;
+
+        /* Line number: right-align in gutter */
+        int linenum = w->text.scroll + row + 1;
+        char lnbuf[8]; gui_itoa(linenum, lnbuf, 8);
+        uint64_t ln_len = (uint64_t)gui_strlen(lnbuf);
+        uint64_t ln_x   = ix + gutter_w - (ln_len + 1u) * fw;
+        gui_draw_str(ln_x, py, lnbuf, 0x00405060u, gutter_bg);
+
+        /* Text content */
         uint64_t col = 0;
         while (pos < w->text.size && d[pos] != '\n' && col < max_cols) {
             unsigned char c = (unsigned char)d[pos];
             if (c >= 32 && c < 127) {
-                console_render_glyph(ix + PAD + col * fw, py, c,
+                console_render_glyph(tx + PAD + col * fw, py, c,
                                      COL_FB_TXT, COL_FB_LIST_BG);
                 col++;
             } else if (c == '\t') {
                 uint64_t next = (col + 4u) & ~3u;
                 while (col < next && col < max_cols) {
-                    console_render_glyph(ix + PAD + col * fw, py, ' ',
+                    console_render_glyph(tx + PAD + col * fw, py, ' ',
                                          COL_FB_TXT, COL_FB_LIST_BG);
                     col++;
                 }
             }
             pos++;
         }
-        /* advance to next line */
+        /* advance past remainder of this line */
         while (pos < w->text.size && d[pos] != '\n') pos++;
         if (pos < w->text.size) pos++;
-        else if (pos == w->text.size) pos++;  /* handle last line without newline */
+        else if (pos == w->text.size) pos++;
         row++;
     }
 
@@ -856,6 +1023,27 @@ static void fb_list_region(window_t *w,
     *lw = iw - FB_SIDEBAR_W - 1u;
     *ly = iy + tb_h + hdr_h;
     *lh = ih - tb_h - hdr_h - stbar;
+}
+
+/* Compute file-browser scrollbar thumb geometry. Returns false if no scrollbar needed. */
+static bool fb_sb_thumb(window_t *w,
+                        uint64_t *sb_x_out, uint64_t *track_y_out, uint64_t *track_h_out,
+                        uint64_t *thumb_y_out, uint64_t *thumb_h_out) {
+    uint64_t lx, ly, lw, lh;
+    fb_list_region(w, &lx, &ly, &lw, &lh);
+    uint64_t max_rows = lh / FB_ROW_H;
+    int total = w->fb.entry_count;
+    if (total <= (int)max_rows) return false;
+    int max_sc = total - (int)max_rows;
+    *sb_x_out   = lx + lw - 6u;
+    *track_y_out = ly;
+    *track_h_out = lh;
+    uint64_t th  = (max_rows * lh) / (uint64_t)total;
+    if (th < 8u) th = 8u;
+    uint64_t ty  = ly + ((uint64_t)w->fb.scroll * (lh - th)) / (uint64_t)max_sc;
+    *thumb_y_out = ty;
+    *thumb_h_out = th;
+    return true;
 }
 
 /* Returns which entry index is at pixel (mx,my), accounting for search filter */
@@ -980,6 +1168,39 @@ static void fb_on_click(window_t *w, int32_t mx, int32_t my) {
         return;
     }
 
+    /* Scrollbar click: thumb drag or track jump */
+    {
+        uint64_t sbx, tly, tlh, thy, thh;
+        if (fb_sb_thumb(w, &sbx, &tly, &tlh, &thy, &thh)) {
+            if ((uint64_t)mx >= sbx && (uint64_t)mx < sbx + 6u &&
+                (uint64_t)my >= tly && (uint64_t)my < tly + tlh) {
+                int max_rows = (int)(tlh / FB_ROW_H);
+                int max_sc   = w->fb.entry_count - max_rows;
+                if (max_sc < 0) max_sc = 0;
+                if ((uint64_t)my >= thy && (uint64_t)my < thy + thh) {
+                    /* Clicked on thumb: start drag, cancel inertia */
+                    w->fb.scroll_vel = 0; w->fb.scroll_acc = 0;
+                    g_sb_drag      = true;
+                    g_sb_drag_win  = (int)(w - g_wins);
+                    g_sb_drag_y0   = my;
+                    g_sb_drag_s0   = w->fb.scroll;
+                    g_sb_drag_lh   = tlh;
+                    g_sb_drag_ly   = tly;
+                    g_sb_drag_max  = max_sc;
+                    g_sb_drag_text = false;
+                } else {
+                    /* Clicked on track: jump to position */
+                    int ns = (int)(((uint64_t)my - tly) * (uint64_t)w->fb.entry_count / tlh);
+                    if (ns < 0) ns = 0;
+                    if (ns > max_sc) ns = max_sc;
+                    w->fb.scroll = ns;
+                    fb_render(w);
+                }
+                return;
+            }
+        }
+    }
+
     /* File list */
     int idx = fb_hit_row(w, mx, my);
     if (idx < 0) return;
@@ -996,12 +1217,124 @@ static void fb_on_click(window_t *w, int32_t mx, int32_t my) {
             fb_has_ext(name, ".cfg") || fb_has_ext(name, ".sh")) {
             char full[256];
             fb_path_join(full, w->fb.path, name);
-            text_open(&g_wins[2], full);
-            win_show(&g_wins[2], 2);
+            text_open(&g_wins[3], full);
+            win_show(&g_wins[3], 3);
             return;
         }
     }
     fb_render(w);
+}
+
+/* ── Settings window ─────────────────────────────────────────────────── */
+
+#define SET_PAD     12u
+#define SET_ROW_H   20u
+#define SET_SEC_H   22u
+#define COL_SET_BG      0x000c1018u
+#define COL_SET_SEC_BG  0x00141e28u
+#define COL_SET_SEC_FG  0x005898e8u
+#define COL_SET_KEY_FG  0x0080a0c8u
+#define COL_SET_VAL_FG  0x00d0dce8u
+#define COL_SET_SEP     0x00182838u
+#define COL_SET_HINT    0x00405060u
+
+static void settings_render(window_t *w) {
+    uint64_t ix = w->x + BORDER;
+    uint64_t iy = w->y + TITLE_H;
+    uint64_t iw = w->w - 2u * BORDER;
+    uint64_t ih = w->h - TITLE_H - BORDER;
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    uint64_t cx = ix + SET_PAD;
+    uint64_t cy = iy + SET_PAD;
+    uint64_t val_x = ix + SET_PAD + 18u * fw;  /* value column */
+
+    console_fill_rect(ix, iy, iw, ih, COL_SET_BG);
+
+    /* ── Section: System ── */
+    console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
+    gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "System Information",
+                 COL_SET_SEC_FG, COL_SET_SEC_BG);
+    cy += SET_SEC_H + 4u;
+
+    /* Build dynamic resolution string */
+    char res_str[24];
+    {
+        char ws[8], hs[8];
+        gui_itoa((int)console_fb_width(),  ws, 8);
+        gui_itoa((int)console_fb_height(), hs, 8);
+        int ri = 0;
+        for (int k = 0; ws[k] && ri < 20; ) res_str[ri++] = ws[k++];
+        res_str[ri++] = ' '; res_str[ri++] = 'x'; res_str[ri++] = ' ';
+        for (int k = 0; hs[k] && ri < 23; ) res_str[ri++] = hs[k++];
+        res_str[ri] = '\0';
+    }
+    /* Build dynamic memory string */
+    char mem_str[24];
+    {
+        uint64_t total_p = pmm_get_total_pages();
+        char tb[8];
+        gui_itoa((int)((total_p * 4096u) >> 20u), tb, 8);
+        int ri = 0;
+        for (int k = 0; tb[k] && ri < 20; ) mem_str[ri++] = tb[k++];
+        mem_str[ri++] = ' '; mem_str[ri++] = 'M'; mem_str[ri++] = 'B';
+        mem_str[ri] = '\0';
+    }
+    struct { const char *key; const char *val; } sysinfo[] = {
+        { "OS:",         "FiFi OS Alpha v5.0" },
+        { "Arch:",       "x86_64"             },
+        { "Kernel:",     "freestanding"       },
+        { "Bootloader:", "Limine / UEFI"      },
+        { "Memory:",     mem_str              },
+        { "Resolution:", res_str              },
+        { NULL, NULL }
+    };
+    for (int i = 0; sysinfo[i].key; i++) {
+        uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
+        console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
+        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u, sysinfo[i].key, COL_SET_KEY_FG, bg);
+        gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u, sysinfo[i].val, COL_SET_VAL_FG, bg);
+        cy += SET_ROW_H;
+    }
+
+    cy += 8u;
+    console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
+    cy += 5u;
+
+    /* ── Section: Keyboard Shortcuts ── */
+    console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
+    gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Keyboard Shortcuts",
+                 COL_SET_SEC_FG, COL_SET_SEC_BG);
+    cy += SET_SEC_H + 4u;
+
+    struct { const char *key; const char *desc; } shortcuts[] = {
+        { "Alt+Tab",        "Cycle open windows"     },
+        { "Esc / Ctrl+W",   "Close focused window"   },
+        { "Up / Down",      "Navigate file list"     },
+        { "Page Up/Down",   "Scroll one page"        },
+        { "Home / End",     "Jump to top / bottom"   },
+        { "Enter",          "Open file or folder"    },
+        { "/ or F",         "Open search bar"        },
+        { "Backspace",      "Delete search char"     },
+        { "Tab",            "Close search bar"       },
+        { NULL, NULL }
+    };
+    for (int i = 0; shortcuts[i].key; i++) {
+        uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
+        console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
+        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u, shortcuts[i].key, COL_SET_KEY_FG, bg);
+        gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u, shortcuts[i].desc, COL_SET_VAL_FG, bg);
+        cy += SET_ROW_H;
+        if (cy + SET_ROW_H > iy + ih) break;
+    }
+
+    /* ── Hint at bottom ── */
+    uint64_t hint_y = iy + ih - fh - 8u;
+    if (hint_y > cy + 4u) {
+        console_fill_rect(ix, hint_y - 4u, iw, 1u, COL_SET_SEP);
+        gui_draw_str(cx, hint_y,
+                     "Press Esc or Ctrl+W to close", COL_SET_HINT, COL_SET_BG);
+    }
 }
 
 /* ── Window content render ───────────────────────────────────────────── */
@@ -1013,27 +1346,183 @@ static void win_render_content(window_t *w) {
         fb_render(w);
     else if (w->type == WIN_TEXT)
         text_render(w);
+    else if (w->type == WIN_SETTINGS)
+        settings_render(w);
+}
+
+/* ── Status bar (top strip, 0..STATUS_H-1) ───────────────────────────── */
+
+static void draw_status_bar(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint32_t bar_bg = 0x0008101cu;
+    uint64_t sy   = (STATUS_H > fh) ? (STATUS_H - fh) / 2u : 0u;
+
+    console_fill_rect(0, 0, fb_w, STATUS_H, bar_bg);
+    console_fill_rect(0, STATUS_H - 1, fb_w, 1, COL_TASKBAR_SEP);
+
+    /* Left: branding */
+    gui_draw_str(6u, sy, "FiFi OS", COL_BORDER, bar_bg);
+
+    /* Uptime: HH:MM:SS */
+    uint64_t hz   = pit_get_hz();
+    if (!hz) hz   = 100;
+    uint64_t secs = pit_ticks() / hz;
+    uint64_t mins = secs / 60u;  secs %= 60u;
+    uint64_t hrs  = mins / 60u;  mins %= 60u;
+
+    char up[12];
+    gui_itoa_pad2(hrs,  up + 0);
+    up[2] = ':';
+    gui_itoa_pad2(mins, up + 3);
+    up[5] = ':';
+    gui_itoa_pad2(secs, up + 6);
+    up[8] = '\0';
+
+    /* Memory: used / total MB */
+    uint64_t total_p = pmm_get_total_pages();
+    uint64_t free_p  = pmm_get_free_pages();
+    uint64_t used_mb  = ((total_p - free_p) * 4096u) >> 20u;
+    uint64_t total_mb = (total_p * 4096u) >> 20u;
+
+    char membuf[32];
+    char ub[8], tb[8];
+    gui_itoa((int)used_mb,  ub, 8);
+    gui_itoa((int)total_mb, tb, 8);
+    {
+        int i = 0;
+        const char *p;
+        for (p = ub;    *p && i < 28; ) membuf[i++] = *p++;
+        for (p = " / "; *p && i < 28; ) membuf[i++] = *p++;
+        for (p = tb;    *p && i < 28; ) membuf[i++] = *p++;
+        for (p = " MB"; *p && i < 28; ) membuf[i++] = *p++;
+        membuf[i] = '\0';
+    }
+
+    /* Right-align: memory  |  uptime */
+    uint64_t up_len  = 8u;
+    uint64_t mem_len = (uint64_t)gui_strlen(membuf);
+    uint64_t right_w = (mem_len + 3u + up_len) * fw + 12u;
+    uint64_t rx = fb_w > right_w ? fb_w - right_w : 0u;
+    uint32_t info_col = 0x00506878u;
+
+    gui_draw_str(rx,                         sy, membuf, info_col, bar_bg);
+    gui_draw_str(rx + (mem_len + 1u) * fw,   sy, "|",    0x00303848u, bar_bg);
+    gui_draw_str(rx + (mem_len + 3u) * fw,   sy, up,     info_col, bar_bg);
+}
+
+/* ── Resize edge highlight ───────────────────────────────────────────── */
+
+static void draw_resize_hint(int slot, resize_dir_t dir) {
+    if (slot < 0 || slot >= MAX_WINS) return;
+    window_t *w = &g_wins[slot];
+    if (!w->active || w->state != WIN_NORMAL) return;
+
+    uint32_t col  = 0x0058a0e0u;
+    uint64_t wx   = w->x, wy   = w->y;
+    uint64_t we   = wx + w->w, wb = wy + w->h;
+    uint64_t hs   = 14u;   /* handle size */
+    uint64_t ht   = 2u;    /* handle thickness */
+
+    switch (dir) {
+        case RES_NW:
+            console_fill_rect(wx,      wy,      hs, ht, col);
+            console_fill_rect(wx,      wy,      ht, hs, col);
+            break;
+        case RES_NE:
+            console_fill_rect(we - hs, wy,      hs, ht, col);
+            console_fill_rect(we - ht, wy,      ht, hs, col);
+            break;
+        case RES_SW:
+            console_fill_rect(wx,      wb - ht, hs, ht, col);
+            console_fill_rect(wx,      wb - hs, ht, hs, col);
+            break;
+        case RES_SE:
+            console_fill_rect(we - hs, wb - ht, hs, ht, col);
+            console_fill_rect(we - ht, wb - hs, ht, hs, col);
+            break;
+        case RES_N:
+            console_fill_rect(wx, wy,      w->w, ht, col);
+            break;
+        case RES_S:
+            console_fill_rect(wx, wb - ht, w->w, ht, col);
+            break;
+        case RES_W:
+            console_fill_rect(wx,      wy + TITLE_H, ht, w->h - TITLE_H, col);
+            break;
+        case RES_E:
+            console_fill_rect(we - ht, wy + TITLE_H, ht, w->h - TITLE_H, col);
+            break;
+        default: break;
+    }
+}
+
+/* ── Desktop background with subtle dot grid ─────────────────────────── */
+
+static void draw_desktop_bg(void) {
+    uint64_t fb_w = console_fb_width();
+    console_fill_rect(0, desk_top(), fb_w, desk_avail(), COL_DESKTOP);
+    uint32_t dot = 0x00252838u;
+    for (uint64_t y = desk_top() + 16; y + 1 < desk_bot(); y += 24)
+        for (uint64_t x = 16; x + 1 < fb_w; x += 24)
+            console_fill_rect(x, y, 1, 1, dot);
 }
 
 /* ── Full compositing redraw ─────────────────────────────────────────── */
 
 static void full_redraw(void) {
     uint64_t fb_w = console_fb_width();
-    console_fill_rect(0, desk_top(), fb_w, desk_avail(), COL_DESKTOP);
+    draw_desktop_bg();
+    draw_status_bar();
     bool suppress_term = false;
-    for (int i = 0; i < MAX_WINS; i++) {
+    /* Shadow pass: two-layer soft drop shadow */
+    for (int zi = 0; zi < MAX_WINS; zi++) {
+        int i = g_z[zi];
         window_t *w = &g_wins[i];
         if (!w->active || w->state == WIN_HIDDEN) continue;
-        win_draw_chrome(w, true);
+        /* Outer (lighter) layer */
+        uint64_t sx3 = w->x + 3u, sy3 = w->y + 3u;
+        if (sx3 + w->w <= fb_w && sy3 + w->h <= desk_bot())
+            console_fill_rect(sx3, sy3, w->w, w->h, 0x00080c1au);
+        /* Inner (darker) core */
+        uint64_t sx6 = w->x + 6u, sy6 = w->y + 6u;
+        if (sx6 + w->w <= fb_w && sy6 + w->h <= desk_bot())
+            console_fill_rect(sx6, sy6, w->w, w->h, 0x00020408u);
+    }
+    /* Snap-to-half preview: draw before windows so the dragged window appears on top */
+    if (g_snap_preview && g_dragging) {
+        uint64_t px = (g_snap_preview == 2) ? fb_w / 2u : 0u;
+        uint64_t pw = fb_w / 2u;
+        uint64_t py = desk_top();
+        uint64_t ph = desk_avail();
+        console_fill_rect(px, py, pw, ph, 0x00101c30u);
+        console_fill_rect(px,      py,      pw, 1u,   0x003060c0u);
+        console_fill_rect(px,      py+ph-1u, pw, 1u,   0x003060c0u);
+        console_fill_rect(px,      py,       1u, ph,   0x003060c0u);
+        console_fill_rect(px+pw-1u,py,       1u, ph,   0x003060c0u);
+    }
+    /* Window pass: render bottom-to-top using z-order */
+    for (int zi = 0; zi < MAX_WINS; zi++) {
+        int i = g_z[zi];
+        window_t *w = &g_wins[i];
+        if (!w->active || w->state == WIN_HIDDEN) continue;
+        /* For WIN_FILES, fb_render() calls win_draw_chrome() itself — skip the fill here */
+        win_draw_chrome(w, w->type != WIN_FILES);
         win_render_content(w);
         if (w->type != WIN_TERM) suppress_term = true;
     }
+    /* Resize edge hint overlay */
+    if (g_resize_hover_win >= 0 && g_resize_hover_dir != RES_NONE)
+        draw_resize_hint(g_resize_hover_win, g_resize_hover_dir);
     /* Non-terminal window visible: suppress terminal rendering to avoid overwrites */
     if (suppress_term)
         console_set_viewport(0, 0, 0, 0);
     taskbar_draw();
     if (g_launcher_open)
         launcher_draw();
+    if (g_ctx_open)
+        ctx_draw();
 }
 
 /* ── Window open / hide / maximize ──────────────────────────────────── */
@@ -1046,6 +1535,11 @@ static void win_show(window_t *w, int slot) {
         if (w->type == WIN_TERM) {
             w->w = fb_w * 88u / 100u;
             w->h = avail * 90u / 100u;
+        } else if (w->type == WIN_SETTINGS) {
+            w->w = 520u;
+            w->h = 480u;
+            if (w->w > fb_w) w->w = fb_w;
+            if (w->h > avail) w->h = avail;
         } else {
             w->w = fb_w * 60u / 100u;
             w->h = avail * 85u / 100u;
@@ -1066,9 +1560,10 @@ static void win_hide(window_t *w, int slot) {
     (void)slot;
     if (w->type == WIN_TERM)
         console_set_viewport(0, 0, 0, 0);
-    g_dragging = false;
-    g_resizing = false;
-    w->state   = WIN_HIDDEN;
+    g_dragging    = false;
+    g_resizing    = false;
+    g_snap_preview = 0;
+    w->state      = WIN_HIDDEN;
     full_redraw();
 }
 
@@ -1080,33 +1575,16 @@ static void win_maximize_toggle(window_t *w) {
         w->w = w->saved_w; w->h = w->saved_h;
         w->state = WIN_NORMAL;
     } else {
-        w->saved_x = w->x; w->saved_y = w->y;
-        w->saved_w = w->w; w->saved_h = w->h;
+        if (!w->half_snapped) {  /* don't overwrite snap-saved dims with half-snap dims */
+            w->saved_x = w->x; w->saved_y = w->y;
+            w->saved_w = w->w; w->saved_h = w->h;
+        }
         w->x = 0; w->y = desk_top();
         w->w = fb_w; w->h = desk_avail();
         w->state = WIN_MAXIMIZED;
     }
+    w->half_snapped = false;
     full_redraw();
-}
-
-/* ── Drag movement ───────────────────────────────────────────────────── */
-
-static void win_move(window_t *w, int32_t new_x, int32_t new_y) {
-    uint64_t fb_w = console_fb_width();
-
-    if (new_x < 0) new_x = 0;
-    if (new_y < (int32_t)desk_top()) new_y = (int32_t)desk_top();
-    if ((uint64_t)new_x + w->w > fb_w)
-        new_x = (int32_t)(fb_w - w->w);
-    if ((uint64_t)new_y + w->h > desk_bot())
-        new_y = (int32_t)(desk_bot() - w->h);
-
-    if ((uint64_t)new_x == w->x && (uint64_t)new_y == w->y) return;
-
-    console_fill_rect(w->x, w->y, w->w, w->h, COL_DESKTOP);
-    w->x = (uint64_t)new_x;
-    w->y = (uint64_t)new_y;
-    win_draw_chrome(w, false);
 }
 
 /* ── Resize ──────────────────────────────────────────────────────────── */
@@ -1195,16 +1673,21 @@ static void win_do_resize(window_t *w, int32_t mx, int32_t my) {
     if (nx == (int64_t)w->x && ny == (int64_t)w->y &&
         nw == (int64_t)w->w && nh == (int64_t)w->h) return;
 
+    /* Erase old window footprint with desktop bg so no ghost remains */
     console_fill_rect(w->x, w->y, w->w, w->h, COL_DESKTOP);
     w->x = (uint64_t)nx; w->y = (uint64_t)ny;
     w->w = (uint64_t)nw; w->h = (uint64_t)nh;
-    win_draw_chrome(w, false);
+    win_draw_chrome(w, w->type != WIN_FILES);
+    win_render_content(w);
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void gui_init(void) {
     uint64_t fb_w = console_fb_width();
+
+    /* Initialize z-order: 0=bottom ... MAX_WINS-1=top */
+    for (int i = 0; i < MAX_WINS; i++) g_z[i] = i;
 
     g_wins[0].active = true;
     g_wins[0].type   = WIN_TERM;
@@ -1213,13 +1696,19 @@ void gui_init(void) {
 
     g_wins[1].active = true;
     g_wins[1].type   = WIN_FILES;
-    g_wins[1].title  = "Files";
+    /* Title points into fb.path — auto-updates as user navigates */
+    g_wins[1].title  = g_wins[1].fb.path;
     g_wins[1].state  = WIN_HIDDEN;
 
     g_wins[2].active = true;
-    g_wins[2].type   = WIN_TEXT;
-    g_wins[2].title  = "Viewer";
+    g_wins[2].type   = WIN_SETTINGS;
+    g_wins[2].title  = "Settings";
     g_wins[2].state  = WIN_HIDDEN;
+
+    g_wins[3].active = true;
+    g_wins[3].type   = WIN_TEXT;
+    g_wins[3].title  = "Viewer";
+    g_wins[3].state  = WIN_HIDDEN;
 
     console_fill_rect(0, desk_top(), fb_w, desk_avail(), COL_DESKTOP);
     taskbar_draw();
@@ -1228,6 +1717,20 @@ void gui_init(void) {
 }
 
 void gui_on_tick(void) {
+    g_gui_tick++;
+
+    /* ── Uptime: redraw status bar once per second ── */
+    {
+        static uint64_t s_last_sec = (uint64_t)-1;
+        uint64_t hz = pit_get_hz();
+        if (!hz) hz = 100;
+        uint64_t now_sec = pit_ticks() / hz;
+        if (now_sec != s_last_sec) {
+            s_last_sec = now_sec;
+            draw_status_bar();
+        }
+    }
+
     int32_t mx, my;
     bool lbtn, rbtn;
     mouse_get_state(&mx, &my, &lbtn, &rbtn);
@@ -1235,6 +1738,11 @@ void gui_on_tick(void) {
     bool btn_pressed  = lbtn && !g_prev_lbtn;
     bool btn_released = !lbtn && g_prev_lbtn;
     g_prev_lbtn = lbtn;
+
+    /* Track right-button edge */
+    static bool g_prev_rbtn = false;
+    bool rbtn_pressed = rbtn && !g_prev_rbtn;
+    g_prev_rbtn = rbtn;
 
     /* Synthetic click from mouse_click()/mclick: lbtn stays false so btn_pressed
      * won't fire — consume it here and treat it as a real press. */
@@ -1248,11 +1756,13 @@ void gui_on_tick(void) {
     }
 
     uint64_t fb_h = console_fb_height();
+    uint64_t fb_w = console_fb_width();
     uint64_t ty   = fb_h - TASKBAR_H;
 
-    /* ── Hover tracking for file browser ── */
+    /* ── Hover tracking for file browser (z-order top-to-bottom) ── */
     if (!g_dragging && !g_resizing && !g_launcher_open) {
-        for (int si = MAX_WINS - 1; si >= 0; si--) {
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int si = g_z[zi];
             window_t *w = &g_wins[si];
             if (!w->active || w->state == WIN_HIDDEN || w->type != WIN_FILES) continue;
             fb_on_motion(w, mx, my);
@@ -1260,11 +1770,136 @@ void gui_on_tick(void) {
         }
     }
 
+    /* ── Chrome hover tracking ── */
+    if (!g_dragging && !g_resizing) {
+        int new_chrome_win = -1;
+        int new_chrome_btn = 0;
+
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int si = g_z[zi];
+            window_t *w = &g_wins[si];
+            if (!w->active || w->state == WIN_HIDDEN) continue;
+
+            int32_t wy = (int32_t)w->y;
+            int32_t wx = (int32_t)w->x;
+            int32_t we = wx + (int32_t)w->w;
+
+            if (my >= wy && my < wy + (int32_t)TITLE_H &&
+                mx >= wx && mx < we) {
+                int32_t clx = (int32_t)w->btn_cls_x;
+                int32_t mxx = (int32_t)w->btn_max_x;
+                int32_t mnx = (int32_t)w->btn_min_x;
+                new_chrome_win = si;
+                if (mx >= clx && mx < clx + (int32_t)BTN_W)
+                    new_chrome_btn = 1;
+                else if (mx >= mxx && mx < mxx + (int32_t)BTN_W)
+                    new_chrome_btn = 2;
+                else if (mx >= mnx && mx < mnx + (int32_t)BTN_W)
+                    new_chrome_btn = 3;
+                else
+                    new_chrome_btn = 0;
+                break;
+            }
+            /* Only check topmost window that contains this x,y in its bounds */
+            if (my >= wy && my < wy + (int32_t)w->h &&
+                mx >= wx && mx < we) {
+                break;
+            }
+        }
+
+        if (new_chrome_win != g_chrome_win || new_chrome_btn != g_chrome_btn) {
+            int old_win = g_chrome_win;
+            g_chrome_win = new_chrome_win;
+            g_chrome_btn = new_chrome_btn;
+            /* Redraw old hovered window's chrome */
+            if (old_win >= 0 && old_win < MAX_WINS &&
+                g_wins[old_win].active && g_wins[old_win].state != WIN_HIDDEN)
+                win_draw_chrome(&g_wins[old_win], false);
+            /* Redraw new hovered window's chrome */
+            if (g_chrome_win >= 0 && g_chrome_win < MAX_WINS &&
+                g_wins[g_chrome_win].active && g_wins[g_chrome_win].state != WIN_HIDDEN)
+                win_draw_chrome(&g_wins[g_chrome_win], false);
+        }
+    }
+
+    /* ── Resize edge hover tracking ── */
+    if (!g_dragging && !g_resizing && !g_launcher_open) {
+        int          new_rw = -1;
+        resize_dir_t new_rd = RES_NONE;
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int si = g_z[zi];
+            window_t *w = &g_wins[si];
+            if (!w->active || w->state == WIN_HIDDEN) continue;
+            resize_dir_t rd = hit_resize(w, mx, my);
+            if (rd != RES_NONE) { new_rw = si; new_rd = rd; break; }
+            if ((uint64_t)mx >= w->x && (uint64_t)mx < w->x + w->w &&
+                (uint64_t)my >= w->y && (uint64_t)my < w->y + w->h) break;
+        }
+        if (new_rw != g_resize_hover_win || new_rd != g_resize_hover_dir) {
+            g_resize_hover_win = new_rw;
+            g_resize_hover_dir = new_rd;
+            full_redraw();
+        }
+    }
+
+    /* ── Launcher hover tracking ── */
+    if (g_launcher_open) {
+        uint64_t lx = launcher_lx();
+        uint64_t ly = launcher_ly();
+        int new_hover = -1;
+        if ((uint64_t)mx >= lx && (uint64_t)mx < lx + LAUNCHER_W &&
+            (uint64_t)my >= ly &&
+            (uint64_t)my < ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H) {
+            new_hover = (int)((uint64_t)my - ly) / (int)LAUNCHER_ITEM_H;
+        }
+        if (new_hover != g_launcher_hover) {
+            g_launcher_hover = new_hover;
+            launcher_draw();
+        }
+    }
+
+    /* ── Taskbar button hover tracking ── */
+    if (!g_launcher_open) {
+        int new_tbhov = -1;
+        if ((uint64_t)my >= ty) {
+            for (int s = 0; s < 3; s++) {
+                uint64_t bx = TASKBTN_X + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
+                if ((uint64_t)mx >= bx && (uint64_t)mx < bx + TASKBTN_W) {
+                    new_tbhov = s; break;
+                }
+            }
+        }
+        if (new_tbhov != g_taskbtn_hover) {
+            static const char *tbnames[] = { "Terminal", "Files", "Settings" };
+            int old = g_taskbtn_hover;
+            g_taskbtn_hover = new_tbhov;
+            if (old >= 0 && old < 3) taskbar_draw_btn(old, tbnames[old]);
+            if (new_tbhov >= 0 && new_tbhov < 3) taskbar_draw_btn(new_tbhov, tbnames[new_tbhov]);
+        }
+    }
+
+    /* ── Context menu hover tracking ── */
+    if (g_ctx_open) {
+        uint64_t ctx_x = (uint64_t)g_ctx_x;
+        uint64_t ctx_y = (uint64_t)g_ctx_y;
+        int new_chov = -1;
+        if ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
+            (uint64_t)my >= ctx_y + 1u &&
+            (uint64_t)my < ctx_y + 1u + CTX_ITEMS * CTX_ITEM_H) {
+            new_chov = (int)((uint64_t)my - (ctx_y + 1u)) / (int)CTX_ITEM_H;
+        }
+        if (new_chov != g_ctx_hover) {
+            g_ctx_hover = new_chov;
+            ctx_draw();
+        }
+    }
+
     /* ── Keyboard capture + input for focused non-terminal window ── */
     {
-        /* Find frontmost non-terminal visible window */
+        /* Find frontmost non-terminal visible window using z-order */
         window_t *focused = NULL;
-        for (int ki = MAX_WINS - 1; ki >= 0; ki--) {
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int ki = g_z[zi];
             window_t *kw = &g_wins[ki];
             if (kw->active && kw->state != WIN_HIDDEN && kw->type != WIN_TERM) {
                 focused = kw; break;
@@ -1279,11 +1914,24 @@ void gui_on_tick(void) {
             s_gui_cap = want_cap;
         }
 
-        if (focused) {
+        /* Drain GUI key buffer — KEY_ALTTAB arrives here regardless of capture mode */
+        {
             int ch;
-            bool changed  = false;
-            bool closed   = false;
+            bool changed = false;
+            bool closed  = false;
             while ((ch = keyboard_gui_try_getchar()) != -1) {
+                /* ── Global: Alt+Tab cycles visible windows ── */
+                if ((uint8_t)ch == KEY_ALTTAB) {
+                    int vis[MAX_WINS], vc = 0;
+                    for (int zi = 0; zi < MAX_WINS; zi++) {
+                        int si = g_z[zi];
+                        if (g_wins[si].active && g_wins[si].state != WIN_HIDDEN)
+                            vis[vc++] = si;
+                    }
+                    if (vc >= 2) { z_raise(vis[vc - 2]); full_redraw(); }
+                    continue;
+                }
+                if (!focused) continue;
                 if (focused->type == WIN_FILES) {
                     if (focused->fb.search_active) {
                         if (ch == 27 || ch == '\t') {
@@ -1305,30 +1953,119 @@ void gui_on_tick(void) {
                         }
                     } else {
                         /* Navigation mode */
+                        int n   = focused->fb.entry_count;
+                        int sel = focused->fb.sel_row;
+                        /* Compute visible row count from window geometry */
+                        uint64_t lx2, ly2, lw2, lh2;
+                        fb_list_region(focused, &lx2, &ly2, &lw2, &lh2);
+                        int vis = (int)(lh2 / FB_ROW_H);
+                        if (vis < 1) vis = 1;
+
                         if (ch == KEY_UP) {
-                            if (focused->fb.scroll > 0) { focused->fb.scroll--; changed = true; }
+                            if (sel < 0) sel = focused->fb.scroll;
+                            else if (sel > 0) sel--;
+                            focused->fb.sel_row = sel;
+                            if (sel < focused->fb.scroll)
+                                focused->fb.scroll = sel;
+                            changed = true;
                         } else if (ch == KEY_DOWN) {
-                            focused->fb.scroll++; changed = true;
-                        } else if (ch == KEY_HOME) {
-                            if (focused->fb.scroll) { focused->fb.scroll = 0; changed = true; }
-                        } else if (ch == KEY_END) {
-                            focused->fb.scroll = focused->fb.entry_count; changed = true;
-                        } else if (ch == '\r' || ch == '\n') {
-                            if (focused->fb.sel_row >= 0 &&
-                                focused->fb.sel_row < focused->fb.entry_count &&
-                                focused->fb.is_dir[focused->fb.sel_row]) {
-                                char np[256];
-                                fb_path_join(np, focused->fb.path,
-                                             focused->fb.entries[focused->fb.sel_row]);
-                                fb_navigate(&focused->fb, np);
-                                changed = true;
+                            if (sel < 0) sel = focused->fb.scroll;
+                            else if (sel < n - 1) sel++;
+                            focused->fb.sel_row = sel;
+                            if (sel >= focused->fb.scroll + vis)
+                                focused->fb.scroll = sel - vis + 1;
+                            changed = true;
+                        } else if (ch == KEY_PGUP) {
+                            focused->fb.scroll -= vis;
+                            if (focused->fb.scroll < 0) focused->fb.scroll = 0;
+                            if (focused->fb.sel_row >= 0) {
+                                focused->fb.sel_row -= vis;
+                                if (focused->fb.sel_row < 0) focused->fb.sel_row = 0;
                             }
+                            changed = true;
+                        } else if (ch == KEY_PGDN) {
+                            focused->fb.scroll += vis;
+                            if (focused->fb.scroll >= n) focused->fb.scroll = n > vis ? n - vis : 0;
+                            if (focused->fb.sel_row >= 0) {
+                                focused->fb.sel_row += vis;
+                                if (focused->fb.sel_row >= n) focused->fb.sel_row = n - 1;
+                            }
+                            changed = true;
+                        } else if (ch == KEY_HOME) {
+                            focused->fb.scroll  = 0;
+                            focused->fb.sel_row = 0;
+                            changed = true;
+                        } else if (ch == KEY_END) {
+                            focused->fb.sel_row = n > 0 ? n - 1 : 0;
+                            int last = focused->fb.sel_row;
+                            focused->fb.scroll  = last - vis + 1;
+                            if (focused->fb.scroll < 0) focused->fb.scroll = 0;
+                            changed = true;
+                        } else if (ch == '\r' || ch == '\n') {
+                            if (sel >= 0 && sel < n) {
+                                if (focused->fb.is_dir[sel]) {
+                                    char np[256];
+                                    fb_path_join(np, focused->fb.path,
+                                                 focused->fb.entries[sel]);
+                                    fb_navigate(&focused->fb, np);
+                                    changed = true;
+                                } else {
+                                    const char *name = focused->fb.entries[sel];
+                                    if (fb_has_ext(name, ".txt") || fb_has_ext(name, ".log") ||
+                                        fb_has_ext(name, ".md")  || fb_has_ext(name, ".ini") ||
+                                        fb_has_ext(name, ".cfg") || fb_has_ext(name, ".sh")) {
+                                        char full[256];
+                                        fb_path_join(full, focused->fb.path, name);
+                                        text_open(&g_wins[3], full);
+                                        win_show(&g_wins[3], 3);
+                                        changed = false;
+                                    }
+                                }
+                            }
+                        } else if (ch == 27) {
+                            int slot = (int)(focused - g_wins);
+                            win_hide(focused, slot);
+                            focused = NULL; closed = true; break;
+                        } else if (ch == 23) { /* Ctrl+W */
+                            int slot = (int)(focused - g_wins);
+                            win_hide(focused, slot);
+                            focused = NULL; closed = true; break;
                         } else if (ch == '/' || ch == 'f') {
                             focused->fb.search_active   = true;
                             focused->fb.search_query[0] = '\0';
                             focused->fb.search_len      = 0;
                             focused->fb.scroll          = 0;
                             changed = true;
+                        } else if (ch == '\b' || ch == 127) {
+                            /* Backspace: go up one directory */
+                            bool can_up2 = !(focused->fb.path[0]=='/'&&focused->fb.path[1]=='\0');
+                            if (can_up2) {
+                                char parent[128];
+                                fb_path_parent(parent, focused->fb.path);
+                                fb_navigate(&focused->fb, parent);
+                                changed = true;
+                            }
+                        } else if (ch >= 32 && ch < 127) {
+                            /* Any printable key: jump to first matching entry */
+                            char lc = (char)ch;
+                            if (lc >= 'A' && lc <= 'Z') lc += 32;
+                            for (int ji = 0; ji < focused->fb.entry_count; ji++) {
+                                char fc = focused->fb.entries[ji][0];
+                                if (fc >= 'A' && fc <= 'Z') fc += 32;
+                                if (fc == lc) {
+                                    focused->fb.sel_row = ji;
+                                    uint64_t jlx, jly, jlw, jlh;
+                                    fb_list_region(focused, &jlx, &jly, &jlw, &jlh);
+                                    int jvis = (int)(jlh / FB_ROW_H);
+                                    if (jvis < 1) jvis = 1;
+                                    if (ji < focused->fb.scroll)
+                                        focused->fb.scroll = ji;
+                                    else if (ji >= focused->fb.scroll + jvis)
+                                        focused->fb.scroll = ji - jvis + 1;
+                                    changed = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 } else if (focused->type == WIN_TEXT) {
@@ -1336,11 +2073,23 @@ void gui_on_tick(void) {
                         if (focused->text.scroll > 0) { focused->text.scroll--; changed = true; }
                     } else if (ch == KEY_DOWN) {
                         focused->text.scroll++; changed = true;
+                    } else if (ch == KEY_PGUP) {
+                        focused->text.scroll -= 10;
+                        if (focused->text.scroll < 0) focused->text.scroll = 0;
+                        changed = true;
+                    } else if (ch == KEY_PGDN) {
+                        focused->text.scroll += 10; changed = true;
                     } else if (ch == KEY_HOME) {
                         if (focused->text.scroll) { focused->text.scroll = 0; changed = true; }
                     } else if (ch == KEY_END) {
                         focused->text.scroll = focused->text.total_lines; changed = true;
-                    } else if (ch == 27 || ch == 'q') {
+                    } else if (ch == 27 || ch == 'q' || ch == 23) { /* ESC, q, Ctrl+W */
+                        int slot = (int)(focused - g_wins);
+                        win_hide(focused, slot);
+                        focused = NULL; closed = true; break;
+                    }
+                } else if (focused->type == WIN_SETTINGS) {
+                    if (ch == 27 || ch == 23) { /* ESC or Ctrl+W */
                         int slot = (int)(focused - g_wins);
                         win_hide(focused, slot);
                         focused = NULL; closed = true; break;
@@ -1357,12 +2106,38 @@ void gui_on_tick(void) {
         }
     }
 
+    /* ── Mouse scroll wheel ── */
+    {
+        int8_t scroll = mouse_consume_scroll();
+        if (scroll) {
+            /* Find topmost visible window under cursor to scroll */
+            for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+                int si = g_z[zi];
+                window_t *w = &g_wins[si];
+                if (!w->active || w->state == WIN_HIDDEN) continue;
+                if ((uint64_t)mx < w->x || (uint64_t)mx >= w->x + w->w ||
+                    (uint64_t)my < w->y || (uint64_t)my >= w->y + w->h) continue;
+                if (w->type == WIN_FILES) {
+                    w->fb.scroll_vel += (int32_t)scroll * 24;
+                    if (w->fb.scroll_vel >  2048) w->fb.scroll_vel =  2048;
+                    if (w->fb.scroll_vel < -2048) w->fb.scroll_vel = -2048;
+                } else if (w->type == WIN_TEXT) {
+                    w->text.scroll_vel += (int32_t)scroll * 24;
+                    if (w->text.scroll_vel >  2048) w->text.scroll_vel =  2048;
+                    if (w->text.scroll_vel < -2048) w->text.scroll_vel = -2048;
+                }
+                break;
+            }
+        }
+    }
+
     /* ── Taskbar clicks ── */
     if (btn_pressed && (uint64_t)my >= ty) {
         int32_t cx, cy;
 
         if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + LOGO_W)) {
             g_launcher_open = !g_launcher_open;
+            g_launcher_hover = -1;
             if (g_launcher_open) {
                 taskbar_draw();
                 launcher_draw();
@@ -1373,19 +2148,58 @@ void gui_on_tick(void) {
             return;
         }
 
-        for (int s = 0; s < 2; s++) {
+        for (int s = 0; s < 3; s++) {
             uint64_t bx = TASKBTN_X + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
             if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
                 window_t *w = &g_wins[s];
-                if (w->state == WIN_HIDDEN)
+                if (w->state == WIN_HIDDEN) {
+                    z_raise(s);
                     win_show(w, s);
-                else
+                } else {
                     win_hide(w, s);
+                }
                 break;
             }
         }
         mouse_consume_click(&cx, &cy);
         return;
+    }
+
+    /* ── Right-click: context menu on desktop ── */
+    if (rbtn_pressed && (uint64_t)my < ty) {
+        /* Check if click is on any window */
+        bool on_win = false;
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int si = g_z[zi];
+            window_t *w = &g_wins[si];
+            if (!w->active || w->state == WIN_HIDDEN) continue;
+            if ((uint64_t)mx >= w->x && (uint64_t)mx < w->x + w->w &&
+                (uint64_t)my >= w->y && (uint64_t)my < w->y + w->h) {
+                on_win = true;
+                break;
+            }
+        }
+        if (!on_win) {
+            /* Close launcher if open */
+            if (g_launcher_open) {
+                g_launcher_open = false;
+                g_launcher_hover = -1;
+            }
+            /* Clamp context menu to screen */
+            int32_t ctx_x = mx;
+            int32_t ctx_y = my;
+            if ((uint64_t)ctx_x + CTX_W > fb_w)
+                ctx_x = (int32_t)(fb_w - CTX_W);
+            if ((uint64_t)ctx_y + CTX_ITEMS * CTX_ITEM_H + 2u > ty)
+                ctx_y = (int32_t)(ty - (uint64_t)(CTX_ITEMS * CTX_ITEM_H + 2u));
+            if (ctx_x < 0) ctx_x = 0;
+            if (ctx_y < (int32_t)desk_top()) ctx_y = (int32_t)desk_top();
+            g_ctx_x = ctx_x;
+            g_ctx_y = ctx_y;
+            g_ctx_open = true;
+            ctx_draw();
+            return;
+        }
     }
 
     /* ── Launcher popup clicks ── */
@@ -1397,10 +2211,12 @@ void gui_on_tick(void) {
                        (uint64_t)my >= ly &&
                        (uint64_t)my < ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H);
         g_launcher_open = false;
+        g_launcher_hover = -1;
         if (inside) {
             int item = (int)((uint64_t)my - ly) / (int)LAUNCHER_ITEM_H;
             if (item >= 0 && item < (int)LAUNCHER_ITEMS) {
                 window_t *w = &g_wins[item];
+                z_raise(item);
                 if (w->state == WIN_HIDDEN)
                     win_show(w, item);
                 else
@@ -1415,17 +2231,114 @@ void gui_on_tick(void) {
         /* fall through to window hit test */
     }
 
+    /* ── Context menu clicks ── */
+    if (btn_pressed && g_ctx_open) {
+        int32_t cx, cy;
+        uint64_t ctx_x = (uint64_t)g_ctx_x;
+        uint64_t ctx_y = (uint64_t)g_ctx_y;
+        bool inside = ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
+                       (uint64_t)my >= ctx_y + 1u &&
+                       (uint64_t)my < ctx_y + 1u + CTX_ITEMS * CTX_ITEM_H);
+        g_ctx_open = false;
+        if (inside) {
+            int item = (int)((uint64_t)my - (ctx_y + 1u)) / (int)CTX_ITEM_H;
+            if (item >= 0 && item < (int)CTX_ITEMS) {
+                window_t *w = &g_wins[item];
+                z_raise(item);
+                if (w->state == WIN_HIDDEN)
+                    win_show(w, item);
+                else
+                    full_redraw();
+            } else {
+                full_redraw();
+            }
+            mouse_consume_click(&cx, &cy);
+            return;
+        }
+        full_redraw();
+        /* fall through to window hit test */
+    }
+
+    /* ── Scrollbar drag in progress ── */
+    if (g_sb_drag && g_sb_drag_win >= 0) {
+        window_t *w = &g_wins[g_sb_drag_win];
+        if (btn_released) {
+            g_sb_drag = false;
+            g_sb_drag_win = -1;
+        } else if (g_sb_drag_lh > 0) {
+            int64_t dy = (int64_t)my - (int64_t)g_sb_drag_y0;
+            int ns = g_sb_drag_s0 + (int)(dy * (int64_t)g_sb_drag_max
+                                          / (int64_t)g_sb_drag_lh);
+            if (ns < 0) ns = 0;
+            if (ns > g_sb_drag_max) ns = g_sb_drag_max;
+            if (g_sb_drag_text) {
+                if (ns != w->text.scroll) {
+                    w->text.scroll = ns;
+                    text_render(w);
+                }
+            } else {
+                if (ns != w->fb.scroll) {
+                    w->fb.scroll = ns;
+                    fb_render(w);
+                }
+            }
+        }
+        int32_t cx, cy;
+        mouse_consume_click(&cx, &cy);
+        return;
+    }
+
     /* ── Drag in progress ── */
     if (g_dragging && g_drag_win >= 0) {
         window_t *w = &g_wins[g_drag_win];
         if (btn_released) {
             g_dragging = false;
             g_drag_win = -1;
+            /* Apply half-snap if preview was active */
+            if (g_snap_preview) {
+                uint64_t fb_w2 = console_fb_width();
+                w->saved_x = w->x; w->saved_y = w->y;
+                w->saved_w = w->w; w->saved_h = w->h;
+                w->y = desk_top(); w->h = desk_avail();
+                if (g_snap_preview == 1) { w->x = 0;           w->w = fb_w2 / 2u; }
+                else                     { w->x = fb_w2 / 2u;  w->w = fb_w2 - fb_w2/2u; }
+                w->state       = WIN_NORMAL;
+                w->half_snapped = true;
+                g_snap_preview = 0;
+            }
             full_redraw();
-            if (w->type == WIN_TERM)
-                term_set_viewport_norender(w);
         } else {
-            win_move(w, mx - g_drag_off_x, my - g_drag_off_y);
+            int32_t new_x = mx - g_drag_off_x;
+            int32_t new_y = my - g_drag_off_y;
+            uint64_t fb_w2 = console_fb_width();
+            if (new_x < 0) new_x = 0;
+            if (new_y < (int32_t)desk_top()) new_y = (int32_t)desk_top();
+            if ((uint64_t)new_x + w->w > fb_w2) new_x = (int32_t)(fb_w2 - w->w);
+            if ((uint64_t)new_y + w->h > desk_bot()) new_y = (int32_t)(desk_bot() - w->h);
+            /* Snap to screen edges */
+            if ((uint64_t)new_x < SNAP_DIST) new_x = 0;
+            if ((uint64_t)(new_x + (int32_t)w->w) + SNAP_DIST > fb_w2)
+                new_x = (int32_t)(fb_w2 - w->w);
+            if ((uint64_t)new_y < desk_top() + SNAP_DIST) new_y = (int32_t)desk_top();
+            if ((uint64_t)(new_y + (int32_t)w->h) + SNAP_DIST > desk_bot())
+                new_y = (int32_t)(desk_bot() - w->h);
+            /* Detect half-snap zone: cursor near left or right screen edge */
+            int old_snap = g_snap_preview;
+            if (mx <= 2)
+                g_snap_preview = 1;
+            else if (mx >= (int32_t)fb_w2 - 3)
+                g_snap_preview = 2;
+            else
+                g_snap_preview = 0;
+            uint64_t old_wx = w->x, old_wy = w->y;
+            w->x = (uint64_t)new_x;
+            w->y = (uint64_t)new_y;
+            w->btn_cls_x = w->x + w->w - BTN_W;
+            w->btn_max_x = w->btn_cls_x - BTN_W;
+            w->btn_min_x = w->btn_max_x - BTN_W;
+            /* Repaint if position changed or snap state changed */
+            if (w->x != old_wx || w->y != old_wy || g_snap_preview != old_snap)
+                full_redraw();
         }
         int32_t cx, cy;
         mouse_consume_click(&cx, &cy);
@@ -1447,9 +2360,11 @@ void gui_on_tick(void) {
         return;
     }
 
-    /* ── Per-window hit tests ── */
+    /* ── Per-window hit tests (z-order top-to-bottom) ── */
     if (btn_pressed) {
-        for (int si = MAX_WINS - 1; si >= 0; si--) {
+        bool hit_any = false;
+        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
+            int si = g_z[zi];
             window_t *w = &g_wins[si];
             if (!w->active || w->state == WIN_HIDDEN) continue;
 
@@ -1469,6 +2384,19 @@ void gui_on_tick(void) {
                 in_win = true; in_tb = false;
             }
 
+            hit_any = true;
+
+            /* Raise window to top on any click */
+            bool was_top = (g_z[MAX_WINS - 1] == si);
+            z_raise(si);
+            if (!was_top) {
+                /* Redraw chrome of previously-top window (now dimmed) and this one */
+                int prev_top = g_z[MAX_WINS - 2];
+                if (g_wins[prev_top].active && g_wins[prev_top].state != WIN_HIDDEN)
+                    win_draw_chrome(&g_wins[prev_top], false);
+                win_draw_chrome(w, false);
+            }
+
             if (in_tb && mx >= clx && mx < clx + (int32_t)BTN_W) {
                 win_hide(w, si);
             } else if (in_tb && mx >= mxx && mx < mxx + (int32_t)BTN_W) {
@@ -1478,6 +2406,7 @@ void gui_on_tick(void) {
             } else {
                 resize_dir_t rdir = hit_resize(w, mx, my);
                 if (rdir != RES_NONE) {
+                    w->half_snapped = false;
                     g_resizing   = true;
                     g_resize_win = si;
                     g_resize_dir = rdir;
@@ -1489,20 +2418,118 @@ void gui_on_tick(void) {
                     g_resize_wh0 = w->h;
                 } else if (in_tb && mx >= wx && mx < mnx) {
                     if (w->state == WIN_NORMAL) {
-                        g_dragging   = true;
-                        g_drag_win   = si;
-                        g_drag_off_x = mx - wx;
-                        g_drag_off_y = my - wy;
+                        /* Double-click detection */
+                        bool dbl = (g_last_click_win == si &&
+                                    g_gui_tick - g_last_click_tick <= 30u);
+                        g_last_click_tick = g_gui_tick;
+                        g_last_click_win  = si;
+                        if (dbl) {
+                            win_maximize_toggle(w);
+                        } else {
+                            g_dragging   = true;
+                            g_drag_win   = si;
+                            g_drag_off_x = mx - wx;
+                            g_drag_off_y = my - wy;
+                            /* Unsnap: restore pre-snap size when dragging out of half-snap */
+                            if (w->half_snapped && w->saved_w > 0 && w->saved_h > 0) {
+                                int32_t rel = g_drag_off_x;
+                                uint64_t old_w = w->w;
+                                w->w = w->saved_w;
+                                w->h = w->saved_h;
+                                g_drag_off_x = (int32_t)((int64_t)rel * (int64_t)w->saved_w
+                                                          / (int64_t)old_w);
+                                if (g_drag_off_x < 0) g_drag_off_x = 0;
+                                if ((uint64_t)g_drag_off_x >= w->w - 1u)
+                                    g_drag_off_x = (int32_t)(w->w - 1u);
+                                w->half_snapped = false;
+                            }
+                        }
                     } else if (w->state == WIN_MAXIMIZED) {
                         win_maximize_toggle(w);
                     }
                 } else if (w->type == WIN_FILES && in_win && !in_tb) {
                     fb_on_click(w, mx, my);
+                } else if (w->type == WIN_TEXT && in_win && !in_tb) {
+                    /* Click on text viewer scrollbar: thumb drag or track jump */
+                    uint64_t fix = w->x + BORDER;
+                    uint64_t fiy = w->y + TITLE_H;
+                    uint64_t fiw = w->w - 2u * BORDER;
+                    uint64_t fih = w->h - TITLE_H - BORDER;
+                    uint64_t sbx = fix + fiw - 8u;
+                    if (w->text.total_lines > 0 &&
+                        (uint64_t)mx >= sbx && (uint64_t)mx < sbx + 8u &&
+                        (uint64_t)my >= fiy && (uint64_t)my < fiy + fih) {
+                        uint64_t max_r = fih > 2u * PAD ? (fih - 2u * PAD) / console_font_height() : 1u;
+                        int max_sc = w->text.total_lines - (int)max_r;
+                        if (max_sc < 0) max_sc = 0;
+                        uint64_t th = (max_r * fih) / (uint64_t)w->text.total_lines;
+                        if (th < 8u) th = 8u;
+                        uint64_t ty = fiy + ((uint64_t)w->text.scroll * (fih - th))
+                                          / (uint64_t)(max_sc > 0 ? max_sc : 1);
+                        if ((uint64_t)my >= ty && (uint64_t)my < ty + th) {
+                            /* Thumb drag — cancel inertia */
+                            w->text.scroll_vel = 0; w->text.scroll_acc = 0;
+                            g_sb_drag      = true;
+                            g_sb_drag_win  = si;
+                            g_sb_drag_y0   = my;
+                            g_sb_drag_s0   = w->text.scroll;
+                            g_sb_drag_lh   = fih;
+                            g_sb_drag_ly   = fiy;
+                            g_sb_drag_max  = max_sc;
+                            g_sb_drag_text = true;
+                        } else {
+                            /* Track click: jump */
+                            int ns = (int)(((uint64_t)my - fiy) *
+                                           (uint64_t)w->text.total_lines / fih);
+                            if (ns < 0) ns = 0;
+                            if (ns > max_sc) ns = max_sc;
+                            w->text.scroll = ns;
+                            text_render(w);
+                        }
+                    }
                 }
             }
             break;
         }
+        (void)hit_any;
         int32_t cx, cy;
         mouse_consume_click(&cx, &cy);
+    }
+
+    /* ── Inertial scroll tick ── */
+    for (int zi = 0; zi < MAX_WINS; zi++) {
+        window_t *w = &g_wins[zi];
+        if (!w->active || w->state == WIN_HIDDEN) continue;
+        if (w->type == WIN_FILES && w->fb.scroll_vel) {
+            w->fb.scroll_acc += w->fb.scroll_vel;
+            int lines = w->fb.scroll_acc / 16;
+            w->fb.scroll_acc -= lines * 16;
+            if (lines) {
+                w->fb.scroll += lines;
+                if (w->fb.scroll < 0) w->fb.scroll = 0;
+                if (w->fb.scroll >= w->fb.entry_count)
+                    w->fb.scroll = w->fb.entry_count > 0 ? w->fb.entry_count - 1 : 0;
+                fb_render(w);
+            }
+            w->fb.scroll_vel = w->fb.scroll_vel * 7 / 8;
+            if (w->fb.scroll_vel > -16 && w->fb.scroll_vel < 16) {
+                w->fb.scroll_vel = 0;
+                w->fb.scroll_acc = 0;
+            }
+        } else if (w->type == WIN_TEXT && w->text.scroll_vel) {
+            w->text.scroll_acc += w->text.scroll_vel;
+            int lines = w->text.scroll_acc / 16;
+            w->text.scroll_acc -= lines * 16;
+            if (lines) {
+                w->text.scroll += lines;
+                if (w->text.scroll < 0) w->text.scroll = 0;
+                text_render(w);
+            }
+            w->text.scroll_vel = w->text.scroll_vel * 7 / 8;
+            if (w->text.scroll_vel > -16 && w->text.scroll_vel < 16) {
+                w->text.scroll_vel = 0;
+                w->text.scroll_acc = 0;
+            }
+        }
     }
 }
