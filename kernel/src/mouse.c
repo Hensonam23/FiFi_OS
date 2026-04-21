@@ -231,6 +231,25 @@ void mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn) {
     if (rbtn) *rbtn = m_rbtn;
 }
 
+void mouse_warp(int32_t x, int32_t y) {
+    int32_t sw = (int32_t)console_fb_width();
+    int32_t sh = (int32_t)console_fb_height();
+    if (x < 0) x = 0; if (x >= sw) x = sw - 1;
+    if (y < 0) y = 0; if (y >= sh) y = sh - 1;
+    cursor_restore();
+    m_x = x; m_y = y;
+    cursor_draw(x, y);
+    m_active = true;
+}
+
+void mouse_click(int32_t x, int32_t y) {
+    mouse_warp(x, y);
+    m_clicked = true;
+    m_click_x = x;
+    m_click_y = y;
+    m_lbtn = false;
+}
+
 void mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn) {
     int32_t nx = m_x + dx;
     int32_t ny = m_y + dy;

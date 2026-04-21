@@ -496,6 +496,8 @@ bool console_load_psf(const char *path) {
     return true;
 }
 
+/* Update viewport coords and re-render the cell buffer.
+ * Used when opening/reopening the window — cell-buffer text is restored. */
 void console_set_viewport(uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
     if (!con.initialized) return;
     con.x_off    = x;
@@ -507,5 +509,22 @@ void console_set_viewport(uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
     if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
     if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
     if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
-    console_clear();
+    for (uint64_t r = 0; r < con.rows; r++)
+        for (uint64_t c = 0; c < con.cols; c++)
+            render_char(c, r, cell_buf[r][c]);
+}
+
+/* Update viewport coords only — no framebuffer re-render.
+ * Used after a pixel blit where the framebuffer already has correct content. */
+void console_set_viewport_norender(uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!con.initialized) return;
+    con.x_off    = x;
+    con.y_offset = y;
+    con.vp_h     = h;
+    con.cols     = w / g_fw;
+    con.rows     = h / g_fh;
+    if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
+    if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
+    if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
+    if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
 }
