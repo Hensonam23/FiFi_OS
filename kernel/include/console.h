@@ -30,6 +30,12 @@ uint64_t           console_viewport_y(void);
 volatile uint32_t *console_fb_ptr(void);
 uint64_t           console_pitch32(void);
 
+/* Double buffering — call console_backbuf_init() once after pmm_init()/vmm_init().
+ * After that all rendering goes to a RAM backbuf; call console_flip_if_dirty()
+ * at the end of each frame tick to push the completed frame to VRAM. */
+void console_backbuf_init(void);
+bool console_flip_if_dirty(void);
+
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);
 uint32_t    console_font_width(void);

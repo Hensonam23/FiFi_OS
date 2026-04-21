@@ -197,6 +197,7 @@ void kmain(void) {
 
     mouse_init();
     i2c_hid_init();
+    console_backbuf_init();   /* init double-buffer; all GUI writes go to RAM first */
     gui_init();
     shell_run();
 }

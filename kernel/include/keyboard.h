@@ -12,6 +12,9 @@
 #define KEY_DELETE  0x84
 #define KEY_HOME    0x85
 #define KEY_END     0x86
+#define KEY_PGUP    0x87
+#define KEY_PGDN    0x88
+#define KEY_ALTTAB  0x89
 
 // IRQ handler calls this with raw Set 1 scancodes
 void keyboard_on_scancode(uint8_t sc);

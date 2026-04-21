@@ -63,8 +63,10 @@ static bool     m_bg_valid = false;
 static int32_t  m_bg_x = 0, m_bg_y = 0;   /* top-left of save area */
 
 /* ── PS/2 packet state ──────────────────────────────────────────────────── */
-static uint8_t  m_pkt[3];
+static uint8_t  m_pkt[4];   /* up to 4 bytes for IntelliMouse */
 static uint32_t m_pkt_idx = 0;
+static bool     m_intellimouse = false;  /* 4-byte packets when true */
+static int8_t   m_scroll = 0;           /* accumulated scroll delta */
 
 /* ── Cursor position ─────────────────────────────────────────────────────── */
 static int32_t m_x = 0, m_y = 0;
@@ -181,7 +183,8 @@ void mouse_on_byte(uint8_t b) {
         return;  /* first byte must have the always-1 bit */
 
     m_pkt[m_pkt_idx++] = b;
-    if (m_pkt_idx < 3u) return;
+    uint32_t pkt_len = m_intellimouse ? 4u : 3u;
+    if (m_pkt_idx < pkt_len) return;
     m_pkt_idx = 0u;
 
     uint8_t  flags    = m_pkt[0];
@@ -189,6 +192,13 @@ void mouse_on_byte(uint8_t b) {
     int32_t  dy       = (int32_t)m_pkt[2] - ((flags & 0x20u) ? 256 : 0);
     bool     new_lbtn = (flags & 0x01u) != 0u;
     bool     new_rbtn = (flags & 0x02u) != 0u;
+
+    /* IntelliMouse: byte 3 bits[3:0] = signed 4-bit scroll delta */
+    if (m_intellimouse) {
+        uint8_t sb = m_pkt[3] & 0x0Fu;
+        int8_t  sd = (sb & 0x08u) ? (int8_t)(sb | 0xF0u) : (int8_t)sb;
+        m_scroll = (int8_t)(m_scroll + sd);
+    }
 
     /* PS/2 Y is inverted: positive delta = upward on screen */
     int32_t nx = m_x + dx;
@@ -248,6 +258,25 @@ void mouse_click(int32_t x, int32_t y) {
     m_click_x = x;
     m_click_y = y;
     m_lbtn = false;
+}
+
+void mouse_set_intellimouse(bool enabled) {
+    m_intellimouse = enabled;
+    m_pkt_idx = 0;
+}
+
+int8_t mouse_consume_scroll(void) {
+    int8_t d = m_scroll;
+    m_scroll = 0;
+    return d;
+}
+
+/* Force a cursor redraw on VRAM at the current position.
+ * Must be called after console_flip_if_dirty() so VRAM has clean scene content. */
+void mouse_cursor_update(void) {
+    if (!m_active) return;
+    m_bg_valid = false;   /* discard stale save; cursor_draw will save fresh */
+    cursor_draw(m_x, m_y);
 }
 
 void mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn) {

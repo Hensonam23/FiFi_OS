@@ -1877,6 +1877,62 @@ else if (streq(argv[0], "ps")) {
         return;
     }
 
+    if (streq_simple(argv[0], "mdrag")) {
+        /* mdrag x1 y1 x2 y2  — simulate drag from (x1,y1) to (x2,y2) */
+        if (argc < 5) { kprintf("usage: mdrag <x1> <y1> <x2> <y2>\n"); return; }
+        int32_t x1=0,y1=0,x2=0,y2=0;
+        for (const char *q=argv[1]; *q>='0'&&*q<='9'; q++) x1=x1*10+(*q-'0');
+        for (const char *q=argv[2]; *q>='0'&&*q<='9'; q++) y1=y1*10+(*q-'0');
+        for (const char *q=argv[3]; *q>='0'&&*q<='9'; q++) x2=x2*10+(*q-'0');
+        for (const char *q=argv[4]; *q>='0'&&*q<='9'; q++) y2=y2*10+(*q-'0');
+        /* Position cursor, press button, drag in steps, release */
+        mouse_warp(x1, y1);
+        thread_sleep_ms(20);
+        mouse_push_rel(0, 0, true, false);  /* button down */
+        thread_sleep_ms(20);
+        int32_t dx = x2 - x1, dy = y2 - y1;
+        int32_t dist = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+        int32_t steps = dist / 6 + 1;
+        for (int32_t i = 1; i <= steps; i++) {
+            int32_t nx = x1 + dx * i / steps;
+            int32_t ny = y1 + dy * i / steps;
+            int32_t ex = x1 + dx * (i-1) / steps;
+            int32_t ey = y1 + dy * (i-1) / steps;
+            mouse_push_rel(nx - ex, ny - ey, true, false);
+            thread_sleep_ms(15);
+        }
+        mouse_push_rel(0, 0, false, false);  /* button up */
+        thread_sleep_ms(20);
+        kprintf("mdrag: dragged (%d,%d)->(%d,%d)\n", x1, y1, x2, y2);
+        return;
+    }
+
+    if (streq_simple(argv[0], "source") || streq_simple(argv[0], ".")) {
+        if (argc < 2) { kprintf("usage: source <file>\n"); return; }
+        const void *data = NULL;
+        uint64_t size = 0;
+        if (vfs_read(argv[1], &data, &size) != 0) {
+            kprintf("source: cannot read %s\n", argv[1]);
+            return;
+        }
+        const char *buf = (const char *)data;
+        uint64_t i = 0;
+        while (i < size) {
+            char line[256];
+            int llen = 0;
+            while (i < size && buf[i] != '\n' && llen < 254)
+                line[llen++] = buf[i++];
+            if (i < size && buf[i] == '\n') i++;
+            line[llen] = '\0';
+            /* Skip blank lines and comments */
+            int si = 0;
+            while (line[si] == ' ' || line[si] == '\t') si++;
+            if (line[si] == '\0' || line[si] == '#') continue;
+            shell_exec(line + si);
+        }
+        return;
+    }
+
 kprintf("Unknown command: %s\n", argv[0]);
     kprintf("Type: help\n");
 }
