@@ -195,6 +195,33 @@ runinstall: $(DISK)
 clean:
 	rm -rf $(BUILD)
 
+# ── linux-desktop targets ─────────────────────────────────────────────────────
+# These targets build and run the linux-desktop branch version.
+# The bare-metal targets above (run, rundbg, iso, etc.) are unchanged.
+
+.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-clean
+
+linux-setup:
+	bash scripts/setup-linux.sh
+
+linux-menuconfig:
+	$(MAKE) -C linux/src menuconfig
+
+linux-kernel:
+	bash scripts/build-kernel.sh
+
+linux-initrd:
+	bash scripts/build-initramfs.sh
+
+linux-run: linux-initrd
+	bash scripts/run-qemu.sh gui
+
+linux-rundbg: linux-initrd
+	bash scripts/run-qemu.sh serial
+
+linux-clean:
+	rm -rf build-linux/
+
 # Package a release zip: fifi.iso + all platform installers
 RELEASE_DIR := $(BUILD)/release
 RELEASE_ZIP := $(BUILD)/fifi-os-release.zip

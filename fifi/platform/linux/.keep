@@ -1,0 +1,2 @@
+# Phase 2: Linux platform layer — DRM/KMS display, evdev input, PipeWire audio.
+# Only compiled in the linux-desktop branch.

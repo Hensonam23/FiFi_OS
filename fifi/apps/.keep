@@ -1,0 +1,2 @@
+# Phase 3: FiFi apps (shell, file browser, text editor, settings) go here.
+# Shared code. Platform layer handles how they get input/display events.
