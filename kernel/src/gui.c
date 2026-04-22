@@ -5505,10 +5505,10 @@ static void settings_render(window_t *w) {
         gui_itoa_pad2((int)sc, up_str + 6); up_str[8] = '\0';
     }
     struct { const char *key; const char *val; } sysinfo[] = {
-        { "OS:",         "FiFi OS Alpha v5.0"     },
+        { "OS:",         "FiFi OS linux-desktop"  },
         { "Arch:",       "x86_64"                 },
-        { "Kernel:",     "freestanding"           },
-        { "Bootloader:", "Limine / UEFI"          },
+        { "Kernel:",     "Linux zen"              },
+        { "Boot:",       "Direct kernel boot"     },
         { "Memory:",     mem_str                  },
         { "Resolution:", res_str                  },
         { "Font:",       console_font_name()      },

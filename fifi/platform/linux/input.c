@@ -483,3 +483,14 @@ void mouse_on_byte(uint8_t b)           { (void)b; }
 void mouse_set_intellimouse(bool e)     { (void)e; }
 void mouse_set_cursor(cursor_type_t t)  { g_cursor_type = t; }
 cursor_type_t mouse_get_cursor(void)    { return g_cursor_type; }
+
+/* ── Compositor-visible helpers ──────────────────────────────────────────── */
+
+bool keyboard_gui_capture_active(void) { return g_gui_capture; }
+
+int input_get_all_fds(int *buf, int maxn) {
+    int n = 0;
+    for (int i = 0; i < g_kbd_cnt && n < maxn; i++) buf[n++] = g_kbd_fds[i];
+    for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
+    return n;
+}
