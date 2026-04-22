@@ -47,12 +47,26 @@ for applet in sh ash mount umount ls cat echo cp mv rm mkdir mknod \
     ln -sf busybox "$STAGE/bin/$applet" 2>/dev/null || true
 done
 
-# Copy ush if it was compiled for linux target (Phase 2+)
+# Copy ush if it was compiled for linux target
 USH_BIN="$REPO_ROOT/build-linux/ush"
 if [ -x "$USH_BIN" ]; then
     cp "$USH_BIN" "$STAGE/bin/ush"
     echo "[initramfs] included ush shell"
 fi
+
+# ── Build and include fifi-compositor ────────────────────────────────────────
+echo "[initramfs] building fifi-compositor..."
+(cd "$REPO_ROOT/fifi/compositor" && make -s) || {
+    echo "[initramfs] WARNING: fifi-compositor build failed — falling back to shell"
+}
+COMP_BIN="$REPO_ROOT/build-linux/fifi-compositor"
+if [ -x "$COMP_BIN" ]; then
+    cp "$COMP_BIN" "$STAGE/bin/fifi-compositor"
+    echo "[initramfs] included fifi-compositor"
+fi
+
+# Create VFS data directory (file browser root)
+mkdir -p "$STAGE/fifi-data"
 
 # Ensure /init is executable
 chmod +x "$STAGE/init"

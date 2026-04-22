@@ -1,7 +1,5 @@
 #!/bin/sh
 # FiFi OS — PID 1 init
-# Phase 1: mount essentials, show banner, launch shell.
-# Phase 2+: this will launch the FiFi compositor instead.
 
 # ── Mount essential virtual filesystems ──────────────────────────────────────
 mount -t proc     none /proc
@@ -29,19 +27,16 @@ export TERM=linux
 clear
 cat /etc/fifi-banner
 
-# ── Phase 2+: launch FiFi compositor ─────────────────────────────────────────
-# When the compositor is ready, replace the exec below with:
-#   exec /bin/fifi-compositor
-# For now we drop to a shell.
+# ── Launch FiFi compositor (Phase 2) ─────────────────────────────────────────
+if [ -x /bin/fifi-compositor ]; then
+    exec /bin/fifi-compositor
+fi
 
+# Fallback: shell if compositor not present
 if [ -x /bin/ush ]; then
     exec /bin/ush
 else
     exec /bin/sh
 fi
 
-# ── Emergency fallback ────────────────────────────────────────────────────────
-echo ""
-echo "  FiFi OS: shell exited — dropping to emergency shell"
-echo ""
 exec /bin/sh

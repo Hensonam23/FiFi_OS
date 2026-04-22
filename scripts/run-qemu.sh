@@ -52,7 +52,7 @@ if [ "$MODE" = "serial" ]; then
 else
     # GUI mode: framebuffer window + serial log to file
     "${QEMU_BASE[@]}" \
-        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3" \
-        -device virtio-vga \
+        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 video=1024x768-32" \
+        -device virtio-vga,xres=1024,yres=768 \
         -serial file:"$REPO_ROOT/serial-linux.log"
 fi
