@@ -79,7 +79,7 @@ static int16_t *s_pcm_virt[BDL_N];
 
 static volatile int      s_tone_active   = 0;
 static volatile uint64_t s_tone_stop_tick = 0;
-static volatile int      s_volume        = 75;
+static volatile int      s_volume        = 50;
 
 /* ── MMIO helpers ──────────────────────────────────────────────────────────── */
 static uint8_t  rd8 (uint32_t o) { return *(volatile uint8_t *)(s_mmio+o); }
@@ -165,11 +165,19 @@ static void fill_pcm(int freq_hz) {
 
 /* ── Codec output amp ──────────────────────────────────────────────────────── */
 static void apply_volume(int vol) {
-    int gain = vol * 0x7F / 100;
-    if (gain < 0)    gain = 0;
-    if (gain > 0x7F) gain = 0x7F;
-    /* 4-bit verb 0x3: set amp; bit15=output, bit13=L, bit12=R, bit7=mute, bits6:0=gain */
-    uint32_t amp = 0xB000u | ((uint32_t)gain & 0x7Fu);
+    /* Map the slider range to the audible gain window.
+     * Gain 0-76 is essentially silent on most HDA hardware; start at 77.
+     * Slider 0  → hardware mute (silence without wasting the low gain steps)
+     * Slider 1  → gain 77  (minimum audible)
+     * Slider 100 → gain 127 (maximum, ~same as old 100%) */
+    uint32_t amp;
+    if (vol <= 0) {
+        amp = 0xB080u;   /* output, L+R, mute bit set */
+    } else {
+        int gain = 77 + (vol * (127 - 77) / 100);
+        if (gain > 0x7F) gain = 0x7F;
+        amp = 0xB000u | ((uint32_t)gain & 0x7Fu);
+    }
     codec_set(2, (0x3u << 16) | amp);   /* DAC (NID 2) */
     codec_set(3, (0x3u << 16) | amp);   /* Pin (NID 3) */
 }
