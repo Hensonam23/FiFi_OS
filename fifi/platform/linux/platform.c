@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 /* Pull in kernel header declarations (stub limine.h will be used) */
 #include "pit.h"
@@ -145,17 +148,77 @@ uint32_t net_dns     = 0;
 static bool g_net_present = false;
 
 void net_init(void) {
+    /* Scan /proc/net/dev for real NICs (non-loopback) */
     FILE *f = fopen("/proc/net/dev", "r");
     if (!f) return;
     char line[256];
+    char iface[32] = {0};
     while (fgets(line, sizeof(line), f)) {
-        /* Look for any non-loopback interface with TX/RX bytes > 0 */
-        if (strstr(line, "eth") || strstr(line, "en") || strstr(line, "virtio")) {
-            g_net_present = true;
-            break;
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        char name[32]; int ni = 0;
+        for (char *p = line; p < colon && *p && ni < 31; p++) {
+            if (*p != ' ' && *p != '\t') name[ni++] = *p;
         }
+        name[ni] = '\0';
+        if (strcmp(name, "lo") == 0) continue;
+        snprintf(iface, sizeof(iface), "%s", name);
+        g_net_present = true;
+        break;
     }
     fclose(f);
+
+    if (!g_net_present || iface[0] == '\0') return;
+
+    /* Read IP and mask using SIOCGIFADDR/SIOCGIFNETMASK.
+     * sa_data for AF_INET: 2 bytes port (usually 0), then 4 bytes IPv4 in network order.
+     * We extract raw bytes to avoid <netinet/in.h> which conflicts with kernel net.h. */
+    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sk >= 0) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+
+        if (ioctl(sk, SIOCGIFADDR, &ifr) == 0) {
+            /* sa_data[2..5] = IPv4 in network byte order */
+            uint32_t ip_nbo;
+            memcpy(&ip_nbo, ifr.ifr_addr.sa_data + 2, 4);
+            net_ip = ntohl(ip_nbo);
+        }
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+        if (ioctl(sk, SIOCGIFNETMASK, &ifr) == 0) {
+            uint32_t mask_nbo;
+            memcpy(&mask_nbo, ifr.ifr_netmask.sa_data + 2, 4);
+            net_mask = ntohl(mask_nbo);
+        }
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+        if (ioctl(sk, SIOCGIFHWADDR, &ifr) == 0)
+            memcpy(net_mac, ifr.ifr_hwaddr.sa_data, 6);
+
+        close(sk);
+    }
+
+    /* Default gateway from /proc/net/route (hex IP in network byte order) */
+    FILE *gr = fopen("/proc/net/route", "r");
+    if (gr) {
+        char rline[256];
+        fgets(rline, sizeof(rline), gr);  /* skip header */
+        while (fgets(rline, sizeof(rline), gr)) {
+            char riface[16]; unsigned int dest, gw;
+            if (sscanf(rline, "%15s %x %x", riface, &dest, &gw) == 3 && dest == 0) {
+                /* gw is in little-endian hex on Linux */
+                net_gateway = ntohl(gw);
+                break;
+            }
+        }
+        fclose(gr);
+    }
+
+    fprintf(stderr, "[net] %s: ip=%u.%u.%u.%u\n", iface,
+            (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
+            (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
 void net_poll(void)  { }
 bool net_nic_present(void) { return g_net_present; }
