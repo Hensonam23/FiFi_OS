@@ -57,6 +57,8 @@
 #define IPC_CLIP_DATA     0x19u  /* compositor → app: {char text[]} — clipboard contents */
 #define IPC_OPEN_FILE     0x1Au  /* app → compositor: {char path[]} — open path in text viewer */
 #define IPC_WIN_RESIZE    0x1Bu  /* compositor → app: {uint16_t new_w, new_h} — window resized */
+#define IPC_DRAG_START    0x1Cu  /* app → compositor: {char path[]} — begin file drag */
+#define IPC_DROP_FILE     0x1Du  /* compositor → app: {char path[]} — file dropped on window */
 
 typedef struct {
     int      fd;
@@ -114,6 +116,12 @@ static int   g_resize_idx = -1;
 static int32_t g_resize_mx0 = 0, g_resize_my0 = 0;  /* cursor at resize start */
 static uint32_t g_resize_w0 = 0, g_resize_h0 = 0;   /* window dims at resize start */
 static bool  g_resize_do_w = false, g_resize_do_h = false;
+/* File drag-and-drop state */
+#define IPC_DRAG_FILE_MAX 1024
+static bool  g_file_drag      = false;
+static char  g_file_drag_path[IPC_DRAG_FILE_MAX] = {0};
+static int   g_file_drag_src  = -1;   /* source client index */
+static int32_t g_file_drag_mx = 0, g_file_drag_my = 0;  /* last cursor pos during drag */
 
 static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len);  /* fwd */
 
@@ -311,6 +319,16 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             path[pld_len] = '\0';
             extern void gui_open_in_viewer(const char *path);
             gui_open_in_viewer(path);
+        }
+        break;
+    }
+    case IPC_DRAG_START: {
+        if (pld_len > 0 && pld_len < IPC_DRAG_FILE_MAX) {
+            memcpy(g_file_drag_path, pld, pld_len);
+            g_file_drag_path[pld_len] = '\0';
+            g_file_drag = true;
+            g_file_drag_src = (int)(c - g_clients);
+            fprintf(stderr, "[ipc] drag start: %s\n", g_file_drag_path);
         }
         break;
     }
@@ -829,6 +847,78 @@ void ipc_draw_resize_handles(void) {
         /* Diagonal lines for grip */
         for (int k = 3; k < IPC_RESIZE_MARGIN - 1; k += 3)
             console_fill_rect(hx + k, hy + IPC_RESIZE_MARGIN - 2, 1, 2, 0xFFc0d8f0u);
+    }
+}
+
+/* Called every tick to update drag cursor position */
+void ipc_file_drag_update(int32_t mx, int32_t my) {
+    if (!g_file_drag) return;
+    g_file_drag_mx = mx;
+    g_file_drag_my = my;
+}
+
+/* True while a file drag is in progress */
+bool ipc_file_drag_active(void) { return g_file_drag; }
+
+/* Cancel the current file drag (e.g. on Esc) */
+void ipc_file_drag_cancel(void) {
+    if (!g_file_drag) return;
+    g_file_drag = false;
+    g_file_drag_path[0] = '\0';
+    g_file_drag_src = -1;
+}
+
+/* Complete drag on mouse-up: dispatch to target IPC window or compositor viewer */
+void ipc_file_drag_drop(int32_t mx, int32_t my) {
+    if (!g_file_drag) return;
+    /* Find topmost IPC window under cursor (excluding source) */
+    int best_i = -1;
+    uint32_t best_z = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
+        if (i == g_file_drag_src) continue;  /* skip source window */
+        if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
+            (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
+            if (c->z_order > best_z) { best_z = c->z_order; best_i = i; }
+        }
+    }
+    if (best_i >= 0) {
+        /* Drop on an IPC window: send IPC_DROP_FILE */
+        ipc_send(&g_clients[best_i], IPC_DROP_FILE,
+                 g_file_drag_path, (uint32_t)strlen(g_file_drag_path));
+        fprintf(stderr, "[ipc] drop '%s' → '%s'\n",
+                g_file_drag_path, g_clients[best_i].title);
+    } else {
+        /* Drop on compositor area: open in built-in viewer */
+        extern void gui_open_in_viewer(const char *path);
+        gui_open_in_viewer(g_file_drag_path);
+    }
+    ipc_file_drag_cancel();
+}
+
+/* Draw a small drag icon following the cursor */
+void ipc_draw_drag_overlay(void) {
+    if (!g_file_drag) return;
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    int32_t ox = g_file_drag_mx + 14;
+    int32_t oy = g_file_drag_my + 4;
+    /* Background chip */
+    console_fill_rect((uint64_t)ox, (uint64_t)oy, 80u, fh + 4u, 0xFF1e3a6eu);
+    console_fill_rect((uint64_t)ox, (uint64_t)oy, 80u, 1u, 0xFF5090d0u);
+    console_fill_rect((uint64_t)ox, (uint64_t)oy + fh + 3u, 80u, 1u, 0xFF5090d0u);
+    /* Filename text (basename) */
+    const char *name = g_file_drag_path;
+    const char *slash = strrchr(name, '/');
+    if (slash) name = slash + 1;
+    int max_ch = (int)(80u / fw) - 1;
+    int nlen   = (int)strlen(name);
+    if (nlen > max_ch) nlen = max_ch;
+    for (int k = 0; k < nlen; k++) {
+        uint64_t cx2 = (uint64_t)ox + 4u + (uint64_t)k * fw;
+        console_render_glyph(cx2, (uint64_t)oy + 2u,
+                             (unsigned char)name[k], 0xFFc8e0f8u, 0xFF1e3a6eu);
     }
 }
 

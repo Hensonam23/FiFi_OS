@@ -34,6 +34,8 @@
 #define IPC_NOTIFY        0x16u
 #define IPC_OPEN_FILE     0x1Au
 #define IPC_WIN_RESIZE    0x1Bu
+#define IPC_DRAG_START    0x1Cu
+#define IPC_DROP_FILE     0x1Du
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define WIN_W    640
@@ -149,6 +151,11 @@ static bool    g_confirm_delete = false;
 static bool    g_renaming = false;
 static char    g_rename_buf[256];
 static int     g_rename_len = 0;
+/* File drag state */
+static bool    g_drag_pending = false;
+static int32_t g_drag_smx = 0, g_drag_smy = 0;  /* mouse pos at drag start */
+static char    g_drag_path[1280] = {0};
+#define DRAG_THRESH 6
 
 static int entry_cmp(const void *a, const void *b) {
     const Entry *ea = (const Entry *)a;
@@ -550,25 +557,53 @@ int main(void) {
                             btns = in_pld[8];
                             bool lbtn = (btns & 1);
                             if (lbtn && !prev_lbtn) {
-                                /* Click: find which row */
+                                /* Press: select row and start potential drag */
                                 int list_top = TITLE_H + HDR_H;
                                 if (my >= list_top && my < WIN_H - FOOT_H) {
                                     int row = (my - list_top) / ITEM_H;
                                     int idx = g_scroll + row;
                                     if (idx < g_nentries) {
                                         if (idx == g_selected) {
-                                            /* double-click equivalent: open */
                                             nav_enter(sock, fb);
                                         } else {
                                             g_selected = idx;
                                             clamp_scroll();
                                             dirty = true;
                                         }
+                                        /* Prepare drag */
+                                        snprintf(g_drag_path, sizeof(g_drag_path),
+                                                 "%s/%s", g_path,
+                                                 g_entries[g_scroll + (my - list_top) / ITEM_H < g_nentries
+                                                           ? g_scroll + (my - list_top) / ITEM_H
+                                                           : g_selected].name);
+                                        g_drag_pending = true;
+                                        g_drag_smx = mx; g_drag_smy = my;
                                     }
                                 }
+                            } else if (lbtn && g_drag_pending) {
+                                /* Held + moved — check drag threshold */
+                                int32_t dx = mx - g_drag_smx, dy = my - g_drag_smy;
+                                if (dx*dx + dy*dy > DRAG_THRESH*DRAG_THRESH) {
+                                    ipc_send_msg(sock, IPC_DRAG_START,
+                                                 g_drag_path, (uint32_t)strlen(g_drag_path));
+                                    g_drag_pending = false;
+                                }
+                            } else if (!lbtn) {
+                                g_drag_pending = false;
                             }
                             prev_lbtn = lbtn;
                         } else if (type == IPC_WIN_RESIZE) {
+                            dirty = true;
+                        } else if (type == IPC_DROP_FILE && in_plen > 0 && in_plen < 1024) {
+                            /* File dropped onto us — navigate to its directory */
+                            char dropped[1024];
+                            memcpy(dropped, in_pld, in_plen); dropped[in_plen] = '\0';
+                            char *slash = strrchr(dropped, '/');
+                            if (slash && slash != dropped) {
+                                *slash = '\0';
+                                snprintf(g_path, sizeof(g_path), "%s", dropped);
+                            }
+                            load_dir(g_path);
                             dirty = true;
                         }
                         free(in_pld); in_pld = NULL;
