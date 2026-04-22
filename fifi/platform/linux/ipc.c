@@ -85,6 +85,9 @@ static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
 static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter */
+/* Cascading spawn position: new windows offset by 28px from each other */
+static uint32_t     g_cascade_x   = 60;
+static uint32_t     g_cascade_y   = 60;
 
 /* ── Toast notification state ────────────────────────────────────────────── */
 #define NOTIFY_DURATION_S 3
@@ -234,8 +237,14 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         if (fb_h == 0) fb_h = 1080;
         c->win_w   = req_w; c->frame_w = req_w;
         c->win_h   = req_h; c->frame_h = req_h;
-        c->win_x   = (fb_w > req_w) ? (fb_w - req_w) / 2 : 0;
-        c->win_y   = (fb_h > req_h) ? (fb_h - req_h) / 2 : 80;
+        /* Cascade spawn: offset each new window so they don't all stack */
+        uint32_t tb_h = 32u;
+        uint32_t max_x = fb_w > req_w ? fb_w - req_w : 0;
+        uint32_t max_y = (fb_h > tb_h + req_h) ? fb_h - tb_h - req_h : 0;
+        c->win_x   = (max_x > 0) ? (g_cascade_x % (max_x + 1)) : 0;
+        c->win_y   = (max_y > 0) ? (g_cascade_y % (max_y + 1)) : 0;
+        g_cascade_x = (g_cascade_x + 28 > fb_w / 2) ? 60 : g_cascade_x + 28;
+        g_cascade_y = (g_cascade_y + 28 > fb_h / 3) ? 60 : g_cascade_y + 28;
         c->snapped = false;
         c->disp_buf = NULL;
 
