@@ -17,6 +17,7 @@
 #include "console.h"
 #include "gui.h"
 #include "limine.h"
+#include "mouse.h"
 
 /* Linux platform functions */
 void input_init(void);
@@ -32,6 +33,14 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
 struct limine_framebuffer *drm_open(void);
 void drm_flush(void);
 void drm_close(void);
+
+/* IPC socket server for standalone FiFi apps (ipc.c) */
+void ipc_init(void);
+void ipc_poll(void);
+void ipc_shutdown(void);
+int  ipc_server_fd(void);
+
+#define CUR_H 20   /* must match input.c / input_sdl.c */
 
 /* PTY functions */
 void  pty_init(void);
@@ -184,6 +193,9 @@ int main(void) {
     gui_init();
     mouse_cursor_update();
 
+    /* IPC socket — apps connect here to create windows and push frames */
+    ipc_init();
+
     fprintf(stderr, "[compositor] running\n");
 
     /* Gather evdev fds for poll() */
@@ -208,8 +220,19 @@ int main(void) {
             nfds++;
         }
 
+        /* Include IPC server fd so new app connections wake us immediately */
+        int ipc_fd = ipc_server_fd();
+        if (ipc_fd >= 0 && nfds < MAX_PFD) {
+            pfd[nfds].fd     = ipc_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
+
         /* Wait up to 4 ms (250 Hz cap) — wakes immediately on input */
         poll(pfd, (nfds_t)nfds, 4);
+
+        /* ── IPC: accept new app connections, read app messages ──────────── */
+        ipc_poll();
 
         /* ── PTY output → console buffer ───────────────────────────────── */
         pty_poll_output();
@@ -230,19 +253,29 @@ int main(void) {
         /* ── GUI tick ──────────────────────────────────────────────────── */
         gui_on_tick();
 
-        /* ── Flip dirty rows → framebuffer, then notify QEMU if using DRM ──── */
-        bool flipped = console_flip_if_dirty();
-        if (flipped && g_using_drm) drm_flush();
-
-        /* ── Cursor: redraw only when position changed or frame was dirty ──── */
+        /* ── Cursor erase: mark old cursor rows dirty so the flip below
+         * pulls clean backbuffer content there (erasing the stale cursor). ── */
         int32_t cx, cy; bool lb, rb;
         mouse_get_state(&cx, &cy, &lb, &rb);
         static int32_t s_last_cx = -1, s_last_cy = -1;
-        if (flipped || cx != s_last_cx || cy != s_last_cy) {
+        bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
+        if (cursor_moved && s_last_cy >= 0) {
+            uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
+            uint32_t ey1 = ey0 + CUR_H;
+            console_mark_dirty_rows(ey0, ey1);
+        }
+
+        /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ───── */
+        bool flipped = console_flip_if_dirty();
+
+        /* ── Cursor redraw: save from backbuf (stale-proof), draw on front ── */
+        if (flipped || cursor_moved) {
             mouse_cursor_update();
-            if (g_using_drm) drm_flush();   /* flush cursor draw too */
             s_last_cx = cx; s_last_cy = cy;
         }
+
+        /* ── Single DRM flush covers both content and cursor ────────────── */
+        if ((flipped || cursor_moved) && g_using_drm) drm_flush();
     }
 
     return 0;

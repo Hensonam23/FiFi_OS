@@ -67,9 +67,9 @@ Everything visible transfers. Only the kernel layer is replaced:
 
 ## Current State
 
-**Phase 4 well underway — DRM/KMS display and ALSA audio working.**
+**Phase 3 complete. Phase 4 well underway.**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update, no stutter. Volume control in the FiFi taskbar and settings panel is wired to the real ALSA mixer. The SDL2 native runner gives smooth VSync-locked display for development. Both paths work.
+FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, a working IPC socket protocol for standalone apps, and a fixed cursor rendering pipeline. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. Volume control in the FiFi taskbar is wired to the real ALSA mixer. Both QEMU and SDL2 native runner work.
 
 ---
 
@@ -101,8 +101,11 @@ FiFi desktop runs on Linux with a DRM/KMS display backend. Instead of polling th
 - [x] F-key shortcuts always reach the GUI regardless of terminal focus
 - [x] PTY window size calculated from font metrics and terminal geometry
 - [x] SDL2 native runner: smooth VSync-locked display for development (no QEMU needed)
-- [ ] File browser and text editor as separate processes (IPC)
-- [ ] App protocol: how apps register windows and exchange paint events
+- [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
+- [x] App protocol defined: connect, register window, push pixel frames, receive input events
+- [x] Hello World app (`fifi/apps/hello/`) demonstrates the full IPC round-trip
+- [ ] File browser extracted as standalone process (uses IPC — groundwork done)
+- [ ] Settings panel extracted as standalone process
 
 ### Phase 4 — Display and Gaming
 

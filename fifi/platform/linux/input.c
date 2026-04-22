@@ -10,6 +10,7 @@
 
 /* Include mouse.h BEFORE linux/input.h — mouse.h has no KEY_* conflicts */
 #include "mouse.h"
+#include "console.h"
 
 /* linux/input.h defines its own KEY_LEFT=105, KEY_F1=59, etc.
  * We keep this include isolated: after mouse.h, before keyboard.h.
@@ -238,45 +239,72 @@ static const uint8_t s_cursor[CUR_H][CUR_W] = {
 void mouse_cursor_update(void) {
     if (!g_fb_ptr) return;
 
-    /* Restore previous area */
+    uint32_t *bb       = console_backbuf_ptr();
+    uint64_t  bb_pitch = console_backbuf_pitch32();
+    if (!bb) bb_pitch = g_fb_pitch;
+
+    /* ── Phase 1: restore old cursor position from backbuffer ─────────── */
     if (g_cur_saved_x >= 0) {
-        for (int cy = 0; cy < CUR_H; cy++) {
-            int py = g_cur_saved_y + cy;
-            if (py < 0 || py >= g_fb_h) continue;
-            for (int cx = 0; cx < CUR_W; cx++) {
-                int px = g_cur_saved_x + cx;
-                if (px < 0 || px >= g_fb_w) continue;
-                g_fb_ptr[(uint64_t)py * g_fb_pitch + px] =
-                    g_cur_saved[cy * CUR_W + cx];
+        int ox = g_cur_saved_x, oy = g_cur_saved_y;
+        /* Fast path: cursor fully on-screen (no edge clamping needed) */
+        if (ox >= 0 && oy >= 0 && ox + CUR_W <= g_fb_w && oy + CUR_H <= g_fb_h) {
+            for (int cy = 0; cy < CUR_H; cy++) {
+                uint32_t *dst = g_fb_ptr + (uint64_t)(oy + cy) * g_fb_pitch + ox;
+                if (bb) {
+                    const uint32_t *s = bb + (uint64_t)(oy + cy) * bb_pitch + ox;
+                    for (int cx = 0; cx < CUR_W; cx++) dst[cx] = s[cx];
+                } else {
+                    for (int cx = 0; cx < CUR_W; cx++)
+                        dst[cx] = g_cur_saved[cy * CUR_W + cx];
+                }
+            }
+        } else {
+            for (int cy = 0; cy < CUR_H; cy++) {
+                int py = oy + cy;
+                if (py < 0 || py >= g_fb_h) continue;
+                for (int cx = 0; cx < CUR_W; cx++) {
+                    int px = ox + cx;
+                    if (px < 0 || px >= g_fb_w) continue;
+                    g_fb_ptr[(uint64_t)py * g_fb_pitch + px] = bb
+                        ? bb[(uint64_t)py * bb_pitch + px]
+                        : g_cur_saved[cy * CUR_W + cx];
+                }
             }
         }
     }
 
-    /* Save new area */
+    /* ── Phase 2+3: save from backbuffer + draw cursor in a single pass ── */
     g_cur_saved_x = g_mx;
     g_cur_saved_y = g_my;
-    for (int cy = 0; cy < CUR_H; cy++) {
-        int py = g_my + cy;
-        if (py < 0 || py >= g_fb_h) continue;
-        for (int cx = 0; cx < CUR_W; cx++) {
-            int px = g_mx + cx;
-            if (px < 0 || px >= g_fb_w) continue;
-            g_cur_saved[cy * CUR_W + cx] =
-                g_fb_ptr[(uint64_t)py * g_fb_pitch + px];
-        }
-    }
+    const uint32_t *save_src = bb ? bb : g_fb_ptr;
+    uint64_t        save_p   = bb ? bb_pitch : g_fb_pitch;
 
-    /* Draw cursor */
-    for (int cy = 0; cy < CUR_H; cy++) {
-        int py = g_my + cy;
-        if (py < 0 || py >= g_fb_h) continue;
-        for (int cx = 0; cx < CUR_W; cx++) {
-            int px = g_mx + cx;
-            if (px < 0 || px >= g_fb_w) continue;
-            uint8_t v = s_cursor[cy][cx];
-            if (v == 0) continue;
-            uint32_t col = (v == 1) ? 0x00FFFFFFu : 0x00000000u;
-            g_fb_ptr[(uint64_t)py * g_fb_pitch + px] = col;
+    int nx = g_mx, ny = g_my;
+    if (nx >= 0 && ny >= 0 && nx + CUR_W <= g_fb_w && ny + CUR_H <= g_fb_h) {
+        /* Fast path: cursor fully on-screen */
+        for (int cy = 0; cy < CUR_H; cy++) {
+            const uint32_t *ss  = save_src + (uint64_t)(ny + cy) * save_p + nx;
+            uint32_t       *dst = g_fb_ptr + (uint64_t)(ny + cy) * g_fb_pitch + nx;
+            const uint8_t  *row = s_cursor[cy];
+            for (int cx = 0; cx < CUR_W; cx++) {
+                g_cur_saved[cy * CUR_W + cx] = ss[cx];
+                uint8_t v = row[cx];
+                dst[cx] = v ? (v == 1 ? 0x00FFFFFFu : 0x00000000u) : ss[cx];
+            }
+        }
+    } else {
+        for (int cy = 0; cy < CUR_H; cy++) {
+            int py = ny + cy;
+            if (py < 0 || py >= g_fb_h) continue;
+            for (int cx = 0; cx < CUR_W; cx++) {
+                int px = nx + cx;
+                if (px < 0 || px >= g_fb_w) continue;
+                uint32_t bg = save_src[(uint64_t)py * save_p + px];
+                g_cur_saved[cy * CUR_W + cx] = bg;
+                uint8_t v = s_cursor[cy][cx];
+                g_fb_ptr[(uint64_t)py * g_fb_pitch + px] =
+                    v ? (v == 1 ? 0x00FFFFFFu : 0x00000000u) : bg;
+            }
         }
     }
 }
