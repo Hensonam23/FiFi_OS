@@ -22,6 +22,8 @@ echo "fifios" > /proc/sys/kernel/hostname 2>/dev/null || true
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
+export XDG_RUNTIME_DIR=/tmp
+export WAYLAND_DISPLAY=wayland-0
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
