@@ -69,7 +69,7 @@ $(BUILD)/comp/console.o: ../../kernel/src/console.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/$(OUT): $(OBJS)
-	$(CC) -static $(OBJS) -o $@
+	$(CC) -static $(OBJS) -o $@ -lm
 	@echo "[compositor] Built: $@ (static)"
 
 clean:
