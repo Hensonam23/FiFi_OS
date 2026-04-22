@@ -234,13 +234,26 @@ void gui_spawn_app(const char *path) {
     signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
     pid_t pid = fork();
     if (pid == 0) {
-        /* Child: exec the app */
         char *argv[] = { (char *)path, NULL };
         execv(path, argv);
         _exit(127);
     }
     if (pid > 0)
         fprintf(stderr, "[platform] spawned %s (pid %d)\n", path, (int)pid);
+    else
+        fprintf(stderr, "[platform] fork failed for %s\n", path);
+}
+
+void gui_spawn_app_with_arg(const char *path, const char *arg) {
+    signal(SIGCHLD, SIG_IGN);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { (char *)path, (char *)arg, NULL };
+        execv(path, argv);
+        _exit(127);
+    }
+    if (pid > 0)
+        fprintf(stderr, "[platform] spawned %s %s (pid %d)\n", path, arg, (int)pid);
     else
         fprintf(stderr, "[platform] fork failed for %s\n", path);
 }

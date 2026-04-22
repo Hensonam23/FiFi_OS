@@ -1,6 +1,6 @@
-/* FiFi Terminal — standalone IPC process.
+/* FiFi Terminal — standalone IPC process with dynamic resize + scrollback.
  * Spawns a PTY shell (/bin/sh) and provides a VT100 terminal window.
- * Multiple instances can run simultaneously, each with its own shell.
+ * Window adapts its COLS/ROWS when the compositor resizes or snaps it.
  * Build: gcc -O2 -static -o fifi-terminal terminal.c
  */
 
@@ -33,13 +33,20 @@
 #define IPC_INPUT_KEY    0x11u
 #define IPC_INPUT_MOUSE  0x12u
 #define IPC_INVALIDATE   0x15u
+#define IPC_CLIP_GET     0x18u
+#define IPC_CLIP_DATA    0x19u
 #define IPC_WIN_RESIZE   0x1Bu
 
-/* ── Window / terminal geometry ─────────────────────────────────────────── */
-#define WIN_W     640
-#define WIN_H     400
-#define TITLE_H   24     /* compositor title bar */
-#define PAD       4
+/* ── Maximum grid bounds (static arrays) ────────────────────────────────── */
+#define MAX_COLS   220
+#define MAX_ROWS    60
+#define SCROLLBACK 300
+
+/* ── Default window size ─────────────────────────────────────────────────── */
+#define DEF_WIN_W  640
+#define DEF_WIN_H  400
+#define TITLE_H     24
+#define PAD          4
 
 /* ── Font (PSF1) ─────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -69,45 +76,54 @@ static bool font_load(const char *path) {
 }
 
 /* ── Terminal state ──────────────────────────────────────────────────────── */
-#define COLS 80
-#define ROWS 23   /* visible rows (WIN_H - TITLE_H - 2*PAD) / glyph_h */
-
 typedef struct { uint8_t ch; uint32_t fg; uint32_t bg; } Cell;
 
-static Cell    g_cells[ROWS][COLS];
-static int     g_cx = 0, g_cy = 0;         /* cursor col, row */
+static Cell     g_cells[MAX_ROWS][MAX_COLS];
+static Cell     g_scrollback[SCROLLBACK][MAX_COLS]; /* ring buffer */
+static int      g_sb_write     = 0;
+static int      g_sb_count     = 0;
+static int      g_scroll_offset = 0;   /* 0=live, N=scrolled back N lines */
+
+static int      g_rows = 23, g_cols = 80;   /* active grid (≤ MAX) */
+static int      g_win_w = DEF_WIN_W, g_win_h = DEF_WIN_H;
+static int      g_cx = 0, g_cy = 0;
 static uint32_t g_fg = 0xFFd8e8f8u;
 static uint32_t g_bg = 0xFF0e1418u;
-static bool    g_cursor_vis = true;
-static bool    g_dirty = true;
-static int     g_pty_master = -1;
-static pid_t   g_child_pid  = -1;
+static bool     g_cursor_vis = true;
+static bool     g_dirty = true;
+static int      g_pty_master = -1;
+static pid_t    g_child_pid  = -1;
 
 /* ESC sequence parser */
-static bool  g_esc        = false;
-static bool  g_esc_bracket = false;
+static bool  g_esc         = false;
+static bool  g_esc_bracket  = false;
 static char  g_esc_buf[32];
-static int   g_esc_len = 0;
+static int   g_esc_len      = 0;
 
-static void cell_clear_all(void) {
-    for (int r = 0; r < ROWS; r++)
-        for (int c = 0; c < COLS; c++)
+static void cell_clear_region(int r0, int c0, int r1, int c1) {
+    for (int r = r0; r <= r1 && r < g_rows; r++)
+        for (int c = c0; c < c1 && c < g_cols; c++)
             g_cells[r][c] = (Cell){ ' ', g_fg, g_bg };
 }
 
+static void cell_clear_all(void) { cell_clear_region(0, 0, g_rows - 1, g_cols); }
+
 static void scroll_up(void) {
-    memmove(&g_cells[0], &g_cells[1], sizeof(Cell) * COLS * (ROWS - 1));
-    for (int c = 0; c < COLS; c++)
-        g_cells[ROWS - 1][c] = (Cell){ ' ', g_fg, g_bg };
+    /* Push top row into scrollback ring */
+    memcpy(g_scrollback[g_sb_write], g_cells[0], sizeof(Cell) * MAX_COLS);
+    g_sb_write = (g_sb_write + 1) % SCROLLBACK;
+    if (g_sb_count < SCROLLBACK) g_sb_count++;
+    /* Shift screen up */
+    memmove(&g_cells[0], &g_cells[1], sizeof(Cell) * MAX_COLS * (g_rows - 1));
+    for (int c = 0; c < g_cols; c++)
+        g_cells[g_rows - 1][c] = (Cell){ ' ', g_fg, g_bg };
 }
 
 static void newline(void) {
-    g_cx = 0;
-    g_cy++;
-    if (g_cy >= ROWS) { g_cy = ROWS - 1; scroll_up(); }
+    g_cx = 0; g_cy++;
+    if (g_cy >= g_rows) { g_cy = g_rows - 1; scroll_up(); }
 }
 
-/* Map ANSI color index (0-7) to 32-bit ARGB */
 static uint32_t ansi_color(int idx, bool bright) {
     static const uint32_t pal[8] = {
         0xFF0e1418u, 0xFF993333u, 0xFF33993eu, 0xFF999933u,
@@ -121,65 +137,54 @@ static uint32_t ansi_color(int idx, bool bright) {
     return bright ? bright_pal[idx] : pal[idx];
 }
 
-/* Process a fully-buffered ESC[...m or other sequence */
 static void handle_esc_seq(void) {
     if (!g_esc_bracket || g_esc_len == 0) {
         g_esc = g_esc_bracket = false; g_esc_len = 0; return;
     }
     char cmd = g_esc_buf[g_esc_len - 1];
-    g_esc_buf[g_esc_len - 1] = '\0';  /* nul-terminate params */
+    g_esc_buf[g_esc_len - 1] = '\0';
 
     if (cmd == 'm') {
-        /* Color / attribute reset: parse semicolon-separated params */
         char *p = g_esc_buf;
         while (*p) {
             int n = atoi(p);
-            if (n == 0)                 { g_fg = ansi_color(7, false); g_bg = ansi_color(0, false); }
-            else if (n == 1)            { /* bold — use bright fg */ }
-            else if (n >= 30 && n <= 37) g_fg = ansi_color(n - 30, false);
-            else if (n >= 90 && n <= 97) g_fg = ansi_color(n - 90, true);
-            else if (n >= 40 && n <= 47) g_bg = ansi_color(n - 40, false);
+            if (n == 0)                  { g_fg = ansi_color(7, false); g_bg = ansi_color(0, false); }
+            else if (n == 1)             { /* bold — use bright fg */ }
+            else if (n >= 30 && n <= 37)   g_fg = ansi_color(n - 30, false);
+            else if (n >= 90 && n <= 97)   g_fg = ansi_color(n - 90, true);
+            else if (n >= 40 && n <= 47)   g_bg = ansi_color(n - 40, false);
             while (*p && *p != ';') p++;
             if (*p == ';') p++;
         }
     } else if (cmd == 'J') {
         int n = atoi(g_esc_buf);
         if (n == 2) { cell_clear_all(); g_cx = 0; g_cy = 0; }
-        else if (n == 0) {  /* clear to end of screen */
-            for (int c = g_cx; c < COLS; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
-            for (int r = g_cy + 1; r < ROWS; r++)
-                for (int c = 0; c < COLS; c++)
-                    g_cells[r][c] = (Cell){ ' ', g_fg, g_bg };
-        }
+        else if (n == 0) cell_clear_region(g_cy, g_cx, g_rows - 1, g_cols);
     } else if (cmd == 'K') {
         int n = atoi(g_esc_buf);
-        if (n == 0) for (int c = g_cx; c < COLS; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
+        if (n == 0) for (int c = g_cx; c < g_cols; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
         else if (n == 1) for (int c = 0; c <= g_cx; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
-        else if (n == 2) for (int c = 0; c < COLS; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
+        else if (n == 2) for (int c = 0; c < g_cols; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
     } else if (cmd == 'H' || cmd == 'f') {
-        /* Cursor position ESC[row;colH */
         int row = 0, col = 0;
         char *sc = strchr(g_esc_buf, ';');
         row = atoi(g_esc_buf);
         if (sc) col = atoi(sc + 1);
-        g_cx = (col > 1 ? col - 1 : 0);
-        g_cy = (row > 1 ? row - 1 : 0);
-        if (g_cx >= COLS) g_cx = COLS - 1;
-        if (g_cy >= ROWS) g_cy = ROWS - 1;
+        g_cx = (col > 1 ? col - 1 : 0); if (g_cx >= g_cols) g_cx = g_cols - 1;
+        g_cy = (row > 1 ? row - 1 : 0); if (g_cy >= g_rows) g_cy = g_rows - 1;
     } else if (cmd == 'A') { int n = atoi(g_esc_buf); g_cy -= n ? n : 1; if (g_cy < 0) g_cy = 0; }
-    else if (cmd == 'B') { int n = atoi(g_esc_buf); g_cy += n ? n : 1; if (g_cy >= ROWS) g_cy = ROWS-1; }
-    else if (cmd == 'C') { int n = atoi(g_esc_buf); g_cx += n ? n : 1; if (g_cx >= COLS) g_cx = COLS-1; }
-    else if (cmd == 'D') { int n = atoi(g_esc_buf); g_cx -= n ? n : 1; if (g_cx < 0) g_cx = 0; }
-    else if (cmd == 'P') {  /* DCH: delete characters */
+      else if (cmd == 'B') { int n = atoi(g_esc_buf); g_cy += n ? n : 1; if (g_cy >= g_rows) g_cy = g_rows-1; }
+      else if (cmd == 'C') { int n = atoi(g_esc_buf); g_cx += n ? n : 1; if (g_cx >= g_cols) g_cx = g_cols-1; }
+      else if (cmd == 'D') { int n = atoi(g_esc_buf); g_cx -= n ? n : 1; if (g_cx < 0) g_cx = 0; }
+    else if (cmd == 'P') {
         int n = atoi(g_esc_buf); if (!n) n = 1;
-        int rem = COLS - g_cx - n;
+        int rem = g_cols - g_cx - n;
         if (rem > 0) memmove(&g_cells[g_cy][g_cx], &g_cells[g_cy][g_cx + n], sizeof(Cell) * rem);
-        for (int c = COLS - n; c < COLS; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
+        for (int c = g_cols - n; c < g_cols; c++) g_cells[g_cy][c] = (Cell){ ' ', g_fg, g_bg };
     }
     g_esc = g_esc_bracket = false; g_esc_len = 0;
 }
 
-/* Process one byte from PTY output */
 static void term_putc(uint8_t c) {
     if (g_esc) {
         if (!g_esc_bracket && c == '[') { g_esc_bracket = true; return; }
@@ -192,7 +197,6 @@ static void term_putc(uint8_t c) {
                 g_esc_buf[g_esc_len++] = c;
             }
         } else {
-            /* Unhandled ESC + non-[ → skip */
             g_esc = false;
         }
         return;
@@ -200,27 +204,27 @@ static void term_putc(uint8_t c) {
     if (c == 0x1B) { g_esc = true; g_esc_bracket = false; g_esc_len = 0; return; }
     if (c == '\r')  { g_cx = 0; return; }
     if (c == '\n')  { newline(); return; }
-    if (c == '\t')  { g_cx = (g_cx + 8) & ~7; if (g_cx >= COLS) g_cx = COLS - 1; return; }
-    if (c == 0x08 || c == 0x7F) {  /* BS/DEL */
+    if (c == '\t')  { g_cx = (g_cx + 8) & ~7; if (g_cx >= g_cols) g_cx = g_cols - 1; return; }
+    if (c == 0x08 || c == 0x7F) {
         if (g_cx > 0) { g_cx--; g_cells[g_cy][g_cx] = (Cell){ ' ', g_fg, g_bg }; } return;
     }
-    if (c < 0x20) return;  /* skip other controls */
+    if (c < 0x20) return;
     g_cells[g_cy][g_cx] = (Cell){ c, g_fg, g_bg };
     g_cx++;
-    if (g_cx >= COLS) { g_cx = 0; g_cy++; if (g_cy >= ROWS) { g_cy = ROWS - 1; scroll_up(); } }
+    if (g_cx >= g_cols) { g_cx = 0; g_cy++; if (g_cy >= g_rows) { g_cy = g_rows - 1; scroll_up(); } }
 }
 
 /* ── Rendering ───────────────────────────────────────────────────────────── */
 static uint32_t *g_fb = NULL;
 
 static void fb_set(int x, int y, uint32_t col) {
-    if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H) g_fb[y * WIN_W + x] = col;
+    if (x >= 0 && x < g_win_w && y >= 0 && y < g_win_h) g_fb[y * g_win_w + x] = col;
 }
 
 static void fb_fill(int x, int y, int w, int h, uint32_t col) {
     for (int row = y; row < y + h; row++)
-        for (int col2 = x; col2 < x + w; col2++)
-            fb_set(col2, row, col);
+        for (int c = x; c < x + w; c++)
+            fb_set(c, row, col);
 }
 
 static void fb_glyph(int px, int py, uint8_t ch, uint32_t fg, uint32_t bg) {
@@ -235,34 +239,52 @@ static void fb_glyph(int px, int py, uint8_t ch, uint32_t fg, uint32_t bg) {
     }
 }
 
+/* Get scrollback line n (0=oldest) */
+static Cell *sb_row_col(int n, int col) {
+    int ring = (g_sb_write - g_sb_count + n + SCROLLBACK * 1024) % SCROLLBACK;
+    return &g_scrollback[ring][col];
+}
+
 static void render(void) {
-    /* Background */
-    fb_fill(0, 0, WIN_W, WIN_H, g_bg);
-    /* Title bar area (left for compositor) */
-    fb_fill(0, 0, WIN_W, TITLE_H, 0xFF0e1620u);
+    fb_fill(0, 0, g_win_w, g_win_h, g_bg);
+    fb_fill(0, 0, g_win_w, TITLE_H, 0xFF0e1620u);
 
     int cell_w = g_glyph_w + 1;
     int cell_h = g_glyph_h + 1;
     int ox = PAD, oy = TITLE_H + PAD;
 
-    for (int row = 0; row < ROWS; row++) {
-        for (int col = 0; col < COLS; col++) {
-            Cell *ce = &g_cells[row][col];
+    for (int row = 0; row < g_rows; row++) {
+        for (int col = 0; col < g_cols; col++) {
+            Cell *ce;
+            if (g_scroll_offset > 0 && row < g_scroll_offset) {
+                int sb_n = g_sb_count - g_scroll_offset + row;
+                if (sb_n < 0) {
+                    static Cell blank = { ' ', 0xFFd8e8f8u, 0xFF0e1418u };
+                    ce = &blank;
+                } else {
+                    ce = sb_row_col(sb_n, col < MAX_COLS ? col : MAX_COLS - 1);
+                }
+            } else {
+                ce = &g_cells[row - g_scroll_offset][col];
+            }
             int px = ox + col * cell_w;
             int py = oy + row * cell_h;
-            if (px + cell_w > WIN_W) break;
-            /* Cell background */
+            if (px + cell_w > g_win_w) break;
             fb_fill(px, py, cell_w, cell_h, ce->bg);
             fb_glyph(px, py, ce->ch, ce->fg, ce->bg);
         }
     }
 
-    /* Cursor */
-    if (g_cursor_vis) {
+    /* Cursor — hidden while scrolled back */
+    if (g_cursor_vis && g_scroll_offset == 0) {
         int px = ox + g_cx * cell_w;
         int py = oy + g_cy * cell_h;
         fb_fill(px, py + cell_h - 2, cell_w, 2, g_fg);
     }
+
+    /* Scrollback indicator: thin blue bar below title */
+    if (g_scroll_offset > 0)
+        fb_fill(0, TITLE_H, g_win_w, 3, 0xFF2060a0u);
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -275,12 +297,12 @@ static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
 }
 
 static void send_frame(int fd) {
-    uint32_t frm[4] = { 0, 0, WIN_W, WIN_H };
-    uint32_t total  = 16 + WIN_W * WIN_H * 4;
+    uint32_t frm[4] = { 0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h };
+    uint32_t total  = 16 + (uint32_t)g_win_w * (uint32_t)g_win_h * 4;
     uint8_t *msg    = malloc(total);
     if (!msg) return;
-    memcpy(msg,      frm,   16);
-    memcpy(msg + 16, g_fb,  WIN_W * WIN_H * 4);
+    memcpy(msg,      frm,  16);
+    memcpy(msg + 16, g_fb, (size_t)g_win_w * g_win_h * 4);
     ipc_send(fd, IPC_APP_FRAME, msg, total);
     free(msg);
 }
@@ -295,69 +317,106 @@ static int pty_spawn(void) {
     char *slave_name = ptsname(g_pty_master);
     if (!slave_name) { close(g_pty_master); return -1; }
 
-    /* Set terminal size */
-    struct winsize ws = { .ws_row = ROWS, .ws_col = COLS, .ws_xpixel = 0, .ws_ypixel = 0 };
+    struct winsize ws = { .ws_row = (uint16_t)g_rows, .ws_col = (uint16_t)g_cols };
     ioctl(g_pty_master, TIOCSWINSZ, &ws);
 
     g_child_pid = fork();
     if (g_child_pid < 0) { close(g_pty_master); return -1; }
     if (g_child_pid == 0) {
-        /* Child: set up PTY slave as controlling terminal */
         setsid();
         int slave = open(slave_name, O_RDWR);
         if (slave < 0) _exit(1);
         ioctl(slave, TIOCSCTTY, 0);
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         if (slave > 2) close(slave);
-        /* Environment */
         setenv("TERM", "xterm", 1);
         setenv("PS1", "$ ", 1);
         char *argv[] = { "/bin/sh", NULL };
         execv("/bin/sh", argv);
         _exit(1);
     }
-    /* Make pty non-blocking for reads */
     fcntl(g_pty_master, F_SETFL, O_NONBLOCK);
     return 0;
 }
 
-/* ── Key translation (FiFi → PTY byte sequences) ────────────────────────── */
+static void pty_update_size(void) {
+    if (g_pty_master < 0) return;
+    struct winsize ws = { .ws_row = (uint16_t)g_rows, .ws_col = (uint16_t)g_cols };
+    ioctl(g_pty_master, TIOCSWINSZ, &ws);
+    if (g_child_pid > 0) kill(g_child_pid, SIGWINCH);
+}
+
+/* ── Key translation ─────────────────────────────────────────────────────── */
 static void key_to_pty(uint8_t k) {
     if (k >= 0x20 && k < 0x7F) { write(g_pty_master, &k, 1); return; }
     switch (k) {
     case 0x0D: case '\n': { uint8_t nl = '\r'; write(g_pty_master, &nl, 1); break; }
     case 0x08: case 0x7F: { uint8_t bs = 0x7F; write(g_pty_master, &bs, 1); break; }
-    case 0x03: write(g_pty_master, "\x03", 1); break;  /* Ctrl+C */
-    case 0x04: write(g_pty_master, "\x04", 1); break;  /* Ctrl+D */
-    case 0x0C: write(g_pty_master, "\x0C", 1); break;  /* Ctrl+L */
-    case 0x1A: write(g_pty_master, "\x1A", 1); break;  /* Ctrl+Z */
-    case 0x1B: write(g_pty_master, "\x1B", 1); break;  /* ESC */
-    case 0x09: write(g_pty_master, "\x09", 1); break;  /* Tab */
-    /* Arrow keys (FIFI_KEY_* codes 0x80-0x83) */
-    case 0x80: write(g_pty_master, "\x1B[D", 3); break;  /* Left */
-    case 0x81: write(g_pty_master, "\x1B[C", 3); break;  /* Right */
-    case 0x82: write(g_pty_master, "\x1B[A", 3); break;  /* Up */
-    case 0x83: write(g_pty_master, "\x1B[B", 3); break;  /* Down */
-    case 0x84: write(g_pty_master, "\x1B[3~", 4); break; /* Del */
-    case 0x85: write(g_pty_master, "\x1B[H", 3); break;  /* Home */
-    case 0x86: write(g_pty_master, "\x1B[F", 3); break;  /* End */
+    case 0x03: write(g_pty_master, "\x03", 1); break;
+    case 0x04: write(g_pty_master, "\x04", 1); break;
+    case 0x0C: write(g_pty_master, "\x0C", 1); break;
+    case 0x1A: write(g_pty_master, "\x1A", 1); break;
+    case 0x1B: write(g_pty_master, "\x1B", 1); break;
+    case 0x09: write(g_pty_master, "\x09", 1); break;
+    case 0x80: write(g_pty_master, "\x1B[D", 3); break;
+    case 0x81: write(g_pty_master, "\x1B[C", 3); break;
+    case 0x82: write(g_pty_master, "\x1B[A", 3); break;
+    case 0x83: write(g_pty_master, "\x1B[B", 3); break;
+    case 0x84: write(g_pty_master, "\x1B[3~", 4); break;
+    case 0x85: write(g_pty_master, "\x1B[H", 3); break;
+    case 0x86: write(g_pty_master, "\x1B[F", 3); break;
     default:
-        if (k < 0x20) write(g_pty_master, &k, 1);  /* other ctrl chars */
+        if (k < 0x20) write(g_pty_master, &k, 1);
         break;
     }
+}
+
+/* Recalculate g_rows/g_cols from current window size, reallocate fb */
+static void resize_to(int new_w, int new_h) {
+    int cell_w = g_glyph_w + 1;
+    int cell_h = g_glyph_h + 1;
+    int new_cols = (new_w - 2 * PAD) / cell_w;
+    int new_rows = (new_h - TITLE_H - 2 * PAD) / cell_h;
+    if (new_cols < 10) new_cols = 10;
+    if (new_rows <  3) new_rows = 3;
+    if (new_cols > MAX_COLS) new_cols = MAX_COLS;
+    if (new_rows > MAX_ROWS) new_rows = MAX_ROWS;
+
+    bool size_changed = (new_cols != g_cols || new_rows != g_rows ||
+                         new_w != g_win_w || new_h != g_win_h);
+    if (!size_changed) return;
+
+    /* Clamp cursor to new grid */
+    if (g_cx >= new_cols) g_cx = new_cols - 1;
+    if (g_cy >= new_rows) g_cy = new_rows - 1;
+    g_cols = new_cols; g_rows = new_rows;
+    g_win_w = new_w;  g_win_h = new_h;
+
+    /* Reallocate framebuffer */
+    free(g_fb);
+    g_fb = malloc((size_t)g_win_w * g_win_h * 4);
+    if (!g_fb) { g_fb = NULL; return; }
+
+    pty_update_size();
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(void) {
     font_load("/fifi-data/fonts/ter16b.psf");
-    g_fb = malloc(WIN_W * WIN_H * 4);
-    if (!g_fb) return 1;
-
+    /* After font load, recalculate default grid */
+    {
+        int cw = g_glyph_w + 1, ch = g_glyph_h + 1;
+        g_cols = (DEF_WIN_W - 2 * PAD) / cw;
+        g_rows = (DEF_WIN_H - TITLE_H - 2 * PAD) / ch;
+        if (g_cols > MAX_COLS) g_cols = MAX_COLS;
+        if (g_rows > MAX_ROWS) g_rows = MAX_ROWS;
+    }
     cell_clear_all();
 
-    /* Spawn shell in PTY */
+    g_fb = malloc((size_t)DEF_WIN_W * DEF_WIN_H * 4);
+    if (!g_fb) return 1;
+
     if (pty_spawn() < 0) {
-        /* fallback: show error message */
         const char *msg = "PTY spawn failed";
         for (int i = 0; msg[i]; i++) term_putc((uint8_t)msg[i]);
     }
@@ -370,35 +429,29 @@ int main(void) {
     strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) return 1;
 
-    /* Register */
     uint8_t conn[68] = {0};
-    uint16_t w = WIN_W, h = WIN_H;
+    uint16_t w = (uint16_t)g_win_w, h = (uint16_t)g_win_h;
     memcpy(conn,     &w, 2);
     memcpy(conn + 2, &h, 2);
     snprintf((char *)(conn + 4), 64, "Terminal");
     ipc_send(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
-    /* Wait for WIN_CREATED */
     {
         uint8_t hdr[8] = {0};
         if (read(sock, hdr, 8) < 8) return 1;
-        uint32_t type, plen;
-        memcpy(&type, hdr,     4);
-        memcpy(&plen, hdr + 4, 4);
-        if (type == IPC_WIN_CREATED && plen >= 20) {
-            uint8_t resp[20]; read(sock, resp, plen > 20 ? 20 : plen);
+        uint32_t tp, pl;
+        memcpy(&tp, hdr, 4); memcpy(&pl, hdr + 4, 4);
+        if (tp == IPC_WIN_CREATED && pl >= 20) {
+            uint8_t resp[20]; read(sock, resp, pl > 20 ? 20 : pl);
         }
     }
 
-    /* Initial render */
+    signal(SIGPIPE, SIG_IGN);
     render();
     send_frame(sock);
 
-    fcntl(sock, F_SETFL, O_NONBLOCK);
-
-    /* Event loop */
-    uint8_t in_hdr[8];
-    int     in_got = 0;
+    uint8_t  in_hdr[8];
+    int      in_got = 0;
     uint8_t *in_pld = NULL;
     uint32_t in_plen = 0, in_pgot = 0;
     uint32_t in_type = 0;
@@ -406,19 +459,16 @@ int main(void) {
     uint32_t tick = 0;
 
     while (running) {
-        /* Poll: compositor socket + PTY master */
         struct pollfd pfds[2];
-        pfds[0].fd      = sock;
-        pfds[0].events  = POLLIN;
-        pfds[1].fd      = (g_pty_master >= 0) ? g_pty_master : -1;
-        pfds[1].events  = POLLIN;
+        pfds[0].fd = sock;     pfds[0].events = POLLIN;
+        pfds[1].fd = (g_pty_master >= 0) ? g_pty_master : -1; pfds[1].events = POLLIN;
 
-        int n = poll(pfds, 2, 16);  /* 16ms timeout ≈ 60Hz */
-        if (n < 0 && errno == EINTR) continue;
+        int pn = poll(pfds, 2, 16);
+        if (pn < 0 && errno == EINTR) continue;
 
-        /* ── Read from compositor ── */
+        /* ── Compositor messages ── */
         if (pfds[0].revents & POLLIN) {
-            uint8_t tbuf[256];
+            uint8_t tbuf[512];
             ssize_t nr = read(sock, tbuf, sizeof(tbuf));
             if (nr <= 0) { running = false; break; }
             ssize_t pos = 0;
@@ -426,9 +476,9 @@ int main(void) {
                 if (in_got < 8) {
                     in_hdr[in_got++] = tbuf[pos++];
                     if (in_got == 8) {
-                        memcpy(&in_type,  in_hdr,     4);
-                        memcpy(&in_plen,  in_hdr + 4, 4);
-                        if (in_plen > 65536) { in_got = 0; break; }
+                        memcpy(&in_type, in_hdr,     4);
+                        memcpy(&in_plen, in_hdr + 4, 4);
+                        if (in_plen > 131072) { in_got = 0; break; }
                         if (in_plen > 0) { in_pld = malloc(in_plen); in_pgot = 0; }
                     }
                 } else if (in_plen > 0 && in_pgot < in_plen) {
@@ -440,7 +490,32 @@ int main(void) {
                     if (in_pgot >= in_plen) {
                         if (in_type == IPC_INPUT_KEY && in_plen >= 1) {
                             uint8_t key = in_pld ? in_pld[0] : 0;
-                            if (g_pty_master >= 0) key_to_pty(key);
+                            if (key == 0x87u) {  /* PgUp: scroll back */
+                                int step = g_rows / 2;
+                                g_scroll_offset += step;
+                                if (g_scroll_offset > g_sb_count) g_scroll_offset = g_sb_count;
+                                g_dirty = true;
+                            } else if (key == 0x88u) {  /* PgDn: scroll forward */
+                                int step = g_rows / 2;
+                                g_scroll_offset -= step;
+                                if (g_scroll_offset < 0) g_scroll_offset = 0;
+                                g_dirty = true;
+                            } else {
+                                if (g_scroll_offset > 0) { g_scroll_offset = 0; g_dirty = true; }
+                                if (key == 0x16u) {
+                                    ipc_send(sock, IPC_CLIP_GET, NULL, 0);
+                                } else if (g_pty_master >= 0) {
+                                    key_to_pty(key);
+                                }
+                            }
+                        } else if (in_type == IPC_CLIP_DATA && in_plen > 0 && g_pty_master >= 0) {
+                            if (in_pld) write(g_pty_master, in_pld, in_plen);
+                        } else if (in_type == IPC_WIN_RESIZE && in_plen >= 4) {
+                            uint16_t nw, nh;
+                            memcpy(&nw, in_pld,     2);
+                            memcpy(&nh, in_pld + 2, 2);
+                            resize_to((int)nw, (int)nh);
+                            g_dirty = true;
                         }
                         free(in_pld); in_pld = NULL;
                         in_got = 0; in_plen = 0; in_pgot = 0;
@@ -453,16 +528,16 @@ int main(void) {
         }
         if (pfds[0].revents & (POLLHUP | POLLERR)) { running = false; break; }
 
-        /* ── Read PTY output ── */
+        /* ── PTY output ── */
         if (g_pty_master >= 0 && (pfds[1].revents & POLLIN)) {
             uint8_t buf[512];
             ssize_t nr2;
             while ((nr2 = read(g_pty_master, buf, sizeof(buf))) > 0) {
                 for (ssize_t i = 0; i < nr2; i++) term_putc(buf[i]);
+                g_scroll_offset = 0;
                 g_dirty = true;
             }
         }
-        /* Check if child exited */
         if (g_child_pid > 0) {
             int wstat = 0;
             if (waitpid(g_child_pid, &wstat, WNOHANG) > 0) {
@@ -477,15 +552,14 @@ int main(void) {
         tick++;
         if ((tick % 30) == 0) { g_cursor_vis = !g_cursor_vis; g_dirty = true; }
 
-        /* ── Render if dirty ── */
-        if (g_dirty) {
+        if (g_dirty && g_fb) {
             render();
             send_frame(sock);
             g_dirty = false;
         }
     }
 
-    if (g_child_pid > 0) { kill(g_child_pid, SIGTERM); }
+    if (g_child_pid > 0) kill(g_child_pid, SIGTERM);
     if (g_pty_master >= 0) close(g_pty_master);
     ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);

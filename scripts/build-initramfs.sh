@@ -103,6 +103,18 @@ echo "[initramfs] building fifi-terminal..."
     echo "[initramfs] included fifi-terminal"
 } || echo "[initramfs] WARNING: fifi-terminal build failed"
 
+echo "[initramfs] building fifi-editor..."
+(cd "$REPO_ROOT/fifi/apps/editor" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/editor/fifi-editor" "$STAGE/bin/"
+    echo "[initramfs] included fifi-editor"
+} || echo "[initramfs] WARNING: fifi-editor build failed"
+
+echo "[initramfs] building fifi-calc..."
+(cd "$REPO_ROOT/fifi/apps/calc" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/calc/fifi-calc" "$STAGE/bin/"
+    echo "[initramfs] included fifi-calc"
+} || echo "[initramfs] WARNING: fifi-calc build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 
@@ -128,10 +140,15 @@ on top of a minimal Linux kernel.
 
 WHAT WORKS:
   * Full FiFi desktop: taskbar, window manager, themes
-  * File browser with this directory as root
-  * Text editor (click any .txt file in the file browser)
+  * File browser — drag and drop, rename (F5), delete (d+d), new folder (n)
+  * Text editor — click any .txt/.c/.h/.sh/.md file; Ctrl+S save, Ctrl+F find
   * Settings panel (F3) with theme, font, clock settings
-  * Terminal window (F1) with interactive shell
+  * Terminal (F1) — real PTY shell, scrollback (PgUp/PgDn), resizes with window
+  * Window snapping — drag to screen edges; left/right/maximize
+  * Window resize — drag bottom-right corner
+  * Clipboard — Ctrl+C/V across all apps
+  * File drag-and-drop between windows
+  * Screenshots — PrintScreen key saves PPM to /fifi-data/screenshots/
   * Real clock, real memory stats
 
 KEYBOARD SHORTCUTS:
@@ -141,16 +158,23 @@ KEYBOARD SHORTCUTS:
   F4 - Toggle text viewer
 
 TERMINAL:
-  The terminal runs a real BusyBox shell (/bin/sh).
-  Type commands and press Enter. Arrow keys work for history.
-  Ctrl+C to interrupt a process.
+  Real PTY shell (/bin/sh). Arrow keys + history. Ctrl+C/D/Z.
+  PgUp/PgDn to scroll through 300-line scrollback buffer.
+  Terminal resizes automatically when window is snapped or resized.
+
+TEXT EDITOR:
+  Full editor with line numbers, find (Ctrl+F), undo (Ctrl+Z), save (Ctrl+S).
+  Opens from: file browser (click any text file) or launcher menu.
+  Launch with: fifi-editor /path/to/file
 
 PHASE ROADMAP:
-  Phase 1 - Linux kernel foundation       [DONE]
-  Phase 2 - FiFi compositor on /dev/fb0  [DONE]
-  Phase 3 - PTY terminal, live stats     [DONE]
-  Phase 4 - DRM/KMS, XWayland, Steam    [NEXT]
-  Phase 5 - Live USB, installer, WiFi    [PLANNED]
+  Phase 1 - Linux kernel foundation              [DONE]
+  Phase 2 - FiFi compositor on /dev/fb0         [DONE]
+  Phase 3 - PTY terminal, live stats            [DONE]
+  Phase 4 - Window snap/resize, editor,         [IN PROGRESS]
+            terminal scrollback + dynamic resize,
+            Wayland compositor, DRM/KMS backend
+  Phase 5 - Live USB, installer, WiFi           [PLANNED]
 WELCOME
 
 cat > "$STAGE/fifi-data/docs/shortcuts.txt" << 'SHORTCUTS'

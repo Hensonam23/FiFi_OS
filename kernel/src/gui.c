@@ -29,11 +29,11 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  10u
+#define LAUNCHER_ITEMS  12u
 #define LAUNCHER_W      110u
 #define CTX_W           130u
 #define CTX_ITEM_H      22u
-#define CTX_ITEMS       9u   /* 4 built-in windows + separator + 4 IPC apps */
+#define CTX_ITEMS       10u  /* 4 built-in windows + separator + 5 IPC apps */
 
 /* File browser context menu */
 #define FB_CTX_W         120u
@@ -808,10 +808,10 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4-8: spawned IPC apps */
+    /* Items 0-3: built-in windows; 4-10: spawned IPC apps */
     static const char *items[] = {
         "Terminal", "Files", "Settings", "Viewer",
-        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term",
+        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator",
     };
 
     int32_t mx, my;
@@ -940,11 +940,11 @@ static void vol_popup_draw(void) {
 static void ctx_draw(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4: separator; 5-7: IPC apps */
+    /* Items 0-3: built-in windows; 4: separator; 5-9: IPC apps */
     static const char *ctx_items[] = {
         "Terminal", "Files", "Settings", "Viewer",
         NULL,               /* separator */
-        "File Browser", "Sys Monitor", "Net Monitor", "New Term",
+        "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
     };
     int32_t cx = g_ctx_x;
     int32_t cy = g_ctx_y;
@@ -6063,6 +6063,9 @@ static void settings_render(window_t *w) {
         { "F2",             "Toggle Files"                },
         { "F3",             "Toggle Settings"             },
         { "F4",             "Toggle Text Viewer"          },
+        { "F5",             "Launch Sys Monitor"          },
+        { "F6",             "Launch Net Monitor"          },
+        { "F7",             "Launch Calculator"           },
         { "Alt+Tab",        "Cycle open windows"         },
         { "Esc / Ctrl+W",   "Close focused window"       },
         { "Up / Down",      "Navigate file list"         },
@@ -7397,6 +7400,23 @@ void gui_on_tick(void) {
                     }
                     continue;
                 }
+                /* ── F5: launch Sys Monitor; F6: launch Net Monitor ── */
+                if ((uint8_t)ch == KEY_F5) {
+                    __attribute__((weak)) void gui_spawn_app(const char *path);
+                    if (gui_spawn_app) gui_spawn_app("/bin/fifi-sysmon");
+                    continue;
+                }
+                if ((uint8_t)ch == KEY_F6) {
+                    __attribute__((weak)) void gui_spawn_app(const char *path);
+                    if (gui_spawn_app) gui_spawn_app("/bin/fifi-netmon");
+                    continue;
+                }
+                /* ── F7: launch Calculator ── */
+                if ((uint8_t)ch == KEY_F7) {
+                    __attribute__((weak)) void gui_spawn_app(const char *path);
+                    if (gui_spawn_app) gui_spawn_app("/bin/fifi-calc");
+                    continue;
+                }
                 /* ── Launcher keyboard navigation ── */
                 if (g_launcher_open) {
                     if ((uint8_t)ch == KEY_UP) {
@@ -7420,6 +7440,8 @@ void gui_on_tick(void) {
                                 "/bin/fifi-sysmon",
                                 "/bin/fifi-netmon",
                                 "/bin/fifi-terminal",
+                                "/bin/fifi-editor",
+                                "/bin/fifi-calc",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
@@ -7449,6 +7471,7 @@ void gui_on_tick(void) {
                                 "/bin/fifi-sysmon",
                                 "/bin/fifi-netmon",
                                 "/bin/fifi-terminal",
+                                "/bin/fifi-editor",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_cc[_ci - 5]);
@@ -9212,6 +9235,8 @@ void gui_on_tick(void) {
                     "/bin/fifi-sysmon",
                     "/bin/fifi-netmon",
                     "/bin/fifi-terminal",
+                    "/bin/fifi-editor",
+                    "/bin/fifi-calc",
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app)
@@ -9327,10 +9352,10 @@ void gui_on_tick(void) {
                 z_raise(item);
                 if (w->state == WIN_HIDDEN) win_show(w, item);
                 else full_redraw();
-            } else if (item >= 5 && item <= 8) {
+            } else if (item >= 5 && item <= 9) {
                 static const char *_cp[] = {
                     "/bin/fifi-filebrowser", "/bin/fifi-sysmon",
-                    "/bin/fifi-netmon", "/bin/fifi-terminal"
+                    "/bin/fifi-netmon", "/bin/fifi-terminal", "/bin/fifi-editor"
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app) gui_spawn_app(_cp[item - 5]);

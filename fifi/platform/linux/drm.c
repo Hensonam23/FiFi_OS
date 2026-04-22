@@ -44,8 +44,7 @@ struct limine_framebuffer *drm_open(void) {
     if (g_fd < 0) { fprintf(stderr, "[drm] no card\n"); return NULL; }
 
     /* DRM master — may fail if not VT-active; QEMU is usually fine */
-    int master_r = ioctl(g_fd, DRM_IOCTL_SET_MASTER, 0);
-    fprintf(stderr, "[drm] SET_MASTER: %s (errno=%d)\n", master_r == 0 ? "ok" : "fail", master_r ? errno : 0);
+    ioctl(g_fd, DRM_IOCTL_SET_MASTER, 0);
 
     /* Tell the kernel we understand universal planes — required by some drivers */
     {
@@ -59,18 +58,23 @@ struct limine_framebuffer *drm_open(void) {
         fprintf(stderr, "[drm] GETRESOURCES failed errno=%d\n", errno);
         goto fail;
     }
-    fprintf(stderr, "[drm] resources: %u connectors %u crtcs\n",
-            res.count_connectors, res.count_crtcs);
 
-    uint32_t *conn_ids = calloc(res.count_connectors, sizeof(uint32_t));
-    uint32_t *crtc_ids = calloc(res.count_crtcs,      sizeof(uint32_t));
-    if (!conn_ids || !crtc_ids) { free(conn_ids); free(crtc_ids); goto fail; }
+    uint32_t *conn_ids = calloc(res.count_connectors ? res.count_connectors : 1, sizeof(uint32_t));
+    uint32_t *crtc_ids = calloc(res.count_crtcs      ? res.count_crtcs      : 1, sizeof(uint32_t));
+    uint32_t *fb_ids   = calloc(res.count_fbs         ? res.count_fbs        : 1, sizeof(uint32_t));
+    uint32_t *enc_ids  = calloc(res.count_encoders    ? res.count_encoders   : 1, sizeof(uint32_t));
+    if (!conn_ids || !crtc_ids || !fb_ids || !enc_ids) {
+        free(conn_ids); free(crtc_ids); free(fb_ids); free(enc_ids); goto fail;
+    }
     res.connector_id_ptr = (uint64_t)(uintptr_t)conn_ids;
     res.crtc_id_ptr      = (uint64_t)(uintptr_t)crtc_ids;
+    res.fb_id_ptr        = (uint64_t)(uintptr_t)fb_ids;
+    res.encoder_id_ptr   = (uint64_t)(uintptr_t)enc_ids;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
         fprintf(stderr, "[drm] GETRESOURCES (fill) failed errno=%d\n", errno);
-        free(conn_ids); free(crtc_ids); goto fail;
+        free(conn_ids); free(crtc_ids); free(fb_ids); free(enc_ids); goto fail;
     }
+    free(fb_ids); free(enc_ids);
 
     /* ── Find first connected connector + preferred mode ────────────── */
     struct drm_mode_modeinfo mode   = {0};
@@ -80,20 +84,45 @@ struct limine_framebuffer *drm_open(void) {
         struct drm_mode_get_connector c = {0};
         c.connector_id = conn_ids[ci];
         if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) < 0) continue;
-        if (c.connection != 1 /* connected */ || c.count_modes == 0)   continue;
+        /* Skip explicitly disconnected connectors; accept connected (1) or unknown (3) */
+        if (c.connection == 2 /* disconnected */) continue;
 
-        struct drm_mode_modeinfo *modes = calloc(c.count_modes, sizeof(*modes));
-        uint32_t *eids = calloc(c.count_encoders, sizeof(uint32_t));
-        if (!modes || !eids) { free(modes); free(eids); continue; }
-
-        c.modes_ptr    = (uint64_t)(uintptr_t)modes;
-        c.encoders_ptr = (uint64_t)(uintptr_t)eids;
-        if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) == 0) {
-            mode    = modes[0];
+        if (c.count_modes == 0) {
+            /* virtio-gpu may report 0 modes — synthesize 1920×1080@60 */
+            mode.clock       = 148500;
+            mode.hdisplay    = 1920; mode.hsync_start = 2008;
+            mode.hsync_end   = 2052; mode.htotal      = 2200;
+            mode.vdisplay    = 1080; mode.vsync_start = 1084;
+            mode.vsync_end   = 1089; mode.vtotal      = 1125;
+            mode.vrefresh    = 60;
+            mode.flags       = 5;   /* DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC */
+            mode.type        = 8;   /* DRM_MODE_TYPE_DRIVER */
+            snprintf(mode.name, sizeof(mode.name), "1920x1080");
             conn_id = conn_ids[ci];
             enc_id  = c.encoder_id;
+        } else {
+            uint32_t n_modes = c.count_modes;
+            uint32_t n_encs  = c.count_encoders ? c.count_encoders : 1;
+            struct drm_mode_modeinfo *modes = calloc(n_modes, sizeof(*modes));
+            uint32_t *eids = calloc(n_encs, sizeof(uint32_t));
+            if (!modes || !eids) { free(modes); free(eids); continue; }
+
+            /* Re-issue GETCONNECTOR with only modes+encoders populated.
+             * Zero out count_props/prop ptrs so kernel won't EFAULT on them. */
+            uint32_t saved_conn_id = c.connector_id;
+            memset(&c, 0, sizeof(c));
+            c.connector_id   = saved_conn_id;
+            c.count_modes    = n_modes;
+            c.count_encoders = n_encs;
+            c.modes_ptr      = (uint64_t)(uintptr_t)modes;
+            c.encoders_ptr   = (uint64_t)(uintptr_t)eids;
+            if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) == 0) {
+                mode    = modes[0];
+                conn_id = conn_ids[ci];
+                enc_id  = c.encoder_id;
+            }
+            free(modes); free(eids);
         }
-        free(modes); free(eids);
     }
     free(conn_ids);
 
@@ -121,7 +150,7 @@ struct limine_framebuffer *drm_open(void) {
     struct drm_mode_create_dumb dumb = {0};
     dumb.width = w; dumb.height = h; dumb.bpp = 32;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0) {
-        fprintf(stderr, "[drm] CREATE_DUMB failed\n"); goto fail;
+        fprintf(stderr, "[drm] CREATE_DUMB failed errno=%d\n", errno); goto fail;
     }
     g_handle = dumb.handle;
 
@@ -131,7 +160,7 @@ struct limine_framebuffer *drm_open(void) {
     fb.pitch = dumb.pitch; fb.bpp = 32; fb.depth = 24;
     fb.handle = dumb.handle;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_ADDFB, &fb) < 0) {
-        fprintf(stderr, "[drm] ADDFB failed\n"); goto fail;
+        fprintf(stderr, "[drm] ADDFB failed errno=%d\n", errno); goto fail;
     }
     g_fb_id = fb.fb_id;
 
@@ -139,13 +168,13 @@ struct limine_framebuffer *drm_open(void) {
     struct drm_mode_map_dumb map = {0};
     map.handle = dumb.handle;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        fprintf(stderr, "[drm] MAP_DUMB failed\n"); goto fail;
+        fprintf(stderr, "[drm] MAP_DUMB failed errno=%d\n", errno); goto fail;
     }
     g_map_sz  = dumb.size;
     g_map_ptr = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE,
                      MAP_SHARED, g_fd, (off_t)map.offset);
     if (g_map_ptr == MAP_FAILED) {
-        fprintf(stderr, "[drm] mmap failed\n"); g_map_ptr = NULL; goto fail;
+        fprintf(stderr, "[drm] mmap failed errno=%d\n", errno); g_map_ptr = NULL; goto fail;
     }
     memset(g_map_ptr, 0, dumb.size);
 
@@ -158,7 +187,15 @@ struct limine_framebuffer *drm_open(void) {
     set.mode               = mode;
     set.mode_valid         = 1;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_SETCRTC, &set) < 0) {
-        fprintf(stderr, "[drm] SETCRTC failed (errno %d)\n", errno); goto fail;
+        fprintf(stderr, "[drm] SETCRTC failed errno=%d\n", errno); goto fail;
+    }
+
+    /* ── Initial DIRTYFB to activate the virtio-gpu scanout in QEMU ─────── */
+    {
+        struct drm_mode_fb_dirty_cmd dirty = {0};
+        dirty.fb_id     = g_fb_id;
+        dirty.num_clips = 0;
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
     }
 
     g_lmfb.address = (uint32_t *)g_map_ptr;

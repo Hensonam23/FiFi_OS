@@ -192,8 +192,17 @@ static void ipc_unsnap(int i) {
     c->win_y = c->pre_snap_y;
     c->win_w = c->pre_snap_w;
     c->win_h = c->pre_snap_h;
-    free(c->disp_buf); c->disp_buf = NULL;
     c->snapped = false;
+    /* If restored size differs from frame, keep scaling via disp_buf */
+    if (c->win_w != c->frame_w || c->win_h != c->frame_h) {
+        free(c->disp_buf);
+        c->disp_buf = malloc(c->win_w * c->win_h * 4);
+        if (c->disp_buf && c->frame_buf)
+            scale_buf(c->frame_buf, c->frame_w, c->frame_h,
+                      c->disp_buf, c->win_w, c->win_h);
+    } else {
+        free(c->disp_buf); c->disp_buf = NULL;
+    }
     uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
     ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
 }
@@ -273,15 +282,36 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint32_t expected = 16 + fw * fh * 4;
         if (pld_len < expected || fw == 0 || fh == 0) break;
 
-        /* Update native frame_buf at the app's original dimensions */
+        /* Allow apps to dynamically resize their frame (full-frame update only) */
+        if (fx == 0 && fy == 0 && (fw != c->frame_w || fh != c->frame_h)) {
+            uint32_t *nb = calloc(fw * fh, 4);
+            if (nb) {
+                free(c->frame_buf);
+                c->frame_buf = nb;
+                c->frame_w = fw;
+                c->frame_h = fh;
+                if (!c->snapped) {
+                    /* App sent corrected size — window now matches, clear disp_buf */
+                    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
+                    c->win_w = fw; c->win_h = fh;
+                    free(c->disp_buf); c->disp_buf = NULL;
+                } else {
+                    /* Snapped: reallocate disp_buf at snap dimensions */
+                    free(c->disp_buf);
+                    c->disp_buf = calloc(c->win_w * c->win_h, 4);
+                }
+            }
+        }
+
+        /* Update native frame_buf */
         if (!c->minimized && c->frame_buf &&
             fx + fw <= c->frame_w && fy + fh <= c->frame_h) {
             const uint32_t *src = (const uint32_t *)(pld + 16);
             for (uint32_t row = 0; row < fh; row++)
                 memcpy(c->frame_buf + (fy + row) * c->frame_w + fx,
                        src + row * fw, fw * 4);
-            /* If snapped, keep disp_buf in sync */
-            if (c->snapped && c->disp_buf)
+            /* If disp_buf exists (snapped or user-resized), keep it in sync */
+            if (c->disp_buf)
                 scale_buf(c->frame_buf, c->frame_w, c->frame_h,
                           c->disp_buf, c->win_w, c->win_h);
         }
@@ -326,8 +356,25 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             char path[512];
             memcpy(path, pld, pld_len);
             path[pld_len] = '\0';
-            extern void gui_open_in_viewer(const char *path);
-            gui_open_in_viewer(path);
+            /* Launch fifi-editor for text-like files; fall back to built-in viewer */
+            const char *ext = strrchr(path, '.');
+            bool use_editor = false;
+            if (ext) {
+                static const char *editable[] = {
+                    ".txt", ".md", ".c", ".h", ".sh", ".cfg", ".conf",
+                    ".ini", ".json", ".xml", ".py", ".lua", ".log", NULL
+                };
+                for (int ei = 0; editable[ei]; ei++) {
+                    if (strcasecmp(ext, editable[ei]) == 0) { use_editor = true; break; }
+                }
+            }
+            if (use_editor) {
+                extern void gui_spawn_app_with_arg(const char *path, const char *arg);
+                gui_spawn_app_with_arg("/bin/fifi-editor", path);
+            } else {
+                extern void gui_open_in_viewer(const char *path);
+                gui_open_in_viewer(path);
+            }
         }
         break;
     }
@@ -567,7 +614,8 @@ void ipc_blit_all(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
-        if (c->snapped && c->disp_buf)
+        if (c->disp_buf)
+            /* snapped OR resized: disp_buf already scaled to win_w × win_h */
             console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
         else
             console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
@@ -617,7 +665,7 @@ void ipc_draw_overlays(void) {
             uint32_t max_col = c->snapped ? 0xFF209040u : 0xFF208030u;
             console_fill_rect(max_bx, by, sz, sz, max_col);
             /* Draw square indicator */
-            console_fill_rect(max_bx + 3, by + 3, sz - 6, sz - 6, 0xFF00000000u);
+            console_fill_rect(max_bx + 3, by + 3, sz - 6, sz - 6, 0x00000000u);
             console_fill_rect(max_bx + 3, by + 3, sz - 6, 2, 0xFFFFFFFFu);
             console_fill_rect(max_bx + 3, by + 3, 2, sz - 6, 0xFFFFFFFFu);
         }
@@ -766,16 +814,19 @@ void ipc_send_focused_key(uint8_t key) {
 }
 
 /* Send mouse event (absolute screen coords) to the focused app translated to
- * window-relative coords. */
+ * window-relative coords. payload: {int32_t rx, ry; uint8_t btns; int8_t scroll} */
 void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns) {
     if (!ipc_keyboard_active()) return;
     ipc_client_t *c = &g_clients[g_focused_idx];
     int32_t rx = mx - (int32_t)c->win_x;
     int32_t ry = my - (int32_t)c->win_y;
-    uint8_t buf[9];
+    extern int8_t mouse_consume_scroll(void);
+    int8_t scroll = mouse_consume_scroll();
+    uint8_t buf[10];
     memcpy(buf,     &rx,  4);
     memcpy(buf + 4, &ry,  4);
     buf[8] = btns;
+    buf[9] = (uint8_t)scroll;
     ipc_send(c, IPC_INPUT_MOUSE, buf, sizeof(buf));
 }
 
@@ -850,10 +901,17 @@ bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn) {
         new_h = h < IPC_MIN_WIN_H ? IPC_MIN_WIN_H : (uint32_t)h;
     }
     if (new_w != c->win_w || new_h != c->win_h) {
-        /* Clear old area before resize */
         console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
         c->win_w = new_w;
         c->win_h = new_h;
+        /* Maintain a scaled disp_buf so the content fills the resized window */
+        if (c->frame_buf) {
+            free(c->disp_buf);
+            c->disp_buf = malloc(c->win_w * c->win_h * 4);
+            if (c->disp_buf)
+                scale_buf(c->frame_buf, c->frame_w, c->frame_h,
+                          c->disp_buf, c->win_w, c->win_h);
+        }
     }
     return true;
 }

@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -178,7 +179,8 @@ static void update_mem(void) {
         else if (sscanf(line, "Cached: %lu", &val) == 1)   mem_cached = val;
         else if (sscanf(line, "SwapTotal: %lu", &val) == 1) swap_total = val;
         else if (sscanf(line, "SwapFree: %lu", &val) == 1)  swap_free = val;
-        if (!nl) break; line = nl + 1;
+        if (!nl) break;
+        line = nl + 1;
     }
     g_mem_total_mb  = mem_total / 1024;
     g_mem_free_mb   = (mem_free + mem_buffers + mem_cached) / 1024;
@@ -239,7 +241,8 @@ static void draw_graph(uint32_t *fb, int x, int y, int w, int h) {
     for (int i = 0; i < n && i < w-2; i++) {
         int idx = (g_hist_head - 1 - i + n * 1000) % n;
         float v = g_cpu_hist[idx];
-        if (v < 0) v = 0; if (v > 100) v = 100;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 100.0f) v = 100.0f;
         int bar_h = (int)((float)(h-2) * v / 100.0f);
         int bx = x + w - 2 - i;
         int by = y + h - 1 - bar_h;
@@ -294,7 +297,7 @@ static void render(uint32_t *fb) {
 
     if (g_mem_total_mb > 0) {
         float mem_pct = (float)g_mem_used_mb * 100.0f / (float)g_mem_total_mb;
-        char mem_lbl[32];
+        char mem_lbl[48];
         snprintf(mem_lbl, sizeof(mem_lbl), "RAM   %4lu/%4lu MB", g_mem_used_mb, g_mem_total_mb);
         draw_str(fb, mem_lbl, PAD, y + (BAR_H + 4 - g_glyph_h)/2, C_VAL);
         draw_bar(fb, PAD + 128, y + 2, WIN_W - PAD - 128 - PAD, BAR_H, mem_pct, C_RAM);
@@ -302,7 +305,7 @@ static void render(uint32_t *fb) {
 
         if (g_swap_total_mb > 0) {
             float sw_pct = (float)g_swap_used_mb * 100.0f / (float)g_swap_total_mb;
-            char sw_lbl[32];
+            char sw_lbl[48];
             snprintf(sw_lbl, sizeof(sw_lbl), "Swap  %4lu/%4lu MB", g_swap_used_mb, g_swap_total_mb);
             draw_str(fb, sw_lbl, PAD, y + (BAR_H + 4 - g_glyph_h)/2, C_GREY);
             draw_bar(fb, PAD + 128, y + 2, WIN_W - PAD - 128 - PAD, BAR_H, sw_pct, C_CPU_HI);
@@ -385,8 +388,8 @@ int main(void) {
     memcpy(&type, hdr8, 4); memcpy(&plen, hdr8+4, 4);
     if (type == IPC_WIN_CREATED && plen >= 20) { uint8_t r[20]; read(sock, r, 20); }
 
+    signal(SIGPIPE, SIG_IGN);
     render(fb); send_frame(sock, fb);
-    fcntl(sock, F_SETFL, O_NONBLOCK);
 
     uint8_t ibuf[8]; int igot = 0;
     uint32_t itype = 0, iplen = 0, ipgot = 0;
@@ -394,10 +397,16 @@ int main(void) {
     time_t last_tick = time(NULL);
 
     while (running) {
+        fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
+        struct timeval tv = {0, 50000};  /* 50ms = 20Hz */
+        if (select(sock + 1, &rfds, NULL, NULL, &tv) < 0) break;
+
         uint8_t tbuf[256];
-        ssize_t n = read(sock, tbuf, sizeof(tbuf));
-        if (n == 0) break;
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        ssize_t n = 0;
+        if (FD_ISSET(sock, &rfds)) {
+            n = read(sock, tbuf, sizeof(tbuf));
+            if (n <= 0) break;
+        }
 
         if (n > 0) {
             ssize_t pos = 0;
@@ -450,8 +459,6 @@ int main(void) {
             send_frame(sock, fb);
         }
 
-        struct timespec ts = {0, 50000000}; /* 20Hz poll */
-        nanosleep(&ts, NULL);
     }
 
     ipc_send_msg(sock, IPC_APP_CLOSE, NULL, 0);

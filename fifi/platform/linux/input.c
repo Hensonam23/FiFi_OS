@@ -229,9 +229,14 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
     return 0;
 }
 
+/* System keys always reach the GUI ring regardless of capture mode. */
+static inline bool is_system_key(uint8_t c) {
+    return c >= FIFI_KEY_F1 && c <= FIFI_KEY_F12;
+}
+
 static void kb_push_internal(uint8_t c) {
     if (!c) return;
-    if (g_gui_capture) {
+    if (g_gui_capture || is_system_key(c)) {
         if (g_gui_used < GUI_RING) {
             g_gui_ring[(g_gui_head + g_gui_used) % GUI_RING] = c;
             g_gui_used++;

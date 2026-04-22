@@ -53,10 +53,11 @@ if [ "$MODE" = "serial" ]; then
         -append "console=ttyS0,115200 quiet loglevel=3" \
         -nographic
 else
-    # GUI mode: virtio-gpu-pci + DRM/KMS in guest → explicit flush per frame (no poll lag)
+    # GUI mode: virtio-vga renders directly to SDL (works without OpenGL).
+    # DRM/KMS in guest still calls DIRTYFB for explicit flush → no poll lag.
     "${QEMU_BASE[@]}" \
         -append "console=tty0 console=ttyS0,115200 quiet loglevel=3" \
-        -device virtio-gpu-pci,xres=1920,yres=1080 \
+        -device virtio-vga,xres=1920,yres=1080 \
         -display sdl,gl=off \
         -serial file:"$REPO_ROOT/serial-linux.log"
 fi

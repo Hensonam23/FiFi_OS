@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -32,6 +33,8 @@
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_INVALIDATE    0x15u
 #define IPC_CLIP_SET      0x17u
+#define IPC_CLIP_GET      0x18u
+#define IPC_CLIP_DATA     0x19u
 #define IPC_NOTIFY        0x16u
 #define IPC_OPEN_FILE     0x1Au
 #define IPC_WIN_RESIZE    0x1Bu
@@ -394,13 +397,11 @@ int main(void) {
         uint8_t resp[20]; read(sock, resp, 20);
     }
 
+    signal(SIGPIPE, SIG_IGN);
     /* Send initial title and render */
     update_title(sock);
     render(fb);
     send_frame(sock, fb);
-
-    /* Set socket non-blocking */
-    fcntl(sock, F_SETFL, O_NONBLOCK);
 
     /* Event loop */
     uint8_t in_hdr[8];
@@ -472,6 +473,9 @@ int main(void) {
                                         }
                                     }
                                     dirty = true;
+                                } else if (key == 0x16u) {
+                                    /* Ctrl+V: request clipboard */
+                                    ipc_send_msg(sock, IPC_CLIP_GET, NULL, 0);
                                 } else if (key == KEY_BS && g_rename_len > 0) {
                                     g_rename_buf[--g_rename_len] = '\0';
                                     redraw = true;
@@ -565,9 +569,19 @@ int main(void) {
                             msg_done:;
                         } else if (type == IPC_INPUT_MOUSE && in_plen >= 9) {
                             int32_t mx, my; uint8_t btns;
+                            int8_t scroll = 0;
                             memcpy(&mx, in_pld,     4);
                             memcpy(&my, in_pld + 4, 4);
                             btns = in_pld[8];
+                            if (in_plen >= 10) scroll = (int8_t)in_pld[9];
+                            /* Scroll wheel: move selection and scroll */
+                            if (scroll != 0) {
+                                g_selected += scroll;
+                                if (g_selected < 0) g_selected = 0;
+                                if (g_selected >= g_nentries) g_selected = g_nentries - 1;
+                                clamp_scroll();
+                                dirty = true;
+                            }
                             bool lbtn = (btns & 1);
                             if (lbtn && !prev_lbtn) {
                                 /* Press: select row and start potential drag */
@@ -606,6 +620,15 @@ int main(void) {
                             }
                             prev_lbtn = lbtn;
                         } else if (type == IPC_WIN_RESIZE) {
+                            dirty = true;
+                        } else if (type == IPC_CLIP_DATA && in_plen > 0 && g_renaming) {
+                            for (uint32_t ci = 0; ci < in_plen &&
+                                 g_rename_len < (int)sizeof(g_rename_buf) - 1; ci++) {
+                                uint8_t ch = in_pld[ci];
+                                if (ch >= 0x20u && ch < 0x7Fu)
+                                    g_rename_buf[g_rename_len++] = (char)ch;
+                            }
+                            g_rename_buf[g_rename_len] = '\0';
                             dirty = true;
                         } else if (type == IPC_DROP_FILE && in_plen > 0 && in_plen < 1024) {
                             /* File dropped onto us — navigate to its directory */
