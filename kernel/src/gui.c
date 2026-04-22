@@ -769,6 +769,30 @@ static void taskbar_draw(void) {
         taskbar_draw_btn(3, tv_label);
     }
 
+    /* ── IPC app window buttons (slots MAX_WINS .. MAX_WINS+7) ─────────────── */
+    __attribute__((weak)) int  ipc_window_count(void);
+    __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
+    if (ipc_window_count && ipc_window_info) {
+        int nipc = ipc_window_count();
+        for (int wi = 0; wi < nipc && wi < 8; wi++) {
+            char ipc_title[20] = "App";
+            bool ipc_focused = false;
+            ipc_window_info(wi, ipc_title, (int)sizeof(ipc_title), &ipc_focused);
+            int islot = MAX_WINS + wi;
+            uint64_t bx = TASKBTN_X + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
+            uint64_t bg = ipc_focused ? 0x003878d8u : COL_TASKBTN_A;
+            console_fill_rect(bx, ty + 3u, TASKBTN_W, TASKBAR_H - 6u, bg);
+            if (ipc_focused)
+                console_fill_rect(bx, ty + TASKBAR_H - 5u, TASKBTN_W, 3u, 0x0060a0f0u);
+            uint64_t max_ch = TASKBTN_W / fw;
+            uint64_t tlen = (uint64_t)gui_strlen(ipc_title);
+            if (tlen > max_ch) tlen = max_ch;
+            uint64_t lpx2 = bx + (TASKBTN_W > tlen * fw ? (TASKBTN_W - tlen * fw) / 2u : 0u);
+            uint64_t lpy2 = ty + (TASKBAR_H - fh) / 2u;
+            gui_draw_str_clip(lpx2, lpy2, ipc_title, COL_TASKBTN_FG, bg, max_ch);
+        }
+    }
+
     taskbar_draw_tray();
 }
 
@@ -8934,6 +8958,23 @@ void gui_on_tick(void) {
                 break;
             }
         }
+
+        /* ── IPC window taskbar buttons ── */
+        __attribute__((weak)) int  ipc_window_count(void);
+        __attribute__((weak)) void ipc_window_focus_slot(int slot);
+        if (ipc_window_count && ipc_window_focus_slot) {
+            int nipc = ipc_window_count();
+            for (int wi = 0; wi < nipc && wi < 8; wi++) {
+                int islot = MAX_WINS + wi;
+                uint64_t bx = TASKBTN_X + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
+                if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
+                    ipc_window_focus_slot(wi);
+                    full_redraw();
+                    break;
+                }
+            }
+        }
+
         mouse_consume_click(&cx, &cy);
         return;
     }
