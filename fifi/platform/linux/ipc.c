@@ -56,11 +56,11 @@
 typedef struct {
     int      fd;
     bool     active;
-    bool     frame_dirty;  /* true after a new IPC_APP_FRAME was blitted this tick */
     bool     minimized;    /* window is hidden (task button remains, process alive) */
     uint32_t win_id;    /* ID returned from gui_app_create_window() — 0 if not yet created */
     uint32_t z_order;   /* higher = on top; raised on focus */
     uint32_t win_x, win_y, win_w, win_h;
+    uint32_t *frame_buf; /* cached pixel frame — win_w × win_h, repainted every tick */
     char     title[64];
     /* partial-read state */
     uint8_t  hdr[IPC_HDR_SZ];
@@ -137,16 +137,15 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         fprintf(stderr, "[ipc] app '%s' connected, window %ux%u at (%u,%u)\n",
                 c->title, c->win_w, c->win_h, c->win_x, c->win_y);
 
-        /* Pre-fill window area with dark color so no stale content shows before first frame */
-        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0xFF0D1117u);
+        /* Allocate cached frame buffer — compositor repaints this every tick */
+        free(c->frame_buf);
+        c->frame_buf = calloc(c->win_w * c->win_h, 4);  /* zero = black until first frame */
 
         /* Reply with window info */
         uint32_t resp[5] = {
             c->win_id, c->win_x, c->win_y, c->win_w, c->win_h
         };
         ipc_send(c, IPC_WIN_CREATED, resp, sizeof(resp));
-        /* Mark dirty so the close button overlay is painted on first frame */
-        c->frame_dirty = true;
         break;
     }
     case IPC_APP_FRAME: {
@@ -160,13 +159,13 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint32_t expected = 16 + fw * fh * 4;
         if (pld_len < expected || fw == 0 || fh == 0) break;
 
-        /* Blit into backbuffer at the app window's compositor position */
-        if (!c->minimized) {
-            const uint32_t *pixels = (const uint32_t *)(pld + 16);
-            uint64_t dst_x = (uint64_t)c->win_x + fx;
-            uint64_t dst_y = (uint64_t)c->win_y + fy;
-            console_paste_rect(pixels, dst_x, dst_y, fw, fh);
-            c->frame_dirty = true;
+        /* Cache pixels into frame_buf — ipc_blit_all() paints this every tick */
+        if (!c->minimized && c->frame_buf &&
+            fx + fw <= c->win_w && fy + fh <= c->win_h) {
+            const uint32_t *src = (const uint32_t *)(pld + 16);
+            for (uint32_t row = 0; row < fh; row++)
+                memcpy(c->frame_buf + (fy + row) * c->win_w + fx,
+                       src + row * fw, fw * 4);
         }
         break;
     }
@@ -202,7 +201,8 @@ static void ipc_disconnect_client(ipc_client_t *c) {
     if (c->win_w > 0 && c->win_h > 0 && !c->minimized)
         console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
     close(c->fd); c->fd = -1; c->active = false;
-    if (c->payload) { free(c->payload); c->payload = NULL; }
+    if (c->payload)   { free(c->payload);   c->payload   = NULL; }
+    if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
     if (g_focused_idx >= 0 && &g_clients[g_focused_idx] == c) g_focused_idx = -1;
     int i = (int)(c - g_clients);
     if (g_drag_idx == i) g_drag_idx = -1;
@@ -350,7 +350,8 @@ static void ipc_kill_client(int i) {
         console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
     if (c->fd >= 0) { close(c->fd); c->fd = -1; }
     c->active = false;
-    if (c->payload) { free(c->payload); c->payload = NULL; }
+    if (c->payload)   { free(c->payload);   c->payload   = NULL; }
+    if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
     if (g_focused_idx == i) g_focused_idx = -1;
     if (g_drag_idx    == i) g_drag_idx    = -1;
     fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
@@ -369,15 +370,22 @@ bool ipc_try_close_at(int32_t mx, int32_t my) {
     return false;
 }
 
-/* Draw close-button overlays on top of each active IPC window in the backbuffer.
- * Only redraws windows that pushed a new frame this tick (frame_dirty flag).
- * Called every tick from main.c right before console_flip_if_dirty(). */
+/* Blit every active IPC window's cached frame into the backbuffer.
+ * Call this AFTER gui_on_tick() so IPC windows appear on top of the wallpaper. */
+void ipc_blit_all(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
+        console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->win_w, c->win_h);
+    }
+}
+
+/* Draw close-button overlays on top of each active IPC window.
+ * Called every tick from main.c after ipc_blit_all(). */
 void ipc_draw_overlays(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
-        if (!c->frame_dirty) continue;
-        c->frame_dirty = false;
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
         if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
 
         uint32_t bx = c->win_x + c->win_w - IPC_CLOSE_BTN_SZ - 3;
@@ -431,7 +439,6 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
     /* Raise to top of z-stack and request a fresh frame so it paints over siblings */
     ipc_raise(best_i);
     ipc_send(&g_clients[best_i], IPC_INVALIDATE, NULL, 0);
-    g_clients[best_i].frame_dirty = true;
 
     /* Start drag if click is in the top drag strip (but NOT on close button) */
     if (g_drag_idx < 0 &&
@@ -462,8 +469,6 @@ bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
         console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
         c->win_x = (uint32_t)new_x;
         c->win_y = (uint32_t)new_y;
-        /* Mark frame dirty so close button is redrawn at new position on next app frame */
-        c->frame_dirty = true;
     }
     return true;
 }
@@ -635,7 +640,6 @@ void ipc_window_focus_slot(int slot) {
                 g_focused_idx = i;
                 ipc_raise(i);
                 ipc_send(c, IPC_INVALIDATE, NULL, 0);
-                c->frame_dirty = true;
                 fprintf(stderr, "[ipc] restored '%s'\n", c->title);
             }
             return;
@@ -649,6 +653,7 @@ void ipc_shutdown(void) {
         if (g_clients[i].fd >= 0) {
             close(g_clients[i].fd);
             free(g_clients[i].payload);
+            free(g_clients[i].frame_buf);
         }
     }
     if (g_srv_fd >= 0) {
