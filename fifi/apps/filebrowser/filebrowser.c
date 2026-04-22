@@ -26,6 +26,7 @@
 #define IPC_APP_CONNECT   0x01u
 #define IPC_APP_FRAME     0x02u
 #define IPC_APP_CLOSE     0x04u
+#define IPC_APP_TITLE     0x03u
 #define IPC_WIN_CREATED   0x10u
 #define IPC_INPUT_KEY     0x11u
 #define IPC_INPUT_MOUSE   0x12u
@@ -310,6 +311,15 @@ static void clamp_scroll(void) {
     if (g_scroll < 0) g_scroll = 0;
 }
 
+static void update_title(int fd) {
+    const char *name = strrchr(g_path, '/');
+    name = name ? name + 1 : g_path;
+    if (!*name) name = "/";
+    char title[68];
+    snprintf(title, sizeof(title), "Files: %s", name);
+    ipc_send_msg(fd, IPC_APP_TITLE, title, (uint32_t)strlen(title));
+}
+
 static void nav_enter(int fd, uint32_t *fb) {
     if (g_nentries == 0) return;
     Entry *e = &g_entries[g_selected];
@@ -318,6 +328,7 @@ static void nav_enter(int fd, uint32_t *fb) {
         snprintf(newpath, sizeof(newpath), "%s/%s", g_path, e->name);
         snprintf(g_path, sizeof(g_path), "%s", newpath);
         load_dir(g_path);
+        update_title(fd);
         render(fb);
         send_frame(fd, fb);
     } else {
@@ -334,6 +345,7 @@ static void nav_up(int fd, uint32_t *fb) {
     *slash = '\0';
     if (g_path[0] == '\0') { g_path[0] = '/'; g_path[1] = '\0'; }
     load_dir(g_path);
+    update_title(fd);
     render(fb);
     send_frame(fd, fb);
 }
@@ -382,7 +394,8 @@ int main(void) {
         uint8_t resp[20]; read(sock, resp, 20);
     }
 
-    /* Initial render */
+    /* Send initial title and render */
+    update_title(sock);
     render(fb);
     send_frame(sock, fb);
 
