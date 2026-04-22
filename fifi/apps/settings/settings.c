@@ -32,10 +32,11 @@
 #define IPC_NOTIFY       0x16u
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
-#define WIN_W 480
-#define WIN_H 380
-#define PAD   16
-#define ROW_H 28
+#define WIN_W   480
+#define WIN_H   420
+#define TITLE_H  24   /* reserved for compositor title bar */
+#define PAD      14
+#define ROW_H    24
 
 /* ── Colours ─────────────────────────────────────────────────────────────── */
 #define C_BG      0x00121820u
@@ -183,7 +184,7 @@ static void alsa_set_vol(int v) {
 
 /* ── System info ─────────────────────────────────────────────────────────── */
 typedef struct { char key[16]; char val[64]; } InfoRow;
-#define N_INFO 5
+#define N_INFO 6
 static InfoRow g_info[N_INFO];
 
 static void gather_info(void) {
@@ -202,17 +203,29 @@ static void gather_info(void) {
     snprintf(g_info[1].val, sizeof(g_info[1].val),
              "%lu MB / %lu MB", used_mb, total_mb);
 
-    snprintf(g_info[2].key, sizeof(g_info[2].key), "Load 1m");
+    snprintf(g_info[2].key, sizeof(g_info[2].key), "CPU Freq");
+    {
+        char buf[32] = {0};
+        int cpufd = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", O_RDONLY);
+        if (cpufd >= 0) { read(cpufd, buf, sizeof(buf)-1); close(cpufd); }
+        unsigned long khz = (unsigned long)strtol(buf, NULL, 10);
+        if (khz > 0)
+            snprintf(g_info[2].val, sizeof(g_info[2].val), "%.2f GHz", khz / 1000000.0);
+        else
+            snprintf(g_info[2].val, sizeof(g_info[2].val), "N/A");
+    }
+
+    snprintf(g_info[3].key, sizeof(g_info[3].key), "Load");
     double load = (double)si.loads[0] / 65536.0;
-    snprintf(g_info[2].val, sizeof(g_info[2].val), "%.2f", load);
+    snprintf(g_info[3].val, sizeof(g_info[3].val), "%.2f (1m avg)", load);
 
-    snprintf(g_info[3].key, sizeof(g_info[3].key), "Processes");
-    snprintf(g_info[3].val, sizeof(g_info[3].val), "%u", si.procs);
+    snprintf(g_info[4].key, sizeof(g_info[4].key), "Processes");
+    snprintf(g_info[4].val, sizeof(g_info[4].val), "%u", si.procs);
 
-    snprintf(g_info[4].key, sizeof(g_info[4].key), "Time");
+    snprintf(g_info[5].key, sizeof(g_info[5].key), "Time");
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
-    snprintf(g_info[4].val, sizeof(g_info[4].val),
+    snprintf(g_info[5].val, sizeof(g_info[5].val),
              "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
 }
 
@@ -223,76 +236,62 @@ static bool g_dragging = false;
 /* ── Render ──────────────────────────────────────────────────────────────── */
 static void render(uint32_t *fb) {
     fill(fb, 0, 0, WIN_W, WIN_H, C_BG);
+    /* Top TITLE_H px left blank — compositor draws the title bar there */
 
-    /* Title bar */
-    fill(fb, 0, 0, WIN_W, 32, C_HDR);
-    hline(fb, 31, C_BORDER);
-    draw_str(fb, "  FiFi Settings", PAD, (32 - g_glyph_h)/2, C_TITLE);
-
-    int y = 42;
+    int y = TITLE_H + 8;
 
     /* ── System info section ── */
-    draw_str(fb, "System", PAD, y, C_KEY);
-    hline(fb, y + g_glyph_h + 3, C_BORDER);
-    y += g_glyph_h + 8;
+    draw_str(fb, "System Information", PAD, y, C_KEY);
+    hline(fb, y + g_glyph_h + 2, C_BORDER);
+    y += g_glyph_h + 6;
 
     gather_info();
     for (int i = 0; i < N_INFO; i++) {
         uint32_t bg = (i & 1) ? C_ROW_B : C_ROW_A;
         fill(fb, 0, y, WIN_W, ROW_H, bg);
         draw_str(fb, g_info[i].key, PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
-        int kw = 10 * 9;  /* key column width */
+        int kw = 11 * 9;
         draw_str(fb, g_info[i].val, PAD + kw, y + (ROW_H - g_glyph_h)/2, C_VAL);
         y += ROW_H;
     }
 
-    y += 16;
+    y += 10;
 
     /* ── Volume section ── */
-    draw_str(fb, "Volume", PAD, y, C_KEY);
-    hline(fb, y + g_glyph_h + 3, C_BORDER);
-    y += g_glyph_h + 12;
+    draw_str(fb, "Audio", PAD, y, C_KEY);
+    hline(fb, y + g_glyph_h + 2, C_BORDER);
+    y += g_glyph_h + 6;
 
-    /* Slider track */
-    g_sl_x = PAD + 80;
+    g_sl_x = PAD + 72;
     g_sl_y = y + (ROW_H - g_sl_h) / 2;
-
-    draw_str(fb, "Level:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
-
+    draw_str(fb, "Volume:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
     fill(fb, g_sl_x, g_sl_y, g_sl_w, g_sl_h, C_ACCENT);
-    /* Fill portion */
     int filled = g_sl_w * g_vol / 100;
     fill(fb, g_sl_x, g_sl_y, filled, g_sl_h, C_FILL);
-    /* Thumb */
     fill(fb, g_sl_x + filled - 4, g_sl_y - 3, 8, g_sl_h + 6, C_VAL);
-
-    /* Percentage label */
     char pct[8]; snprintf(pct, sizeof(pct), "%d%%", g_vol);
-    draw_str(fb, pct, g_sl_x + g_sl_w + 10, y + (ROW_H - g_glyph_h)/2, C_VAL);
+    draw_str(fb, pct, g_sl_x + g_sl_w + 8, y + (ROW_H - g_glyph_h)/2, C_VAL);
+    y += ROW_H + 8;
 
-    y += ROW_H + 12;
+    /* ── Devices section ── */
+    draw_str(fb, "Devices", PAD, y, C_KEY);
+    hline(fb, y + g_glyph_h + 2, C_BORDER);
+    y += g_glyph_h + 6;
 
-    /* ── Note about compositor-side settings ── */
-    fill(fb, PAD, y, WIN_W - 2*PAD, ROW_H + 4, C_ROW_A);
-    draw_str(fb, "Theme and display: use the compositor settings panel (F3)",
-             PAD + 8, y + 6, C_GREY);
+    /* Gamepad status */
+    fill(fb, 0, y, WIN_W, ROW_H, C_ROW_A);
+    draw_str(fb, "Gamepad:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    {
+        int gpfd = open("/dev/input/js0", O_RDONLY | O_NONBLOCK);
+        if (gpfd >= 0) { close(gpfd); draw_str(fb, "Connected", PAD + 11*9, y + (ROW_H - g_glyph_h)/2, 0x0060d060u); }
+        else            draw_str(fb, "None", PAD + 11*9, y + (ROW_H - g_glyph_h)/2, C_GREY);
+    }
+    y += ROW_H + 10;
 
-    y += ROW_H + 20;
-
-    /* ── Close button ── */
-    int bw = 80, bh = 26;
-    int bx = (WIN_W - bw) / 2;
-    fill(fb, bx, y, bw, bh, C_BTN_BG);
-    fill(fb, bx, y, bw, 1, C_BORDER);
-    fill(fb, bx, y+bh-1, bw, 1, C_BORDER);
-    fill(fb, bx, y, 1, bh, C_BORDER);
-    fill(fb, bx+bw-1, y, 1, bh, C_BORDER);
-    const char *lbl = "Close";
-    draw_str(fb, lbl, bx + (bw - str_w(lbl))/2, y + (bh - g_glyph_h)/2, C_VAL);
-
-    /* Border */
-    for (int x = 0; x < WIN_W; x++) { fb[x] = C_BORDER; fb[(WIN_H-1)*WIN_W+x] = C_BORDER; }
-    for (int ry = 0; ry < WIN_H; ry++) { fb[ry*WIN_W] = C_BORDER; fb[ry*WIN_W+WIN_W-1] = C_BORDER; }
+    /* ── Hint line ── */
+    fill(fb, PAD, y, WIN_W - 2*PAD, ROW_H - 4, C_ROW_B);
+    draw_str(fb, "F1 Theme   F2 Terminal   F3 Settings   F4 Files",
+             PAD + 6, y + (ROW_H - 4 - g_glyph_h)/2, C_GREY);
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -389,42 +388,24 @@ int main(void) {
                             btns = ipld[8];
                             bool lb = (btns & 1);
 
-                            if (lb) {
-                                /* Slider interaction */
-                                if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
-                                    mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
-                                    int newvol = (mx - g_sl_x) * 100 / g_sl_w;
-                                    if (newvol < 0) newvol = 0;
-                                    if (newvol > 100) newvol = 100;
-                                    alsa_set_vol(newvol);
-                                    render(fb);
-                                    send_frame(sock, fb);
-                                }
-                                /* Close button: roughly bottom center area */
-                                int bw = 80, bh = 26;
-                                int bx = (WIN_W - bw) / 2;
-                                if (!lb && prev_lb) {  /* release */
-                                    (void)bx; (void)bh;
-                                }
+                            /* Volume slider drag */
+                            if (lb && my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
+                                int newvol = (mx - g_sl_x) * 100 / g_sl_w;
+                                if (newvol < 0) newvol = 0;
+                                if (newvol > 100) newvol = 100;
+                                alsa_set_vol(newvol);
+                                render(fb);
+                                send_frame(sock, fb);
                             }
-                            if (!lb && prev_lb) {
-                                /* On release — check close button */
-                                int bw = 80;
-                                int bx = (WIN_W - bw) / 2;
-                                if (mx >= bx && mx < bx + bw &&
-                                    my >= WIN_H - 80 && my < WIN_H - 20)
-                                    running = false;
-                                /* Volume slider release — notify compositor */
-                                if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
-                                    mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
-                                    char ntxt[24];
-                                    int cv = (mx - g_sl_x) * 100 / g_sl_w;
-                                    if (cv < 0) cv = 0; if (cv > 100) cv = 100;
-                                    int nlen = snprintf(ntxt, sizeof(ntxt),
-                                                        "Volume: %d%%", cv);
-                                    if (nlen > 0)
-                                        ipc_send_msg(sock, IPC_NOTIFY, ntxt, (uint32_t)nlen);
-                                }
+                            /* Volume slider release → toast notification */
+                            if (!lb && prev_lb &&
+                                my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
+                                char ntxt[24];
+                                int nlen = snprintf(ntxt, sizeof(ntxt), "Volume: %d%%", g_vol);
+                                if (nlen > 0)
+                                    ipc_send_msg(sock, IPC_NOTIFY, ntxt, (uint32_t)nlen);
                             }
                             prev_lb = lb;
                         }

@@ -43,8 +43,9 @@
 #define GP_BTN_DLEFT  (1u<<12)
 #define GP_BTN_DRIGHT (1u<<13)
 
-#define WIN_W 480
-#define WIN_H 320
+#define WIN_W   480
+#define WIN_H   320
+#define TITLE_H  24   /* reserved for compositor title bar */
 
 static uint32_t g_fb[WIN_W * WIN_H];
 
@@ -263,29 +264,26 @@ static void draw_shoulder(int x, int y, int w, int h, bool pressed, const char *
 }
 
 static void render(void) {
-    /* Background */
+    /* Background — top TITLE_H px left blank for compositor title bar */
     fill_rect(0, 0, WIN_W, WIN_H, COL_BG);
 
-    /* Title bar */
-    fill_rect(0, 0, WIN_W, 20, COL_PANEL);
-    fill_rect(0, 19, WIN_W, 1, COL_BORDER);
-    draw_str_micro(8, 7, "GAMEPAD", COL_TITLE);
+    /* Status badge in the content area */
     const char *status = g_connected ? "CONNECTED" : "NO GAMEPAD";
     uint32_t status_col = g_connected ? 0xFF3FB950u : COL_DIM;
-    draw_str_micro(WIN_W - (int)(strlen(status) * 4) - 8, 7, status, status_col);
+    draw_str_micro(WIN_W - (int)(strlen(status) * 4) - 8, TITLE_H + 5, status, status_col);
 
     if (!g_connected) {
-        draw_str_micro(WIN_W/2 - 40, WIN_H/2 - 4, "NO GAMEPAD CONNECTED", COL_DIM);
-        draw_str_micro(WIN_W/2 - 44, WIN_H/2 + 8, "PLUG IN A CONTROLLER", COL_DIM);
+        draw_str_micro(WIN_W/2 - 40, WIN_H/2 + TITLE_H/2 - 4, "NO GAMEPAD CONNECTED", COL_DIM);
+        draw_str_micro(WIN_W/2 - 44, WIN_H/2 + TITLE_H/2 + 8, "PLUG IN A CONTROLLER", COL_DIM);
         return;
     }
 
     /* Left side: D-pad + left stick */
     int left_cx = 100;
-    int left_cy = 160;
+    int left_cy = TITLE_H + 140;
 
     /* Shoulder / trigger row */
-    int sh_y  = 25;
+    int sh_y  = TITLE_H + 4;
     int sh_h  = 14;
     int sh_w  = 60;
     /* LB / LT */
@@ -296,25 +294,25 @@ static void render(void) {
     draw_trigger(WIN_W - sh_w - 10, sh_y + sh_h + 2, sh_w, 10, g_rt, "RT");
 
     /* SELECT / START */
-    draw_button(WIN_W/2 - 30, 60, 10, !!(g_btns & GP_BTN_SELECT), COL_BTN_ON, "SEL");
-    draw_button(WIN_W/2 + 30, 60, 10, !!(g_btns & GP_BTN_START),  COL_BTN_ON, "STA");
+    draw_button(WIN_W/2 - 30, TITLE_H + 40, 10, !!(g_btns & GP_BTN_SELECT), COL_BTN_ON, "SEL");
+    draw_button(WIN_W/2 + 30, TITLE_H + 40, 10, !!(g_btns & GP_BTN_START),  COL_BTN_ON, "STA");
 
     /* D-pad */
     draw_dpad(left_cx, left_cy, g_btns);
 
     /* Left stick */
-    int lsx = 185, lsy = 195;
+    int lsx = 185, lsy = TITLE_H + 172;
     draw_stick(lsx, lsy, 30, g_lx, g_ly, !!(g_btns & GP_BTN_LS));
     draw_str_micro(lsx - 4, lsy + 36, "LS", COL_DIM);
 
     /* Right stick */
-    int rsx = WIN_W - 185, rsy = 195;
+    int rsx = WIN_W - 185, rsy = TITLE_H + 172;
     draw_stick(rsx, rsy, 30, g_rx, g_ry, !!(g_btns & GP_BTN_RS));
     draw_str_micro(rsx - 4, rsy + 36, "RS", COL_DIM);
 
     /* ABXY buttons (right side) */
     int right_cx = WIN_W - 100;
-    int right_cy = 160;
+    int right_cy = TITLE_H + 140;
     int br = 12;
     draw_button(right_cx,      right_cy - 28, br, !!(g_btns & GP_BTN_Y), COL_Y_ON, "Y");
     draw_button(right_cx,      right_cy + 28, br, !!(g_btns & GP_BTN_A), COL_A_ON, "A");

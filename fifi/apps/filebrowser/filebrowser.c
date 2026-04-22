@@ -32,12 +32,13 @@
 #define IPC_INVALIDATE    0x15u
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
-#define WIN_W   640
-#define WIN_H   480
-#define HDR_H   36    /* path bar */
-#define FOOT_H  24    /* status bar */
-#define ITEM_H  22    /* height per entry row */
-#define PAD_X   12
+#define WIN_W    640
+#define WIN_H    480
+#define TITLE_H  24   /* reserved for compositor title bar (drawn by compositor) */
+#define HDR_H    32   /* path bar below the title */
+#define FOOT_H   22   /* status bar */
+#define ITEM_H   20   /* height per entry row */
+#define PAD_X    12
 
 /* ── Colours (ARGB / 0x00RRGGBB) ────────────────────────────────────────── */
 #define C_BG        0x00121820u
@@ -174,25 +175,26 @@ static void load_dir(const char *path) {
 
 /* ── Rendering ───────────────────────────────────────────────────────────── */
 static void render(uint32_t *fb) {
-    /* Background */
+    /* Full background */
     fill_rect(fb, 0, 0, WIN_W, WIN_H, C_BG);
+    /* Top TITLE_H px left dark — compositor draws the title bar there */
 
-    /* Header bar */
-    fill_rect(fb, 0, 0, WIN_W, HDR_H, C_HDR_BG);
-    draw_hline(fb, HDR_H - 1, C_BORDER);
-    const char *label = "  Files: ";
+    /* Path bar */
+    int hdr_y = TITLE_H;
+    fill_rect(fb, 0, hdr_y, WIN_W, HDR_H, C_HDR_BG);
+    draw_hline(fb, hdr_y + HDR_H - 1, C_BORDER);
+    const char *label = "  ";
     int lx = PAD_X;
-    font_draw_str(fb, label, lx, (HDR_H - g_glyph_h) / 2, C_GREY);
+    font_draw_str(fb, label, lx, hdr_y + (HDR_H - g_glyph_h) / 2, C_GREY);
     lx += font_strw(label);
-    /* Clamp path to available width */
     int path_chars = (WIN_W - lx - PAD_X) / 9;
     const char *p = g_path;
     int plen = (int)strlen(p);
     if (plen > path_chars) p += (plen - path_chars);
-    font_draw_str(fb, p, lx, (HDR_H - g_glyph_h) / 2, C_WHITE);
+    font_draw_str(fb, p, lx, hdr_y + (HDR_H - g_glyph_h) / 2, C_WHITE);
 
     /* Entry list */
-    int list_top = HDR_H;
+    int list_top = TITLE_H + HDR_H;
     int list_bot = WIN_H - FOOT_H;
     int visible  = (list_bot - list_top) / ITEM_H;
 
@@ -204,12 +206,10 @@ static void render(uint32_t *fb) {
 
         if (sel) fill_rect(fb, 0, ry, WIN_W, ITEM_H, C_SEL);
 
-        /* icon */
         const char *icon = g_entries[idx].is_dir ? ">" : " ";
         font_draw_str(fb, icon, PAD_X, ry + (ITEM_H - g_glyph_h) / 2,
                       g_entries[idx].is_dir ? C_DIR : C_GREY);
 
-        /* name (truncate if needed) */
         const char *name = g_entries[idx].name;
         int namelen = (int)strlen(name);
         uint32_t fg = g_entries[idx].is_dir ? C_DIR : C_FILE;
@@ -218,7 +218,6 @@ static void render(uint32_t *fb) {
         font_draw_strn(fb, name, draw_chars,
                        PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, fg);
 
-        /* row divider */
         draw_hline(fb, ry + ITEM_H - 1, C_BORDER);
     }
 
@@ -226,13 +225,9 @@ static void render(uint32_t *fb) {
     fill_rect(fb, 0, list_bot, WIN_W, FOOT_H, C_FOOT_BG);
     draw_hline(fb, list_bot, C_BORDER);
     char foot[128];
-    snprintf(foot, sizeof(foot), "  %d items  |  arrows: navigate  enter: open  esc: up  q: quit",
+    snprintf(foot, sizeof(foot), "  %d items   arrows/enter/esc: navigate   q: quit",
              g_nentries);
     font_draw_str(fb, foot, 0, list_bot + (FOOT_H - g_glyph_h) / 2, C_GREY);
-
-    /* Outer border */
-    for (int x = 0; x < WIN_W; x++) { fb[x] = C_BORDER; fb[(WIN_H-1)*WIN_W+x] = C_BORDER; }
-    for (int y = 0; y < WIN_H; y++) { fb[y*WIN_W] = C_BORDER; fb[y*WIN_W+WIN_W-1] = C_BORDER; }
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -264,7 +259,7 @@ static void send_frame(int fd, uint32_t *pixels) {
 #define KEY_q     'q'
 
 static int g_visible(void) {
-    return (WIN_H - HDR_H - FOOT_H) / ITEM_H;
+    return (WIN_H - TITLE_H - HDR_H - FOOT_H) / ITEM_H;
 }
 
 static void clamp_scroll(void) {
@@ -417,7 +412,7 @@ int main(void) {
                             bool lbtn = (btns & 1);
                             if (lbtn && !prev_lbtn) {
                                 /* Click: find which row */
-                                int list_top = HDR_H;
+                                int list_top = TITLE_H + HDR_H;
                                 if (my >= list_top && my < WIN_H - FOOT_H) {
                                     int row = (my - list_top) / ITEM_H;
                                     int idx = g_scroll + row;
