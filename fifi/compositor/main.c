@@ -41,6 +41,8 @@ void ipc_shutdown(void);
 int  ipc_server_fd(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
+bool ipc_try_close_at(int32_t mx, int32_t my);
+void ipc_draw_overlays(void);
 bool ipc_keyboard_active(void);
 void ipc_send_focused_key(uint8_t key);
 void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
@@ -300,9 +302,12 @@ int main(void) {
             bool dragging = ipc_drag_update(mcx, mcy, mlb);
 
             if (mlb && !dragging) {
-                /* On left-click: check if it lands on an IPC window */
-                if (!ipc_hit_test(mcx, mcy))
-                    ipc_clear_focus();  /* click on compositor GUI — clear IPC focus */
+                /* Close button takes priority over hit-test and drag */
+                if (!ipc_try_close_at(mcx, mcy)) {
+                    /* On left-click: check if it lands on an IPC window */
+                    if (!ipc_hit_test(mcx, mcy))
+                        ipc_clear_focus();  /* click on compositor GUI — clear IPC focus */
+                }
             }
             if (ipc_keyboard_active() && !dragging)
                 ipc_send_focused_mouse(mcx, mcy, btns);
@@ -342,6 +347,9 @@ int main(void) {
             uint32_t ey1 = ey0 + CUR_H;
             console_mark_dirty_rows(ey0, ey1);
         }
+
+        /* ── IPC overlays (close buttons) drawn on top before flip ─────── */
+        ipc_draw_overlays();
 
         /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ───── */
         bool flipped = console_flip_if_dirty();

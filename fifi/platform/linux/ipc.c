@@ -53,6 +53,7 @@
 typedef struct {
     int      fd;
     bool     active;
+    bool     frame_dirty;  /* true after a new IPC_APP_FRAME was blitted this tick */
     uint32_t win_id;    /* ID returned from gui_app_create_window() — 0 if not yet created */
     uint32_t win_x, win_y, win_w, win_h;
     char     title[64];
@@ -69,7 +70,8 @@ static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
 
 /* ── Window drag state ────────────────────────────────────────────────────── */
-#define IPC_DRAG_STRIP  24   /* top N pixels of an IPC window act as drag handle */
+#define IPC_DRAG_STRIP   24   /* top N pixels of an IPC window act as drag handle */
+#define IPC_CLOSE_BTN_SZ 18   /* close button square size (in the drag strip) */
 static int   g_drag_idx   = -1;   /* which client is being dragged */
 static int32_t g_drag_ox  = 0;    /* cursor offset within window at drag start */
 static int32_t g_drag_oy  = 0;
@@ -116,6 +118,8 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             c->win_id, c->win_x, c->win_y, c->win_w, c->win_h
         };
         ipc_send(c, IPC_WIN_CREATED, resp, sizeof(resp));
+        /* Mark dirty so the close button overlay is painted on first frame */
+        c->frame_dirty = true;
         break;
     }
     case IPC_APP_FRAME: {
@@ -134,6 +138,7 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint64_t dst_x = (uint64_t)c->win_x + fx;
         uint64_t dst_y = (uint64_t)c->win_y + fy;
         console_paste_rect(pixels, dst_x, dst_y, fw, fh);
+        c->frame_dirty = true;
         break;
     }
     case IPC_APP_TITLE: {
@@ -281,6 +286,78 @@ void ipc_poll(void) {
     }
 }
 
+/* Close-button hit box for client c: top-right corner of drag strip */
+static inline bool close_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
+    if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ) return false;
+    uint32_t bx = c->win_x + c->win_w - IPC_CLOSE_BTN_SZ - 3;
+    uint32_t by = c->win_y + 3;
+    return (uint32_t)mx >= bx && (uint32_t)mx < bx + IPC_CLOSE_BTN_SZ &&
+           (uint32_t)my >= by && (uint32_t)my < by + IPC_CLOSE_BTN_SZ;
+}
+
+/* Kill a client and clear its screen region */
+static void ipc_kill_client(int i) {
+    ipc_client_t *c = &g_clients[i];
+    if (!c->active) return;
+    /* Black out the backbuffer region so no stale pixels remain */
+    if (c->win_w > 0 && c->win_h > 0)
+        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
+    if (c->fd >= 0) { close(c->fd); c->fd = -1; }
+    c->active = false;
+    if (c->payload) { free(c->payload); c->payload = NULL; }
+    if (g_focused_idx == i) g_focused_idx = -1;
+    if (g_drag_idx    == i) g_drag_idx    = -1;
+    fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
+}
+
+/* Check if click lands on any window's close button; if so, kill it. Returns true if handled. */
+bool ipc_try_close_at(int32_t mx, int32_t my) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if (close_btn_hit(c, mx, my)) {
+            ipc_kill_client(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Draw close-button overlays on top of each active IPC window in the backbuffer.
+ * Only redraws windows that pushed a new frame this tick (frame_dirty flag).
+ * Called every tick from main.c right before console_flip_if_dirty(). */
+void ipc_draw_overlays(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if (!c->frame_dirty) continue;
+        c->frame_dirty = false;
+        if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
+
+        uint32_t bx = c->win_x + c->win_w - IPC_CLOSE_BTN_SZ - 3;
+        uint32_t by = c->win_y + 3;
+        uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
+
+        /* Red background */
+        console_fill_rect(bx, by, sz, sz, 0xFFCC2222u);
+
+        /* White X — two diagonal stroke rects (3px thick approximation) */
+        uint32_t pad = 3;
+        uint32_t inner = sz - pad * 2;
+        /* Draw X pixel-by-pixel into backbuf using fill_rect of 2×2 blocks */
+        for (uint32_t k = 0; k < inner; k++) {
+            uint32_t px1 = bx + pad + k;
+            uint32_t py1 = by + pad + k;
+            uint32_t px2 = bx + pad + (inner - 1 - k);
+            uint32_t py2 = by + pad + k;
+            if (px1 < bx + sz && py1 < by + sz)
+                console_fill_rect(px1, py1, 2, 2, 0xFFFFFFFFu);
+            if (px2 < bx + sz && py2 < by + sz)
+                console_fill_rect(px2, py2, 2, 2, 0xFFFFFFFFu);
+        }
+    }
+}
+
 /* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit.
  * Also starts a drag if the click is in the top IPC_DRAG_STRIP pixels of the window. */
 bool ipc_hit_test(int32_t mx, int32_t my) {
@@ -293,9 +370,10 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
                 g_focused_idx = i;
                 fprintf(stderr, "[ipc] focus → '%s'\n", c->title);
             }
-            /* Start drag if click is in the top drag strip */
+            /* Start drag if click is in the top drag strip (but NOT on close button) */
             if (g_drag_idx < 0 &&
-                (uint32_t)my < c->win_y + IPC_DRAG_STRIP) {
+                (uint32_t)my < c->win_y + IPC_DRAG_STRIP &&
+                !close_btn_hit(c, mx, my)) {
                 g_drag_idx = i;
                 g_drag_ox  = mx - (int32_t)c->win_x;
                 g_drag_oy  = my - (int32_t)c->win_y;
@@ -319,8 +397,14 @@ bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
     int32_t new_y = my - g_drag_oy;
     if (new_x < 0) new_x = 0;
     if (new_y < 0) new_y = 0;
-    c->win_x = (uint32_t)new_x;
-    c->win_y = (uint32_t)new_y;
+    if ((uint32_t)new_x != c->win_x || (uint32_t)new_y != c->win_y) {
+        /* Clear old window position in backbuffer before moving */
+        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
+        c->win_x = (uint32_t)new_x;
+        c->win_y = (uint32_t)new_y;
+        /* Mark frame dirty so close button is redrawn at new position on next app frame */
+        c->frame_dirty = true;
+    }
     return true;
 }
 
