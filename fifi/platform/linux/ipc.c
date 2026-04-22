@@ -102,10 +102,18 @@ static void ipc_raise(int i) {
 #define IPC_DRAG_STRIP   24   /* top N pixels of an IPC window act as drag handle */
 #define IPC_CLOSE_BTN_SZ 18   /* close button square size (in the drag strip) */
 #define IPC_SNAP_ZONE    40   /* px from screen edge that activates snap */
+#define IPC_RESIZE_MARGIN 10  /* px at right/bottom edge that act as resize handle */
+#define IPC_MIN_WIN_W    200
+#define IPC_MIN_WIN_H    150
 static int   g_drag_idx   = -1;   /* which client is being dragged */
 static int32_t g_drag_ox  = 0;    /* cursor offset within window at drag start */
 static int32_t g_drag_oy  = 0;
 static int   g_snap_preview = 0;  /* 0=none, 1=left, 2=right, 3=max */
+/* Resize state */
+static int   g_resize_idx = -1;
+static int32_t g_resize_mx0 = 0, g_resize_my0 = 0;  /* cursor at resize start */
+static uint32_t g_resize_w0 = 0, g_resize_h0 = 0;   /* window dims at resize start */
+static bool  g_resize_do_w = false, g_resize_do_h = false;
 
 static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len);  /* fwd */
 
@@ -713,6 +721,115 @@ void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns) {
     memcpy(buf + 4, &ry,  4);
     buf[8] = btns;
     ipc_send(c, IPC_INPUT_MOUSE, buf, sizeof(buf));
+}
+
+/* Returns true if mx,my is in the resize zone of window i (right, bottom, or corner) */
+static bool resize_hit(const ipc_client_t *c, int32_t mx, int32_t my,
+                       bool *do_w, bool *do_h) {
+    int32_t rx = mx - (int32_t)c->win_x;
+    int32_t ry = my - (int32_t)c->win_y;
+    if (rx < 0 || ry < 0 || (uint32_t)rx >= c->win_w || (uint32_t)ry >= c->win_h)
+        return false;
+    bool near_right  = (uint32_t)rx >= c->win_w  - IPC_RESIZE_MARGIN;
+    bool near_bottom = (uint32_t)ry >= c->win_h  - IPC_RESIZE_MARGIN;
+    if (!near_right && !near_bottom) return false;
+    *do_w = near_right;
+    *do_h = near_bottom;
+    return true;
+}
+
+/* Begin resize of window i at mouse position mx, my */
+bool ipc_resize_begin(int32_t mx, int32_t my) {
+    if (g_drag_idx >= 0 || g_resize_idx >= 0) return false;
+    /* Find topmost window with a resize handle under cursor */
+    int best_i = -1;
+    uint32_t best_z = 0;
+    bool bdo_w = false, bdo_h = false;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || c->snapped) continue;
+        bool dw = false, dh = false;
+        if (resize_hit(c, mx, my, &dw, &dh) && c->z_order > best_z) {
+            best_z = c->z_order; best_i = i; bdo_w = dw; bdo_h = dh;
+        }
+    }
+    if (best_i < 0) return false;
+    g_resize_idx = best_i;
+    g_resize_mx0 = mx;
+    g_resize_my0 = my;
+    g_resize_w0  = g_clients[best_i].win_w;
+    g_resize_h0  = g_clients[best_i].win_h;
+    g_resize_do_w = bdo_w;
+    g_resize_do_h = bdo_h;
+    g_focused_idx = best_i;
+    ipc_raise(best_i);
+    return true;
+}
+
+/* Update resize drag. Returns true while resize is active. */
+bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn) {
+    if (g_resize_idx < 0) return false;
+    if (!lbtn) {
+        /* Commit resize: notify the app */
+        ipc_client_t *c = &g_clients[g_resize_idx];
+        if (c->active) {
+            uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
+            ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
+        }
+        g_resize_idx = -1;
+        return false;
+    }
+    ipc_client_t *c = &g_clients[g_resize_idx];
+    if (!c->active || c->fd < 0) { g_resize_idx = -1; return false; }
+
+    int32_t dx = mx - g_resize_mx0;
+    int32_t dy = my - g_resize_my0;
+    uint32_t new_w = c->win_w, new_h = c->win_h;
+    if (g_resize_do_w) {
+        int32_t w = (int32_t)g_resize_w0 + dx;
+        new_w = w < IPC_MIN_WIN_W ? IPC_MIN_WIN_W : (uint32_t)w;
+    }
+    if (g_resize_do_h) {
+        int32_t h = (int32_t)g_resize_h0 + dy;
+        new_h = h < IPC_MIN_WIN_H ? IPC_MIN_WIN_H : (uint32_t)h;
+    }
+    if (new_w != c->win_w || new_h != c->win_h) {
+        /* Clear old area before resize */
+        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
+        c->win_w = new_w;
+        c->win_h = new_h;
+    }
+    return true;
+}
+
+/* Returns true if a resize is in progress (caller should suppress normal mouse routing) */
+bool ipc_resize_active(void) { return g_resize_idx >= 0; }
+
+/* Returns true if mx,my is in any IPC window resize zone (for cursor change hints) */
+bool ipc_resize_zone_at(int32_t mx, int32_t my) {
+    bool dw = false, dh = false;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || c->snapped) continue;
+        if (resize_hit(c, mx, my, &dw, &dh)) return true;
+    }
+    return false;
+}
+
+/* Draw resize handle indicator on each snappable window corner */
+void ipc_draw_resize_handles(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || c->snapped) continue;
+        bool foc = (g_focused_idx == i);
+        uint32_t hcol = foc ? 0xFF5090d0u : 0xFF344460u;
+        uint32_t hx = c->win_x + c->win_w - IPC_RESIZE_MARGIN;
+        uint32_t hy = c->win_y + c->win_h - IPC_RESIZE_MARGIN;
+        console_fill_rect(hx, hy, IPC_RESIZE_MARGIN, IPC_RESIZE_MARGIN, hcol);
+        /* Diagonal lines for grip */
+        for (int k = 3; k < IPC_RESIZE_MARGIN - 1; k += 3)
+            console_fill_rect(hx + k, hy + IPC_RESIZE_MARGIN - 2, 1, 2, 0xFFc0d8f0u);
+    }
 }
 
 /* Clear IPC keyboard focus (compositor GUI reclaimed focus) */
