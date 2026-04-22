@@ -309,10 +309,18 @@ int main(void) {
         }
 
         if (ipc_keyboard_active()) {
-            /* Keys go to the focused IPC app, not PTY or GUI */
+            /* Keys go to the focused IPC app, except F1-F4 which always reach the GUI */
             int c;
-            while ((c = keyboard_try_getchar()) != -1)
-                ipc_send_focused_key((uint8_t)c);
+            while ((c = keyboard_try_getchar()) != -1) {
+                uint8_t uc = (uint8_t)c;
+                if (uc >= 0x8Au && uc <= 0x8Du) {
+                    /* F1-F4: re-inject into GUI key queue */
+                    extern void keyboard_push_char(uint8_t c);
+                    keyboard_push_char(uc);
+                } else {
+                    ipc_send_focused_key(uc);
+                }
+            }
         } else if (!keyboard_gui_capture_active()) {
             /* Terminal is focused — keys go to PTY */
             int c;
