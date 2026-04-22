@@ -55,6 +55,7 @@ typedef struct {
     int      fd;
     bool     active;
     bool     frame_dirty;  /* true after a new IPC_APP_FRAME was blitted this tick */
+    bool     minimized;    /* window is hidden (task button remains, process alive) */
     uint32_t win_id;    /* ID returned from gui_app_create_window() — 0 if not yet created */
     uint32_t z_order;   /* higher = on top; raised on focus */
     uint32_t win_x, win_y, win_w, win_h;
@@ -145,11 +146,13 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         if (pld_len < expected || fw == 0 || fh == 0) break;
 
         /* Blit into backbuffer at the app window's compositor position */
-        const uint32_t *pixels = (const uint32_t *)(pld + 16);
-        uint64_t dst_x = (uint64_t)c->win_x + fx;
-        uint64_t dst_y = (uint64_t)c->win_y + fy;
-        console_paste_rect(pixels, dst_x, dst_y, fw, fh);
-        c->frame_dirty = true;
+        if (!c->minimized) {
+            const uint32_t *pixels = (const uint32_t *)(pld + 16);
+            uint64_t dst_x = (uint64_t)c->win_x + fx;
+            uint64_t dst_y = (uint64_t)c->win_y + fy;
+            console_paste_rect(pixels, dst_x, dst_y, fw, fh);
+            c->frame_dirty = true;
+        }
         break;
     }
     case IPC_APP_TITLE: {
@@ -325,7 +328,7 @@ static void ipc_kill_client(int i) {
 bool ipc_try_close_at(int32_t mx, int32_t my) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
         if (close_btn_hit(c, mx, my)) {
             ipc_kill_client(i);
             return true;
@@ -340,7 +343,7 @@ bool ipc_try_close_at(int32_t mx, int32_t my) {
 void ipc_draw_overlays(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
         if (!c->frame_dirty) continue;
         c->frame_dirty = false;
         if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
@@ -378,7 +381,7 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
     uint32_t best_z = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
         if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
             (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
             if (c->z_order > best_z) {
@@ -499,8 +502,9 @@ int ipc_window_count(void) {
     return n;
 }
 
-/* Fill title (truncated to title_max-1) and focused flag for the nth active window.
- * Returns false if slot is out of range. */
+/* Fill title (truncated to title_max-1), focused flag, and minimized flag for nth window.
+ * Returns false if slot is out of range. (title_max >= 2: title[] gets an extra '~' prefix
+ * if minimized, so callers can see the state from the title alone if preferred.) */
 bool ipc_window_info(int slot, char *title, int title_max, bool *focused) {
     int found = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
@@ -513,7 +517,7 @@ bool ipc_window_info(int slot, char *title, int title_max, bool *focused) {
                 memcpy(title, g_clients[i].title, (size_t)len);
                 title[len] = '\0';
             }
-            if (focused) *focused = (g_focused_idx == i);
+            if (focused) *focused = (g_focused_idx == i && !g_clients[i].minimized);
             return true;
         }
         found++;
@@ -521,18 +525,29 @@ bool ipc_window_info(int slot, char *title, int title_max, bool *focused) {
     return false;
 }
 
-/* Raise and focus the nth active IPC window */
+/* Toggle minimize or raise/focus the nth active IPC window */
 void ipc_window_focus_slot(int slot) {
     int found = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         if (!g_clients[i].active || g_clients[i].fd < 0 || g_clients[i].win_w == 0)
             continue;
         if (found == slot) {
-            g_focused_idx = i;
-            ipc_raise(i);
-            ipc_send(&g_clients[i], IPC_INVALIDATE, NULL, 0);
-            g_clients[i].frame_dirty = true;
-            fprintf(stderr, "[ipc] taskbar raised '%s'\n", g_clients[i].title);
+            ipc_client_t *c = &g_clients[i];
+            if (!c->minimized && g_focused_idx == i) {
+                /* Already focused → minimize */
+                c->minimized = true;
+                console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
+                if (g_focused_idx == i) g_focused_idx = -1;
+                fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
+            } else {
+                /* Restore / raise */
+                c->minimized = false;
+                g_focused_idx = i;
+                ipc_raise(i);
+                ipc_send(c, IPC_INVALIDATE, NULL, 0);
+                c->frame_dirty = true;
+                fprintf(stderr, "[ipc] restored '%s'\n", c->title);
+            }
             return;
         }
         found++;
