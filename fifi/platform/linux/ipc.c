@@ -103,6 +103,8 @@ static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t 
     if (len > 0 && data) write(c->fd, data, len);
 }
 
+static void ipc_disconnect_client(ipc_client_t *c);  /* forward decl */
+
 /* ── Dispatch a fully-received message from an app ──────────────────────── */
 static void ipc_dispatch(ipc_client_t *c, uint32_t type,
                          const uint8_t *pld, uint32_t pld_len) {
@@ -175,11 +177,7 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         break;
     }
     case IPC_APP_CLOSE:
-        fprintf(stderr, "[ipc] app '%s' closed\n", c->title);
-        close(c->fd);
-        c->fd     = -1;
-        c->active = false;
-        if (c->payload) { free(c->payload); c->payload = NULL; }
+        ipc_disconnect_client(c);
         break;
     case IPC_NOTIFY: {
         if (pld_len > 0) {
@@ -197,6 +195,19 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
     }
 }
 
+/* Disconnect a client cleanly: close socket, clear backbuffer region, release memory */
+static void ipc_disconnect_client(ipc_client_t *c) {
+    if (!c->active) return;
+    fprintf(stderr, "[ipc] app '%s' disconnected\n", c->title);
+    if (c->win_w > 0 && c->win_h > 0 && !c->minimized)
+        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
+    close(c->fd); c->fd = -1; c->active = false;
+    if (c->payload) { free(c->payload); c->payload = NULL; }
+    if (g_focused_idx >= 0 && &g_clients[g_focused_idx] == c) g_focused_idx = -1;
+    int i = (int)(c - g_clients);
+    if (g_drag_idx == i) g_drag_idx = -1;
+}
+
 /* ── Read available data from one client ─────────────────────────────────── */
 static void ipc_read_client(ipc_client_t *c) {
     for (;;) {
@@ -206,8 +217,7 @@ static void ipc_read_client(ipc_client_t *c) {
             if (n <= 0) {
                 if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                     /* Disconnected */
-                    close(c->fd); c->fd = -1; c->active = false;
-                    if (c->payload) { free(c->payload); c->payload = NULL; }
+                    ipc_disconnect_client(c);
                 }
                 return;
             }
@@ -218,7 +228,7 @@ static void ipc_read_client(ipc_client_t *c) {
             memcpy(&c->pld_len, c->hdr + 4, 4);
             if (c->pld_len > 64 * 1024 * 1024u) {
                 /* Absurd payload — drop client */
-                close(c->fd); c->fd = -1; c->active = false;
+                ipc_disconnect_client(c);
                 return;
             }
             c->pld_got = 0;
@@ -226,7 +236,7 @@ static void ipc_read_client(ipc_client_t *c) {
                 free(c->payload);
                 c->payload = malloc(c->pld_len);
                 if (!c->payload) {
-                    close(c->fd); c->fd = -1; c->active = false;
+                    ipc_disconnect_client(c);
                     return;
                 }
             }
@@ -236,10 +246,8 @@ static void ipc_read_client(ipc_client_t *c) {
         if (c->pld_len > 0 && c->pld_got < c->pld_len) {
             ssize_t n = read(c->fd, c->payload + c->pld_got, c->pld_len - c->pld_got);
             if (n <= 0) {
-                if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                    close(c->fd); c->fd = -1; c->active = false;
-                    if (c->payload) { free(c->payload); c->payload = NULL; }
-                }
+                if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+                    ipc_disconnect_client(c);
                 return;
             }
             c->pld_got += (uint32_t)n;
