@@ -30,6 +30,7 @@
 #include <sys/un.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <time.h>
 
 #include "console.h"
 #include "gui.h"
@@ -50,6 +51,7 @@
 #define IPC_FOCUS         0x13u
 #define IPC_INPUT_GAMEPAD 0x14u  /* {uint16_t btns; int16_t lx,ly,rx,ry,lt,rt} = 14 bytes */
 #define IPC_INVALIDATE    0x15u  /* ask app to push a fresh full frame (no payload) */
+#define IPC_NOTIFY        0x16u  /* app → compositor: {char text[]} — show toast notification */
 
 typedef struct {
     int      fd;
@@ -72,6 +74,11 @@ static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
 static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter */
+
+/* ── Toast notification state ────────────────────────────────────────────── */
+#define NOTIFY_DURATION_S 3
+static char    g_notify_text[80] = {0};
+static time_t  g_notify_expire   = 0;   /* monotonic time when notification ends */
 
 /* Raise a window to the top of the z-stack */
 static void ipc_raise(int i) {
@@ -168,6 +175,17 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         c->active = false;
         if (c->payload) { free(c->payload); c->payload = NULL; }
         break;
+    case IPC_NOTIFY: {
+        if (pld_len > 0) {
+            uint32_t len = pld_len < (uint32_t)(sizeof(g_notify_text) - 1)
+                         ? pld_len : (uint32_t)(sizeof(g_notify_text) - 1);
+            memcpy(g_notify_text, pld, len);
+            g_notify_text[len] = '\0';
+            g_notify_expire = time(NULL) + NOTIFY_DURATION_S;
+            fprintf(stderr, "[ipc] notify: %s\n", g_notify_text);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -492,6 +510,64 @@ void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
 
 /* Returns the IPC server fd for inclusion in the main poll set */
 int ipc_server_fd(void) { return g_srv_fd; }
+
+/* Draw active notification toast in bottom-right corner (above taskbar).
+ * Returns true if it dirtied the backbuffer (caller should force flip). */
+bool ipc_notify_draw(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+
+#define NOTIFY_TASKBAR_H  32u
+#define NOTIFY_PAD_X      10u
+#define NOTIFY_PAD_Y      6u
+
+    /* Use a saved position so we can clear it consistently */
+    static uint64_t s_bx = 0, s_by = 0, s_bw = 0, s_bh = 0;
+
+    if (g_notify_text[0] == '\0') return false;
+
+    if (time(NULL) >= g_notify_expire) {
+        /* Expired — clear the notification area with desktop background */
+        if (s_bw > 0 && s_bh > 0) {
+            console_fill_rect(s_bx, s_by, s_bw, s_bh, 0x001a1a2eu);
+            s_bw = 0; s_bh = 0;
+        }
+        g_notify_text[0] = '\0';
+        return true;  /* one more flip to clear */
+    }
+
+    /* Measure text */
+    size_t tlen = strlen(g_notify_text);
+    if (tlen > 60) tlen = 60;
+    uint64_t tw = (uint64_t)tlen * fw;
+    uint64_t bw = tw + NOTIFY_PAD_X * 2;
+    uint64_t bh = fh + NOTIFY_PAD_Y * 2;
+
+    /* Position: bottom-right, above taskbar */
+    uint64_t bx = fb_w > bw + 8u ? fb_w - bw - 8u : 0u;
+    uint64_t by = fb_h > NOTIFY_TASKBAR_H + bh + 8u
+                ? fb_h - NOTIFY_TASKBAR_H - bh - 8u : 0u;
+
+    s_bx = bx; s_by = by; s_bw = bw; s_bh = bh;
+
+    /* Dark background with accent border */
+    console_fill_rect(bx,           by,           bw, bh, 0xFF101828u);
+    console_fill_rect(bx,           by,           bw, 2u, 0xFF3878d8u);
+    console_fill_rect(bx,           by + bh - 2u, bw, 2u, 0xFF3878d8u);
+    console_fill_rect(bx,           by,           2u, bh, 0xFF3878d8u);
+    console_fill_rect(bx + bw - 2u, by,           2u, bh, 0xFF3878d8u);
+
+    /* Text */
+    uint64_t tx = bx + NOTIFY_PAD_X;
+    uint64_t ty = by + NOTIFY_PAD_Y;
+    for (size_t i = 0; i < tlen; i++)
+        console_render_glyph(tx + i * fw, ty,
+                             (unsigned char)g_notify_text[i],
+                             0xFFE0E8F0u, 0xFF101828u);
+    return true;
+}
 
 /* ── Window list query API (called from gui.c taskbar) ──────────────────── */
 

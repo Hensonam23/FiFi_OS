@@ -29,6 +29,7 @@
 #define IPC_INPUT_KEY    0x11u
 #define IPC_INPUT_MOUSE  0x12u
 #define IPC_INVALIDATE   0x15u
+#define IPC_NOTIFY       0x16u
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W 480
@@ -410,10 +411,20 @@ int main(void) {
                                 /* On release — check close button */
                                 int bw = 80;
                                 int bx = (WIN_W - bw) / 2;
-                                /* Close button y is around WIN_H - 60 area */
                                 if (mx >= bx && mx < bx + bw &&
                                     my >= WIN_H - 80 && my < WIN_H - 20)
                                     running = false;
+                                /* Volume slider release — notify compositor */
+                                if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                    mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
+                                    char ntxt[24];
+                                    int cv = (mx - g_sl_x) * 100 / g_sl_w;
+                                    if (cv < 0) cv = 0; if (cv > 100) cv = 100;
+                                    int nlen = snprintf(ntxt, sizeof(ntxt),
+                                                        "Volume: %d%%", cv);
+                                    if (nlen > 0)
+                                        ipc_send_msg(sock, IPC_NOTIFY, ntxt, (uint32_t)nlen);
+                                }
                             }
                             prev_lb = lb;
                         }
