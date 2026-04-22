@@ -125,10 +125,11 @@ typedef struct {
     bool     animations;    /* true = window open/close animations */
     bool     statusbar;     /* true = show top status bar */
     bool     desktop_info;  /* true = show neofetch-style info on desktop */
+    int8_t   utc_offset;    /* UTC hour offset applied to RTC time, -12..+14 */
 } gui_theme_t;
 
 /* Default theme: FiFi blue accent, gradient wallpaper */
-static gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, false, true, true, true };
+static gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, false, true, true, true, 0 };
 
 /* 16 accent colour presets */
 #define ACCENT_PRESET_COUNT 16
@@ -387,6 +388,8 @@ static const char *g_font_labels[] = {
 /* Absolute screen coords of font prev/next buttons (updated each settings render) */
 static uint64_t g_font_prev_bx = 0, g_font_next_bx = 0;
 static uint64_t g_font_btn_by  = 0, g_font_btn_bw  = 28u, g_font_btn_bh = 0u;
+static uint64_t g_utc_minus_bx = 0, g_utc_plus_bx = 0;
+static uint64_t g_utc_btn_by   = 0, g_utc_btn_bh  = 0u;
 
 /* ── Chrome hover state ──────────────────────────────────────────────── */
 static int g_chrome_win = -1;
@@ -591,6 +594,11 @@ static void taskbar_draw_tray(void) {
     /* ── Clock ── */
     uint8_t rh = 0, rm = 0, rs = 0;
     rtc_get_time(&rh, &rm, &rs);
+    {
+        int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset;
+        adj = ((adj % 24) + 24) % 24;
+        rh = (uint8_t)adj;
+    }
 
     /* Build clock string: HH:MM:SS (24h) or H:MM:SS AM/PM (12h) */
     char clk[14]; /* max "12:59:59 PM\0" = 12 chars */
@@ -5533,6 +5541,46 @@ static void settings_render(window_t *w) {
             cy += SET_ROW_H + 8u;
         }
 
+        /* UTC offset row: [−]  UTC+N  [+] */
+        {
+            uint64_t btn_h2 = fh + 6u;
+            console_fill_rect(ix, cy, iw, btn_h2, COL_SET_BG);
+            gui_draw_str(cx, cy + (btn_h2 - fh) / 2u, "Clock UTC:", COL_SET_KEY_FG, COL_SET_BG);
+
+            uint64_t pb2 = val_x;
+            console_fill_rect(pb2, cy, g_font_btn_bw, btn_h2, 0x00182838u);
+            gui_draw_str(pb2 + (g_font_btn_bw - fw) / 2u, cy + (btn_h2 - fh) / 2u,
+                         "-", 0x0060a0e0u, 0x00182838u);
+            g_utc_minus_bx = pb2;
+
+            char utc_lbl[8];
+            {
+                int8_t off = g_theme.utc_offset;
+                int abs_off = off < 0 ? (int)-off : (int)off;
+                int ri = 0;
+                utc_lbl[ri++] = 'U'; utc_lbl[ri++] = 'T'; utc_lbl[ri++] = 'C';
+                utc_lbl[ri++] = (off < 0) ? '-' : '+';
+                if (abs_off >= 10) utc_lbl[ri++] = (char)('0' + abs_off / 10);
+                utc_lbl[ri++] = (char)('0' + abs_off % 10);
+                utc_lbl[ri] = '\0';
+            }
+            uint64_t lbl_len = (uint64_t)gui_strlen(utc_lbl);
+            uint64_t lbl_x   = pb2 + g_font_btn_bw + 4u;
+            uint64_t plus2   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
+            uint64_t lbl_w   = plus2 > lbl_x + 2u ? plus2 - lbl_x - 2u : 1u;
+            uint64_t lbl_cx2 = lbl_x + (lbl_w > lbl_len * fw ? (lbl_w - lbl_len * fw) / 2u : 0u);
+            console_fill_rect(lbl_x, cy, lbl_w, btn_h2, COL_SET_BG);
+            gui_draw_str(lbl_cx2, cy + (btn_h2 - fh) / 2u, utc_lbl, COL_SET_VAL_FG, COL_SET_BG);
+
+            console_fill_rect(plus2, cy, g_font_btn_bw, btn_h2, 0x00182838u);
+            gui_draw_str(plus2 + (g_font_btn_bw - fw) / 2u, cy + (btn_h2 - fh) / 2u,
+                         "+", 0x0060a0e0u, 0x00182838u);
+            g_utc_plus_bx = plus2;
+            g_utc_btn_by  = cy;
+            g_utc_btn_bh  = btn_h2;
+            cy += btn_h2 + 4u;
+        }
+
         console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
         cy += 5u;
     }
@@ -6602,14 +6650,16 @@ void gui_on_tick(void) {
         if (any_anim) full_redraw();
     }
 
-    /* ── Cursor blink: re-render windows with active search or edit mode every 25 ticks ── */
+    /* ── Cursor blink: trigger full redraw if any window has active search or edit mode ── */
     if ((g_gui_tick % 25u) == 0u) {
         for (int i = 0; i < MAX_WINS; i++) {
             window_t *bw = &g_wins[i];
             if (!bw->active || bw->state == WIN_HIDDEN || bw->anim_phase != ANIM_NONE) continue;
-            if (bw->type == WIN_FILES  && bw->fb.search_active)   fb_render(bw);
-            if (bw->type == WIN_TEXT   && (bw->text.srch_active || bw->text.edit_mode))
-                text_render(bw);
+            if ((bw->type == WIN_FILES && bw->fb.search_active) ||
+                (bw->type == WIN_TEXT  && (bw->text.srch_active || bw->text.edit_mode))) {
+                full_redraw();
+                break;
+            }
         }
     }
 
@@ -6894,7 +6944,7 @@ void gui_on_tick(void) {
         bool term_vis = g_wins[0].active && g_wins[0].state != WIN_HIDDEN
                         && g_wins[0].anim_phase != ANIM_CLOSE;
         static bool s_gui_cap = false;
-        bool want_cap = (focused != NULL) || !term_vis;
+        bool want_cap = (focused != NULL && top_vis != 0) || !term_vis;
         if (want_cap != s_gui_cap) {
             keyboard_set_gui_capture(want_cap);
             s_gui_cap = want_cap;
@@ -9495,6 +9545,20 @@ void gui_on_tick(void) {
                             }
                         }
                     }
+                    /* UTC offset buttons: [−] and [+] */
+                    if (g_utc_btn_bh > 0 &&
+                        (uint64_t)my >= g_utc_btn_by &&
+                        (uint64_t)my <  g_utc_btn_by + g_utc_btn_bh) {
+                        if ((uint64_t)mx >= g_utc_minus_bx &&
+                            (uint64_t)mx <  g_utc_minus_bx + g_font_btn_bw) {
+                            if (g_theme.utc_offset > -12) g_theme.utc_offset--;
+                            full_redraw();
+                        } else if ((uint64_t)mx >= g_utc_plus_bx &&
+                                   (uint64_t)mx <  g_utc_plus_bx + g_font_btn_bw) {
+                            if (g_theme.utc_offset < 14) g_theme.utc_offset++;
+                            full_redraw();
+                        }
+                    }
                 }
             }
             break;
@@ -9505,6 +9569,7 @@ void gui_on_tick(void) {
     }
 
     /* ── Inertial scroll tick ── */
+    bool inertial_dirty = false;
     for (int zi = 0; zi < MAX_WINS; zi++) {
         window_t *w = &g_wins[zi];
         if (!w->active || w->state == WIN_HIDDEN) continue;
@@ -9517,7 +9582,7 @@ void gui_on_tick(void) {
                 if (w->fb.scroll < 0) w->fb.scroll = 0;
                 if (w->fb.scroll >= w->fb.entry_count)
                     w->fb.scroll = w->fb.entry_count > 0 ? w->fb.entry_count - 1 : 0;
-                fb_render(w);
+                inertial_dirty = true;
             }
             w->fb.scroll_vel = w->fb.scroll_vel * 7 / 8;
             if (w->fb.scroll_vel > -16 && w->fb.scroll_vel < 16) {
@@ -9531,7 +9596,7 @@ void gui_on_tick(void) {
             if (lines) {
                 w->text.scroll += lines;
                 if (w->text.scroll < 0) w->text.scroll = 0;
-                text_render(w);
+                inertial_dirty = true;
             }
             w->text.scroll_vel = w->text.scroll_vel * 7 / 8;
             if (w->text.scroll_vel > -16 && w->text.scroll_vel < 16) {
@@ -9540,4 +9605,5 @@ void gui_on_tick(void) {
             }
         }
     }
+    if (inertial_dirty) full_redraw();
 }
