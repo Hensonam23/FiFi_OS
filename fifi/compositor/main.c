@@ -49,6 +49,9 @@ void wayland_shutdown(void);
 int  wayland_server_fd(void);
 void wayland_set_display_size(int w, int h);
 void wayland_blit_surfaces(void);
+void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns);
+void wayland_send_key(uint32_t evdev_key, uint32_t state);
+bool wayland_has_focus(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
@@ -380,6 +383,10 @@ int main(void) {
             }
             if (ipc_keyboard_active() && !dragging)
                 ipc_send_focused_mouse(mcx, mcy, btns);
+
+            /* Forward mouse to Wayland surfaces (when no IPC window has focus) */
+            if (!ipc_keyboard_active())
+                wayland_send_mouse(mcx, mcy, btns);
         }
 
         /* ── Activity tracking: mouse movement resets the blank timer ───── */

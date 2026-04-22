@@ -870,6 +870,192 @@ static void wl_client_flush(wl_client_t *c) {
     }
 }
 
+/* ── Focus tracking ──────────────────────────────────────────────────────── */
+
+static int      g_focus_ci  = -1;  /* client index with keyboard focus */
+static uint32_t g_focus_sid = 0;   /* surface obj id with keyboard focus */
+static int32_t  g_prev_mx = -1, g_prev_my = -1;
+static uint8_t  g_prev_btns = 0;
+
+/* Find the topmost mapped Wayland surface that contains (mx, my) */
+static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
+    if (!s || !s->mapped) return false;
+    return mx >= s->x && mx < s->x + s->w &&
+           my >= s->y && my < s->y + s->h;
+}
+
+/* Wl-fixed is 24.8 fixed-point (value * 256) */
+static uint32_t wl_fixed(int32_t v) { return (uint32_t)(v * 256); }
+
+/* Send pointer enter/leave events when focus changes */
+static void wl_send_ptr_enter(wl_client_t *c, uint32_t surf_id,
+                               int32_t mx, int32_t my) {
+    if (!c->pointer_id) return;
+    uint32_t ser = next_serial(c);
+    int h = wl_begin_msg(c, c->pointer_id, WL_PTR_ENTER);
+    wl_push_u32(c, ser);
+    wl_push_u32(c, surf_id);
+    wl_push_u32(c, wl_fixed(mx));
+    wl_push_u32(c, wl_fixed(my));
+    wl_end_msg(c, h);
+    h = wl_begin_msg(c, c->pointer_id, WL_PTR_FRAME);
+    wl_end_msg(c, h);
+}
+
+static void wl_send_ptr_leave(wl_client_t *c, uint32_t surf_id) {
+    if (!c->pointer_id) return;
+    uint32_t ser = next_serial(c);
+    int h = wl_begin_msg(c, c->pointer_id, WL_PTR_LEAVE);
+    wl_push_u32(c, ser);
+    wl_push_u32(c, surf_id);
+    wl_end_msg(c, h);
+    h = wl_begin_msg(c, c->pointer_id, WL_PTR_FRAME);
+    wl_end_msg(c, h);
+}
+
+static void wl_send_kbd_enter(wl_client_t *c, uint32_t surf_id) {
+    if (!c->keyboard_id) return;
+    uint32_t ser = next_serial(c);
+    int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_ENTER);
+    wl_push_u32(c, ser);
+    wl_push_u32(c, surf_id);
+    wl_push_u32(c, 0);  /* empty keys array */
+    wl_end_msg(c, h);
+}
+
+static void wl_send_kbd_leave(wl_client_t *c, uint32_t surf_id) {
+    if (!c->keyboard_id) return;
+    uint32_t ser = next_serial(c);
+    int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_LEAVE);
+    wl_push_u32(c, ser);
+    wl_push_u32(c, surf_id);
+    wl_end_msg(c, h);
+}
+
+/* Deliver mouse events to Wayland surfaces.
+ * Call from main.c after input_poll() with current mouse state. */
+void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
+    /* Find topmost surface under cursor */
+    int  new_ci  = -1;
+    uint32_t new_sid = 0;
+    wl_surface_t *new_s = NULL;
+
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            if (c->objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = c->objs[oi].data;
+            if (wl_surface_hit(s, mx, my)) {
+                new_ci  = ci;
+                new_sid = c->objs[oi].id;
+                new_s   = s;
+                /* keep searching — last (topmost draw order) wins */
+            }
+        }
+    }
+
+    /* Handle focus changes */
+    if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
+        /* Leave old surface */
+        if (g_focus_ci >= 0 && g_focus_sid) {
+            wl_client_t *oc = &g_wl_clients[g_focus_ci];
+            if (oc->active) {
+                wl_send_ptr_leave(oc, g_focus_sid);
+                wl_send_kbd_leave(oc, g_focus_sid);
+                wl_client_flush(oc);
+            }
+        }
+        /* Enter new surface */
+        if (new_ci >= 0 && new_sid) {
+            wl_client_t *nc = &g_wl_clients[new_ci];
+            wl_surface_t *s_loc = new_s;
+            wl_send_ptr_enter(nc, new_sid, mx - s_loc->x, my - s_loc->y);
+            wl_send_kbd_enter(nc, new_sid);
+            wl_client_flush(nc);
+        }
+        g_focus_ci  = new_ci;
+        g_focus_sid = new_sid;
+    }
+
+    if (g_focus_ci < 0 || !g_focus_sid) { g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns; return; }
+
+    wl_client_t *fc = &g_wl_clients[g_focus_ci];
+    if (!fc->active || !fc->pointer_id) { g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns; return; }
+
+    /* Find focused surface to compute local coords */
+    wl_surface_t *fs = NULL;
+    for (int oi = 0; oi < fc->n_objs; oi++) {
+        if (fc->objs[oi].id == g_focus_sid && fc->objs[oi].type == OBJ_SURFACE)
+            fs = fc->objs[oi].data;
+    }
+    int32_t lx = fs ? mx - fs->x : mx;
+    int32_t ly = fs ? my - fs->y : my;
+
+    /* Motion */
+    if (mx != g_prev_mx || my != g_prev_my) {
+        int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_MOTION);
+        wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));  /* time ms */
+        wl_push_u32(fc, wl_fixed(lx));
+        wl_push_u32(fc, wl_fixed(ly));
+        wl_end_msg(fc, h);
+    }
+
+    /* Button changes — Wayland uses Linux BTN codes directly */
+    uint8_t changed = btns ^ g_prev_btns;
+    if (changed) {
+        /* BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112 */
+        static const uint32_t btn_codes[3] = { 0x110, 0x111, 0x112 };
+        for (int b = 0; b < 3; b++) {
+            if (!(changed & (1u << b))) continue;
+            uint32_t state = (btns >> b) & 1;  /* 1=pressed, 0=released */
+            uint32_t ser = next_serial(fc);
+            int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_BUTTON);
+            wl_push_u32(fc, ser);
+            wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+            wl_push_u32(fc, btn_codes[b]);
+            wl_push_u32(fc, state);
+            wl_end_msg(fc, h);
+        }
+    }
+
+    /* Frame event after motion/buttons */
+    if (mx != g_prev_mx || my != g_prev_my || changed) {
+        int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_FRAME);
+        wl_end_msg(fc, h);
+        wl_client_flush(fc);
+    }
+
+    g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
+}
+
+/* Deliver a key event to the focused Wayland surface.
+ * key is a Linux evdev keycode (KEY_A=30, etc.), state: 1=press, 0=release. */
+void wayland_send_key(uint32_t evdev_key, uint32_t state) {
+    if (g_focus_ci < 0 || !g_focus_sid) return;
+    wl_client_t *fc = &g_wl_clients[g_focus_ci];
+    if (!fc->active || !fc->keyboard_id) return;
+    uint32_t ser = next_serial(fc);
+    int h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
+    wl_push_u32(fc, ser);
+    wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+    wl_push_u32(fc, evdev_key);
+    wl_push_u32(fc, state);
+    wl_end_msg(fc, h);
+    /* send modifiers (all zero for now) */
+    h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_MODIFIERS);
+    wl_push_u32(fc, next_serial(fc));
+    wl_push_u32(fc, 0); /* depressed */
+    wl_push_u32(fc, 0); /* latched */
+    wl_push_u32(fc, 0); /* locked */
+    wl_push_u32(fc, 0); /* group */
+    wl_end_msg(fc, h);
+    wl_client_flush(fc);
+}
+
+/* Returns true if a Wayland surface has keyboard focus */
+bool wayland_has_focus(void) { return g_focus_ci >= 0; }
+
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */
 
 /* Called from compositor main after ipc_blit_all() */
