@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <linux/fb.h>
 #include <termios.h>
 
@@ -40,6 +41,14 @@ void ipc_init(void);
 void ipc_poll(void);
 void ipc_shutdown(void);
 int  ipc_server_fd(void);
+
+/* Wayland compositor (wayland.c) */
+bool wayland_init(void);
+void wayland_poll(void);
+void wayland_shutdown(void);
+int  wayland_server_fd(void);
+void wayland_set_display_size(int w, int h);
+void wayland_blit_surfaces(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
@@ -160,6 +169,34 @@ static int fb_open(void) {
     return 0;
 }
 
+/* ── Screenshot ──────────────────────────────────────────────────────────── */
+
+static void take_screenshot(void) {
+    static int s_idx = 0;
+    mkdir("/fifi-data/screenshots", 0755);
+    char path[64];
+    snprintf(path, sizeof(path), "/fifi-data/screenshots/shot%03d.ppm", ++s_idx);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[screenshot] cannot open %s\n", path);
+        return;
+    }
+    uint32_t w = g_lmfb.width, h = g_lmfb.height;
+    uint32_t pitch32 = g_lmfb.pitch / 4;
+    const uint32_t *fb = (const uint32_t *)g_lmfb.address;
+    fprintf(f, "P6\n%u %u\n255\n", w, h);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t px = fb[y * pitch32 + x];
+            uint8_t rgb[3] = { (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF };
+            fwrite(rgb, 1, 3, f);
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "[screenshot] saved %s\n", path);
+    gui_toast_extern("Screenshot saved", 0x0080c8a0u);
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -238,6 +275,11 @@ int main(void) {
     /* IPC socket — apps connect here to create windows and push frames */
     ipc_init();
 
+    /* Wayland compositor socket — native Wayland clients connect here */
+    wayland_set_display_size((int)g_lmfb.width, (int)g_lmfb.height);
+    if (!wayland_init())
+        fprintf(stderr, "[compositor] Wayland init failed — continuing without it\n");
+
     fprintf(stderr, "[compositor] running\n");
 
     /* Gather evdev fds for poll() */
@@ -278,11 +320,20 @@ int main(void) {
             nfds++;
         }
 
+        /* Include Wayland server fd */
+        int wl_fd = wayland_server_fd();
+        if (wl_fd >= 0 && nfds < MAX_PFD) {
+            pfd[nfds].fd     = wl_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
+
         /* 4 ms cap (250 Hz) normally; 0 in gaming mode for max frame rate */
         poll(pfd, (nfds_t)nfds, g_gaming_mode ? 0 : 4);
 
         /* ── IPC: accept new app connections, read app messages ──────────── */
         ipc_poll();
+        wayland_poll();
 
         /* ── Gamepad → IPC focused app ───────────────────────────────────── */
         if (ipc_keyboard_active() && input_gamepad_connected()) {
@@ -342,6 +393,7 @@ int main(void) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                 if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
                 uint8_t uc = (uint8_t)c;
+                if (uc == 0x96u) { take_screenshot(); continue; }  /* PrintScreen — global */
                 if (uc >= 0x8Au && uc <= 0x8Du) {
                     extern void keyboard_push_char(uint8_t c);
                     keyboard_push_char(uc);
@@ -355,7 +407,17 @@ int main(void) {
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                 if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
+                if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                 pty_write_input((uint8_t)c);
+            }
+        } else {
+            /* GUI capture active — drain kb_ring to prevent overflow; intercept PrtSc.
+             * gui_on_tick() reads its own gui_ring via keyboard_gui_try_getchar(). */
+            int c;
+            while ((c = keyboard_try_getchar()) != -1) {
+                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                if (g_blanked) { g_blanked = false; break; }
+                if ((uint8_t)c == 0x96u) take_screenshot();
             }
         }
 
@@ -383,6 +445,7 @@ int main(void) {
 
         /* ── IPC windows: blit cached frames ON TOP of GUI background ─────── */
         ipc_blit_all();
+        wayland_blit_surfaces();
 
         /* ── Cursor erase: mark old cursor rows dirty so the flip below
          * pulls clean backbuffer content there (erasing the stale cursor). ── */

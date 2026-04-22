@@ -40,6 +40,7 @@
 #define FIFI_KEY_F10    0x93u
 #define FIFI_KEY_F11    0x94u
 #define FIFI_KEY_F12    0x95u
+#define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
 
 /* ── Evdev device fds ─────────────────────────────────────────────────────── */
 #define MAX_EVDEV 8
@@ -150,6 +151,7 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_F10: return FIFI_KEY_F10;
         case KEY_F11: return FIFI_KEY_F11;
         case KEY_F12: return FIFI_KEY_F12;
+        case KEY_SYSRQ: return FIFI_KEY_PRTSC;
         /* ASCII control */
         case KEY_BACKSPACE: return '\b';
         case KEY_TAB:       return '\t';

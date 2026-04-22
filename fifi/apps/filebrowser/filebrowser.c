@@ -31,6 +31,7 @@
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_INVALIDATE    0x15u
 #define IPC_CLIP_SET      0x17u
+#define IPC_OPEN_FILE     0x1Au
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define WIN_W    640
@@ -280,8 +281,11 @@ static void nav_enter(int fd, uint32_t *fb) {
         load_dir(g_path);
         render(fb);
         send_frame(fd, fb);
+    } else {
+        char fullpath[1280];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", g_path, e->name);
+        ipc_send_msg(fd, IPC_OPEN_FILE, fullpath, (uint32_t)strlen(fullpath));
     }
-    /* Files: no viewer in standalone filebrowser — future work */
 }
 
 static void nav_up(int fd, uint32_t *fb) {
