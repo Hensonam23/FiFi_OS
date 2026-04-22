@@ -22,6 +22,7 @@
 #include "hda.h"
 
 static int    g_ctl_fd    = -1;
+static int    g_pcm_card  = -1;  /* card index that owns the volume control / PCM output */
 static bool   g_ready     = false;
 static int    g_vol       = 50;
 
@@ -35,7 +36,11 @@ bool hda_init(void) {
         char p[32];
         snprintf(p, sizeof(p), "/dev/snd/controlC%d", card);
         g_ctl_fd = open(p, O_RDWR);
-        if (g_ctl_fd >= 0) { fprintf(stderr, "[audio] %s\n", p); break; }
+        if (g_ctl_fd >= 0) {
+            g_pcm_card = card;
+            fprintf(stderr, "[audio] %s\n", p);
+            break;
+        }
     }
     if (g_ctl_fd < 0) { fprintf(stderr, "[audio] no ALSA control device\n"); return false; }
 
@@ -206,9 +211,20 @@ static void tone_logf(const char *fmt, ...) {
 }
 
 static void play_tone_child(int freq_hz, int duration_ms) {
+    tone_logf("[tone] child start: %dHz %dms card=%d\n",
+              freq_hz, duration_ms, g_pcm_card);
     int pcm_fd = -1;
     char dev_path[48];
-    for (int card = 0; card < 4 && pcm_fd < 0; card++) {
+
+    /* Try the same card as the volume control first (device 0), then scan broadly */
+    int card_order[8] = { g_pcm_card, 0, 1, 2, 3, -1, -1, -1 };
+    for (int ci = 0; ci < 8 && pcm_fd < 0; ci++) {
+        int card = card_order[ci];
+        if (card < 0) break;
+        /* Skip duplicates */
+        bool dup = false;
+        for (int j = 0; j < ci; j++) if (card_order[j] == card) { dup = true; break; }
+        if (dup) continue;
         for (int dev = 0; dev < 8 && pcm_fd < 0; dev++) {
             snprintf(dev_path, sizeof(dev_path), "/dev/snd/pcmC%dD%dp", card, dev);
             pcm_fd = open(dev_path, O_WRONLY | O_NONBLOCK);
@@ -250,24 +266,48 @@ static void play_tone_child(int freq_hz, int duration_ms) {
         }
     }
 
-    /* ── Phase 2: pick period size within the kernel's valid range ────────── */
+    /* ── Phase 2: pick period/periods within the kernel's valid range ──────── */
     struct snd_interval *iv_ps =
         &hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)];
     unsigned int period = 1024;
     if (period < iv_ps->min) period = iv_ps->min;
-    if (iv_ps->max > 0 && period > iv_ps->max) period = iv_ps->max;
+    if (iv_ps->max > 0 && iv_ps->max != UINT_MAX && period > iv_ps->max)
+        period = iv_ps->max;
 
     struct snd_interval *iv_pr =
         &hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)];
     unsigned int periods = 4;
     if (periods < iv_pr->min) periods = iv_pr->min;
-    if (iv_pr->max > 0 && periods > iv_pr->max) periods = iv_pr->max;
+    if (iv_pr->max > 0 && iv_pr->max != UINT_MAX && periods > iv_pr->max)
+        periods = iv_pr->max;
 
     interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)], period);
     interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)], periods);
     interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate);
 
-    tone_logf("[tone] HW_PARAMS: rate=%u period=%u periods=%u\n", rate, period, periods);
+    /* BUFFER_SIZE must be a single value for HW_PARAMS — set it explicitly.
+     * Without this the kernel rejects HW_PARAMS with EINVAL because the
+     * interval is still 0..UINT_MAX from params_any(). */
+    unsigned int buffer_size = period * periods;
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)],
+                 buffer_size);
+
+    /* BUFFER_BYTES is also needed by some drivers */
+    unsigned int buffer_bytes = buffer_size * 2 * sizeof(int16_t); /* stereo S16_LE */
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)],
+                 buffer_bytes);
+
+    /* period_bytes = period * channels * sample_size */
+    unsigned int period_bytes = period * 2 * sizeof(int16_t);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_BYTES)],
+                 period_bytes);
+
+    /* cmask: indicate which params we changed since last refine */
+    hp.cmask = hp.rmask;
+    hp.rmask = 0;  /* HW_PARAMS: 0 means apply as-is, not a new refine request */
+
+    tone_logf("[tone] HW_PARAMS: rate=%u period=%u periods=%u buf=%u\n",
+              rate, period, periods, buffer_size);
 
     if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hp) < 0) {
         tone_logf("[tone] HW_PARAMS failed: errno=%d\n", errno);
