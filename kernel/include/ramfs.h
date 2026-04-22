@@ -29,6 +29,9 @@ int  ramfs_write(const char *name, const void *data, uint32_t len);
 /* Look up a file.  Returns 0 on success and fills *data / *size. */
 int  ramfs_get(const char *name, const void **data, uint64_t *size);
 
+/* Rename a file in-place (just changes name field).  Returns 0 on success. */
+int  ramfs_rename(const char *old_name, const char *new_name);
+
 /* Delete a named file (frees heap buffer).  Returns 0 on success. */
 int  ramfs_delete(const char *name);
 

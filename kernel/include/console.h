@@ -35,9 +35,20 @@ uint64_t           console_pitch32(void);
  * at the end of each frame tick to push the completed frame to VRAM. */
 void console_backbuf_init(void);
 bool console_flip_if_dirty(void);
+/* Pixel capture/paste for shadow-buffer drag.  buf must be w*h uint32_t's. */
+bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
+void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);
 uint32_t    console_font_width(void);
 uint32_t    console_font_height(void);
 const char *console_font_name(void);
+
+/* Terminal scrollback ring buffer (64KB).
+ * All console_putc output is captured here even while suppressed. */
+#define CONSOLE_TSB_CAP (64u * 1024u)
+void     console_set_suppress_draw(bool on);  /* suppress screen output */
+int      console_tsb_count_lines(void);        /* total newlines in ring */
+/* Fill buf with line content, line_from_end=0 is newest. Returns bytes written. */
+int      console_tsb_get_line(int line_from_end, char *buf, int maxlen);

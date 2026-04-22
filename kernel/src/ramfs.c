@@ -102,6 +102,17 @@ int ramfs_get(const char *name, const void **data, uint64_t *size) {
     return -1;
 }
 
+int ramfs_rename(const char *old_name, const char *new_name) {
+    if (!old_name || !new_name) return -1;
+    for (int i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (g_ramfs[i].used && rf_streq(g_ramfs[i].name, old_name)) {
+            rf_strcpy(g_ramfs[i].name, new_name, RAMFS_NAME_MAX);
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int ramfs_delete(const char *name) {
     if (!name) return -1;
     for (int i = 0; i < RAMFS_MAX_FILES; i++) {

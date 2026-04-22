@@ -47,6 +47,9 @@ static volatile uint32_t sc_make_cnt[128]  = {0};
 static volatile uint32_t sc_break_cnt[128] = {0};
 
 uint32_t keyboard_sc_make(uint8_t sc)  { return sc < 128 ? (uint32_t)sc_make_cnt[sc]  : 0; }
+bool kbd_shift_down(void) { return shift_down; }
+bool kbd_ctrl_down(void)  { return ctrl_down;  }
+bool kbd_alt_down(void)   { return alt_down;   }
 uint32_t keyboard_sc_break(uint8_t sc) { return sc < 128 ? (uint32_t)sc_break_cnt[sc] : 0; }
 
 /* Held-key bitmask: tracks which scancodes have been pressed but not yet released.
@@ -294,6 +297,31 @@ void keyboard_on_scancode(uint8_t sc) {
         return;
     }
 
+    /* Function keys (Set 2 scancodes) — always go to GUI buffer */
+    {
+        uint8_t fkc = 0;
+        switch (sc) {
+            case 0x05: fkc = KEY_F1;  break;
+            case 0x06: fkc = KEY_F2;  break;
+            case 0x04: fkc = KEY_F3;  break;
+            case 0x0C: fkc = KEY_F4;  break;
+            case 0x03: fkc = KEY_F5;  break;
+            case 0x0B: fkc = KEY_F6;  break;
+            case 0x83: fkc = KEY_F7;  break;
+            case 0x0A: fkc = KEY_F8;  break;
+            case 0x01: fkc = KEY_F9;  break;
+            case 0x09: fkc = KEY_F10; break;
+            case 0x78: fkc = KEY_F11; break;
+            case 0x07: fkc = KEY_F12; break;
+            default: break;
+        }
+        if (fkc) {
+            uint32_t next = (gui_head + 1) % GUI_BUF_SIZE;
+            if (next != gui_tail) { gui_buf[gui_head] = fkc; gui_head = next; }
+            return;
+        }
+    }
+
     /* Normal ASCII — look up in Set 2 map */
     char c = shift_down ? map_s2_shift[sc] : map_s2_norm[sc];
     if (!c) return;
@@ -323,7 +351,13 @@ void keyboard_push_char(uint8_t c) {
 void keyboard_hid_make(uint8_t kc, uint8_t ch) {
     extern uint64_t pit_ticks(void);
     uint64_t now = pit_ticks();
-    kbd_push(ch);
+    /* F-keys and KEY_ALTTAB always go to the GUI buffer */
+    if (ch >= KEY_F1 && ch <= KEY_F12) {
+        uint32_t next = (gui_head + 1) % GUI_BUF_SIZE;
+        if (next != gui_tail) { gui_buf[gui_head] = ch; gui_head = next; }
+    } else {
+        kbd_push(ch);
+    }
     g_hid_rep_kc = kc;
     g_rep_char   = ch;
     g_rep_sc     = 0;

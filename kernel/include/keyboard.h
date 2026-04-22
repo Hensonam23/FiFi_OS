@@ -15,6 +15,18 @@
 #define KEY_PGUP    0x87
 #define KEY_PGDN    0x88
 #define KEY_ALTTAB  0x89
+#define KEY_F1      0x8A
+#define KEY_F2      0x8B
+#define KEY_F3      0x8C
+#define KEY_F4      0x8D
+#define KEY_F5      0x8E
+#define KEY_F6      0x8F
+#define KEY_F7      0x90
+#define KEY_F8      0x91
+#define KEY_F9      0x92
+#define KEY_F10     0x93
+#define KEY_F11     0x94
+#define KEY_F12     0x95
 
 // IRQ handler calls this with raw Set 1 scancodes
 void keyboard_on_scancode(uint8_t sc);
@@ -71,6 +83,11 @@ int keyboard_has_data(void);
 /* GUI keyboard capture — redirect chars away from shell ring buffer */
 void keyboard_set_gui_capture(bool on);
 int  keyboard_gui_try_getchar(void);
+
+/* Query current modifier key state */
+bool kbd_shift_down(void);
+bool kbd_ctrl_down(void);
+bool kbd_alt_down(void);
 
 #endif
 void keyboard_irq_handler(void);

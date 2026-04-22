@@ -185,6 +185,174 @@ static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 static uint32_t *g_back  = NULL;
 static bool      g_dirty = false;
 
+/* ── Terminal scrollback ring buffer ────────────────────────────────────── */
+static uint8_t  g_tsb_ring[CONSOLE_TSB_CAP];
+static uint32_t g_tsb_head  = 0;  /* oldest byte index in ring */
+static uint32_t g_tsb_used  = 0;  /* bytes currently stored */
+static bool     g_tsb_suppress = false;
+
+/* ── ANSI VT100 SGR colour state machine ─────────────────────────────────
+ * Parses ESC [ <param> ; ... m   (SGR sequences only).
+ * Supported codes:
+ *   0          reset to defaults
+ *   1          bold → use bright-fg variant
+ *   30-37      set fg (standard 8 colours)
+ *   40-47      set bg (standard 8 colours)
+ *   90-97      set fg (bright 8 colours)
+ *   100-107    set bg (bright 8 colours)   */
+typedef enum { ANSI_NORM, ANSI_ESC, ANSI_CSI } ansi_state_t;
+static ansi_state_t g_ansi_st   = ANSI_NORM;
+static uint8_t      g_ansi_buf[16];
+static uint8_t      g_ansi_len  = 0;
+static uint32_t     g_ansi_fg0  = 0x00FFFFFFu; /* default fg */
+static uint32_t     g_ansi_bg0  = 0x00101010u; /* default bg */
+static bool         g_ansi_bold = false;
+
+/* Standard 8 ANSI foreground colours (dark theme palette) */
+static const uint32_t ansi_fg_std[8] = {
+    0x00202020u, /* 0: black  */
+    0x00cc4444u, /* 1: red    */
+    0x0044cc66u, /* 2: green  */
+    0x00ddaa22u, /* 3: yellow */
+    0x004488ddu, /* 4: blue   */
+    0x00bb66ddu, /* 5: magenta*/
+    0x0033bbddu, /* 6: cyan   */
+    0x00ccccccu, /* 7: white  */
+};
+/* Bright variants */
+static const uint32_t ansi_fg_brt[8] = {
+    0x00505050u, /* 0: bright black (gray) */
+    0x00ff6666u, /* 1: bright red   */
+    0x0066ff88u, /* 2: bright green */
+    0x00ffdd44u, /* 3: bright yellow*/
+    0x0066aaffu, /* 4: bright blue  */
+    0x00dd88ffu, /* 5: bright magenta */
+    0x0055eeffu, /* 6: bright cyan  */
+    0x00ffffffu, /* 7: bright white */
+};
+/* Background colours (darker versions) */
+static const uint32_t ansi_bg_std[8] = {
+    0x00000000u, /* 0: black  */
+    0x00330808u, /* 1: dark red   */
+    0x00083308u, /* 2: dark green */
+    0x00332200u, /* 3: dark yellow*/
+    0x00081830u, /* 4: dark blue  */
+    0x00200830u, /* 5: dark magenta*/
+    0x00083028u, /* 6: dark cyan  */
+    0x00202020u, /* 7: gray       */
+};
+static const uint32_t ansi_bg_brt[8] = {
+    0x00303030u, /* bright black */
+    0x00661010u, /* bright red   */
+    0x00106610u, /* bright green */
+    0x00664400u, /* bright yellow*/
+    0x00103060u, /* bright blue  */
+    0x00401060u, /* bright magenta*/
+    0x00106050u, /* bright cyan  */
+    0x00606060u, /* bright white */
+};
+
+static void ansi_apply_sgr(uint8_t *params, int n) {
+    for (int pi = 0; pi < n; pi++) {
+        uint8_t p = params[pi];
+        if (p == 0) {
+            /* Reset */
+            con.fg = g_ansi_fg0;
+            con.bg = g_ansi_bg0;
+            g_ansi_bold = false;
+        } else if (p == 1) {
+            g_ansi_bold = true;
+        } else if (p >= 30u && p <= 37u) {
+            con.fg = g_ansi_bold ? ansi_fg_brt[p - 30u] : ansi_fg_std[p - 30u];
+        } else if (p >= 40u && p <= 47u) {
+            con.bg = ansi_bg_std[p - 40u];
+        } else if (p >= 90u && p <= 97u) {
+            con.fg = ansi_fg_brt[p - 90u];
+        } else if (p >= 100u && p <= 107u) {
+            con.bg = ansi_bg_brt[p - 100u];
+        }
+    }
+}
+
+static void ansi_process_csi(void) {
+    /* Parse semicolon-separated decimal params, then dispatch on final char */
+    uint8_t params[8];
+    int     np = 0;
+    uint8_t cur = 0;
+    for (int i = 0; i < (int)g_ansi_len - 1; i++) {
+        uint8_t c2 = g_ansi_buf[i];
+        if (c2 >= '0' && c2 <= '9') {
+            cur = (uint8_t)(cur * 10u + (c2 - '0'));
+        } else if (c2 == ';') {
+            if (np < 8) params[np++] = cur;
+            cur = 0;
+        }
+    }
+    if (np < 8) params[np++] = cur;  /* last param */
+
+    uint8_t final_ch = g_ansi_len > 0 ? g_ansi_buf[g_ansi_len - 1u] : 0u;
+    if (final_ch == 'm') {
+        if (np == 1 && params[0] == 0) {
+            con.fg = g_ansi_fg0;
+            con.bg = g_ansi_bg0;
+            g_ansi_bold = false;
+        } else {
+            ansi_apply_sgr(params, np);
+        }
+    }
+    /* Other CSI sequences (cursor movement, erase, etc.) are silently ignored */
+}
+
+void console_set_suppress_draw(bool on) { g_tsb_suppress = on; }
+
+static inline uint8_t tsb_at(uint32_t pos) {
+    return g_tsb_ring[(g_tsb_head + pos) % CONSOLE_TSB_CAP];
+}
+
+static void tsb_push(uint8_t c) {
+    if (g_tsb_used < CONSOLE_TSB_CAP) {
+        g_tsb_ring[(g_tsb_head + g_tsb_used) % CONSOLE_TSB_CAP] = c;
+        g_tsb_used++;
+    } else {
+        /* Ring full: overwrite oldest */
+        g_tsb_ring[g_tsb_head] = c;
+        g_tsb_head = (g_tsb_head + 1u) % CONSOLE_TSB_CAP;
+    }
+}
+
+int console_tsb_count_lines(void) {
+    int n = 0;
+    for (uint32_t i = 0; i < g_tsb_used; i++)
+        if (tsb_at(i) == '\n') n++;
+    return n;
+}
+
+int console_tsb_get_line(int line_from_end, char *buf, int maxlen) {
+    if (maxlen <= 0 || !buf || g_tsb_used == 0) { if (buf && maxlen > 0) buf[0]='\0'; return 0; }
+    int32_t pos = (int32_t)g_tsb_used - 1;
+    /* Skip trailing newline(s) at end of buffer */
+    while (pos >= 0 && tsb_at((uint32_t)pos) == '\n') pos--;
+    /* Walk back counting newlines to find our target line */
+    int nl_seen = 0;
+    while (pos >= 0 && nl_seen < line_from_end) {
+        if (tsb_at((uint32_t)pos) == '\n') nl_seen++;
+        pos--;
+    }
+    if (pos < 0) { buf[0] = '\0'; return 0; }
+    /* pos is now at the last char of the target line */
+    int32_t end = pos;
+    /* Walk back to find the start of this line */
+    while (pos > 0 && tsb_at((uint32_t)(pos - 1)) != '\n') pos--;
+    int32_t line_start = pos;
+    int len = (int)(end - line_start + 1);
+    if (len < 0) len = 0;
+    if (len > maxlen - 1) len = maxlen - 1;
+    for (int i = 0; i < len; i++)
+        buf[i] = (char)tsb_at((uint32_t)(line_start + (int32_t)i));
+    buf[len] = '\0';
+    return len;
+}
+
 /* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
@@ -192,7 +360,7 @@ static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
     const uint64_t py = cell_y * g_fh + con.y_offset;
     if (px + g_fw > con.w || py + g_fh > con.h) return;
 
-    uint32_t gi = (uc < (uint8_t)g_fglyphs) ? uc : ('?' < g_fglyphs ? '?' : 0u);
+    uint32_t gi = (uc < g_fglyphs) ? uc : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
 
@@ -285,6 +453,7 @@ static void ensure_cursor_visible(void) {
 static void draw_char_at(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
     if (cell_x < CELL_MAX_COLS && cell_y < CELL_MAX_ROWS)
         cell_buf[cell_y][cell_x] = uc;
+    if (con.cols == 0 || con.rows == 0 || cell_x >= con.cols || cell_y >= con.rows) return;
     render_char(cell_x, cell_y, uc);
 }
 
@@ -323,8 +492,12 @@ void console_init(struct limine_framebuffer *fb) {
     if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
     if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
 
-    con.fg = 0x00FFFFFF; /* white */
-    con.bg = 0x00101010; /* near-black */
+    con.fg = 0x00FFFFFFu; /* white */
+    con.bg = 0x00101010u; /* near-black */
+    g_ansi_fg0 = con.fg;
+    g_ansi_bg0 = con.bg;
+    g_ansi_st  = ANSI_NORM;
+    g_ansi_len = 0;
 
     con.initialized = true;
     console_clear();
@@ -354,7 +527,7 @@ void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t 
 /* Render a single glyph at absolute pixel coordinates (bypasses cell buffer). */
 void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg) {
     if (!con.initialized) return;
-    uint32_t gi = (ch < (uint8_t)g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
+    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     if (px + g_fw > con.w || py + g_fh > con.h) return;
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
@@ -395,7 +568,7 @@ uint64_t           console_pitch32(void)  { return con.pitch32; }
 void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
                                   uint64_t scale, uint32_t fg, uint32_t bg) {
     if (!con.initialized || scale == 0) return;
-    uint32_t gi = (ch < (uint8_t)g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
+    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
     uint32_t *target_back = g_back;
@@ -425,6 +598,36 @@ void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
 
 void console_putc(char c) {
     if (!con.initialized) return;
+    uint8_t uc = (uint8_t)c;
+
+    /* ── ANSI escape sequence state machine ── */
+    if (g_ansi_st == ANSI_ESC) {
+        if (uc == '[') { g_ansi_st = ANSI_CSI; g_ansi_len = 0; return; }
+        g_ansi_st = ANSI_NORM;   /* unknown sequence — abort */
+    } else if (g_ansi_st == ANSI_CSI) {
+        if ((uc >= 0x40u && uc <= 0x7Eu) || g_ansi_len >= 15u) {
+            /* Final byte of CSI sequence */
+            if (g_ansi_len < 15u) g_ansi_buf[g_ansi_len++] = uc;
+            ansi_process_csi();
+            g_ansi_st = ANSI_NORM;
+        } else {
+            g_ansi_buf[g_ansi_len++] = uc;   /* collect param bytes */
+        }
+        return;
+    } else if (uc == 0x1Bu) {   /* ESC */
+        g_ansi_st = ANSI_ESC;
+        return;
+    }
+
+    /* Always capture to scrollback ring (skip control codes except \n) */
+    if (uc >= 0x20u || uc == '\n') tsb_push(uc);
+
+    if (g_tsb_suppress) {
+        if (c == '\n') { con.cx = 0; con.cy++; }
+        else if (c == '\r') con.cx = 0;
+        else if (c != '\x7f' && c != '\b') con.cx++;
+        return;
+    }
 
     if (c == '\x7f' || c == '\b') {
         if (con.cx > 0) con.cx--;
@@ -607,4 +810,29 @@ bool console_flip_if_dirty(void) {
     for (uint64_t i = 0; i < n; i++)
         dst[i] = src[i];
     return true;
+}
+
+/* Read a rectangle of pixels from the back buffer into buf (caller-allocated,
+ * must be w*h uint32_t elements).  Returns false if no back buffer. */
+bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!g_back || !buf) return false;
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        const uint32_t *src = g_back + (y + yy) * con.pitch32 + x;
+        uint32_t       *dst = buf + yy * w;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+            dst[xx] = src[xx];
+    }
+    return true;
+}
+
+/* Write a rectangle of pixels from buf into the back buffer. */
+void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!g_back || !buf) return;
+    g_dirty = true;
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        const uint32_t *src = buf + yy * w;
+        uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+            dst[xx] = src[xx];
+    }
 }
