@@ -8,7 +8,7 @@ INCLUDES := \
     -I../../kernel/include
 
 CFLAGS := \
-    -std=c11 -O2 -pipe -Wall -Wextra \
+    -std=c11 -O3 -march=native -pipe -Wall -Wextra \
     -Wno-unused-parameter \
     -Wno-misleading-indentation \
     -D_GNU_SOURCE \

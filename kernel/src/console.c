@@ -477,17 +477,20 @@ static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
 }
 
 static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c) {
+    if (x >= con.w || y >= con.h || w == 0 || h == 0) return;
+    if (x + w > con.w) w = con.w - x;
+    if (y + h > con.h) h = con.h - y;
     if (g_back) {
         g_dirty = true;
-        for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        for (uint64_t yy = 0; yy < h; yy++) {
             uint32_t *row = g_back + (y + yy) * con.pitch32 + x;
-            for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+            for (uint64_t xx = 0; xx < w; xx++)
                 row[xx] = c;
         }
     } else {
-        for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        for (uint64_t yy = 0; yy < h; yy++) {
             volatile uint32_t *row = con.pix + (y + yy) * con.pitch32 + x;
-            for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
+            for (uint64_t xx = 0; xx < w; xx++)
                 row[xx] = c;
         }
     }
@@ -498,22 +501,45 @@ static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c
 static void scroll_one_line(void) {
     if (con.rows <= 1) return;
 
-    uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
     uint64_t vr = (con.rows < CELL_MAX_ROWS) ? con.rows : CELL_MAX_ROWS;
 
-    /* Shift cell buffer up by one row (fast — regular RAM, not video memory) */
+#ifdef __linux__
+    /* Fast path: shift pixels directly in the back buffer, no glyph decode */
+    memmove(cell_buf[0], cell_buf[1], (vr - 1) * CELL_MAX_COLS);
+    memset(cell_buf[vr - 1], ' ', CELL_MAX_COLS);
+
+    if (g_back && g_fh > 0) {
+        uint64_t vp_w   = con.cols * g_fw;
+        uint64_t stride = con.pitch32 * sizeof(uint32_t);
+
+        /* Shift all pixel rows in the terminal viewport up by one character row */
+        for (uint64_t r = 0; r < vr - 1; r++) {
+            uint8_t *dst = (uint8_t *)(g_back + (con.y_offset + r * g_fh) * con.pitch32 + con.x_off);
+            const uint8_t *src = (const uint8_t *)(g_back + (con.y_offset + (r + 1) * g_fh) * con.pitch32 + con.x_off);
+            for (uint32_t yy = 0; yy < g_fh; yy++)
+                memcpy(dst + yy * stride, src + yy * stride, vp_w * sizeof(uint32_t));
+        }
+        /* Clear last character row */
+        fill_rect(con.x_off, con.y_offset + (vr - 1) * g_fh, vp_w, g_fh, con.bg);
+        g_dirty = true;
+    } else {
+        /* No back buffer: re-render from cell buf (bare-metal path) */
+        uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
+        for (uint64_t r = 0; r < vr; r++)
+            for (uint64_t c = 0; c < vc; c++)
+                render_char(c, r, cell_buf[r][c]);
+    }
+#else
+    uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
     for (uint64_t r = 0; r + 1 < vr; r++)
         for (uint64_t c = 0; c < vc; c++)
             cell_buf[r][c] = cell_buf[r + 1][c];
-
-    /* Clear last row in cell buffer */
     for (uint64_t c = 0; c < vc; c++)
         cell_buf[vr - 1][c] = ' ';
-
-    /* Re-render entire screen from cell buffer (write-only to framebuffer) */
     for (uint64_t r = 0; r < vr; r++)
         for (uint64_t c = 0; c < vc; c++)
             render_char(c, r, cell_buf[r][c]);
+#endif
 
     /* Clear any fractional pixel rows below the last cell row */
     uint64_t used_h = vr * g_fh;
