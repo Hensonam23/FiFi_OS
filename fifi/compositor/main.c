@@ -44,6 +44,7 @@ bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
 void ipc_draw_overlays(void);
+bool ipc_notify_draw(void);
 bool ipc_keyboard_active(void);
 void ipc_send_focused_key(uint8_t key);
 void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
@@ -393,8 +394,9 @@ int main(void) {
                 console_mark_dirty_rows(ey0, ey1);
             }
 
-            /* ── IPC overlays (close buttons) drawn on top before flip ─── */
+            /* ── IPC overlays (close buttons + notifications) ───────────── */
             ipc_draw_overlays();
+            ipc_notify_draw();
 
             /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ── */
             bool flipped = console_flip_if_dirty();
