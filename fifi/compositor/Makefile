@@ -20,6 +20,8 @@ SRCS := \
     ../platform/linux/input.c \
     ../platform/linux/pty.c \
     ../platform/linux/vfs_posix.c \
+    ../platform/linux/drm.c \
+    ../platform/linux/audio.c \
     ../../kernel/src/gui.c \
     ../../kernel/src/console.c
 
@@ -47,6 +49,12 @@ $(BUILD)/comp/vfs_posix.o: ../platform/linux/vfs_posix.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/pty.o: ../platform/linux/pty.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/drm.o: ../platform/linux/drm.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/audio.o: ../platform/linux/audio.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Kernel source files (compiled with Linux stubs)

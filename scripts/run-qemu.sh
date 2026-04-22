@@ -53,10 +53,10 @@ if [ "$MODE" = "serial" ]; then
         -append "console=ttyS0,115200 quiet loglevel=3" \
         -nographic
 else
-    # GUI mode: framebuffer window + serial log to file
+    # GUI mode: virtio-gpu-pci + DRM/KMS in guest → explicit flush per frame (no poll lag)
     "${QEMU_BASE[@]}" \
-        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 video=2560x1440-32" \
-        -device virtio-vga,xres=2560,yres=1440 \
+        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3" \
+        -device virtio-gpu-pci,xres=1920,yres=1080 \
         -display sdl,gl=off \
         -serial file:"$REPO_ROOT/serial-linux.log"
 fi
