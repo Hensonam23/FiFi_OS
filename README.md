@@ -69,7 +69,7 @@ Everything visible transfers. Only the kernel layer is replaced:
 
 **Phase 3 complete. Phase 4 well underway.**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, a working IPC socket protocol for standalone apps, and a fixed cursor rendering pipeline. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. Volume control in the FiFi taskbar is wired to the real ALSA mixer. Both QEMU and SDL2 native runner work.
+FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control with working test tone, a working IPC socket protocol for standalone apps, and a fixed cursor rendering pipeline. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. Volume control in the FiFi taskbar is wired to the real ALSA mixer; the test button plays an actual audio tone. Both QEMU and SDL2 native runner work.
 
 ---
 
@@ -113,6 +113,7 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, 
 - [x] virtio-gpu-pci: explicit per-frame flush instead of poll timer (QEMU smooth display)
 - [x] Dirty-row tracking: only copies changed rows to GPU — much less work per frame
 - [x] ALSA volume control: volume slider in FiFi taskbar controls real system audio
+- [x] ALSA test tone: test button plays a real sine wave at current volume via PCM ioctls
 - [ ] PipeWire audio: game audio routing, multi-app mixing
 - [ ] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
 - [ ] Steam installed in image, launches in a FiFi window

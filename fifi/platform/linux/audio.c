@@ -11,7 +11,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <sound/asound.h>
 
 #include "hda.h"
@@ -147,8 +151,127 @@ void hda_set_volume(int v) {
     ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &ev);
 }
 
-/* Tone generation is not implemented — requires complex PCM hw_params setup.
- * Stubs so the GUI compiles and volume control still works. */
-void hda_play_tone(int f, int d) { (void)f; (void)d; }
-void hda_stop(void)              { }
-void hda_poll(void)              { }
+/* ── Tone generation via ALSA PCM ioctls ────────────────────────────────────
+ * Runs in a forked child so the GUI loop is never blocked.                   */
+
+#define TONE_RATE      44100
+#define TONE_CHANNELS  2
+#define TONE_PERIOD    1024   /* frames per period */
+#define TONE_PERIODS   4      /* periods per buffer */
+
+#define MASK_IDX(p)     ((p) - SNDRV_PCM_HW_PARAM_FIRST_MASK)
+#define INTERVAL_IDX(p) ((p) - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL)
+
+static void params_any(struct snd_pcm_hw_params *p) {
+    memset(p, 0, sizeof(*p));
+    int nm = SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK + 1;
+    for (int i = 0; i < nm; i++)
+        memset(p->masks[i].bits, 0xFF, sizeof(p->masks[i].bits));
+    int ni = SNDRV_PCM_HW_PARAM_LAST_INTERVAL - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + 1;
+    for (int i = 0; i < ni; i++) {
+        p->intervals[i].min = 0;
+        p->intervals[i].max = UINT_MAX;
+    }
+    p->rmask = UINT_MAX;
+}
+
+static void mask_set_one(struct snd_mask *m, unsigned int val) {
+    memset(m->bits, 0, sizeof(m->bits));
+    m->bits[val / 32] = 1u << (val % 32);
+}
+
+static void interval_set(struct snd_interval *iv, unsigned int val) {
+    iv->min = val; iv->max = val; iv->integer = 1; iv->empty = 0;
+    iv->openmin = 0; iv->openmax = 0;
+}
+
+static void play_tone_child(int freq_hz, int duration_ms) {
+    int pcm_fd = -1;
+    for (int card = 0; card < 4; card++) {
+        for (int dev = 0; dev < 4; dev++) {
+            char p[48];
+            snprintf(p, sizeof(p), "/dev/snd/pcmC%dD%dp", card, dev);
+            pcm_fd = open(p, O_WRONLY);
+            if (pcm_fd >= 0) { fprintf(stderr, "[tone] %s\n", p); goto opened; }
+        }
+    }
+    fprintf(stderr, "[tone] no PCM device found\n");
+    return;
+opened:;
+    /* ── Set hw_params ───────────────────────────────────────────────────── */
+    struct snd_pcm_hw_params hp;
+    params_any(&hp);
+
+    mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
+                 SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
+                 SNDRV_PCM_FORMAT_S16_LE);
+    /* SUBFORMAT = 0 (STD) — already limited by format mask kernel-side */
+
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)],
+                 TONE_CHANNELS);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)],
+                 TONE_RATE);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)],
+                 TONE_PERIOD);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)],
+                 TONE_PERIODS);
+
+    if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hp) < 0) {
+        perror("[tone] HW_PARAMS");
+        close(pcm_fd);
+        return;
+    }
+    if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0) {
+        perror("[tone] PREPARE");
+        close(pcm_fd);
+        return;
+    }
+
+    /* ── Generate and write sine wave ───────────────────────────────────── */
+    int16_t buf[TONE_PERIOD * TONE_CHANNELS];
+    uint64_t total_frames = (uint64_t)TONE_RATE * duration_ms / 1000;
+    uint64_t written = 0;
+    double   phase = 0.0;
+    double   step  = 2.0 * M_PI * freq_hz / TONE_RATE;
+    /* Scale by volume (0-100); keep headroom at 75% of full scale */
+    float    scale = (float)g_vol / 100.0f * 24576.0f;
+
+    while (written < total_frames) {
+        uint64_t batch = total_frames - written;
+        if (batch > TONE_PERIOD) batch = TONE_PERIOD;
+
+        for (uint64_t i = 0; i < batch; i++) {
+            int16_t s = (int16_t)(sinf((float)phase) * scale);
+            buf[i * 2]     = s;
+            buf[i * 2 + 1] = s;
+            phase += step;
+            if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+        }
+
+        struct snd_xferi xferi = { .result = 0, .buf = buf, .frames = batch };
+        if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xferi) < 0) {
+            if (errno == EPIPE) {
+                /* underrun — recover */
+                ioctl(pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
+                continue;
+            }
+            perror("[tone] WRITEI_FRAMES");
+            break;
+        }
+        written += (uint64_t)xferi.result;
+    }
+    ioctl(pcm_fd, SNDRV_PCM_IOCTL_DRAIN);
+    close(pcm_fd);
+}
+
+void hda_play_tone(int f, int d) {
+    signal(SIGCHLD, SIG_IGN);
+    pid_t pid = fork();
+    if (pid == 0) {
+        play_tone_child(f, d);
+        _exit(0);
+    }
+}
+void hda_stop(void) { }
+void hda_poll(void) { }
