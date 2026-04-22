@@ -216,6 +216,41 @@ int vfs_write(const char *path, const void *data, uint64_t size) {
     return 0;
 }
 
+int vfs_rename(const char *old_path, const char *new_path) {
+    const char *no = vfs_norm_path(old_path);
+    const char *nn = vfs_norm_path(new_path);
+    if (!no || !*no || !nn || !*nn) return -1;
+
+    /* Try in-place rename in ramfs */
+    ramfs_rename(no, nn);
+
+    /* Rename in ext2: read + write-new + delete-old */
+    if (ext2_present()) {
+        char fold[258], fnew[258];
+        fold[0] = '/'; fnew[0] = '/';
+        size_t i = 0;
+        while (no[i] && i < 256) { fold[i + 1] = no[i]; i++; } fold[i + 1] = '\0';
+        i = 0;
+        while (nn[i] && i < 256) { fnew[i + 1] = nn[i]; i++; } fnew[i + 1] = '\0';
+        int fsize = ext2_file_size(fold);
+        if (fsize > 0) {
+            uint8_t *tmp = (uint8_t *)kmalloc((uint32_t)fsize);
+            if (tmp) {
+                int rd = ext2_read_file(fold, tmp, (uint32_t)fsize);
+                if (rd > 0) {
+                    ext2_write_file(fnew, tmp, (uint32_t)rd);
+                    ext2_delete_file(fold);
+                }
+                kfree(tmp);
+            }
+        } else if (fsize == 0) {
+            ext2_write_file(fnew, (void*)0, 0);
+            ext2_delete_file(fold);
+        }
+    }
+    return 0;
+}
+
 /* Returns 1 if path is a directory (initrd and ramfs are flat, so only ext2 +
  * the virtual root "/" are checked). */
 int vfs_isdir(const char *path) {

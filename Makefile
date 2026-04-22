@@ -65,6 +65,7 @@ OBJS := \
     $(BUILD)/http.o \
     $(BUILD)/statusbar.o \
     $(BUILD)/splash.o \
+    $(BUILD)/rtc.o \
     $(BUILD)/mouse.o \
     $(BUILD)/gui.o \
     $(BUILD)/i2c_hid.o \

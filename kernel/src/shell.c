@@ -748,28 +748,41 @@ static int streq_simple(const char *a, const char *b) {
 }
 
 static void shell_help(void) {
-    kprintf("\nType: help\n\n");
+    kprintf("\nFiFi OS Shell — built-in commands:\n\n");
 
-    kprintf("Useful:\n");
-    kprintf("  help\n");
-    kprintf("  ls\n");
-    kprintf("  cat <file>\n");
-    kprintf("  motd\n");
-    kprintf("  modules\n");
-    kprintf("  clear (or cls)\n");
-    kprintf("  threads\n");
-    kprintf("  ps\n");
-    kprintf("  spawn\n");
-    kprintf("  spawnbg\n");
-    kprintf("  wait <slot>\n");
-    kprintf("  kill <slot>\n");
-    kprintf("  userdemo\n");
-    kprintf("  run <prog.elf> [args]\n");
-    kprintf("  runbg <prog.elf> [args]\n");
-    kprintf("  sys <nop|uptime|yield|log> [message]\n");
-    kprintf("  tss\n");
-    kprintf("  int80\n");
-    kprintf("  font [name]        — show or load a PSF font from /fonts/\n");
+    kprintf("File system:\n");
+    kprintf("  ls                 list files in VFS root\n");
+    kprintf("  cat <file>         print file contents\n");
+    kprintf("  stat <file>        show file info\n");
+    kprintf("  touch <path>       create empty file\n");
+    kprintf("  write <path> <..>  write text to file\n");
+    kprintf("  mkdir <path>       create directory\n");
+    kprintf("  rm <path>          delete file or directory\n");
+    kprintf("  mv <old> <new>     rename or move file\n");
+    kprintf("  hexdump <file>     hex dump first 256 bytes\n");
+    kprintf("\nGeneral:\n");
+    kprintf("  echo <text>        print text\n");
+    kprintf("  clear (cls)        clear screen\n");
+    kprintf("  version            show OS version\n");
+    kprintf("  uptime             show system uptime\n");
+    kprintf("  mem                memory usage\n");
+    kprintf("  reboot             restart system\n");
+    kprintf("  halt               halt system\n");
+    kprintf("\nProcesses:\n");
+    kprintf("  ps / threads       list running threads\n");
+    kprintf("  run <elf> [args]   exec userspace ELF\n");
+    kprintf("  kill <slot>        kill process\n");
+    kprintf("  jobs               list background jobs\n");
+    kprintf("\nNetwork:\n");
+    kprintf("  ifconfig           show network config\n");
+    kprintf("  dhcp               request DHCP lease\n");
+    kprintf("  ping <ip>          send ICMP echo\n");
+    kprintf("  dns <host>         DNS lookup\n");
+    kprintf("  wget <url>         fetch URL\n");
+    kprintf("\nOther:\n");
+    kprintf("  font [name]        show or load PSF font\n");
+    kprintf("  pci-scan           list PCI devices\n");
+    kprintf("  motd               show message of the day\n");
 }
 
 
@@ -1036,6 +1049,62 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
         return;
     }
 
+    if (streq_simple(argv[0], "echo")) {
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) kprintf(" ");
+            kprintf("%s", argv[i]);
+        }
+        kprintf("\n");
+        return;
+    }
+
+    if (streq_simple(argv[0], "touch")) {
+        if (argc < 2) { kprintf("usage: touch <path>\n"); return; }
+        const void *_td = NULL; uint64_t _ts = 0;
+        if (vfs_read(argv[1], &_td, &_ts) == 0) {
+            kprintf("touch: %s already exists\n", argv[1]);
+        } else {
+            int rc = vfs_write(argv[1], "", 0);
+            if (rc != 0) kprintf("touch: failed: %s\n", argv[1]);
+        }
+        return;
+    }
+
+    if (streq_simple(argv[0], "mkdir")) {
+        if (argc < 2) { kprintf("usage: mkdir <path>\n"); return; }
+        int rc = vfs_mkdir(argv[1]);
+        if (rc != 0) kprintf("mkdir: failed: %s\n", argv[1]);
+        return;
+    }
+
+    if (streq_simple(argv[0], "rm")) {
+        if (argc < 2) { kprintf("usage: rm <path>\n"); return; }
+        int rc = vfs_delete(argv[1]);
+        if (rc != 0) kprintf("rm: not found or failed: %s\n", argv[1]);
+        return;
+    }
+
+    if (streq_simple(argv[0], "mv") || streq_simple(argv[0], "rename")) {
+        if (argc < 3) { kprintf("usage: mv <old> <new>\n"); return; }
+        int rc = vfs_rename(argv[1], argv[2]);
+        if (rc != 0) kprintf("mv: failed: %s -> %s\n", argv[1], argv[2]);
+        return;
+    }
+
+    if (streq_simple(argv[0], "write")) {
+        if (argc < 3) { kprintf("usage: write <path> <text>\n"); return; }
+        static char wbuf[2048];
+        int wpos = 0;
+        for (int i = 2; i < argc && wpos < 2040; i++) {
+            if (i > 2) wbuf[wpos++] = ' ';
+            for (const char *p = argv[i]; *p && wpos < 2040; ) wbuf[wpos++] = *p++;
+        }
+        wbuf[wpos++] = '\n';
+        int rc = vfs_write(argv[1], wbuf, (uint64_t)wpos);
+        if (rc != 0) kprintf("write: failed: %s\n", argv[1]);
+        return;
+    }
+
     if (streq_simple(argv[0], "motd")) {
         initrd_cat("motd.txt");
         return;
@@ -1047,7 +1116,7 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
     }
 
     if (streq_simple(argv[0], "version")) {
-        kprintf("FiFi OS Alpha v4.0 build %s %s\n", __DATE__, __TIME__);
+        kprintf("FiFi OS Alpha v5.0 build %s %s\n", __DATE__, __TIME__);
         return;
     }
 
@@ -1855,57 +1924,6 @@ if (streq(argv[0], "sysnums")) {
 else if (streq(argv[0], "ps")) {
     thread_ps_dump();
 }
-
-    /* Mouse warp/click helpers for GUI testing */
-    if (streq_simple(argv[0], "mgoto")) {
-        if (argc < 3) { kprintf("usage: mgoto <x> <y>\n"); return; }
-        int32_t x = 0, y = 0;
-        for (const char *q = argv[1]; *q >= '0' && *q <= '9'; q++) x = x*10 + (*q-'0');
-        for (const char *q = argv[2]; *q >= '0' && *q <= '9'; q++) y = y*10 + (*q-'0');
-        mouse_warp(x, y);
-        kprintf("mgoto: cursor at (%d,%d)\n", x, y);
-        return;
-    }
-
-    if (streq_simple(argv[0], "mclick")) {
-        if (argc < 3) { kprintf("usage: mclick <x> <y>\n"); return; }
-        int32_t x = 0, y = 0;
-        for (const char *q = argv[1]; *q >= '0' && *q <= '9'; q++) x = x*10 + (*q-'0');
-        for (const char *q = argv[2]; *q >= '0' && *q <= '9'; q++) y = y*10 + (*q-'0');
-        mouse_click(x, y);
-        kprintf("mclick: clicked at (%d,%d)\n", x, y);
-        return;
-    }
-
-    if (streq_simple(argv[0], "mdrag")) {
-        /* mdrag x1 y1 x2 y2  — simulate drag from (x1,y1) to (x2,y2) */
-        if (argc < 5) { kprintf("usage: mdrag <x1> <y1> <x2> <y2>\n"); return; }
-        int32_t x1=0,y1=0,x2=0,y2=0;
-        for (const char *q=argv[1]; *q>='0'&&*q<='9'; q++) x1=x1*10+(*q-'0');
-        for (const char *q=argv[2]; *q>='0'&&*q<='9'; q++) y1=y1*10+(*q-'0');
-        for (const char *q=argv[3]; *q>='0'&&*q<='9'; q++) x2=x2*10+(*q-'0');
-        for (const char *q=argv[4]; *q>='0'&&*q<='9'; q++) y2=y2*10+(*q-'0');
-        /* Position cursor, press button, drag in steps, release */
-        mouse_warp(x1, y1);
-        thread_sleep_ms(20);
-        mouse_push_rel(0, 0, true, false);  /* button down */
-        thread_sleep_ms(20);
-        int32_t dx = x2 - x1, dy = y2 - y1;
-        int32_t dist = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
-        int32_t steps = dist / 6 + 1;
-        for (int32_t i = 1; i <= steps; i++) {
-            int32_t nx = x1 + dx * i / steps;
-            int32_t ny = y1 + dy * i / steps;
-            int32_t ex = x1 + dx * (i-1) / steps;
-            int32_t ey = y1 + dy * (i-1) / steps;
-            mouse_push_rel(nx - ex, ny - ey, true, false);
-            thread_sleep_ms(15);
-        }
-        mouse_push_rel(0, 0, false, false);  /* button up */
-        thread_sleep_ms(20);
-        kprintf("mdrag: dragged (%d,%d)->(%d,%d)\n", x1, y1, x2, y2);
-        return;
-    }
 
     if (streq_simple(argv[0], "source") || streq_simple(argv[0], ".")) {
         if (argc < 2) { kprintf("usage: source <file>\n"); return; }

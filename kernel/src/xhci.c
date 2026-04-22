@@ -1455,7 +1455,7 @@ static const uint8_t hid2asc[256] = {
     /* 0x28 */'\n', 27, '\b', '\t', ' ',
     /* 0x2D */'-','=','[',']','\\',0,';','\'','`',',','.','/',
     /* 0x39 Caps */ 0,
-    /* 0x3A-0x45 F1-F12 */ 0,0,0,0,0,0,0,0,0,0,0,0,
+    /* 0x3A-0x45 F1-F12 */ KEY_F1,KEY_F2,KEY_F3,KEY_F4,KEY_F5,KEY_F6,KEY_F7,KEY_F8,KEY_F9,KEY_F10,KEY_F11,KEY_F12,
     /* 0x46-0x49 */ 0,0,0,0,
     /* 0x4A */ KEY_HOME,
     /* 0x4B */ 0,  /* Page Up — not handled */
@@ -1476,7 +1476,7 @@ static const uint8_t hid2asc_sh[256] = {
     '\n', 27, '\b', '\t', ' ',
     '_','+','{','}','|',0,':','"','~','<','>','?',
     0,
-    0,0,0,0,0,0,0,0,0,0,0,0,
+    KEY_F1,KEY_F2,KEY_F3,KEY_F4,KEY_F5,KEY_F6,KEY_F7,KEY_F8,KEY_F9,KEY_F10,KEY_F11,KEY_F12,
     0,0,0,0, KEY_HOME, 0, KEY_DELETE, KEY_END, 0,
     KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP,
 };

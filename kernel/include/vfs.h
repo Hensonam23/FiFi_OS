@@ -24,6 +24,9 @@ int vfs_write(const char *path, const void *data, uint64_t size);
 /* Delete a file from ramfs and ext2.  Returns 0 on success, -1 if not found. */
 int vfs_delete(const char *path);
 
+/* Rename / move a file within the same directory.  Returns 0 on success. */
+int vfs_rename(const char *old_path, const char *new_path);
+
 /* Create a directory on ext2.  Returns 0 on success, -1 on error. */
 int vfs_mkdir(const char *path);
 
