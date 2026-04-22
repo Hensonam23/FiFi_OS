@@ -487,11 +487,21 @@ static inline bool close_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) 
            (uint32_t)my >= by && (uint32_t)my < by + sz;
 }
 
-/* Minimize-button hit box: just left of the close button */
+/* Minimize-button hit box: second from right */
 static inline bool min_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
     if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ * 2 + 8) return false;
     uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
     uint32_t bx = c->win_x + c->win_w - sz * 2 - 7;
+    uint32_t by = c->win_y + 3;
+    return (uint32_t)mx >= bx && (uint32_t)mx < bx + sz &&
+           (uint32_t)my >= by && (uint32_t)my < by + sz;
+}
+
+/* Maximize-button hit box: third from right */
+static inline bool max_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
+    if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ * 3 + 16) return false;
+    uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
+    uint32_t bx = c->win_x + c->win_w - sz * 3 - 11;
     uint32_t by = c->win_y + 3;
     return (uint32_t)mx >= bx && (uint32_t)mx < bx + sz &&
            (uint32_t)my >= by && (uint32_t)my < by + sz;
@@ -515,7 +525,7 @@ static void ipc_kill_client(int i) {
     fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
 }
 
-/* Check if click lands on any window's close or minimize button. Returns true if handled. */
+/* Check if click lands on any window's close, minimize, or maximize button. */
 bool ipc_try_close_at(int32_t mx, int32_t my) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
@@ -529,6 +539,13 @@ bool ipc_try_close_at(int32_t mx, int32_t my) {
             console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
             if (g_focused_idx == i) g_focused_idx = -1;
             fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
+            return true;
+        }
+        if (max_btn_hit(c, mx, my)) {
+            if (c->snapped)
+                ipc_unsnap(i);          /* already maximized — restore */
+            else
+                ipc_apply_snap(i, 3);   /* maximize */
             return true;
         }
     }
@@ -575,7 +592,7 @@ void ipc_draw_overlays(void) {
             uint64_t ty = (uint64_t)c->win_y + ((uint64_t)IPC_DRAG_STRIP - fh) / 2;
             uint64_t tx = (uint64_t)c->win_x + 8u;
             uint64_t max_tx = (uint64_t)c->win_x + c->win_w
-                            - (uint64_t)IPC_CLOSE_BTN_SZ * 2u - 14u;
+                            - (uint64_t)IPC_CLOSE_BTN_SZ * 3u - 18u;
             for (size_t j = 0; j < sizeof(c->title) && c->title[j] && tx + fw <= max_tx;
                  j++, tx += fw)
                 console_render_glyph(tx, ty,
@@ -583,16 +600,27 @@ void ipc_draw_overlays(void) {
                                      0xFFDDE8F8u, tb_col);
         }
 
-        /* ── Minimize button (left of close) ────────────────────────────── */
+        /* ── Maximize button (green, third from right) ──────────────────── */
         uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
         uint32_t by = c->win_y + 3;
+        if (c->win_w >= sz * 3 + 16) {
+            uint32_t max_bx = c->win_x + c->win_w - sz * 3 - 11;
+            uint32_t max_col = c->snapped ? 0xFF209040u : 0xFF208030u;
+            console_fill_rect(max_bx, by, sz, sz, max_col);
+            /* Draw square indicator */
+            console_fill_rect(max_bx + 3, by + 3, sz - 6, sz - 6, 0xFF00000000u);
+            console_fill_rect(max_bx + 3, by + 3, sz - 6, 2, 0xFFFFFFFFu);
+            console_fill_rect(max_bx + 3, by + 3, 2, sz - 6, 0xFFFFFFFFu);
+        }
+
+        /* ── Minimize button (yellow, second from right) ─────────────────── */
         uint32_t min_bx = c->win_x + c->win_w - sz * 2 - 7;
         console_fill_rect(min_bx, by, sz, sz, 0xFFB09020u);
         /* Draw underscore (_) indicator */
         uint32_t mid_y = by + sz - 5;
         console_fill_rect(min_bx + 3, mid_y, sz - 6, 2, 0xFFFFFFFFu);
 
-        /* ── Close button (right side of title bar) ─────────────────────── */
+        /* ── Close button (red, rightmost) ──────────────────────────────── */
         uint32_t bx = c->win_x + c->win_w - sz - 3;
         console_fill_rect(bx, by, sz, sz, 0xFFCC2222u);
 
@@ -667,7 +695,8 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
     if (g_drag_idx < 0 &&
         (uint32_t)my < g_clients[best_i].win_y + IPC_DRAG_STRIP &&
         !close_btn_hit(&g_clients[best_i], mx, my) &&
-        !min_btn_hit(&g_clients[best_i], mx, my)) {
+        !min_btn_hit(&g_clients[best_i], mx, my) &&
+        !max_btn_hit(&g_clients[best_i], mx, my)) {
         /* If snapped, unsnap first so we drag the native-size window */
         if (g_clients[best_i].snapped) ipc_unsnap(best_i);
         g_drag_idx = best_i;
