@@ -43,6 +43,7 @@ int  ipc_server_fd(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
+void ipc_blit_all(void);
 void ipc_draw_overlays(void);
 bool ipc_notify_draw(void);
 bool ipc_keyboard_active(void);
@@ -379,6 +380,9 @@ int main(void) {
 
         /* ── GUI tick (always runs — clock/state must update even when blanked) */
         gui_on_tick();
+
+        /* ── IPC windows: blit cached frames ON TOP of GUI background ─────── */
+        ipc_blit_all();
 
         /* ── Cursor erase: mark old cursor rows dirty so the flip below
          * pulls clean backbuffer content there (erasing the stale cursor). ── */
