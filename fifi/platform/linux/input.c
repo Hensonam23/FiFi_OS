@@ -41,6 +41,7 @@
 #define FIFI_KEY_F11    0x94u
 #define FIFI_KEY_F12    0x95u
 #define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
+#define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
 /* ── Evdev device fds ─────────────────────────────────────────────────────── */
 #define MAX_EVDEV 8
@@ -439,6 +440,10 @@ void input_poll(void) {
 
             if (g_alt && ev.code == KEY_TAB) {
                 kb_push_internal(FIFI_KEY_ALTTAB);
+                continue;
+            }
+            if (g_alt && ev.code == KEY_F4) {
+                kb_push_internal(FIFI_KEY_ALT_F4);
                 continue;
             }
 

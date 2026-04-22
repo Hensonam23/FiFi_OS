@@ -65,6 +65,7 @@ void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
 void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
                       int16_t rx, int16_t ry, int16_t lt, int16_t rt);
 void ipc_clear_focus(void);
+void ipc_close_focused(void);
 bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
@@ -425,6 +426,7 @@ int main(void) {
                 if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
                 uint8_t uc = (uint8_t)c;
                 if (uc == 0x96u) { take_screenshot(); continue; }
+                if (uc == 0x97u) { ipc_close_focused(); continue; }  /* Alt+F4 */
                 if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                 if (uc >= 0x8Au && uc <= 0x8Du) {
                     extern void keyboard_push_char(uint8_t c);
@@ -438,18 +440,19 @@ int main(void) {
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
+                if (g_blanked) { g_blanked = false; break; }
                 if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
+                if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
                 pty_write_input((uint8_t)c);
             }
         } else {
-            /* GUI capture active — drain kb_ring to prevent overflow; intercept PrtSc.
-             * gui_on_tick() reads its own gui_ring via keyboard_gui_try_getchar(). */
+            /* GUI capture active — drain kb_ring; intercept globals */
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                 if (g_blanked) { g_blanked = false; break; }
                 if ((uint8_t)c == 0x96u) take_screenshot();
+                if ((uint8_t)c == 0x97u) ipc_close_focused();
             }
         }
 
