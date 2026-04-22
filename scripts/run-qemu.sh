@@ -45,12 +45,10 @@ QEMU_BASE=(
 )
 
 if [ "$MODE" = "serial" ]; then
-    # Serial mode: kernel console on stdout, no graphical window
+    # Serial mode: -nographic redirects serial+monitor to stdio automatically
     "${QEMU_BASE[@]}" \
         -append "console=ttyS0,115200 quiet loglevel=3" \
-        -vga none \
-        -nographic \
-        -serial stdio
+        -nographic
 else
     # GUI mode: framebuffer window + serial log to file
     "${QEMU_BASE[@]}" \

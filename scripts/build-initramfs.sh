@@ -31,6 +31,10 @@ trap 'rm -rf "$STAGE"' EXIT
 
 cp -a "$ROOT_DIR/." "$STAGE/"
 
+# Create mount points git doesn't track (empty dirs)
+mkdir -p "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/tmp" "$STAGE/run"
+mkdir -p "$STAGE/root" "$STAGE/mnt" "$STAGE/etc"
+
 # Install busybox and create symlinks for all applets
 mkdir -p "$STAGE/bin" "$STAGE/sbin" "$STAGE/usr/bin" "$STAGE/usr/sbin"
 cp "$BUSYBOX_BIN" "$STAGE/bin/busybox"
