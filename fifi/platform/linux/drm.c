@@ -199,6 +199,13 @@ void drm_flush(void) {
 
 int drm_fd(void) { return g_fd; }
 
+/* Fill the DRM frontbuffer with black and flush — used for screen blanking. */
+void drm_blank_display(void) {
+    if (!g_map_ptr || g_map_sz == 0) return;
+    memset(g_map_ptr, 0, g_map_sz);
+    drm_flush();
+}
+
 void drm_close(void) {
     if (g_fd < 0) return;
     if (g_map_ptr) { munmap(g_map_ptr, g_map_sz); g_map_ptr = NULL; }
