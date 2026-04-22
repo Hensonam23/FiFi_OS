@@ -33,6 +33,7 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
 struct limine_framebuffer *drm_open(void);
 void drm_flush(void);
 void drm_close(void);
+void drm_blank_display(void);
 
 /* IPC socket server for standalone FiFi apps (ipc.c) */
 void ipc_init(void);
@@ -82,6 +83,9 @@ static struct   limine_framebuffer g_lmfb;
 static bool     g_using_drm  = false;
 static bool     g_gaming_mode = false;  /* set by GUI; removes poll cap */
 static uint32_t g_fps_current = 0;      /* last measured frame rate */
+static bool     g_blanked     = false;  /* display blanked due to inactivity */
+static struct timespec g_last_input;    /* time of last user input */
+#define BLANK_TIMEOUT_S 300             /* blank after 5 minutes of no input */
 
 bool gaming_mode_active(void)   { return g_gaming_mode; }
 uint32_t compositor_fps(void)   { return g_fps_current; }
@@ -246,6 +250,9 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &fps_ts);
     uint32_t fps_frames = 0;
 
+    /* Screen-blank inactivity timer */
+    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+
     for (;;) {
         /* ── Build poll set ────────────────────────────────────────────── */
         int nfds = 0;
@@ -289,7 +296,16 @@ int main(void) {
         pty_poll_output();
 
         /* ── evdev events ──────────────────────────────────────────────── */
-        input_poll();
+        bool had_input_before = false;
+        {
+            /* Snapshot mouse state before polling so we can detect changes */
+            int32_t px, py; bool pb_l, pb_r;
+            mouse_get_state(&px, &py, &pb_l, &pb_r);
+            input_poll();
+            int32_t nx, ny; bool nb_l, nb_r;
+            mouse_get_state(&nx, &ny, &nb_l, &nb_r);
+            had_input_before = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
+        }
 
         /* ── Input routing: IPC app > PTY > GUI ────────────────────────
          * Check mouse first so we can update IPC focus before routing keys. */
@@ -313,13 +329,18 @@ int main(void) {
                 ipc_send_focused_mouse(mcx, mcy, btns);
         }
 
+        /* ── Activity tracking: mouse movement resets the blank timer ───── */
+        if (had_input_before)
+            clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+
         if (ipc_keyboard_active()) {
             /* Keys go to the focused IPC app, except F1-F4 which always reach the GUI */
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
+                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
                 uint8_t uc = (uint8_t)c;
                 if (uc >= 0x8Au && uc <= 0x8Du) {
-                    /* F1-F4: re-inject into GUI key queue */
                     extern void keyboard_push_char(uint8_t c);
                     keyboard_push_char(uc);
                 } else {
@@ -329,11 +350,33 @@ int main(void) {
         } else if (!keyboard_gui_capture_active()) {
             /* Terminal is focused — keys go to PTY */
             int c;
-            while ((c = keyboard_try_getchar()) != -1)
+            while ((c = keyboard_try_getchar()) != -1) {
+                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
                 pty_write_input((uint8_t)c);
+            }
         }
 
-        /* ── GUI tick ──────────────────────────────────────────────────── */
+        /* Wake display on mouse input when blanked */
+        if (g_blanked && had_input_before) {
+            g_blanked = false;
+            clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+        }
+
+        /* ── Screen blank check ─────────────────────────────────────────── */
+        {
+            struct timespec now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            long idle_s = now_ts.tv_sec - g_last_input.tv_sec;
+            if (!g_blanked && !g_gaming_mode && idle_s >= BLANK_TIMEOUT_S) {
+                g_blanked = true;
+                if (g_using_drm) drm_blank_display();
+                else if (g_fb_mem) memset(g_fb_mem, 0, g_fb_size);
+                fprintf(stderr, "[compositor] display blanked (idle %lds)\n", idle_s);
+            }
+        }
+
+        /* ── GUI tick (always runs — clock/state must update even when blanked) */
         gui_on_tick();
 
         /* ── Cursor erase: mark old cursor rows dirty so the flip below
@@ -342,26 +385,32 @@ int main(void) {
         mouse_get_state(&cx, &cy, &lb, &rb);
         static int32_t s_last_cx = -1, s_last_cy = -1;
         bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
-        if (cursor_moved && s_last_cy >= 0) {
-            uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
-            uint32_t ey1 = ey0 + CUR_H;
-            console_mark_dirty_rows(ey0, ey1);
-        }
 
-        /* ── IPC overlays (close buttons) drawn on top before flip ─────── */
-        ipc_draw_overlays();
+        if (!g_blanked) {
+            if (cursor_moved && s_last_cy >= 0) {
+                uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
+                uint32_t ey1 = ey0 + CUR_H;
+                console_mark_dirty_rows(ey0, ey1);
+            }
 
-        /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ───── */
-        bool flipped = console_flip_if_dirty();
+            /* ── IPC overlays (close buttons) drawn on top before flip ─── */
+            ipc_draw_overlays();
 
-        /* ── Cursor redraw: save from backbuf (stale-proof), draw on front ── */
-        if (flipped || cursor_moved) {
-            mouse_cursor_update();
+            /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ── */
+            bool flipped = console_flip_if_dirty();
+
+            /* ── Cursor redraw: save from backbuf (stale-proof), draw on front */
+            if (flipped || cursor_moved) {
+                mouse_cursor_update();
+                s_last_cx = cx; s_last_cy = cy;
+            }
+
+            /* ── Single DRM flush covers both content and cursor ─────────── */
+            if ((flipped || cursor_moved) && g_using_drm) drm_flush();
+        } else {
+            /* Blanked: keep frontbuffer black, but track cursor for wake-up */
             s_last_cx = cx; s_last_cy = cy;
         }
-
-        /* ── Single DRM flush covers both content and cursor ────────────── */
-        if ((flipped || cursor_moved) && g_using_drm) drm_flush();
 
         /* ── FPS counter: update once per second ────────────────────────── */
         fps_frames++;
