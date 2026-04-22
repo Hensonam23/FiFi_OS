@@ -65,8 +65,84 @@ if [ -x "$COMP_BIN" ]; then
     echo "[initramfs] included fifi-compositor"
 fi
 
-# Create VFS data directory (file browser root)
+# Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
+
+# Copy fonts into the VFS so the GUI can load ter16b.psf
+FONT_SRC="$REPO_ROOT/initrd/rootfs/fonts"
+if [ -d "$FONT_SRC" ]; then
+    mkdir -p "$STAGE/fifi-data/fonts"
+    cp "$FONT_SRC"/*.psf "$STAGE/fifi-data/fonts/" 2>/dev/null || true
+    echo "[initramfs] included fonts from $FONT_SRC"
+fi
+
+# Populate initial fifi-data content for the file browser
+mkdir -p "$STAGE/fifi-data/docs" "$STAGE/fifi-data/config"
+
+cat > "$STAGE/fifi-data/docs/welcome.txt" << 'WELCOME'
+FiFi OS — Linux Desktop
+========================
+
+Welcome to FiFi OS linux-desktop!
+
+This is an early alpha running the FiFi desktop compositor
+on top of a minimal Linux kernel.
+
+WHAT WORKS:
+  * Full FiFi desktop: taskbar, window manager, themes
+  * File browser with this directory as root
+  * Text editor (click any .txt file in the file browser)
+  * Settings panel (F3) with theme, font, clock settings
+  * Terminal window (F1) with interactive shell
+  * Real clock, real memory stats
+
+KEYBOARD SHORTCUTS:
+  F1 - Toggle terminal window
+  F2 - Toggle file browser
+  F3 - Toggle settings panel
+  F4 - Toggle text viewer
+
+TERMINAL:
+  The terminal runs a real BusyBox shell (/bin/sh).
+  Type commands and press Enter. Arrow keys work for history.
+  Ctrl+C to interrupt a process.
+
+PHASE ROADMAP:
+  Phase 1 - Linux kernel foundation       [DONE]
+  Phase 2 - FiFi compositor on /dev/fb0  [DONE]
+  Phase 3 - PTY terminal, live stats     [DONE]
+  Phase 4 - DRM/KMS, XWayland, Steam    [NEXT]
+  Phase 5 - Live USB, installer, WiFi    [PLANNED]
+WELCOME
+
+cat > "$STAGE/fifi-data/docs/shortcuts.txt" << 'SHORTCUTS'
+FiFi OS Keyboard Shortcuts
+===========================
+
+WINDOW MANAGEMENT:
+  F1          Toggle terminal window
+  F2          Toggle file browser
+  F3          Toggle settings panel
+  F4          Toggle text viewer
+  Alt+Tab     Cycle windows
+
+TERMINAL (when focused):
+  Arrow keys  Navigate history / move cursor
+  Ctrl+C      Interrupt running process
+  Ctrl+D      End of input / logout
+  Ctrl+Z      Suspend process
+  Ctrl+L      Clear screen (in bash/sh)
+
+THEME:
+  Settings > Theme to change accent color
+  Settings > Wallpaper to change background
+
+FILE BROWSER:
+  Click files to open in text viewer
+  Double-click directories to navigate
+SHORTCUTS
+
+echo "[initramfs] added initial fifi-data content"
 
 # Ensure /init is executable
 chmod +x "$STAGE/init"

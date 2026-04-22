@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +5,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 #include <time.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -18,7 +18,7 @@
 #include "gui.h"
 #include "limine.h"
 
-/* Linux platform functions declared here */
+/* Linux platform functions */
 void input_init(void);
 void input_poll(void);
 void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h);
@@ -27,6 +27,18 @@ void mouse_cursor_update(void);
 void vfs_init(void);
 void pit_init(uint32_t hz);
 void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
+
+/* PTY functions */
+void  pty_init(void);
+void  pty_poll_output(void);
+void  pty_write_input(uint8_t c);
+int   pty_master_fd(void);
+void  pty_set_winsize(uint16_t cols, uint16_t rows);
+
+/* Input query functions */
+bool  keyboard_gui_capture_active(void);
+int   input_get_all_fds(int *buf, int maxn);
+int   keyboard_try_getchar(void);
 
 /* ── Framebuffer setup ───────────────────────────────────────────────────── */
 
@@ -39,25 +51,21 @@ static struct termios g_orig_term;
 static bool           g_term_saved = false;
 
 static void restore_term(void) {
-    if (g_term_saved) {
+    if (g_term_saved)
         tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_term);
-    }
 }
 
 static void sig_handler(int sig) {
     (void)sig;
     restore_term();
-
-    /* Show terminal cursor again */
     write(STDOUT_FILENO, "\033[?25h", 6);
-
     _exit(0);
 }
 
 static int fb_open(void) {
     g_fb_fd = open("/dev/fb0", O_RDWR);
     if (g_fb_fd < 0) {
-        fprintf(stderr, "[compositor] cannot open /dev/fb0: check framebuffer driver\n");
+        fprintf(stderr, "[compositor] cannot open /dev/fb0\n");
         return -1;
     }
 
@@ -69,25 +77,22 @@ static int fb_open(void) {
         return -1;
     }
 
-    fprintf(stderr, "[compositor] fb0: %ux%u @ %ubpp, pitch=%u\n",
+    fprintf(stderr, "[compositor] fb0: %ux%u @ %ubpp pitch=%u\n",
             vinfo.xres, vinfo.yres, vinfo.bits_per_pixel, finfo.line_length);
 
     if (vinfo.bits_per_pixel != 32) {
-        fprintf(stderr, "[compositor] need 32bpp framebuffer (got %u)\n",
-                vinfo.bits_per_pixel);
+        fprintf(stderr, "[compositor] need 32bpp (got %u)\n", vinfo.bits_per_pixel);
         return -1;
     }
 
     g_fb_size = finfo.smem_len;
-    g_fb_mem  = (uint32_t *)mmap(NULL, g_fb_size,
-                                 PROT_READ | PROT_WRITE,
-                                 MAP_SHARED, g_fb_fd, 0);
+    g_fb_mem  = (uint32_t *)mmap(NULL, g_fb_size, PROT_READ | PROT_WRITE,
+                                  MAP_SHARED, g_fb_fd, 0);
     if (g_fb_mem == MAP_FAILED) {
-        fprintf(stderr, "[compositor] mmap /dev/fb0 failed\n");
+        fprintf(stderr, "[compositor] mmap failed\n");
         return -1;
     }
 
-    /* Build limine_framebuffer struct */
     g_lmfb.address = g_fb_mem;
     g_lmfb.width   = vinfo.xres;
     g_lmfb.height  = vinfo.yres;
@@ -97,36 +102,14 @@ static int fb_open(void) {
     return 0;
 }
 
-/* ── 100 Hz sleep helper ─────────────────────────────────────────────────── */
-#define TICK_NS 10000000L  /* 10 ms = 100 Hz */
-
-static void sleep_tick(struct timespec *last) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    long elapsed_ns = (long)((now.tv_sec  - last->tv_sec) * 1000000000L
-                           + (now.tv_nsec - last->tv_nsec));
-    long remain_ns  = TICK_NS - elapsed_ns;
-
-    if (remain_ns > 0) {
-        struct timespec ts = { 0, remain_ns };
-        nanosleep(&ts, NULL);
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, last);
-}
-
 /* ── Entry point ─────────────────────────────────────────────────────────── */
 
 int main(void) {
-    /* Install signal handlers for clean exit */
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
-    /* Hide terminal cursor */
-    write(STDOUT_FILENO, "\033[?25l", 6);
+    write(STDOUT_FILENO, "\033[?25l", 6);  /* hide cursor */
 
-    /* Set terminal to raw mode (suppress input echo to console) */
     if (tcgetattr(STDIN_FILENO, &g_orig_term) == 0) {
         g_term_saved = true;
         atexit(restore_term);
@@ -135,54 +118,100 @@ int main(void) {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
 
-    /* Open framebuffer */
-    if (fb_open() < 0) {
-        fprintf(stderr, "[compositor] framebuffer init failed\n");
-        return 1;
-    }
+    if (fb_open() < 0) return 1;
 
-    /* Init platform subsystems */
     pit_init(100);
     pmm_init(NULL, 0);
     vfs_init();
 
-    /* Init console (double buffer) */
+    /* net_init detects NICs from /proc/net/dev */
+    extern void net_init(void);
+    net_init();
+
     console_init(&g_lmfb);
     console_backbuf_init();
 
-    /* Init input */
-    input_set_fb(g_fb_mem,
-                 (uint64_t)(g_lmfb.pitch / 4),
-                 (int32_t)g_lmfb.width,
-                 (int32_t)g_lmfb.height);
+    input_set_fb(g_fb_mem, (uint64_t)(g_lmfb.pitch / 4),
+                 (int32_t)g_lmfb.width, (int32_t)g_lmfb.height);
     mouse_init();
     input_init();
 
-    /* Init GUI */
-    gui_init();
+    /* Start PTY shell before GUI so the shell prompt arrives early */
+    pty_init();
 
-    /* Draw initial cursor */
+    /* Set PTY size from actual framebuffer + expected terminal window geometry */
+    {
+        uint32_t fw = console_font_width();
+        uint32_t fh = console_font_height();
+        if (fw > 0 && fh > 0) {
+            /* Terminal window is ~88% of fb width, ~90% of desk height (STATUS_H=20, TASKBAR_H=32) */
+            uint64_t desk_h = g_lmfb.height > 52u ? g_lmfb.height - 52u : g_lmfb.height;
+            uint64_t win_w  = g_lmfb.width * 88u / 100u;
+            uint64_t win_h  = desk_h * 90u / 100u;
+            /* Inner content after TITLE_H=24, BORDER=1, PAD=4 each side */
+            uint64_t inner_w = win_w > 10u ? win_w - 10u : 1u;
+            uint64_t inner_h = win_h > 33u ? win_h - 33u : 1u;
+            uint16_t cols = (uint16_t)(inner_w / fw);
+            uint16_t rows = (uint16_t)(inner_h / fh);
+            if (cols < 20) cols = 20;
+            if (rows < 5)  rows = 5;
+            pty_set_winsize(cols, rows);
+            fprintf(stderr, "[compositor] terminal %ux%u chars\n", cols, rows);
+        }
+    }
+
+    gui_init();
     mouse_cursor_update();
 
-    fprintf(stderr, "[compositor] running at 100 Hz\n");
+    fprintf(stderr, "[compositor] running\n");
 
-    struct timespec last;
-    clock_gettime(CLOCK_MONOTONIC, &last);
+    /* Gather evdev fds for poll() */
+    int evdev_fds[20];
+    int nevdev = input_get_all_fds(evdev_fds, 20);
+
+#define MAX_PFD 24
+    struct pollfd pfd[MAX_PFD];
 
     for (;;) {
-        /* Poll evdev events */
-        input_poll();
-
-        /* Run one GUI tick */
-        gui_on_tick();
-
-        /* Flip backbuffer → framebuffer */
-        if (console_flip_if_dirty()) {
-            /* Redraw software cursor on top of flipped frame */
-            mouse_cursor_update();
+        /* ── Build poll set ────────────────────────────────────────────── */
+        int nfds = 0;
+        for (int i = 0; i < nevdev && nfds < MAX_PFD; i++) {
+            pfd[nfds].fd     = evdev_fds[i];
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
+        int pty_fd = pty_master_fd();
+        if (pty_fd >= 0 && nfds < MAX_PFD) {
+            pfd[nfds].fd     = pty_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
         }
 
-        sleep_tick(&last);
+        /* Wait up to 16 ms (60 Hz) — wakes immediately on input */
+        poll(pfd, (nfds_t)nfds, 16);
+
+        /* ── PTY output → console buffer ───────────────────────────────── */
+        pty_poll_output();
+
+        /* ── evdev events ──────────────────────────────────────────────── */
+        input_poll();
+
+        /* ── Route keyboard to PTY when terminal window is focused ───────
+         * gui_capture=false means the terminal is on top and visible;
+         * keys sit in g_kb_ring waiting for the (now absent) bare-metal
+         * shell.  We drain them here and write to the PTY instead.       */
+        if (!keyboard_gui_capture_active()) {
+            int c;
+            while ((c = keyboard_try_getchar()) != -1)
+                pty_write_input((uint8_t)c);
+        }
+
+        /* ── GUI tick ──────────────────────────────────────────────────── */
+        gui_on_tick();
+
+        /* ── Flip backbuffer → framebuffer, redraw cursor ─────────────── */
+        if (console_flip_if_dirty())
+            mouse_cursor_update();
     }
 
     return 0;

@@ -51,16 +51,15 @@ void     pit_on_irq0(void)   { }
 
 /* ── PMM — malloc-backed stubs ────────────────────────────────────────────── */
 
-static uint64_t g_pmm_total = 0;
-static uint64_t g_pmm_free  = 0;
-static bool     g_pmm_read  = false;
+static uint64_t g_pmm_total      = 0;
+static uint64_t g_pmm_free       = 0;
+static time_t   g_pmm_last_read  = 0;
 
 static void pmm_refresh(void) {
     FILE *f = fopen("/proc/meminfo", "r");
     if (!f) {
         g_pmm_total = (256ULL * 1024 * 1024) / 4096;
         g_pmm_free  = (128ULL * 1024 * 1024) / 4096;
-        g_pmm_read  = true;
         return;
     }
     char line[128];
@@ -72,12 +71,19 @@ static void pmm_refresh(void) {
     fclose(f);
     g_pmm_total = total_kb / 4;
     g_pmm_free  = avail_kb / 4;
-    g_pmm_read  = true;
+    g_pmm_last_read = time(NULL);
+}
+
+static void pmm_refresh_if_stale(void) {
+    time_t now = time(NULL);
+    if (now - g_pmm_last_read >= 3)
+        pmm_refresh();
 }
 
 void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm) {
     (void)mm; (void)hhdm;
     pmm_refresh();
+    g_pmm_last_read = time(NULL);
 }
 
 uint64_t pmm_alloc_page(void)       { return (uint64_t)(uintptr_t)malloc(4096); }
@@ -92,11 +98,11 @@ void    *pmm_phys_to_virt(uint64_t phys)  { return (void *)(uintptr_t)phys; }
 uint64_t pmm_virt_to_phys(void *virt)     { return (uint64_t)(uintptr_t)virt; }
 
 uint64_t pmm_get_total_pages(void) {
-    if (!g_pmm_read) pmm_refresh();
+    pmm_refresh_if_stale();
     return g_pmm_total;
 }
 uint64_t pmm_get_free_pages(void) {
-    if (!g_pmm_read) pmm_refresh();
+    pmm_refresh_if_stale();
     return g_pmm_free;
 }
 uint64_t pmm_get_used_pages(void) {
@@ -135,7 +141,7 @@ int  hda_get_volume(void)        { return s_vol; }
 bool hda_is_ready(void)          { return false; }
 void hda_poll(void)              { }
 
-/* ── NET — stub ───────────────────────────────────────────────────────────── */
+/* ── NET — detect virtio NIC from /proc/net/dev ───────────────────────────── */
 
 uint8_t  net_mac[6]  = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 uint32_t net_ip      = 0;
@@ -143,9 +149,23 @@ uint32_t net_mask    = 0;
 uint32_t net_gateway = 0;
 uint32_t net_dns     = 0;
 
-void net_init(void)  { }
+static bool g_net_present = false;
+
+void net_init(void) {
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        /* Look for any non-loopback interface with TX/RX bytes > 0 */
+        if (strstr(line, "eth") || strstr(line, "en") || strstr(line, "virtio")) {
+            g_net_present = true;
+            break;
+        }
+    }
+    fclose(f);
+}
 void net_poll(void)  { }
-bool net_nic_present(void) { return false; }
+bool net_nic_present(void) { return g_net_present; }
 bool net_send_eth(const uint8_t dst[6], uint16_t et,
                   const void *payload, size_t len) {
     (void)dst; (void)et; (void)payload; (void)len;
@@ -165,10 +185,10 @@ void print_hex_u64(uint64_t v)   { (void)v; }
 void kprintf(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    vfprintf(stderr, fmt, ap);
     va_end(ap);
 }
 
 void kvprintf(const char *fmt, va_list ap) {
-    vprintf(fmt, ap);
+    vfprintf(stderr, fmt, ap);
 }

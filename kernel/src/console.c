@@ -1,6 +1,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifdef __linux__
+#include <string.h>
+#endif
 #include "console.h"
 #include "vfs.h"
 #include "pmm.h"
@@ -274,33 +277,116 @@ static void ansi_apply_sgr(uint8_t *params, int n) {
     }
 }
 
+/* Forward declarations for functions defined later in this file */
+static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
+
 static void ansi_process_csi(void) {
     /* Parse semicolon-separated decimal params, then dispatch on final char */
-    uint8_t params[8];
-    int     np = 0;
-    uint8_t cur = 0;
+    uint16_t params[8];
+    int      np = 0;
+    uint16_t cur = 0;
+    bool     private_mode = false;
     for (int i = 0; i < (int)g_ansi_len - 1; i++) {
         uint8_t c2 = g_ansi_buf[i];
+        if (c2 == '?') { private_mode = true; continue; }
         if (c2 >= '0' && c2 <= '9') {
-            cur = (uint8_t)(cur * 10u + (c2 - '0'));
+            cur = (uint16_t)(cur * 10u + (c2 - '0'));
         } else if (c2 == ';') {
             if (np < 8) params[np++] = cur;
             cur = 0;
         }
     }
-    if (np < 8) params[np++] = cur;  /* last param */
+    if (np < 8) params[np++] = cur;
 
     uint8_t final_ch = g_ansi_len > 0 ? g_ansi_buf[g_ansi_len - 1u] : 0u;
+
+    /* Private mode sequences (?n h/l): ignore (cursor visibility, etc.) */
+    if (private_mode) return;
+
     if (final_ch == 'm') {
         if (np == 1 && params[0] == 0) {
-            con.fg = g_ansi_fg0;
-            con.bg = g_ansi_bg0;
-            g_ansi_bold = false;
+            con.fg = g_ansi_fg0; con.bg = g_ansi_bg0; g_ansi_bold = false;
         } else {
-            ansi_apply_sgr(params, np);
+            uint8_t p8[8];
+            for (int i = 0; i < np; i++) p8[i] = (uint8_t)params[i];
+            ansi_apply_sgr(p8, np);
+        }
+    } else if (final_ch == 'A') {          /* CUU — cursor up */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cy = (con.cy >= n) ? con.cy - n : 0;
+    } else if (final_ch == 'B') {          /* CUD — cursor down */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cy += n;
+        if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
+    } else if (final_ch == 'C') {          /* CUF — cursor forward */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cx += n;
+        if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
+    } else if (final_ch == 'D') {          /* CUB — cursor back */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cx = (con.cx >= n) ? con.cx - n : 0;
+    } else if (final_ch == 'G') {          /* CHA — cursor horizontal absolute */
+        uint16_t col = (params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
+        con.cx = (con.cols > 0 && col < con.cols) ? col : (con.cols > 0 ? con.cols - 1 : 0);
+    } else if (final_ch == 'H' || final_ch == 'f') {  /* CUP — cursor position */
+        uint16_t row = (np >= 1 && params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
+        uint16_t col = (np >= 2 && params[1] > 0) ? (uint16_t)(params[1] - 1) : 0;
+        con.cy = (con.rows > 0 && row < con.rows) ? row : (con.rows > 0 ? con.rows - 1 : 0);
+        con.cx = (con.cols > 0 && col < con.cols) ? col : (con.cols > 0 ? con.cols - 1 : 0);
+    } else if (final_ch == 'J') {          /* ED — erase display */
+        uint16_t mode = params[0];
+        if (mode == 2 || mode == 3) {
+            /* Clear all: inline console_clear() */
+            fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
+            con.cx = 0; con.cy = 0;
+            for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
+                for (uint64_t c = 0; c < CELL_MAX_COLS; c++)
+                    cell_buf[r][c] = ' ';
+        } else if (mode == 0) {
+            /* Erase cursor to end */
+            if (con.cols > con.cx)
+                fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
+                          (con.cols - con.cx) * g_fw, g_fh, con.bg);
+            for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
+                cell_buf[con.cy][c] = ' ';
+            if (con.cy + 1 < con.rows) {
+                fill_rect(con.x_off, con.y_offset + (con.cy + 1u) * g_fh,
+                          con.cols * g_fw, (con.rows - con.cy - 1u) * g_fh, con.bg);
+                for (uint64_t r = con.cy + 1; r < con.rows && r < CELL_MAX_ROWS; r++)
+                    for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
+                        cell_buf[r][c] = ' ';
+            }
+        } else if (mode == 1) {
+            /* Erase start to cursor */
+            if (con.cy > 0) {
+                fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.cy * g_fh, con.bg);
+                for (uint64_t r = 0; r < con.cy && r < CELL_MAX_ROWS; r++)
+                    for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
+                        cell_buf[r][c] = ' ';
+            }
+            fill_rect(con.x_off, con.y_offset + con.cy * g_fh, (con.cx + 1u) * g_fw, g_fh, con.bg);
+            for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
+                cell_buf[con.cy][c] = ' ';
+        }
+    } else if (final_ch == 'K') {          /* EL — erase line */
+        uint16_t mode = params[0];
+        if (mode == 0) {
+            if (con.cols > con.cx)
+                fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
+                          (con.cols - con.cx) * g_fw, g_fh, con.bg);
+            for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
+                cell_buf[con.cy][c] = ' ';
+        } else if (mode == 1) {
+            fill_rect(con.x_off, con.y_offset + con.cy * g_fh, (con.cx + 1u) * g_fw, g_fh, con.bg);
+            for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
+                cell_buf[con.cy][c] = ' ';
+        } else if (mode == 2) {
+            fill_rect(con.x_off, con.y_offset + con.cy * g_fh, con.cols * g_fw, g_fh, con.bg);
+            for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
+                cell_buf[con.cy][c] = ' ';
         }
     }
-    /* Other CSI sequences (cursor movement, erase, etc.) are silently ignored */
+    /* ESC[h/l (mode set/reset): ignore */
 }
 
 void console_set_suppress_draw(bool on) { g_tsb_suppress = on; }
@@ -793,8 +879,11 @@ void console_backbuf_init(void) {
     uint64_t phys   = pmm_alloc_pages(npages);
     if (!phys) return;
     g_back = (uint32_t *)pmm_phys_to_virt(phys);
-    /* Zero the backbuf */
+#ifdef __linux__
+    memset(g_back, 0, npix * sizeof(uint32_t));
+#else
     for (uint64_t i = 0; i < npix; i++) g_back[i] = 0;
+#endif
     g_dirty = false;
 }
 
@@ -807,8 +896,11 @@ bool console_flip_if_dirty(void) {
     /* Cast away volatile so the compiler can auto-vectorize the bulk copy.
      * WC framebuffer writes are always visible; volatile is not needed here. */
     uint32_t *dst = (uint32_t *)(uintptr_t)con.pix;
-    for (uint64_t i = 0; i < n; i++)
-        dst[i] = src[i];
+#ifdef __linux__
+    memcpy(dst, src, n * sizeof(uint32_t));
+#else
+    for (uint64_t i = 0; i < n; i++) dst[i] = src[i];
+#endif
     return true;
 }
 
