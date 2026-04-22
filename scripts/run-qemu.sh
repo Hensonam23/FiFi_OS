@@ -42,7 +42,7 @@ QEMU_BASE=(
     -netdev user,id=net0
     -device virtio-net-pci,netdev=net0
     -device virtio-mouse-pci
-    -audiodev pipewire,id=snd0
+    -audiodev sdl,id=snd0
     -device intel-hda,id=hda0
     -device hda-output,audiodev=snd0
 )

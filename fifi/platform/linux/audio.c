@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <sound/asound.h>
@@ -192,65 +193,107 @@ static void interval_set(struct snd_interval *iv, unsigned int val) {
     iv->openmin = 0; iv->openmax = 0;
 }
 
+/* Raw write to stderr — safe in forked child (no stdio flushing needed). */
+static void tone_log(const char *msg) {
+    write(STDERR_FILENO, msg, strlen(msg));
+}
+static void tone_logf(const char *fmt, ...) {
+    char buf[128];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    write(STDERR_FILENO, buf, strlen(buf));
+}
+
 static void play_tone_child(int freq_hz, int duration_ms) {
     int pcm_fd = -1;
-    for (int card = 0; card < 4; card++) {
-        for (int dev = 0; dev < 4; dev++) {
-            char p[48];
-            snprintf(p, sizeof(p), "/dev/snd/pcmC%dD%dp", card, dev);
-            pcm_fd = open(p, O_WRONLY);
-            if (pcm_fd >= 0) { fprintf(stderr, "[tone] %s\n", p); goto opened; }
+    char dev_path[48];
+    for (int card = 0; card < 4 && pcm_fd < 0; card++) {
+        for (int dev = 0; dev < 8 && pcm_fd < 0; dev++) {
+            snprintf(dev_path, sizeof(dev_path), "/dev/snd/pcmC%dD%dp", card, dev);
+            pcm_fd = open(dev_path, O_WRONLY);
         }
     }
-    fprintf(stderr, "[tone] no PCM device found\n");
-    return;
-opened:;
-    /* ── Set hw_params ───────────────────────────────────────────────────── */
+    if (pcm_fd < 0) { tone_log("[tone] no PCM device\n"); return; }
+    tone_logf("[tone] opened %s\n", dev_path);
+
+    /* ── Phase 1: constrain format/access/channels, let kernel refine ───── */
     struct snd_pcm_hw_params hp;
     params_any(&hp);
-
     mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
                  SNDRV_PCM_ACCESS_RW_INTERLEAVED);
     mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
                  SNDRV_PCM_FORMAT_S16_LE);
-    /* SUBFORMAT = 0 (STD) — already limited by format mask kernel-side */
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], 2);
 
-    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)],
-                 TONE_CHANNELS);
-    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)],
-                 TONE_RATE);
-    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)],
-                 TONE_PERIOD);
-    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)],
-                 TONE_PERIODS);
+    /* Try 44100 Hz; if refine rejects it, fall back to 48000 */
+    unsigned int rate = 44100;
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate);
+    if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_HW_REFINE, &hp) < 0) {
+        /* Try 48000 */
+        rate = 48000;
+        params_any(&hp);
+        mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
+                     SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+        mask_set_one(&hp.masks[MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
+                     SNDRV_PCM_FORMAT_S16_LE);
+        interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], 2);
+        interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate);
+        if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_HW_REFINE, &hp) < 0) {
+            tone_log("[tone] HW_REFINE failed\n");
+            close(pcm_fd); return;
+        }
+    }
+
+    /* ── Phase 2: pick period size within the kernel's valid range ────────── */
+    struct snd_interval *iv_ps =
+        &hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)];
+    unsigned int period = 1024;
+    if (period < iv_ps->min) period = iv_ps->min;
+    if (iv_ps->max > 0 && period > iv_ps->max) period = iv_ps->max;
+
+    struct snd_interval *iv_pr =
+        &hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)];
+    unsigned int periods = 4;
+    if (periods < iv_pr->min) periods = iv_pr->min;
+    if (iv_pr->max > 0 && periods > iv_pr->max) periods = iv_pr->max;
+
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)], period);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIODS)], periods);
+    interval_set(&hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate);
+
+    tone_logf("[tone] HW_PARAMS: rate=%u period=%u periods=%u\n", rate, period, periods);
 
     if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hp) < 0) {
-        perror("[tone] HW_PARAMS");
-        close(pcm_fd);
-        return;
+        tone_logf("[tone] HW_PARAMS failed: errno=%d\n", errno);
+        close(pcm_fd); return;
     }
+
+    /* Read back the actual period size the kernel chose */
+    period = hp.intervals[INTERVAL_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min;
+    tone_logf("[tone] actual period=%u\n", period);
+
     if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_PREPARE) < 0) {
-        perror("[tone] PREPARE");
-        close(pcm_fd);
-        return;
+        tone_logf("[tone] PREPARE failed: errno=%d\n", errno);
+        close(pcm_fd); return;
     }
 
     /* ── Generate and write sine wave ───────────────────────────────────── */
-    int16_t buf[TONE_PERIOD * TONE_CHANNELS];
-    uint64_t total_frames = (uint64_t)TONE_RATE * duration_ms / 1000;
+    unsigned int buf_frames = period > 0 ? period : 1024;
+    int16_t *buf = malloc(buf_frames * 2 * sizeof(int16_t));
+    if (!buf) { close(pcm_fd); return; }
+
+    uint64_t total_frames = (uint64_t)rate * (unsigned int)duration_ms / 1000;
     uint64_t written = 0;
     double   phase = 0.0;
-    double   step  = 2.0 * M_PI * freq_hz / TONE_RATE;
-    /* Test tone is always at least 50% amplitude so it's audible regardless
-     * of slider position — its job is to confirm audio is working. */
+    double   step  = 2.0 * M_PI * freq_hz / (double)rate;
     int      vol   = g_vol < 50 ? 50 : g_vol;
     float    scale = (float)vol / 100.0f * 24576.0f;
-    fprintf(stderr, "[tone] playing %dHz for %dms vol=%d scale=%.0f\n",
-            freq_hz, duration_ms, vol, (double)scale);
+    tone_logf("[tone] playing %dHz %dms vol=%d\n", freq_hz, duration_ms, vol);
 
     while (written < total_frames) {
         uint64_t batch = total_frames - written;
-        if (batch > TONE_PERIOD) batch = TONE_PERIOD;
+        if (batch > buf_frames) batch = buf_frames;
 
         for (uint64_t i = 0; i < batch; i++) {
             int16_t s = (int16_t)(sinf((float)phase) * scale);
@@ -263,16 +306,17 @@ opened:;
         struct snd_xferi xferi = { .result = 0, .buf = buf, .frames = batch };
         if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xferi) < 0) {
             if (errno == EPIPE) {
-                /* underrun — recover */
                 ioctl(pcm_fd, SNDRV_PCM_IOCTL_PREPARE);
                 continue;
             }
-            perror("[tone] WRITEI_FRAMES");
+            tone_logf("[tone] WRITEI failed: errno=%d\n", errno);
             break;
         }
-        written += (uint64_t)xferi.result;
+        written += (uint64_t)(xferi.result > 0 ? xferi.result : (snd_pcm_sframes_t)batch);
     }
     ioctl(pcm_fd, SNDRV_PCM_IOCTL_DRAIN);
+    tone_log("[tone] done\n");
+    free(buf);
     close(pcm_fd);
 }
 
