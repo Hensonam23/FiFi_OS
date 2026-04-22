@@ -25,6 +25,7 @@
 #define IPC_INPUT_KEY    0x11u
 #define IPC_INPUT_MOUSE  0x12u
 #define IPC_INPUT_GAMEPAD 0x14u
+#define IPC_INVALIDATE   0x15u
 
 /* Gamepad button bit masks (must match compositor input.c) */
 #define GP_BTN_A      (1u<<0)
@@ -69,6 +70,7 @@ static int16_t  g_lx = 0, g_ly = 0;
 static int16_t  g_rx = 0, g_ry = 0;
 static int16_t  g_lt = 0, g_rt = 0;
 static bool     g_connected = false;
+static bool     g_invalidated = false;  /* IPC_INVALIDATE received — force redraw */
 
 /* IPC partial-read state */
 static uint8_t  g_hdr[8];
@@ -386,6 +388,8 @@ static void dispatch_msg(uint32_t type, const uint8_t *pld, uint32_t len) {
         memcpy(&g_lt,   pld + 10, 2);
         memcpy(&g_rt,   pld + 12, 2);
         g_connected = true;
+    } else if (type == IPC_INVALIDATE) {
+        g_invalidated = true;
     }
 }
 
@@ -472,10 +476,11 @@ int main(void) {
             if (g_connected) got_gamepad = true;
         }
 
-        if (got_gamepad || needs_render) {
+        if (got_gamepad || needs_render || g_invalidated) {
             render();
             push_frame(g_sock);
             needs_render = false;
+            g_invalidated = false;
         }
     }
 
