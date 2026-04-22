@@ -57,6 +57,7 @@ bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
 void ipc_blit_all(void);
 void ipc_draw_overlays(void);
+void ipc_draw_resize_handles(void);
 bool ipc_notify_draw(void);
 bool ipc_keyboard_active(void);
 void ipc_send_focused_key(uint8_t key);
@@ -64,6 +65,10 @@ void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
 void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
                       int16_t rx, int16_t ry, int16_t lt, int16_t rt);
 void ipc_clear_focus(void);
+bool ipc_resize_begin(int32_t mx, int32_t my);
+bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
+bool ipc_resize_active(void);
+bool ipc_resize_zone_at(int32_t mx, int32_t my);
 
 /* Gamepad input query */
 bool input_gamepad_connected(void);
@@ -370,18 +375,24 @@ int main(void) {
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
-            /* Update drag (move IPC window) — do this before hit-test */
-            bool dragging = ipc_drag_update(mcx, mcy, mlb);
+            /* Update resize (must check before drag to avoid conflict) */
+            bool resizing = ipc_resize_update(mcx, mcy, mlb);
 
-            if (mlb && !dragging) {
+            /* Update drag (move IPC window) — do this before hit-test */
+            bool dragging = !resizing && ipc_drag_update(mcx, mcy, mlb);
+
+            if (mlb && !dragging && !resizing) {
                 /* Close button takes priority over hit-test and drag */
                 if (!ipc_try_close_at(mcx, mcy)) {
-                    /* On left-click: check if it lands on an IPC window */
-                    if (!ipc_hit_test(mcx, mcy))
-                        ipc_clear_focus();  /* click on compositor GUI — clear IPC focus */
+                    /* Try resize handle first */
+                    if (!ipc_resize_begin(mcx, mcy)) {
+                        /* On left-click: check if it lands on an IPC window */
+                        if (!ipc_hit_test(mcx, mcy))
+                            ipc_clear_focus();
+                    }
                 }
             }
-            if (ipc_keyboard_active() && !dragging)
+            if (ipc_keyboard_active() && !dragging && !resizing)
                 ipc_send_focused_mouse(mcx, mcy, btns);
 
             /* Forward mouse to Wayland surfaces (when no IPC window has focus) */
@@ -468,8 +479,9 @@ int main(void) {
                 console_mark_dirty_rows(ey0, ey1);
             }
 
-            /* ── IPC overlays (close buttons + notifications) ───────────── */
+            /* ── IPC overlays (title bars, close/min buttons, resize handles) */
             ipc_draw_overlays();
+            ipc_draw_resize_handles();
             ipc_notify_draw();
 
             /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ── */
