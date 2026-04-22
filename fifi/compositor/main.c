@@ -69,6 +69,11 @@ bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
 bool ipc_resize_zone_at(int32_t mx, int32_t my);
+bool ipc_file_drag_active(void);
+void ipc_file_drag_update(int32_t mx, int32_t my);
+void ipc_file_drag_drop(int32_t mx, int32_t my);
+void ipc_file_drag_cancel(void);
+void ipc_draw_drag_overlay(void);
 
 /* Gamepad input query */
 bool input_gamepad_connected(void);
@@ -376,6 +381,13 @@ int main(void) {
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
             /* Update resize (must check before drag to avoid conflict) */
+            /* File drag in progress: update cursor and handle release */
+            if (ipc_file_drag_active()) {
+                ipc_file_drag_update(mcx, mcy);
+                if (!mlb) ipc_file_drag_drop(mcx, mcy);
+                goto mouse_done;
+            }
+
             bool resizing = ipc_resize_update(mcx, mcy, mlb);
 
             /* Update drag (move IPC window) — do this before hit-test */
@@ -394,6 +406,7 @@ int main(void) {
             }
             if (ipc_keyboard_active() && !dragging && !resizing)
                 ipc_send_focused_mouse(mcx, mcy, btns);
+            mouse_done:;
 
             /* Forward mouse to Wayland surfaces (when no IPC window has focus) */
             if (!ipc_keyboard_active())
@@ -411,7 +424,8 @@ int main(void) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                 if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
                 uint8_t uc = (uint8_t)c;
-                if (uc == 0x96u) { take_screenshot(); continue; }  /* PrintScreen — global */
+                if (uc == 0x96u) { take_screenshot(); continue; }
+                if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                 if (uc >= 0x8Au && uc <= 0x8Du) {
                     extern void keyboard_push_char(uint8_t c);
                     keyboard_push_char(uc);
@@ -482,6 +496,7 @@ int main(void) {
             /* ── IPC overlays (title bars, close/min buttons, resize handles) */
             ipc_draw_overlays();
             ipc_draw_resize_handles();
+            ipc_draw_drag_overlay();
             ipc_notify_draw();
 
             /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ── */
