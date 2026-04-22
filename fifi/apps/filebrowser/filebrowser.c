@@ -30,6 +30,7 @@
 #define IPC_INPUT_KEY     0x11u
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_INVALIDATE    0x15u
+#define IPC_CLIP_SET      0x17u
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define WIN_W    640
@@ -402,6 +403,15 @@ int main(void) {
                                 redraw = false;
                             } else if (key == KEY_q || key == 'Q') {
                                 running = false;
+                            } else if (key == 'c' || key == 'C') {
+                                /* Copy current file path to clipboard */
+                                if (g_nentries > 0 && g_selected < g_nentries) {
+                                    char fullpath[1280];
+                                    snprintf(fullpath, sizeof(fullpath), "%s/%s",
+                                             g_path, g_entries[g_selected].name);
+                                    ipc_send_msg(sock, IPC_CLIP_SET, fullpath,
+                                                 (uint32_t)strlen(fullpath));
+                                }
                             }
                             if (redraw) { dirty = true; }
                         } else if (type == IPC_INPUT_MOUSE && in_plen >= 9) {
