@@ -192,7 +192,7 @@ static uint32_t e2_lookup(const ext2_inode_t *dir, const char *name) {
         uint8_t *end = blk_buf + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
             if (de->inode != 0 && e2_name_eq(de, name))
                 return de->inode;
             p += de->rec_len;
@@ -213,7 +213,7 @@ static uint32_t e2_lookup(const ext2_inode_t *dir, const char *name) {
                 uint8_t *end = blk_buf + g.block_size;
                 while (p < end) {
                     ext2_dirent_t *de = (ext2_dirent_t*)p;
-                    if (de->rec_len == 0) break;
+                    if (de->rec_len < 8 || p + de->rec_len > end) break;
                     if (de->inode != 0 && e2_name_eq(de, name))
                         return de->inode;
                     p += de->rec_len;
@@ -421,7 +421,7 @@ void ext2_ls(const char *path) {
         uint8_t *end = blk + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
             if (de->inode != 0) {
                 char type = (de->file_type == 2) ? 'd' : 'f';
                 kprintf("  [%c] ", type);
@@ -454,7 +454,7 @@ size_t ext2_ls_buf(char *buf, size_t cap) {
         uint8_t *end = blk + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
             if (de->inode != 0 && de->name_len > 0) {
                 /* skip "." and ".." */
                 if (!(de->name_len == 1 && de->name[0] == '.') &&
@@ -496,7 +496,7 @@ size_t ext2_ls_buf_at(const char *path, char *buf, size_t cap) {
         uint8_t *end = blk + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
             if (de->inode != 0 && de->name_len > 0) {
                 if (!(de->name_len == 1 && de->name[0] == '.') &&
                     !(de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.')) {
@@ -663,12 +663,13 @@ static bool e2_add_dirent(uint32_t dir_ino, const char *name, uint32_t name_len,
         uint8_t *end = buf + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
 
             /* Minimum space actually occupied by this entry */
             uint32_t actual = (de->inode != 0)
                               ? ((8u + (uint32_t)de->name_len + 3u) & ~3u) : 0u;
-            uint32_t slack  = de->rec_len - (de->inode != 0 ? actual : 0u);
+            uint32_t slack  = (de->inode != 0 && de->rec_len >= actual)
+                              ? (de->rec_len - actual) : de->rec_len;
 
             if (slack >= needed) {
                 if (de->inode != 0) {
@@ -903,7 +904,7 @@ static bool e2_remove_dirent(uint32_t dir_ino, const char *name) {
         uint8_t *end = buf + g.block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t*)p;
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || p + de->rec_len > end) break;
             if (de->inode != 0 && e2_name_eq(de, name)) {
                 de->inode = 0;
                 return e2_write_block(dblk, buf);
