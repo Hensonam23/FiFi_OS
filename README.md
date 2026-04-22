@@ -73,7 +73,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 ## Roadmap
 
 ### Phase 1 — Linux Foundation
-*Get to a bootable Linux system with a FiFi splash and minimal shell. ~4–6 weeks.*
 
 - [ ] Minimal Linux kernel config (x86-64, DRM, GPU drivers, USB, ext4, networking)
 - [ ] Custom initramfs: busybox userland, FiFi init script as PID 1
@@ -84,7 +83,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 - [ ] Real hardware test: boots from USB on NVIDIA and AMD machines
 
 ### Phase 2 — FiFi Compositor (DRM/KMS)
-*Port the GUI to run as a native Linux process. ~6–8 weeks.*
 
 - [ ] Open `/dev/dri/card0` via libdrm, set video mode, map framebuffer
 - [ ] Port `gui.c` rendering to write into the KMS framebuffer instead of Limine framebuffer
@@ -96,7 +94,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 - [ ] Settings: display resolution and refresh rate picker (reads KMS connector info)
 
 ### Phase 3 — Native FiFi Apps
-*Port apps to compile as standard Linux processes managed by the compositor. ~3–4 weeks.*
 
 - [ ] `ush` shell runs inside a compositor-managed terminal window
 - [ ] File browser compiled as standalone process, launched by compositor
@@ -106,7 +103,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 - [ ] FiFi app protocol: how apps register windows, send input, receive paint events
 
 ### Phase 4 — Gaming (Steam + Proton)
-*Wire up XWayland so Steam and Windows games run inside the FiFi desktop. ~2–3 weeks.*
 
 - [ ] XWayland instance managed by the FiFi compositor
 - [ ] Steam installed in the image, launches inside a FiFi window
@@ -117,7 +113,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 - [ ] Gaming mode toggle in Settings: hides desktop chrome, max performance governor
 
 ### Phase 5 — Full System
-*Everything that makes it a complete daily-driver OS. ~2–3 months.*
 
 - [ ] USB live boot: ISO boots straight to FiFi desktop, no install required
 - [ ] In-OS installer: "Install FiFi OS" option partitions disk, formats ext4, copies image
@@ -131,7 +126,6 @@ This branch was forked from `main` at Alpha v5.1. The bare-metal kernel is prese
 - [ ] FiFi app store stub: browse and install apps from a hosted repo
 
 ### v1.0
-*The stable public release. Live USB OS, installer, full hardware support, browser, gaming.*
 
 - [ ] Boots on any x86-64 machine without configuration
 - [ ] Full desktop: browser, terminal, file manager, text editor, settings, system monitor
