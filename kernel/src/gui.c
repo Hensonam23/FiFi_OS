@@ -29,7 +29,7 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  7u
+#define LAUNCHER_ITEMS  8u
 #define LAUNCHER_W      110u
 #define CTX_W           110u
 #define CTX_ITEM_H      22u
@@ -808,10 +808,10 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4-6: spawned IPC apps */
+    /* Items 0-3: built-in windows; 4-7: spawned IPC apps */
     static const char *items[] = {
         "Terminal", "Files", "Settings", "Viewer",
-        "File Browser", "System Info", "Gamepad",
+        "File Browser", "Settings", "Gamepad", "Sys Monitor",
     };
 
     int32_t mx, my;
@@ -7394,6 +7394,7 @@ void gui_on_tick(void) {
                                 "/bin/fifi-filebrowser",
                                 "/bin/fifi-settings",
                                 "/bin/fifi-gamepad",
+                                "/bin/fifi-sysmon",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
@@ -9167,12 +9168,13 @@ void gui_on_tick(void) {
                     win_show(w, item);
                 else
                     full_redraw();
-            } else if (item == 4 || item == 5 || item == 6) {
+            } else if (item >= 4 && item < (int)LAUNCHER_ITEMS) {
                 /* IPC standalone apps — spawn via platform fork/exec */
                 static const char *app_paths[] = {
                     "/bin/fifi-filebrowser",
                     "/bin/fifi-settings",
                     "/bin/fifi-gamepad",
+                    "/bin/fifi-sysmon",
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app)

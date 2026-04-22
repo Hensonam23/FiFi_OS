@@ -84,6 +84,13 @@ echo "[initramfs] building fifi-gamepad..."
     echo "[initramfs] included fifi-gamepad"
 } || echo "[initramfs] WARNING: fifi-gamepad build failed"
 
+echo "[initramfs] building fifi-sysmon..."
+(cd "$REPO_ROOT/fifi/apps/sysmon" && \
+    gcc -O2 -static -Wall -o fifi-sysmon sysmon.c -s 2>&1) && {
+    cp "$REPO_ROOT/fifi/apps/sysmon/fifi-sysmon" "$STAGE/bin/"
+    echo "[initramfs] included fifi-sysmon"
+} || echo "[initramfs] WARNING: fifi-sysmon build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 

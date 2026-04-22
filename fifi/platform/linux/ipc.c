@@ -380,25 +380,50 @@ void ipc_blit_all(void) {
     }
 }
 
-/* Draw close-button overlays on top of each active IPC window.
+/* Draw title bars and close buttons on top of all active IPC windows.
  * Called every tick from main.c after ipc_blit_all(). */
 void ipc_draw_overlays(void) {
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
         if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
 
+        bool focused = (g_focused_idx == i);
+
+        /* ── Title bar strip (top IPC_DRAG_STRIP pixels of the window) ─── */
+        uint32_t tb_col = focused ? 0xFF1e3a6eu : 0xFF18283eu;
+        console_fill_rect(c->win_x, c->win_y, c->win_w, (uint32_t)IPC_DRAG_STRIP, tb_col);
+
+        /* Accent bottom edge on the title bar */
+        uint32_t edge_col = focused ? 0xFF3878d8u : 0xFF243448u;
+        console_fill_rect(c->win_x, c->win_y + IPC_DRAG_STRIP - 2,
+                          c->win_w, 2u, edge_col);
+
+        /* Title text (left-aligned, vertically centered in title bar) */
+        if (fw > 0 && fh > 0) {
+            uint64_t ty = (uint64_t)c->win_y + ((uint64_t)IPC_DRAG_STRIP - fh) / 2;
+            uint64_t tx = (uint64_t)c->win_x + 8u;
+            uint64_t max_tx = (uint64_t)c->win_x + c->win_w
+                            - (uint64_t)IPC_CLOSE_BTN_SZ - 10u;
+            for (size_t j = 0; j < sizeof(c->title) && c->title[j] && tx + fw <= max_tx;
+                 j++, tx += fw)
+                console_render_glyph(tx, ty,
+                                     (unsigned char)c->title[j],
+                                     0xFFDDE8F8u, tb_col);
+        }
+
+        /* ── Close button (right side of title bar) ─────────────────────── */
         uint32_t bx = c->win_x + c->win_w - IPC_CLOSE_BTN_SZ - 3;
         uint32_t by = c->win_y + 3;
         uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
 
-        /* Red background */
         console_fill_rect(bx, by, sz, sz, 0xFFCC2222u);
 
-        /* White X — two diagonal stroke rects (3px thick approximation) */
-        uint32_t pad = 3;
+        uint32_t pad   = 3;
         uint32_t inner = sz - pad * 2;
-        /* Draw X pixel-by-pixel into backbuf using fill_rect of 2×2 blocks */
         for (uint32_t k = 0; k < inner; k++) {
             uint32_t px1 = bx + pad + k;
             uint32_t py1 = by + pad + k;
@@ -409,6 +434,13 @@ void ipc_draw_overlays(void) {
             if (px2 < bx + sz && py2 < by + sz)
                 console_fill_rect(px2, py2, 2, 2, 0xFFFFFFFFu);
         }
+
+        /* ── 1px border around the whole window ─────────────────────────── */
+        uint32_t br_col = focused ? 0xFF3878d8u : 0xFF243448u;
+        console_fill_rect(c->win_x,              c->win_y,              c->win_w, 1u, br_col);
+        console_fill_rect(c->win_x,              c->win_y + c->win_h - 1u, c->win_w, 1u, br_col);
+        console_fill_rect(c->win_x,              c->win_y,              1u, c->win_h, br_col);
+        console_fill_rect(c->win_x + c->win_w - 1u, c->win_y,          1u, c->win_h, br_col);
     }
 }
 
