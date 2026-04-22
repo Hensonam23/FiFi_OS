@@ -9,6 +9,7 @@
 #include "gui.h"
 #include "console.h"
 #include "mouse.h"
+#include "hda.h"
 
 #define PIT_CH0  0x40
 #define PIT_CMD  0x43
@@ -33,6 +34,7 @@ void pit_on_tick(void) {
     gui_on_tick();        /* process mouse clicks */
     if (console_flip_if_dirty())
         mouse_cursor_update();  /* redraw cursor on VRAM after flip erases it */
+    hda_poll();
 }
 
 void pit_init(uint32_t hz) {
