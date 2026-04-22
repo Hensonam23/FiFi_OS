@@ -28,6 +28,11 @@ void vfs_init(void);
 void pit_init(uint32_t hz);
 void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
 
+/* DRM/KMS backend (drm.c) — try first, fall back to /dev/fb0 */
+struct limine_framebuffer *drm_open(void);
+void drm_flush(void);
+void drm_close(void);
+
 /* PTY functions */
 void  pty_init(void);
 void  pty_poll_output(void);
@@ -47,6 +52,7 @@ static int      g_fb_fd   = -1;
 static uint32_t *g_fb_mem = NULL;
 static size_t   g_fb_size = 0;
 static struct   limine_framebuffer g_lmfb;
+static bool     g_using_drm = false;
 
 static struct termios g_orig_term;
 static bool           g_term_saved = false;
@@ -119,7 +125,17 @@ int main(void) {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
 
-    if (fb_open() < 0) return 1;
+    /* Try DRM/KMS first (virtio-gpu: triggers explicit flush → instant QEMU update).
+     * Fall back to /dev/fb0 if DRM isn't available (e.g. virtio-vga or bare fb). */
+    struct limine_framebuffer *drm_fb = drm_open();
+    if (drm_fb) {
+        g_lmfb      = *drm_fb;
+        g_using_drm = true;
+        fprintf(stderr, "[compositor] DRM/KMS backend active\n");
+    } else {
+        fprintf(stderr, "[compositor] fallback: /dev/fb0\n");
+        if (fb_open() < 0) return 1;
+    }
 
     pit_init(100);
     pmm_init(NULL, 0);
@@ -129,10 +145,14 @@ int main(void) {
     extern void net_init(void);
     net_init();
 
+    /* ALSA volume control — non-fatal if audio device not present */
+    extern bool hda_init(void);
+    hda_init();
+
     console_init(&g_lmfb);
     console_backbuf_init();
 
-    input_set_fb(g_fb_mem, (uint64_t)(g_lmfb.pitch / 4),
+    input_set_fb(g_lmfb.address, (uint64_t)(g_lmfb.pitch / 4),
                  (int32_t)g_lmfb.width, (int32_t)g_lmfb.height);
     mouse_init();
     input_init();
@@ -210,13 +230,17 @@ int main(void) {
         /* ── GUI tick ──────────────────────────────────────────────────── */
         gui_on_tick();
 
-        /* ── Flip only dirty rows, then update cursor only if it moved ─────── */
+        /* ── Flip dirty rows → framebuffer, then notify QEMU if using DRM ──── */
         bool flipped = console_flip_if_dirty();
+        if (flipped && g_using_drm) drm_flush();
+
+        /* ── Cursor: redraw only when position changed or frame was dirty ──── */
         int32_t cx, cy; bool lb, rb;
         mouse_get_state(&cx, &cy, &lb, &rb);
         static int32_t s_last_cx = -1, s_last_cy = -1;
         if (flipped || cx != s_last_cx || cy != s_last_cy) {
             mouse_cursor_update();
+            if (g_using_drm) drm_flush();   /* flush cursor draw too */
             s_last_cx = cx; s_last_cy = cy;
         }
     }

@@ -22,6 +22,7 @@ OBJS := \
     $(BUILD)/sdl/platform.o \
     $(BUILD)/sdl/pty.o \
     $(BUILD)/sdl/vfs_posix.o \
+    $(BUILD)/sdl/audio_sdl_stub.o \
     $(BUILD)/sdl/gui.o \
     $(BUILD)/sdl/console.o
 
@@ -45,6 +46,9 @@ $(BUILD)/sdl/pty.o: ../linux/pty.c | $(BUILD)/sdl
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/sdl/vfs_posix.o: ../linux/vfs_posix.c | $(BUILD)/sdl
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/sdl/audio_sdl_stub.o: audio_sdl_stub.c | $(BUILD)/sdl
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/sdl/gui.o: ../../../kernel/src/gui.c | $(BUILD)/sdl

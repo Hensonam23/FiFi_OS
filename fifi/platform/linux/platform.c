@@ -129,17 +129,7 @@ void rtc_get_date(uint8_t *day, uint8_t *mon, uint16_t *year) {
     if (year) *year = (uint16_t)(tm->tm_year + 1900);
 }
 
-/* ── HDA — stub (no audio in Phase 2) ────────────────────────────────────── */
-
-static int s_vol = 50;
-
-bool hda_init(void)              { return false; }
-void hda_play_tone(int f, int d) { (void)f; (void)d; }
-void hda_stop(void)              { }
-void hda_set_volume(int v)       { s_vol = v < 0 ? 0 : v > 100 ? 100 : v; }
-int  hda_get_volume(void)        { return s_vol; }
-bool hda_is_ready(void)          { return false; }
-void hda_poll(void)              { }
+/* HDA functions live in audio.c (ALSA raw-ioctl backend) */
 
 /* ── NET — detect virtio NIC from /proc/net/dev ───────────────────────────── */
 
