@@ -52,6 +52,9 @@
 #define IPC_INPUT_GAMEPAD 0x14u  /* {uint16_t btns; int16_t lx,ly,rx,ry,lt,rt} = 14 bytes */
 #define IPC_INVALIDATE    0x15u  /* ask app to push a fresh full frame (no payload) */
 #define IPC_NOTIFY        0x16u  /* app → compositor: {char text[]} — show toast notification */
+#define IPC_CLIP_SET      0x17u  /* app → compositor: {char text[]} — set shared clipboard */
+#define IPC_CLIP_GET      0x18u  /* app → compositor: (no payload) — request clipboard contents */
+#define IPC_CLIP_DATA     0x19u  /* compositor → app: {char text[]} — clipboard contents */
 
 typedef struct {
     int      fd;
@@ -79,6 +82,10 @@ static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter *
 #define NOTIFY_DURATION_S 3
 static char    g_notify_text[80] = {0};
 static time_t  g_notify_expire   = 0;   /* monotonic time when notification ends */
+
+/* ── Shared clipboard ────────────────────────────────────────────────────── */
+#define CLIP_MAX 4096
+static char g_clipboard[CLIP_MAX] = {0};
 
 /* Raise a window to the top of the z-stack */
 static void ipc_raise(int i) {
@@ -187,6 +194,20 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             g_notify_expire = time(NULL) + NOTIFY_DURATION_S;
             fprintf(stderr, "[ipc] notify: %s\n", g_notify_text);
         }
+        break;
+    }
+    case IPC_CLIP_SET: {
+        if (pld_len > 0) {
+            uint32_t len = pld_len < (uint32_t)(CLIP_MAX - 1) ? pld_len : (uint32_t)(CLIP_MAX - 1);
+            memcpy(g_clipboard, pld, len);
+            g_clipboard[len] = '\0';
+            fprintf(stderr, "[ipc] clipboard set (%u bytes)\n", len);
+        }
+        break;
+    }
+    case IPC_CLIP_GET: {
+        uint32_t len = (uint32_t)strlen(g_clipboard);
+        ipc_send(c, IPC_CLIP_DATA, g_clipboard, len);
         break;
     }
     default:

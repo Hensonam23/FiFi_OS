@@ -31,9 +31,9 @@
 #define LAUNCHER_ITEM_H 26u
 #define LAUNCHER_ITEMS  8u
 #define LAUNCHER_W      110u
-#define CTX_W           110u
+#define CTX_W           130u
 #define CTX_ITEM_H      22u
-#define CTX_ITEMS       4u
+#define CTX_ITEMS       7u   /* 4 built-in windows + separator + 2 IPC apps */
 
 /* File browser context menu */
 #define FB_CTX_W         120u
@@ -934,28 +934,46 @@ static void vol_popup_draw(void) {
 
 /* ── Context menu ────────────────────────────────────────────────────── */
 
+/* Separator height (half of item height) */
+#define CTX_SEP_IDX  4   /* row index that's a separator line */
+
 static void ctx_draw(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    static const char *ctx_items[] = { "Terminal", "Files", "Settings", "Viewer" };
+    /* Items 0-3: built-in windows; 4: separator; 5-6: IPC apps */
+    static const char *ctx_items[] = {
+        "Terminal", "Files", "Settings", "Viewer",
+        NULL,               /* separator */
+        "File Browser", "Sys Monitor",
+    };
     int32_t cx = g_ctx_x;
     int32_t cy = g_ctx_y;
 
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
+    /* Total height: CTX_ITEMS rows but row 4 is a 6px separator */
+    uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, total_h, COL_LAUNCH_BG);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy + CTX_ITEMS * CTX_ITEM_H + 1u, CTX_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx + CTX_W - 1u, (uint64_t)cy, 1u, CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, CTX_W, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx + CTX_W - 1u, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
 
+    uint64_t ry = (uint64_t)cy + 1u;
     for (int i = 0; i < (int)CTX_ITEMS; i++) {
-        uint64_t ry  = (uint64_t)cy + 1u + (uint64_t)i * CTX_ITEM_H;
-        bool hov     = (g_ctx_hover == i);
-        uint32_t bg  = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
+        if (ctx_items[i] == NULL) {
+            /* Separator */
+            console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, 8u, COL_LAUNCH_BG);
+            console_fill_rect((uint64_t)cx + 6u, ry + 3u, CTX_W - 12u, 1u, COL_LAUNCH_HL);
+            ry += 8u;
+            continue;
+        }
+        bool hov    = (g_ctx_hover == i);
+        uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
         console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, CTX_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(ctx_items[i]);
         uint64_t spx  = (uint64_t)cx + (CTX_W - slen * fw) / 2u;
         uint64_t spy  = ry + (CTX_ITEM_H - fh) / 2u;
         gui_draw_str(spx, spy, ctx_items[i], COL_LAUNCH_FG, bg);
+        ry += CTX_ITEM_H;
     }
 }
 
@@ -7280,13 +7298,18 @@ void gui_on_tick(void) {
 
     /* ── Context menu hover tracking ── */
     if (g_ctx_open) {
-        uint64_t ctx_x = (uint64_t)g_ctx_x;
-        uint64_t ctx_y = (uint64_t)g_ctx_y;
+        uint64_t ctx_x  = (uint64_t)g_ctx_x;
+        uint64_t ctx_y  = (uint64_t)g_ctx_y;
+        uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
         int new_chov = -1;
         if ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
-            (uint64_t)my >= ctx_y + 1u &&
-            (uint64_t)my < ctx_y + 1u + CTX_ITEMS * CTX_ITEM_H) {
-            new_chov = (int)((uint64_t)my - (ctx_y + 1u)) / (int)CTX_ITEM_H;
+            (uint64_t)my >= ctx_y + 1u && (uint64_t)my < ctx_y + total_h) {
+            uint64_t dy = (uint64_t)my - (ctx_y + 1u);
+            uint64_t sep_start = 4u * CTX_ITEM_H;
+            if (dy < sep_start)
+                new_chov = (int)(dy / CTX_ITEM_H);
+            else if (dy >= sep_start + 8u)
+                new_chov = 5 + (int)((dy - sep_start - 8u) / CTX_ITEM_H);
         }
         if (new_chov != g_ctx_hover) {
             g_ctx_hover = new_chov;
@@ -9269,19 +9292,32 @@ void gui_on_tick(void) {
         int32_t cx, cy;
         uint64_t ctx_x = (uint64_t)g_ctx_x;
         uint64_t ctx_y = (uint64_t)g_ctx_y;
+        uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
         bool inside = ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
                        (uint64_t)my >= ctx_y + 1u &&
-                       (uint64_t)my < ctx_y + 1u + CTX_ITEMS * CTX_ITEM_H);
+                       (uint64_t)my < ctx_y + total_h);
         g_ctx_open = false;
         if (inside) {
-            int item = (int)((uint64_t)my - (ctx_y + 1u)) / (int)CTX_ITEM_H;
-            if (item >= 0 && item < (int)CTX_ITEMS) {
+            /* Map y offset to item index, accounting for the separator at index 4 */
+            uint64_t dy = (uint64_t)my - (ctx_y + 1u);
+            int item = -1;
+            /* Rows 0-3 are each CTX_ITEM_H; row 4 is 8px separator; rows 5-6 are CTX_ITEM_H */
+            uint64_t sep_start = 4u * CTX_ITEM_H;
+            if (dy < sep_start) {
+                item = (int)(dy / CTX_ITEM_H);
+            } else if (dy >= sep_start + 8u) {
+                item = 5 + (int)((dy - sep_start - 8u) / CTX_ITEM_H);
+            }
+            if (item >= 0 && item < 4) {
                 window_t *w = &g_wins[item];
                 z_raise(item);
-                if (w->state == WIN_HIDDEN)
-                    win_show(w, item);
-                else
-                    full_redraw();
+                if (w->state == WIN_HIDDEN) win_show(w, item);
+                else full_redraw();
+            } else if (item == 5 || item == 6) {
+                static const char *_cp[] = { "/bin/fifi-filebrowser", "/bin/fifi-sysmon" };
+                __attribute__((weak)) void gui_spawn_app(const char *path);
+                if (gui_spawn_app) gui_spawn_app(_cp[item - 5]);
+                full_redraw();
             } else {
                 full_redraw();
             }
