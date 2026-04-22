@@ -396,6 +396,22 @@ static uint64_t g_vol_btn_by   = 0, g_vol_btn_bh   = 0u;
 static uint64_t g_vol_chime_bx = 0, g_vol_chime_by = 0;
 static uint64_t g_vol_chime_bw = 0, g_vol_chime_bh = 0u;
 
+/* ── Volume tray popup state ─────────────────────────────────────────── */
+static bool     g_vol_popup_open  = false;
+static uint64_t g_vol_tray_x      = 0;
+static uint64_t g_vol_tray_w      = 0;
+/* popup internal bounds (set by vol_popup_draw, consumed by click handler) */
+static uint64_t g_vol_pop_x       = 0;
+static uint64_t g_vol_pop_y       = 0;
+static uint64_t g_vol_pop_h       = 0;
+static uint64_t g_vol_pop_minus_x = 0;
+static uint64_t g_vol_pop_plus_x  = 0;
+static uint64_t g_vol_pop_btn_y   = 0;
+static uint64_t g_vol_pop_btn_w   = 0;
+static uint64_t g_vol_pop_btn_h   = 0;
+static uint64_t g_vol_pop_slid_x  = 0;
+static uint64_t g_vol_pop_slid_w  = 0;
+
 /* ── Chrome hover state ──────────────────────────────────────────────── */
 static int g_chrome_win = -1;
 static int g_chrome_btn = 0;  /* 0=none, 1=close, 2=max, 3=min */
@@ -643,6 +659,31 @@ static void taskbar_draw_tray(void) {
     console_fill_rect(bx, by + 7u, bar_full_w, 1u, 0x00202838u);
     console_fill_rect(bx, by, 1u, 8u, 0x00202838u);
     console_fill_rect(bx + bar_full_w - 1u, by, 1u, 8u, 0x00202838u);
+
+    /* ── Volume tray icon (left of memory bar) ── */
+    {
+        int vol = hda_is_ready() ? hda_get_volume() : -1;
+        char vtxt[6]; int vi = 0;
+        if (vol < 0) {
+            vtxt[vi++] = '-'; vtxt[vi++] = '-'; vtxt[vi++] = '%';
+        } else if (vol >= 100) {
+            vtxt[vi++] = '1'; vtxt[vi++] = '0'; vtxt[vi++] = '0'; vtxt[vi++] = '%';
+        } else {
+            if (vol >= 10) vtxt[vi++] = (char)('0' + vol / 10);
+            vtxt[vi++] = (char)('0' + vol % 10);
+            vtxt[vi++] = '%';
+        }
+        vtxt[vi] = '\0';
+        uint64_t vw  = (uint64_t)vi * fw + 8u;
+        uint64_t vx  = bx > vw + 4u ? bx - vw - 4u : 0u;
+        uint64_t vy  = ty + (TASKBAR_H - fh) / 2u;
+        uint32_t vbg = g_vol_popup_open ? g_theme.accent : 0x00141e2au;
+        console_fill_rect(vx, ty + 3u, vw, TASKBAR_H - 6u, vbg);
+        uint32_t vfg = g_vol_popup_open ? 0x00ffffffu : 0x0090b8d8u;
+        gui_draw_str(vx + 4u, vy, vtxt, vfg, vbg);
+        g_vol_tray_x = vx;
+        g_vol_tray_w = vw;
+    }
 }
 
 static void taskbar_draw(void) {
@@ -706,6 +747,104 @@ static void launcher_draw(void) {
     console_fill_rect(lx, ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H, LAUNCHER_W, 1u, COL_LAUNCH_HL);
     console_fill_rect(lx, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
     console_fill_rect(lx + LAUNCHER_W - 1u, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
+}
+
+/* ── Volume tray popup ───────────────────────────────────────────────── */
+#define VOL_POP_W 170u
+
+static void vol_popup_draw(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint64_t ty   = fb_h - TASKBAR_H;
+
+    /* Height: top-pad + title + gap + btn-row + bot-pad */
+    uint64_t btn_h  = fh + 4u;
+    uint64_t pop_h  = 6u + fh + 6u + btn_h + 8u;
+    g_vol_pop_h = pop_h;
+
+    /* Right-align popup to tray icon right edge */
+    uint64_t pop_right = (g_vol_tray_w > 0u) ? (g_vol_tray_x + g_vol_tray_w) : (fb_w - 4u);
+    uint64_t px = (pop_right > VOL_POP_W) ? (pop_right - VOL_POP_W) : 0u;
+    if (px + VOL_POP_W > fb_w) px = fb_w - VOL_POP_W;
+    uint64_t py = (ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u;
+    g_vol_pop_x = px;
+    g_vol_pop_y = py;
+
+    /* Background + accent border */
+    uint32_t pbg = 0x00101828u;
+    uint32_t pbo = g_theme.accent;
+    console_fill_rect(px, py, VOL_POP_W, pop_h, pbg);
+    console_fill_rect(px, py, VOL_POP_W, 1u, pbo);
+    console_fill_rect(px, py + pop_h - 1u, VOL_POP_W, 1u, pbo);
+    console_fill_rect(px, py, 1u, pop_h, pbo);
+    console_fill_rect(px + VOL_POP_W - 1u, py, 1u, pop_h, pbo);
+
+    /* Title: "Volume: XX%" */
+    int vol = hda_get_volume();
+    char title[16]; int ti = 0;
+    const char *tlbl = "Volume: ";
+    for (int k = 0; tlbl[k]; k++) title[ti++] = tlbl[k];
+    if (vol >= 100) { title[ti++] = '1'; title[ti++] = '0'; title[ti++] = '0'; }
+    else            { title[ti++] = (char)('0' + vol / 10); title[ti++] = (char)('0' + vol % 10); }
+    title[ti++] = '%'; title[ti] = '\0';
+    uint64_t tlen = (uint64_t)ti;
+    uint64_t ttx  = px + (VOL_POP_W > tlen * fw ? (VOL_POP_W - tlen * fw) / 2u : 2u);
+    uint64_t tty  = py + 6u;
+    gui_draw_str(ttx, tty, title, 0x00c0d8f0u, pbg);
+
+    /* Control row: [−] slider [+] */
+    uint64_t row_y  = tty + fh + 6u;
+    uint64_t pad    = 6u;
+    uint64_t btn_w  = 20u;
+    uint64_t slid_x = px + pad + btn_w + 4u;
+    uint64_t slid_w = VOL_POP_W > 2u * pad + 2u * btn_w + 8u
+                    ? VOL_POP_W - 2u * pad - 2u * btn_w - 8u : 4u;
+    uint64_t slid_h = 8u;
+    uint64_t slid_y = row_y + (btn_h - slid_h) / 2u;
+    uint64_t mb_x   = px + pad;
+    uint64_t pb_x   = px + VOL_POP_W - pad - btn_w;
+
+    g_vol_pop_minus_x = mb_x;
+    g_vol_pop_plus_x  = pb_x;
+    g_vol_pop_btn_y   = row_y;
+    g_vol_pop_btn_w   = btn_w;
+    g_vol_pop_btn_h   = btn_h;
+    g_vol_pop_slid_x  = slid_x;
+    g_vol_pop_slid_w  = slid_w;
+
+    /* [−] button */
+    uint32_t bbg = 0x00182030u;
+    console_fill_rect(mb_x, row_y, btn_w, btn_h, bbg);
+    console_fill_rect(mb_x, row_y, btn_w, 1u, pbo);
+    console_fill_rect(mb_x, row_y + btn_h - 1u, btn_w, 1u, pbo);
+    console_fill_rect(mb_x, row_y, 1u, btn_h, pbo);
+    console_fill_rect(mb_x + btn_w - 1u, row_y, 1u, btn_h, pbo);
+    gui_draw_str(mb_x + (btn_w - fw) / 2u, row_y + (btn_h - fh) / 2u, "-", 0x00e0f0ffu, bbg);
+
+    /* [+] button */
+    console_fill_rect(pb_x, row_y, btn_w, btn_h, bbg);
+    console_fill_rect(pb_x, row_y, btn_w, 1u, pbo);
+    console_fill_rect(pb_x, row_y + btn_h - 1u, btn_w, 1u, pbo);
+    console_fill_rect(pb_x, row_y, 1u, btn_h, pbo);
+    console_fill_rect(pb_x + btn_w - 1u, row_y, 1u, btn_h, pbo);
+    gui_draw_str(pb_x + (btn_w - fw) / 2u, row_y + (btn_h - fh) / 2u, "+", 0x00e0f0ffu, bbg);
+
+    /* Slider track */
+    console_fill_rect(slid_x, slid_y, slid_w, slid_h, 0x00080c14u);
+    console_fill_rect(slid_x, slid_y, slid_w, 1u, 0x00202838u);
+    console_fill_rect(slid_x, slid_y + slid_h - 1u, slid_w, 1u, 0x00202838u);
+    console_fill_rect(slid_x, slid_y, 1u, slid_h, 0x00202838u);
+    console_fill_rect(slid_x + slid_w - 1u, slid_y, 1u, slid_h, 0x00202838u);
+
+    /* Slider fill */
+    if (vol > 0 && slid_w > 2u) {
+        uint64_t fill = (uint64_t)(vol) * (slid_w - 2u) / 100u;
+        if (fill > slid_w - 2u) fill = slid_w - 2u;
+        if (fill > 0u)
+            console_fill_rect(slid_x + 1u, slid_y + 1u, fill, slid_h - 2u, g_theme.accent);
+    }
 }
 
 /* ── Context menu ────────────────────────────────────────────────────── */
@@ -6337,6 +6476,8 @@ static void full_redraw(void) {
     taskbar_draw();
     if (g_launcher_open)
         launcher_draw();
+    if (g_vol_popup_open)
+        vol_popup_draw();
     if (g_ctx_open)
         ctx_draw();
     if (g_fb_ctx_open)
@@ -8576,11 +8717,29 @@ void gui_on_tick(void) {
         int32_t cx, cy;
 
         if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + LOGO_W)) {
+            g_vol_popup_open = false;
             g_launcher_open = !g_launcher_open;
             g_launcher_hover = -1;
             if (g_launcher_open) {
                 taskbar_draw();
                 launcher_draw();
+            } else {
+                full_redraw();
+            }
+            mouse_consume_click(&cx, &cy);
+            return;
+        }
+
+        /* ── Volume tray icon click ── */
+        if (g_vol_tray_w > 0u &&
+            mx >= (int32_t)g_vol_tray_x &&
+            mx <  (int32_t)(g_vol_tray_x + g_vol_tray_w)) {
+            g_launcher_open  = false;
+            g_launcher_hover = -1;
+            g_vol_popup_open = !g_vol_popup_open;
+            if (g_vol_popup_open) {
+                taskbar_draw_tray();
+                vol_popup_draw();
             } else {
                 full_redraw();
             }
@@ -8750,10 +8909,13 @@ void gui_on_tick(void) {
             }
         }
         if (!on_win) {
-            /* Close launcher and fb ctx menu if open */
+            /* Close launcher, vol popup, and fb ctx menu if open */
             if (g_launcher_open) {
                 g_launcher_open = false;
                 g_launcher_hover = -1;
+            }
+            if (g_vol_popup_open) {
+                g_vol_popup_open = false;
             }
             if (g_fb_ctx_open) {
                 g_fb_ctx_open = false;
@@ -8803,6 +8965,59 @@ void gui_on_tick(void) {
         }
         full_redraw();
         /* fall through to window hit test */
+    }
+
+    /* ── Volume popup clicks ── */
+    if (btn_pressed && g_vol_popup_open) {
+        int32_t cx, cy;
+        bool inside = ((uint64_t)mx >= g_vol_pop_x &&
+                       (uint64_t)mx <  g_vol_pop_x + VOL_POP_W &&
+                       (uint64_t)my >= g_vol_pop_y &&
+                       (uint64_t)my <  g_vol_pop_y + g_vol_pop_h);
+        if (inside) {
+            /* [−] button */
+            if (g_vol_pop_btn_w > 0u &&
+                (uint64_t)mx >= g_vol_pop_minus_x &&
+                (uint64_t)mx <  g_vol_pop_minus_x + g_vol_pop_btn_w &&
+                (uint64_t)my >= g_vol_pop_btn_y &&
+                (uint64_t)my <  g_vol_pop_btn_y + g_vol_pop_btn_h) {
+                int v = hda_get_volume() - 5;
+                if (v < 0) v = 0;
+                hda_set_volume(v);
+                vol_popup_draw();
+                taskbar_draw_tray();
+            /* [+] button */
+            } else if (g_vol_pop_btn_w > 0u &&
+                (uint64_t)mx >= g_vol_pop_plus_x &&
+                (uint64_t)mx <  g_vol_pop_plus_x + g_vol_pop_btn_w &&
+                (uint64_t)my >= g_vol_pop_btn_y &&
+                (uint64_t)my <  g_vol_pop_btn_y + g_vol_pop_btn_h) {
+                int v = hda_get_volume() + 5;
+                if (v > 100) v = 100;
+                hda_set_volume(v);
+                vol_popup_draw();
+                taskbar_draw_tray();
+            /* Slider track — click sets volume proportionally */
+            } else if (g_vol_pop_slid_w > 0u &&
+                (uint64_t)mx >= g_vol_pop_slid_x &&
+                (uint64_t)mx <  g_vol_pop_slid_x + g_vol_pop_slid_w) {
+                uint64_t rel = (uint64_t)mx - g_vol_pop_slid_x;
+                int v = (int)(rel * 100u / g_vol_pop_slid_w);
+                if (v < 0) v = 0;
+                if (v > 100) v = 100;
+                hda_set_volume(v);
+                vol_popup_draw();
+                taskbar_draw_tray();
+            }
+            mouse_consume_click(&cx, &cy);
+            return;
+        } else {
+            /* Click outside popup — close it */
+            g_vol_popup_open = false;
+            mouse_consume_click(&cx, &cy);
+            full_redraw();
+            return;
+        }
     }
 
     /* ── File browser context menu clicks ── */
