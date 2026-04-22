@@ -211,7 +211,12 @@ static void play_tone_child(int freq_hz, int duration_ms) {
     for (int card = 0; card < 4 && pcm_fd < 0; card++) {
         for (int dev = 0; dev < 8 && pcm_fd < 0; dev++) {
             snprintf(dev_path, sizeof(dev_path), "/dev/snd/pcmC%dD%dp", card, dev);
-            pcm_fd = open(dev_path, O_WRONLY);
+            pcm_fd = open(dev_path, O_WRONLY | O_NONBLOCK);
+            if (pcm_fd >= 0) {
+                /* Re-open blocking — non-block was just to detect busy devices */
+                int flags = fcntl(pcm_fd, F_GETFL);
+                fcntl(pcm_fd, F_SETFL, flags & ~O_NONBLOCK);
+            }
         }
     }
     if (pcm_fd < 0) { tone_log("[tone] no PCM device\n"); return; }
