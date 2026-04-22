@@ -23,6 +23,7 @@ SRCS := \
     ../platform/linux/drm.c \
     ../platform/linux/audio.c \
     ../platform/linux/ipc.c \
+    ../platform/linux/wayland.c \
     ../../kernel/src/gui.c \
     ../../kernel/src/console.c
 
@@ -59,6 +60,9 @@ $(BUILD)/comp/audio.o: ../platform/linux/audio.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/ipc.o: ../platform/linux/ipc.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/wayland.o: ../platform/linux/wayland.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Kernel source files (compiled with Linux stubs)

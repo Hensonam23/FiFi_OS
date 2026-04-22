@@ -55,6 +55,7 @@
 #define IPC_CLIP_SET      0x17u  /* app → compositor: {char text[]} — set shared clipboard */
 #define IPC_CLIP_GET      0x18u  /* app → compositor: (no payload) — request clipboard contents */
 #define IPC_CLIP_DATA     0x19u  /* compositor → app: {char text[]} — clipboard contents */
+#define IPC_OPEN_FILE     0x1Au  /* app → compositor: {char path[]} — open path in text viewer */
 
 typedef struct {
     int      fd;
@@ -208,6 +209,16 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
     case IPC_CLIP_GET: {
         uint32_t len = (uint32_t)strlen(g_clipboard);
         ipc_send(c, IPC_CLIP_DATA, g_clipboard, len);
+        break;
+    }
+    case IPC_OPEN_FILE: {
+        if (pld_len > 0 && pld_len < 512) {
+            char path[512];
+            memcpy(path, pld, pld_len);
+            path[pld_len] = '\0';
+            extern void gui_open_in_viewer(const char *path);
+            gui_open_in_viewer(path);
+        }
         break;
     }
     default:

@@ -10207,3 +10207,15 @@ void gui_on_tick(void) {
     /* Coalesced hover redraw: at most one full_redraw() per tick for hover changes */
     if (g_needs_redraw) full_redraw();
 }
+
+/* ── Public helpers callable from platform code ─────────────────────────── */
+
+void gui_open_in_viewer(const char *path) {
+    text_open(&g_wins[3], path);
+    win_show(&g_wins[3], 3);
+    z_raise(3);
+}
+
+void gui_toast_extern(const char *msg, uint32_t color) {
+    gui_toast(msg, color);
+}
