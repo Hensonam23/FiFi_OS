@@ -11,6 +11,7 @@
 #include "pmm.h"
 #include "net.h"
 #include "rtc.h"
+#include "hda.h"
 /* ── Layout ──────────────────────────────────────────────────────────── */
 #define STATUS_H        20u
 #define TASKBAR_H       32u
@@ -390,6 +391,10 @@ static uint64_t g_font_prev_bx = 0, g_font_next_bx = 0;
 static uint64_t g_font_btn_by  = 0, g_font_btn_bw  = 28u, g_font_btn_bh = 0u;
 static uint64_t g_utc_minus_bx = 0, g_utc_plus_bx = 0;
 static uint64_t g_utc_btn_by   = 0, g_utc_btn_bh  = 0u;
+static uint64_t g_vol_minus_bx = 0, g_vol_plus_bx  = 0;
+static uint64_t g_vol_btn_by   = 0, g_vol_btn_bh   = 0u;
+static uint64_t g_vol_chime_bx = 0, g_vol_chime_by = 0;
+static uint64_t g_vol_chime_bw = 0, g_vol_chime_bh = 0u;
 
 /* ── Chrome hover state ──────────────────────────────────────────────── */
 static int g_chrome_win = -1;
@@ -5585,6 +5590,78 @@ static void settings_render(window_t *w) {
         cy += 5u;
     }
 
+    /* ── Section: Audio ── */
+    if (cy + SET_SEC_H + SET_ROW_H + 4u <= iy + ih) {
+        console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
+        gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Audio",
+                     COL_SET_SEC_FG, COL_SET_SEC_BG);
+        cy += SET_SEC_H + 4u;
+
+        uint64_t btn_ha = fh + 6u;
+
+        /* Volume row: [−]  NN%  [+] */
+        console_fill_rect(ix, cy, iw, btn_ha, COL_SET_BG);
+        if (hda_is_ready()) {
+            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "Volume:", COL_SET_KEY_FG, COL_SET_BG);
+
+            uint64_t vm_x = val_x;
+            console_fill_rect(vm_x, cy, g_font_btn_bw, btn_ha, 0x00182838u);
+            gui_draw_str(vm_x + (g_font_btn_bw - fw) / 2u, cy + (btn_ha - fh) / 2u,
+                         "-", 0x0060a0e0u, 0x00182838u);
+            g_vol_minus_bx = vm_x;
+
+            char vol_lbl[6];
+            {
+                int vv = hda_get_volume();
+                int ri = 0;
+                if (vv >= 100) { vol_lbl[ri++]='1'; vol_lbl[ri++]='0'; vol_lbl[ri++]='0'; }
+                else if (vv >= 10) { vol_lbl[ri++]=(char)('0'+vv/10); vol_lbl[ri++]=(char)('0'+vv%10); }
+                else { vol_lbl[ri++]=(char)('0'+vv); }
+                vol_lbl[ri++] = '%'; vol_lbl[ri] = '\0';
+            }
+            uint64_t vl_len = (uint64_t)gui_strlen(vol_lbl);
+            uint64_t vl_x   = vm_x + g_font_btn_bw + 4u;
+            uint64_t vp_x   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
+            uint64_t vl_w   = vp_x > vl_x + 2u ? vp_x - vl_x - 2u : 1u;
+            uint64_t vl_cx  = vl_x + (vl_w > vl_len * fw ? (vl_w - vl_len * fw) / 2u : 0u);
+            console_fill_rect(vl_x, cy, vl_w, btn_ha, COL_SET_BG);
+            gui_draw_str(vl_cx, cy + (btn_ha - fh) / 2u, vol_lbl, COL_SET_VAL_FG, COL_SET_BG);
+
+            console_fill_rect(vp_x, cy, g_font_btn_bw, btn_ha, 0x00182838u);
+            gui_draw_str(vp_x + (g_font_btn_bw - fw) / 2u, cy + (btn_ha - fh) / 2u,
+                         "+", 0x0060a0e0u, 0x00182838u);
+            g_vol_plus_bx = vp_x;
+            g_vol_btn_by  = cy;
+            g_vol_btn_bh  = btn_ha;
+        } else {
+            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "No audio device", COL_SET_HINT, COL_SET_BG);
+            g_vol_btn_bh = 0u;
+        }
+        cy += btn_ha + 4u;
+
+        /* Test Tone button */
+        if (hda_is_ready() && cy + btn_ha <= iy + ih) {
+            static const char *chime_lbl = "Chime";
+            uint64_t cbl = (uint64_t)gui_strlen(chime_lbl);
+            uint64_t cbw = (cbl + 2u) * fw;
+            uint64_t cbx = val_x;
+            uint64_t cby = cy;
+            console_fill_rect(ix, cy, iw, btn_ha, COL_SET_BG);
+            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "Test:", COL_SET_KEY_FG, COL_SET_BG);
+            console_fill_rect(cbx, cby, cbw, btn_ha, 0x00182838u);
+            uint64_t cpx = cbx + (cbw - cbl * fw) / 2u;
+            gui_draw_str(cpx, cby + (btn_ha - fh) / 2u, chime_lbl, 0x0060a0e0u, 0x00182838u);
+            g_vol_chime_bx = cbx; g_vol_chime_by = cby;
+            g_vol_chime_bw = cbw; g_vol_chime_bh = btn_ha;
+            cy += btn_ha + 4u;
+        } else {
+            g_vol_chime_bh = 0u;
+        }
+
+        console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+
     /* ── Section: Network ── */
     if (cy + SET_SEC_H + SET_ROW_H < iy + ih) {
         console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
@@ -9558,6 +9635,32 @@ void gui_on_tick(void) {
                             if (g_theme.utc_offset < 14) g_theme.utc_offset++;
                             full_redraw();
                         }
+                    }
+                    /* Volume [−] / [+] buttons */
+                    if (g_vol_btn_bh > 0 &&
+                        (uint64_t)my >= g_vol_btn_by &&
+                        (uint64_t)my <  g_vol_btn_by + g_vol_btn_bh) {
+                        if ((uint64_t)mx >= g_vol_minus_bx &&
+                            (uint64_t)mx <  g_vol_minus_bx + g_font_btn_bw) {
+                            int nv = hda_get_volume() - 5;
+                            if (nv < 0) nv = 0;
+                            hda_set_volume(nv);
+                            full_redraw();
+                        } else if ((uint64_t)mx >= g_vol_plus_bx &&
+                                   (uint64_t)mx <  g_vol_plus_bx + g_font_btn_bw) {
+                            int nv = hda_get_volume() + 5;
+                            if (nv > 100) nv = 100;
+                            hda_set_volume(nv);
+                            full_redraw();
+                        }
+                    }
+                    /* Volume chime test button */
+                    if (g_vol_chime_bh > 0 &&
+                        (uint64_t)my >= g_vol_chime_by &&
+                        (uint64_t)my <  g_vol_chime_by + g_vol_chime_bh &&
+                        (uint64_t)mx >= g_vol_chime_bx &&
+                        (uint64_t)mx <  g_vol_chime_bx + g_vol_chime_bw) {
+                        hda_play_tone(750, 400);
                     }
                 }
             }

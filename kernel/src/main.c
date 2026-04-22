@@ -34,6 +34,7 @@
 #include "dhcp.h"
 #include "mouse.h"
 #include "i2c_hid.h"
+#include "hda.h"
 #include "gui.h"
 
 __attribute__((used, section(".limine_requests")))
@@ -197,7 +198,9 @@ void kmain(void) {
 
     mouse_init();
     i2c_hid_init();
+    hda_init();
     console_backbuf_init();   /* init double-buffer; all GUI writes go to RAM first */
     gui_init();
+    hda_play_tone(750, 400);  /* startup chime: 750 Hz for 400 ms */
     shell_run();
 }
