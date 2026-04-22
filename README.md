@@ -104,8 +104,8 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control w
 - [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
 - [x] App protocol defined: connect, register window, push pixel frames, receive input events
 - [x] Hello World app (`fifi/apps/hello/`) demonstrates the full IPC round-trip
-- [ ] File browser extracted as standalone process (uses IPC — groundwork done)
-- [ ] Settings panel extracted as standalone process
+- [x] File browser as standalone IPC process (`fifi-filebrowser` — PSF font, dir nav, mouse + keyboard)
+- [x] Settings panel as standalone IPC process (`fifi-settings` — system info, ALSA volume slider)
 
 ### Phase 4 — Display and Gaming
 

@@ -122,6 +122,13 @@ bool hda_init(void) {
     fprintf(stderr, "[audio] current volume: %d%%\n", g_vol);
 
     g_ready = true;
+
+    /* If ALSA mixer is at 0, set it to 70% so audio is audible by default */
+    if (g_vol == 0) {
+        hda_set_volume(70);
+        fprintf(stderr, "[audio] mixer was 0%% — reset to 70%%\n");
+    }
+
     return true;
 
 fail:
@@ -234,8 +241,12 @@ opened:;
     uint64_t written = 0;
     double   phase = 0.0;
     double   step  = 2.0 * M_PI * freq_hz / TONE_RATE;
-    /* Scale by volume (0-100); keep headroom at 75% of full scale */
-    float    scale = (float)g_vol / 100.0f * 24576.0f;
+    /* Test tone is always at least 50% amplitude so it's audible regardless
+     * of slider position — its job is to confirm audio is working. */
+    int      vol   = g_vol < 50 ? 50 : g_vol;
+    float    scale = (float)vol / 100.0f * 24576.0f;
+    fprintf(stderr, "[tone] playing %dHz for %dms vol=%d scale=%.0f\n",
+            freq_hz, duration_ms, vol, (double)scale);
 
     while (written < total_frames) {
         uint64_t batch = total_frames - written;

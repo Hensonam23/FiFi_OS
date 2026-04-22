@@ -71,3 +71,5 @@ linux/*.o
 linux/*.a
 build-sdl/
 fifi/apps/hello/hello-fifi-app
+fifi/apps/filebrowser/fifi-filebrowser
+fifi/apps/settings/fifi-settings
