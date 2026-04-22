@@ -11,8 +11,10 @@
 
 #include "vfs.h"
 
-/* VFS root — all paths are relative to this directory */
+/* VFS root — override with -DVFS_ROOT='"path"' at compile time */
+#ifndef VFS_ROOT
 #define VFS_ROOT "/fifi-data"
+#endif
 
 static void make_full(char *out, size_t cap, const char *path) {
     if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {

@@ -222,6 +222,21 @@ linux-rundbg: linux-initrd
 linux-clean:
 	rm -rf build-linux/
 
+# ── Native SDL2 host runner (no QEMU — smooth VSync display) ─────────────────
+.PHONY: sdl-build sdl-run sdl-clean
+
+sdl-build:
+	mkdir -p build-sdl/fifi-data/fonts
+	cp -r initramfs/root/fifi-data/. build-sdl/fifi-data/ 2>/dev/null || true
+	cp initrd/rootfs/fonts/*.psf build-sdl/fifi-data/fonts/ 2>/dev/null || true
+	$(MAKE) -C fifi/platform/sdl
+
+sdl-run: sdl-build
+	cd build-sdl && ./fifi-compositor-sdl
+
+sdl-clean:
+	rm -rf build-sdl/
+
 # Package a release zip: fifi.iso + all platform installers
 RELEASE_DIR := $(BUILD)/release
 RELEASE_ZIP := $(BUILD)/fifi-os-release.zip

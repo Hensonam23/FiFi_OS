@@ -44,8 +44,11 @@
 #define MAX_EVDEV 8
 static int g_kbd_fds[MAX_EVDEV];
 static int g_kbd_cnt = 0;
-static int g_ptr_fds[MAX_EVDEV];
+static int g_ptr_fds[MAX_EVDEV];   /* relative mice */
 static int g_ptr_cnt = 0;
+typedef struct { int fd; int32_t x_max, y_max; } abs_dev_t;
+static abs_dev_t g_abs_devs[MAX_EVDEV];
+static int g_abs_cnt = 0;
 
 /* ── Keyboard state ───────────────────────────────────────────────────────── */
 #define KB_RING  256
@@ -308,6 +311,24 @@ void input_init(void) {
                 continue;
             }
         }
+        /* Check absolute BEFORE relative — virtio-tablet has both EV_ABS and EV_REL */
+        bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
+        if (has_abs && evdev_has_bit(fd, EV_ABS, ABS_X) &&
+            evdev_has_bit(fd, EV_ABS, ABS_Y) &&
+            evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
+            if (g_abs_cnt < MAX_EVDEV) {
+                struct input_absinfo ai;
+                abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
+                dev->fd = fd;
+                dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0)
+                             ? ai.maximum : 32767;
+                dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0)
+                             ? ai.maximum : 32767;
+                fprintf(stderr, "[input] tablet: %s (range %dx%d)\n",
+                        path, dev->x_max, dev->y_max);
+                continue;
+            }
+        }
         if (has_rel && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
             if (g_ptr_cnt < MAX_EVDEV) {
                 g_ptr_fds[g_ptr_cnt++] = fd;
@@ -320,7 +341,7 @@ void input_init(void) {
     closedir(d);
 
     if (g_kbd_cnt == 0) fprintf(stderr, "[input] warning: no keyboard found\n");
-    if (g_ptr_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
+    if (g_ptr_cnt == 0 && g_abs_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
 }
 
 /* ── Poll — call each frame ─────────────────────────────────────────────── */
@@ -376,6 +397,49 @@ void input_poll(void) {
             if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
             mouse_push_rel(dx, dy, lbtn, rbtn);
             /* click on rising edge */
+            if (lbtn && !prev) {
+                if (g_clk_used < CLK_RING) {
+                    g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =
+                        (click_t){ g_mx, g_my };
+                    g_clk_used++;
+                }
+            }
+        }
+    }
+
+    /* ── Absolute pointer devices (USB tablet / virtio-tablet) ───────────── */
+    for (int ai = 0; ai < g_abs_cnt; ai++) {
+        abs_dev_t *dev = &g_abs_devs[ai];
+        int32_t abs_x = -1, abs_y = -1;
+        bool lbtn = g_lbtn, rbtn = g_rbtn;
+        bool had_event = false;
+
+        while (read(dev->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+            if (ev.type == EV_ABS) {
+                if (ev.code == ABS_X) abs_x = ev.value;
+                else if (ev.code == ABS_Y) abs_y = ev.value;
+                had_event = true;
+            } else if (ev.type == EV_KEY) {
+                if (ev.code == BTN_LEFT)  lbtn = (ev.value != 0);
+                if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                had_event = true;
+            } else if (ev.type == EV_SYN) {
+                had_event = true;
+            }
+        }
+
+        if (had_event) {
+            bool prev = g_lbtn;
+            g_lbtn = lbtn; g_rbtn = rbtn;
+            /* Scale using actual device axis range */
+            if (abs_x >= 0)
+                g_mx = (int32_t)((int64_t)abs_x * g_fb_w / (dev->x_max + 1));
+            if (abs_y >= 0)
+                g_my = (int32_t)((int64_t)abs_y * g_fb_h / (dev->y_max + 1));
+            if (g_mx < 0) g_mx = 0;
+            if (g_my < 0) g_my = 0;
+            if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;
+            if (g_my >= g_fb_h) g_my = g_fb_h - 1;
             if (lbtn && !prev) {
                 if (g_clk_used < CLK_RING) {
                     g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =
@@ -492,5 +556,6 @@ int input_get_all_fds(int *buf, int maxn) {
     int n = 0;
     for (int i = 0; i < g_kbd_cnt && n < maxn; i++) buf[n++] = g_kbd_fds[i];
     for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
+    for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
     return n;
 }
