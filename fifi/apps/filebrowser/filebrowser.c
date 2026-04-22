@@ -31,7 +31,9 @@
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_INVALIDATE    0x15u
 #define IPC_CLIP_SET      0x17u
+#define IPC_NOTIFY        0x16u
 #define IPC_OPEN_FILE     0x1Au
+#define IPC_WIN_RESIZE    0x1Bu
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define WIN_W    640
@@ -52,6 +54,7 @@
 #define C_GREY      0x00506070u
 #define C_BORDER    0x00243448u
 #define C_WHITE     0x00f0f0f0u
+#define C_WARN      0x00e04040u
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -142,6 +145,10 @@ static int     g_nentries = 0;
 static int     g_selected = 0;
 static int     g_scroll   = 0;
 static char    g_path[1024] = "/fifi-data";
+static bool    g_confirm_delete = false;
+static bool    g_renaming = false;
+static char    g_rename_buf[256];
+static int     g_rename_len = 0;
 
 static int entry_cmp(const void *a, const void *b) {
     const Entry *ea = (const Entry *)a;
@@ -208,17 +215,31 @@ static void render(uint32_t *fb) {
 
         if (sel) fill_rect(fb, 0, ry, WIN_W, ITEM_H, C_SEL);
 
-        const char *icon = g_entries[idx].is_dir ? ">" : " ";
-        font_draw_str(fb, icon, PAD_X, ry + (ITEM_H - g_glyph_h) / 2,
-                      g_entries[idx].is_dir ? C_DIR : C_GREY);
+        /* When renaming this row, show inline input field */
+        if (sel && g_renaming) {
+            fill_rect(fb, PAD_X + 14, ry + 1, WIN_W - PAD_X - 14 - PAD_X, ITEM_H - 2,
+                      0x00283850u);
+            int max_ch = (WIN_W - PAD_X - 14 - PAD_X - 4) / 9;
+            int draw_from = g_rename_len > max_ch ? g_rename_len - max_ch : 0;
+            int draw_n    = g_rename_len - draw_from;
+            font_draw_strn(fb, g_rename_buf + draw_from, draw_n,
+                           PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, C_WHITE);
+            /* Cursor bar */
+            int cx = PAD_X + 16 + draw_n * 9;
+            fill_rect(fb, cx, ry + 3, 2, ITEM_H - 6, C_WHITE);
+        } else {
+            const char *icon = g_entries[idx].is_dir ? ">" : " ";
+            font_draw_str(fb, icon, PAD_X, ry + (ITEM_H - g_glyph_h) / 2,
+                          g_entries[idx].is_dir ? C_DIR : C_GREY);
 
-        const char *name = g_entries[idx].name;
-        int namelen = (int)strlen(name);
-        uint32_t fg = g_entries[idx].is_dir ? C_DIR : C_FILE;
-        int max_chars = (WIN_W - PAD_X - 16 - PAD_X) / 9;
-        int draw_chars = namelen < max_chars ? namelen : max_chars;
-        font_draw_strn(fb, name, draw_chars,
-                       PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, fg);
+            const char *name = g_entries[idx].name;
+            int namelen = (int)strlen(name);
+            uint32_t fg = g_entries[idx].is_dir ? C_DIR : C_FILE;
+            int max_chars = (WIN_W - PAD_X - 16 - PAD_X) / 9;
+            int draw_chars = namelen < max_chars ? namelen : max_chars;
+            font_draw_strn(fb, name, draw_chars,
+                           PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, fg);
+        }
 
         draw_hline(fb, ry + ITEM_H - 1, C_BORDER);
     }
@@ -226,10 +247,19 @@ static void render(uint32_t *fb) {
     /* Footer */
     fill_rect(fb, 0, list_bot, WIN_W, FOOT_H, C_FOOT_BG);
     draw_hline(fb, list_bot, C_BORDER);
-    char foot[128];
-    snprintf(foot, sizeof(foot), "  %d items   arrows/enter/esc: navigate   q: quit",
-             g_nentries);
-    font_draw_str(fb, foot, 0, list_bot + (FOOT_H - g_glyph_h) / 2, C_GREY);
+    int foot_y = list_bot + (FOOT_H - g_glyph_h) / 2;
+    if (g_renaming) {
+        font_draw_str(fb, "  Rename: Enter to confirm, Esc to cancel",
+                      0, foot_y, C_WHITE);
+    } else if (g_confirm_delete) {
+        font_draw_str(fb, "  CONFIRM DELETE: press d again  (any other key cancels)",
+                      0, foot_y, C_WARN);
+    } else {
+        char foot[128];
+        snprintf(foot, sizeof(foot), "  %d items  F5:rename  d:del  n:mkdir  r:reload  c:copy  q:quit",
+                 g_nentries);
+        font_draw_str(fb, foot, 0, foot_y, C_GREY);
+    }
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -258,6 +288,8 @@ static void send_frame(int fd, uint32_t *pixels) {
 #define KEY_ENTER 0x0D
 #define KEY_ESC   0x1B
 #define KEY_BS    0x08
+#define KEY_DEL   0x84   /* FIFI_KEY_DELETE */
+#define KEY_F5    0x8Eu  /* FIFI_KEY_F5 — rename */
 #define KEY_q     'q'
 
 static int g_visible(void) {
@@ -395,6 +427,46 @@ int main(void) {
                         if (type == IPC_INPUT_KEY && in_plen >= 1) {
                             uint8_t key = in_pld ? in_pld[0] : 0;
                             bool redraw = false;
+
+                            /* ── Rename mode input ── */
+                            if (g_renaming) {
+                                if (key == KEY_ESC) {
+                                    g_renaming = false;
+                                    redraw = true;
+                                } else if (key == KEY_ENTER || key == '\r' || key == '\n') {
+                                    g_renaming = false;
+                                    if (g_rename_len > 0 && g_nentries > 0) {
+                                        char oldpath[1280], newpath[1280];
+                                        snprintf(oldpath, sizeof(oldpath), "%s/%s",
+                                                 g_path, g_entries[g_selected].name);
+                                        snprintf(newpath, sizeof(newpath), "%s/%.*s",
+                                                 g_path, g_rename_len, g_rename_buf);
+                                        if (rename(oldpath, newpath) == 0) {
+                                            ipc_send_msg(sock, IPC_NOTIFY, "Renamed", 7);
+                                            load_dir(g_path);
+                                        } else {
+                                            char ntxt[80];
+                                            uint32_t nlen = (uint32_t)snprintf(ntxt, sizeof(ntxt),
+                                                "Rename failed: %s", strerror(errno));
+                                            ipc_send_msg(sock, IPC_NOTIFY, ntxt, nlen);
+                                        }
+                                    }
+                                    dirty = true;
+                                } else if (key == KEY_BS && g_rename_len > 0) {
+                                    g_rename_buf[--g_rename_len] = '\0';
+                                    redraw = true;
+                                } else if (key >= 0x20u && key < 0x7Fu &&
+                                           g_rename_len < (int)sizeof(g_rename_buf) - 1) {
+                                    g_rename_buf[g_rename_len++] = (char)key;
+                                    g_rename_buf[g_rename_len]   = '\0';
+                                    redraw = true;
+                                }
+                                if (redraw) dirty = true;
+                                goto msg_done;
+                            }
+
+                            /* Any key other than 'd' cancels pending delete */
+                            if (key != 'd' && key != 'D') g_confirm_delete = false;
                             if (key == KEY_UP || key == 'A') {   /* up arrow via ANSI */
                                 if (g_selected > 0) { g_selected--; clamp_scroll(); redraw = true; }
                             } else if (key == KEY_DOWN || key == 'B') {
@@ -408,7 +480,6 @@ int main(void) {
                             } else if (key == KEY_q || key == 'Q') {
                                 running = false;
                             } else if (key == 'c' || key == 'C') {
-                                /* Copy current file path to clipboard */
                                 if (g_nentries > 0 && g_selected < g_nentries) {
                                     char fullpath[1280];
                                     snprintf(fullpath, sizeof(fullpath), "%s/%s",
@@ -416,8 +487,62 @@ int main(void) {
                                     ipc_send_msg(sock, IPC_CLIP_SET, fullpath,
                                                  (uint32_t)strlen(fullpath));
                                 }
+                            } else if (key == 'd' || key == 'D') {
+                                if (g_nentries > 0 && g_selected < g_nentries) {
+                                    if (!g_confirm_delete) {
+                                        g_confirm_delete = true;
+                                        redraw = true;
+                                    } else {
+                                        g_confirm_delete = false;
+                                        char fullpath[1280];
+                                        snprintf(fullpath, sizeof(fullpath), "%s/%s",
+                                                 g_path, g_entries[g_selected].name);
+                                        int ret = g_entries[g_selected].is_dir
+                                                  ? rmdir(fullpath) : unlink(fullpath);
+                                        char ntxt[128];
+                                        uint32_t nlen;
+                                        if (ret == 0) {
+                                            nlen = (uint32_t)snprintf(ntxt, sizeof(ntxt),
+                                                "Deleted: %s", g_entries[g_selected].name);
+                                            load_dir(g_path);
+                                        } else {
+                                            nlen = (uint32_t)snprintf(ntxt, sizeof(ntxt),
+                                                "Delete failed: %s", strerror(errno));
+                                        }
+                                        ipc_send_msg(sock, IPC_NOTIFY, ntxt, nlen);
+                                        dirty = true;
+                                    }
+                                }
+                            } else if (key == 'n' || key == 'N') {
+                                char newdir[1280];
+                                snprintf(newdir, sizeof(newdir), "%s/NewFolder", g_path);
+                                if (mkdir(newdir, 0755) == 0) {
+                                    ipc_send_msg(sock, IPC_NOTIFY, "NewFolder created", 17);
+                                    load_dir(g_path);
+                                    dirty = true;
+                                } else {
+                                    char ntxt[64];
+                                    uint32_t nlen = (uint32_t)snprintf(ntxt, sizeof(ntxt),
+                                        "mkdir failed: %s", strerror(errno));
+                                    ipc_send_msg(sock, IPC_NOTIFY, ntxt, nlen);
+                                }
+                            } else if (key == 'r' || key == 'R') {
+                                load_dir(g_path);
+                                dirty = true;
+                            } else if (key == KEY_F5) {
+                                if (g_nentries > 0 && g_selected < g_nentries) {
+                                    g_renaming = true;
+                                    g_rename_len = (int)strlen(g_entries[g_selected].name);
+                                    if (g_rename_len >= (int)sizeof(g_rename_buf))
+                                        g_rename_len = (int)sizeof(g_rename_buf) - 1;
+                                    memcpy(g_rename_buf, g_entries[g_selected].name,
+                                           (size_t)g_rename_len);
+                                    g_rename_buf[g_rename_len] = '\0';
+                                    redraw = true;
+                                }
                             }
                             if (redraw) { dirty = true; }
+                            msg_done:;
                         } else if (type == IPC_INPUT_MOUSE && in_plen >= 9) {
                             int32_t mx, my; uint8_t btns;
                             memcpy(&mx, in_pld,     4);
@@ -443,6 +568,8 @@ int main(void) {
                                 }
                             }
                             prev_lbtn = lbtn;
+                        } else if (type == IPC_WIN_RESIZE) {
+                            dirty = true;
                         }
                         free(in_pld); in_pld = NULL;
                         in_got = 0; in_plen = 0; in_pgot = 0;
