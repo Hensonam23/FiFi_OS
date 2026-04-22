@@ -8,16 +8,17 @@ ZEN_REPO="https://github.com/zen-kernel/zen-kernel.git"
 SRC_DIR="$REPO_ROOT/linux/src"
 CFG_FRAGMENT="$REPO_ROOT/linux/fifi.config"
 
-# Detect latest zen stable branch from git ls-remote, or fall back to a known good one
+# Detect latest zen stable branch (format: X.Y/main)
 detect_zen_branch() {
     local latest
-    latest=$(git ls-remote --heads "$ZEN_REPO" 'refs/heads/zen/v*/zen' 2>/dev/null \
+    latest=$(git ls-remote --heads "$ZEN_REPO" 2>/dev/null \
         | awk '{print $2}' \
+        | grep -E 'refs/heads/6\.[0-9]+/main$' \
         | sed 's|refs/heads/||' \
         | sort -t. -k1,1n -k2,2n \
         | tail -1)
     if [ -z "$latest" ]; then
-        echo "zen/v6.14/zen"   # fallback — update if this gets too old
+        echo "6.19/main"   # fallback
     else
         echo "$latest"
     fi
