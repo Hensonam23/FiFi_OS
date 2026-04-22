@@ -1,0 +1,3 @@
+# Phase 2: Bare-metal platform layer — Limine framebuffer, PS/2, HDA, XHCI.
+# Only compiled in the main branch.
+# Maps to the same interface as fifi/platform/linux/ so compositor/ is portable.

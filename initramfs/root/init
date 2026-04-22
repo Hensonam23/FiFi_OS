@@ -1,0 +1,47 @@
+#!/bin/sh
+# FiFi OS — PID 1 init
+# Phase 1: mount essentials, show banner, launch shell.
+# Phase 2+: this will launch the FiFi compositor instead.
+
+# ── Mount essential virtual filesystems ──────────────────────────────────────
+mount -t proc     none /proc
+mount -t sysfs    none /sys
+mount -t devtmpfs none /dev
+mount -t tmpfs    none /tmp
+mount -t tmpfs    none /run
+
+mkdir -p /dev/pts /dev/shm
+mount -t devpts   none /dev/pts
+mount -t tmpfs    none /dev/shm
+
+# ── Kernel messages: quiet after boot ────────────────────────────────────────
+echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
+
+# ── Hostname ──────────────────────────────────────────────────────────────────
+echo "fifios" > /proc/sys/kernel/hostname 2>/dev/null || true
+
+# ── PATH ──────────────────────────────────────────────────────────────────────
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export TERM=linux
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+clear
+cat /etc/fifi-banner
+
+# ── Phase 2+: launch FiFi compositor ─────────────────────────────────────────
+# When the compositor is ready, replace the exec below with:
+#   exec /bin/fifi-compositor
+# For now we drop to a shell.
+
+if [ -x /bin/ush ]; then
+    exec /bin/ush
+else
+    exec /bin/sh
+fi
+
+# ── Emergency fallback ────────────────────────────────────────────────────────
+echo ""
+echo "  FiFi OS: shell exited — dropping to emergency shell"
+echo ""
+exec /bin/sh

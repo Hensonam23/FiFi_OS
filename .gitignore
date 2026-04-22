@@ -60,3 +60,12 @@ initrd/rootfs/*.elf
 
 # QEMU serial log (read by Claude for live debugging)
 serial.log
+serial-linux.log
+
+# linux-desktop: kernel source (huge, cloned separately by setup-linux.sh)
+linux/src/
+# linux-desktop: build artifacts
+build-linux/
+# linux-desktop: keep the config fragment but ignore build byproducts
+linux/*.o
+linux/*.a

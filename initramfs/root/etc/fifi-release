@@ -1,0 +1,7 @@
+NAME="FiFi OS"
+VERSION="linux-desktop alpha"
+ID=fifios
+ID_LIKE=arch
+PRETTY_NAME="FiFi OS (linux-desktop alpha)"
+HOME_URL="https://github.com/Hensonam23/FiFi_OS"
+BUILD_BRANCH="linux-desktop"
