@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <time.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 /* Pull in kernel header declarations (stub limine.h will be used) */
 #include "pit.h"
@@ -160,6 +163,42 @@ bool net_send_eth(const uint8_t dst[6], uint16_t et,
                   const void *payload, size_t len) {
     (void)dst; (void)et; (void)payload; (void)len;
     return false;
+}
+
+/* ── App spawning — fork+exec for IPC apps ────────────────────────────────── */
+
+void gui_spawn_app(const char *path) {
+    signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: exec the app */
+        char *argv[] = { (char *)path, NULL };
+        execv(path, argv);
+        _exit(127);
+    }
+    if (pid > 0)
+        fprintf(stderr, "[platform] spawned %s (pid %d)\n", path, (int)pid);
+    else
+        fprintf(stderr, "[platform] fork failed for %s\n", path);
+}
+
+/* ── CPU frequency (read from sysfs) ─────────────────────────────────────── */
+
+uint32_t sys_cpu_freq_mhz(void) {
+    /* Try scaling_cur_freq (kHz), fall back to cpuinfo_cur_freq */
+    static const char *paths[] = {
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        uint32_t khz = 0;
+        if (fscanf(f, "%u", &khz) == 1) { fclose(f); return khz / 1000u; }
+        fclose(f);
+    }
+    return 0;
 }
 
 /* ── Serial — stub ────────────────────────────────────────────────────────── */

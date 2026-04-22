@@ -53,23 +53,26 @@ Everything visible transfers. Only the kernel layer is replaced:
 | Component | Status |
 |---|---|
 | GUI compositor: window manager, z-order, drag/resize | **Working (Phase 2 ✓)** |
-| Taskbar: launcher, window buttons, clock, volume tray | **Working** |
+| Taskbar: launcher, window buttons, clock, volume/FPS tray | **Working** |
 | Theme system: 16 accent presets, 5 wallpaper patterns | **Working** |
 | File browser: list/grid view, sidebar, search, operations | **Working** |
 | Text viewer/editor: syntax highlight, edit mode, undo | **Working** |
-| Settings panel: theme, clock, audio, display | **Working** |
+| Settings panel: theme, clock, audio, gaming, network | **Working** |
 | PTY terminal: real shell (busybox sh) in a FiFi window | **Working (Phase 3 ✓)** |
 | DRM/KMS display: direct GPU, no polling lag | **Working (Phase 4 ✓)** |
 | Audio: ALSA volume control (slider works in UI) | **Working (Phase 4 ✓)** |
+| Gamepad: evdev HID input routed to focused IPC app | **Working (Phase 4 ✓)** |
+| Gaming mode: CPU governor switch, uncapped frame rate | **Working (Phase 4 ✓)** |
+| App launcher: spawn IPC apps from GUI (Files, Settings, Gamepad) | **Working (Phase 4 ✓)** |
 | Kernel infrastructure: PMM, VMM, IDT, scheduler | Replaced by Linux |
 
 ---
 
 ## Current State
 
-**Phase 3 complete. Phase 4 well underway.**
+**Phase 3 complete. Phase 4 nearly complete.**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control with working test tone, a working IPC socket protocol for standalone apps, and a fixed cursor rendering pipeline. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. Volume control in the FiFi taskbar is wired to the real ALSA mixer; the test button plays an actual audio tone. Both QEMU and SDL2 native runner work.
+FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. The GUI launcher can spawn IPC apps (`fifi-filebrowser`, `fifi-settings`, `fifi-gamepad`) directly without opening a terminal. IPC windows are draggable by their top edge. CPU frequency and gamepad status are shown in the Settings panel. Both QEMU and SDL2 native runner work.
 
 ---
 
@@ -114,12 +117,18 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control w
 - [x] Dirty-row tracking: only copies changed rows to GPU — much less work per frame
 - [x] ALSA volume control: volume slider in FiFi taskbar controls real system audio
 - [x] ALSA test tone: test button plays a real sine wave at current volume via PCM ioctls
+- [x] Gamepad input: evdev HID events detected, normalized, routed to focused IPC app
+- [x] Gaming mode toggle: Settings panel button switches CPU governor + uncaps frame rate
+- [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
+- [x] Gamepad visualizer app: `fifi-gamepad` shows live button/axis state (IPC demo)
+- [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar without terminal
+- [x] IPC window drag: grab any IPC app window by its top strip to move it
+- [x] CPU frequency in Settings: reads from sysfs, shown in System Information panel
+- [x] Gamepad status in Settings: shows Connected/None in Gaming section
 - [ ] PipeWire audio: game audio routing, multi-app mixing
 - [ ] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
 - [ ] Steam installed in image, launches in a FiFi window
 - [ ] Proton configured and tested (Vulkan via Mesa/RADV or NVIDIA open drivers)
-- [ ] Gamepad input: HID events routed to focused game window
-- [ ] Gaming mode toggle in Settings
 
 ### Phase 5 — Security and Privacy
 

@@ -29,8 +29,8 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  4u
-#define LAUNCHER_W      100u
+#define LAUNCHER_ITEMS  7u
+#define LAUNCHER_W      110u
 #define CTX_W           110u
 #define CTX_ITEM_H      22u
 #define CTX_ITEMS       4u
@@ -395,6 +395,8 @@ static uint64_t g_vol_minus_bx = 0, g_vol_plus_bx  = 0;
 static uint64_t g_vol_btn_by   = 0, g_vol_btn_bh   = 0u;
 static uint64_t g_vol_chime_bx = 0, g_vol_chime_by = 0;
 static uint64_t g_vol_chime_bw = 0, g_vol_chime_bh = 0u;
+static uint64_t g_gaming_btn_bx = 0, g_gaming_btn_by = 0;
+static uint64_t g_gaming_btn_bw = 0, g_gaming_btn_bh = 0u;
 
 /* ── Volume tray popup state ─────────────────────────────────────────── */
 static bool     g_vol_popup_open  = false;
@@ -660,7 +662,45 @@ static void taskbar_draw_tray(void) {
     console_fill_rect(bx, by, 1u, 8u, 0x00202838u);
     console_fill_rect(bx + bar_full_w - 1u, by, 1u, 8u, 0x00202838u);
 
-    /* ── Volume tray icon (left of memory bar) ── */
+    /* ── Gamepad indicator (shown when gamepad connected) ── */
+    uint64_t tray_right = bx > 4u ? bx - 4u : 0u;
+    {
+        extern bool input_gamepad_connected(void);
+        if (input_gamepad_connected()) {
+            static const char *gp_lbl = "GP";
+            uint64_t gpl = 2u;
+            uint64_t gpw = gpl * fw + 8u;
+            uint64_t gpx = tray_right > gpw ? tray_right - gpw : 0u;
+            console_fill_rect(gpx, ty + 3u, gpw, TASKBAR_H - 6u, 0x00102820u);
+            gui_draw_str(gpx + 4u, ty + (TASKBAR_H - fh) / 2u, gp_lbl, 0x0050e880u, 0x00102820u);
+            tray_right = gpx > 4u ? gpx - 4u : 0u;
+        }
+    }
+
+    /* ── FPS counter (shown in gaming mode, left of gamepad indicator) ── */
+    uint64_t fps_right_edge = tray_right;
+    {
+        extern uint32_t compositor_fps(void);
+        extern bool gaming_mode_active(void);
+        if (gaming_mode_active()) {
+            uint32_t fps = compositor_fps();
+            char ftxt[8]; int fi = 0;
+            if (fps >= 1000) { ftxt[fi++]='9'; ftxt[fi++]='9'; ftxt[fi++]='9'; }
+            else if (fps >= 100) { ftxt[fi++]=(char)('0'+fps/100); fps%=100; ftxt[fi++]=(char)('0'+fps/10); ftxt[fi++]=(char)('0'+fps%10); }
+            else if (fps >= 10)  { ftxt[fi++]=(char)('0'+fps/10);  ftxt[fi++]=(char)('0'+fps%10); }
+            else                 { ftxt[fi++]=(char)('0'+fps); }
+            ftxt[fi++]='f'; ftxt[fi++]='p'; ftxt[fi++]='s'; ftxt[fi]='\0';
+            uint64_t fw2 = (uint64_t)fi * fw + 8u;
+            uint64_t fx  = fps_right_edge > fw2 ? fps_right_edge - fw2 : 0u;
+            uint32_t fbg = 0x00101828u;
+            uint32_t ffg = fps >= 60u ? 0x0050e880u : fps >= 30u ? 0x00e8c040u : 0x00e86040u;
+            console_fill_rect(fx, ty + 3u, fw2, TASKBAR_H - 6u, fbg);
+            gui_draw_str(fx + 4u, ty + (TASKBAR_H - fh) / 2u, ftxt, ffg, fbg);
+            fps_right_edge = fx > 4u ? fx - 4u : 0u;
+        }
+    }
+
+    /* ── Volume tray icon (left of memory bar / FPS counter) ── */
     {
         int vol = hda_is_ready() ? hda_get_volume() : -1;
         char vtxt[6]; int vi = 0;
@@ -675,7 +715,7 @@ static void taskbar_draw_tray(void) {
         }
         vtxt[vi] = '\0';
         uint64_t vw  = (uint64_t)vi * fw + 8u;
-        uint64_t vx  = bx > vw + 4u ? bx - vw - 4u : 0u;
+        uint64_t vx  = fps_right_edge > vw + 4u ? fps_right_edge - vw - 4u : 0u;
         uint64_t vy  = ty + (TASKBAR_H - fh) / 2u;
         uint32_t vbg = g_vol_popup_open ? g_theme.accent : 0x00141e2au;
         console_fill_rect(vx, ty + 3u, vw, TASKBAR_H - 6u, vbg);
@@ -727,7 +767,11 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    static const char *items[] = { "Terminal", "Files", "Settings", "Viewer" };
+    /* Items 0-3: built-in windows; 4-6: spawned IPC apps */
+    static const char *items[] = {
+        "Terminal", "Files", "Settings", "Viewer",
+        "File Browser", "System Info", "Gamepad",
+    };
 
     int32_t mx, my;
     bool lbtn, rbtn;
@@ -5504,6 +5548,32 @@ static void settings_render(window_t *w) {
         gui_itoa_pad2((int)mn, up_str + 3); up_str[5] = ':';
         gui_itoa_pad2((int)sc, up_str + 6); up_str[8] = '\0';
     }
+    /* Build CPU frequency string */
+    char cpu_str[16];
+    {
+        /* sys_cpu_freq_mhz() is provided by Linux platform.c; returns 0 if unavailable */
+        __attribute__((weak)) uint32_t sys_cpu_freq_mhz(void);
+        uint32_t mhz = sys_cpu_freq_mhz ? sys_cpu_freq_mhz() : 0u;
+        if (mhz == 0) {
+            cpu_str[0] = '?'; cpu_str[1] = '\0';
+        } else if (mhz >= 1000) {
+            char gb[6];
+            gui_itoa((int)(mhz / 1000), gb, 6);
+            int ri = 0;
+            for (int k = 0; gb[k] && ri < 12; ) cpu_str[ri++] = gb[k++];
+            cpu_str[ri++] = '.';
+            cpu_str[ri++] = (char)('0' + (mhz % 1000) / 100);
+            cpu_str[ri++] = ' '; cpu_str[ri++] = 'G'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
+            cpu_str[ri] = '\0';
+        } else {
+            char mb[6];
+            gui_itoa((int)mhz, mb, 6);
+            int ri = 0;
+            for (int k = 0; mb[k] && ri < 9; ) cpu_str[ri++] = mb[k++];
+            cpu_str[ri++] = ' '; cpu_str[ri++] = 'M'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
+            cpu_str[ri] = '\0';
+        }
+    }
     struct { const char *key; const char *val; } sysinfo[] = {
         { "OS:",         "FiFi OS linux-desktop"  },
         { "Arch:",       "x86_64"                 },
@@ -5511,6 +5581,7 @@ static void settings_render(window_t *w) {
         { "Boot:",       "Direct kernel boot"     },
         { "Memory:",     mem_str                  },
         { "Resolution:", res_str                  },
+        { "CPU:",        cpu_str                  },
         { "Font:",       console_font_name()      },
         { "Uptime:",     up_str                   },
         { NULL, NULL }
@@ -5799,6 +5870,58 @@ static void settings_render(window_t *w) {
 
         console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
         cy += 5u;
+    }
+
+    /* ── Section: Gaming ── */
+    {
+        uint64_t gm_btn_h = fh + 6u;
+        if (cy + SET_SEC_H + gm_btn_h < iy + ih) {
+            console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Gaming",
+                         COL_SET_SEC_FG, COL_SET_SEC_BG);
+            cy += SET_SEC_H + 4u;
+
+            /* Gamepad status row */
+            if (cy + SET_ROW_H <= iy + ih) {
+                extern bool input_gamepad_connected(void);
+                bool gp = input_gamepad_connected();
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
+                gui_draw_str(cx,    cy + (SET_ROW_H - fh) / 2u, "Gamepad:", COL_SET_KEY_FG, bg);
+                gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u,
+                             gp ? "Connected" : "None",
+                             gp ? 0x0060d880u : COL_SET_HINT, bg);
+                cy += SET_ROW_H;
+            }
+
+            /* Gaming Mode toggle button */
+            if (cy + gm_btn_h <= iy + ih) {
+                extern bool gaming_mode_active(void);
+                bool gm_on = gaming_mode_active();
+                const char *gm_lbl = gm_on ? "ON " : "OFF";
+                uint64_t gbl = 3u;
+                uint64_t gbw = (gbl + 2u) * fw;
+                uint64_t gbx = val_x;
+                uint64_t gby = cy;
+                console_fill_rect(ix, cy, iw, gm_btn_h, COL_SET_BG);
+                gui_draw_str(cx, cy + (gm_btn_h - fh) / 2u, "Gaming Mode:", COL_SET_KEY_FG, COL_SET_BG);
+                uint32_t gm_bg = gm_on ? 0x00103820u : 0x00182838u;
+                uint32_t gm_fg = gm_on ? 0x0050e880u : 0x0060a0e0u;
+                console_fill_rect(gbx, gby, gbw, gm_btn_h, gm_bg);
+                uint64_t gpx = gbx + (gbw - gbl * fw) / 2u;
+                gui_draw_str(gpx, gby + (gm_btn_h - fh) / 2u, gm_lbl, gm_fg, gm_bg);
+                g_gaming_btn_bx = gbx; g_gaming_btn_by = gby;
+                g_gaming_btn_bw = gbw; g_gaming_btn_bh = gm_btn_h;
+                cy += gm_btn_h + 4u;
+            } else {
+                g_gaming_btn_bh = 0u;
+            }
+
+            console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
+            cy += 5u;
+        } else {
+            g_gaming_btn_bh = 0u;
+        }
     }
 
     /* ── Section: Network ── */
@@ -7207,6 +7330,15 @@ void gui_on_tick(void) {
                             window_t *_lw = &g_wins[_li];
                             z_raise(_li);
                             if (_lw->state == WIN_HIDDEN) win_show(_lw, _li); else full_redraw();
+                        } else if (_li >= 4 && _li < (int)LAUNCHER_ITEMS) {
+                            static const char *_ap[] = {
+                                "/bin/fifi-filebrowser",
+                                "/bin/fifi-settings",
+                                "/bin/fifi-gamepad",
+                            };
+                            __attribute__((weak)) void gui_spawn_app(const char *path);
+                            if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
+                            full_redraw();
                         }
                         continue;
                     } else { g_launcher_open = false; g_launcher_hover = -1; full_redraw(); continue; }
@@ -8951,13 +9083,25 @@ void gui_on_tick(void) {
         g_launcher_hover = -1;
         if (inside) {
             int item = (int)((uint64_t)my - ly) / (int)LAUNCHER_ITEM_H;
-            if (item >= 0 && item < (int)LAUNCHER_ITEMS) {
+            if (item >= 0 && item < 4) {
+                /* Built-in windows: show/raise */
                 window_t *w = &g_wins[item];
                 z_raise(item);
                 if (w->state == WIN_HIDDEN)
                     win_show(w, item);
                 else
                     full_redraw();
+            } else if (item == 4 || item == 5 || item == 6) {
+                /* IPC standalone apps — spawn via platform fork/exec */
+                static const char *app_paths[] = {
+                    "/bin/fifi-filebrowser",
+                    "/bin/fifi-settings",
+                    "/bin/fifi-gamepad",
+                };
+                __attribute__((weak)) void gui_spawn_app(const char *path);
+                if (gui_spawn_app)
+                    gui_spawn_app(app_paths[item - 4]);
+                full_redraw();
             } else {
                 full_redraw();
             }
@@ -9877,6 +10021,17 @@ void gui_on_tick(void) {
                         (uint64_t)mx >= g_vol_chime_bx &&
                         (uint64_t)mx <  g_vol_chime_bx + g_vol_chime_bw) {
                         hda_play_tone(750, 400);
+                    }
+                    /* Gaming Mode toggle button */
+                    if (g_gaming_btn_bh > 0 &&
+                        (uint64_t)my >= g_gaming_btn_by &&
+                        (uint64_t)my <  g_gaming_btn_by + g_gaming_btn_bh &&
+                        (uint64_t)mx >= g_gaming_btn_bx &&
+                        (uint64_t)mx <  g_gaming_btn_bx + g_gaming_btn_bw) {
+                        extern bool gaming_mode_active(void);
+                        extern void gaming_mode_set(bool on);
+                        gaming_mode_set(!gaming_mode_active());
+                        settings_render(w);
                     }
                 }
             }

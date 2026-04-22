@@ -51,6 +51,36 @@ typedef struct { int fd; int32_t x_max, y_max; } abs_dev_t;
 static abs_dev_t g_abs_devs[MAX_EVDEV];
 static int g_abs_cnt = 0;
 
+/* ── Gamepad state ──────────────────────────────────────────────────────────
+ * Supports up to 2 gamepads. Each one tracks buttons + 4 axes + 2 triggers. */
+#define GP_BTN_A      (1u<<0)
+#define GP_BTN_B      (1u<<1)
+#define GP_BTN_X      (1u<<2)
+#define GP_BTN_Y      (1u<<3)
+#define GP_BTN_LB     (1u<<4)
+#define GP_BTN_RB     (1u<<5)
+#define GP_BTN_START  (1u<<6)
+#define GP_BTN_SELECT (1u<<7)
+#define GP_BTN_LS     (1u<<8)
+#define GP_BTN_RS     (1u<<9)
+#define GP_BTN_DUP    (1u<<10)
+#define GP_BTN_DDOWN  (1u<<11)
+#define GP_BTN_DLEFT  (1u<<12)
+#define GP_BTN_DRIGHT (1u<<13)
+
+typedef struct {
+    int      fd;
+    uint16_t buttons;
+    int16_t  lx, ly;   /* left stick */
+    int16_t  rx, ry;   /* right stick */
+    int16_t  lt, rt;   /* triggers */
+    bool     changed;
+    int32_t  abs_max[8]; /* max values for ABS 0..7 */
+} gamepad_t;
+
+static gamepad_t g_gamepads[2];
+static int       g_gp_cnt = 0;
+
 /* ── Keyboard state ───────────────────────────────────────────────────────── */
 #define KB_RING  256
 #define GUI_RING 256
@@ -364,6 +394,20 @@ void input_init(void) {
                 continue;
             }
         }
+        /* Gamepad: has BTN_A (BTN_SOUTH=0x130) + EV_ABS */
+        if (has_key && has_abs && evdev_has_bit(fd, EV_KEY, BTN_SOUTH) &&
+            g_gp_cnt < 2) {
+            gamepad_t *gp = &g_gamepads[g_gp_cnt++];
+            memset(gp, 0, sizeof(*gp));
+            gp->fd = fd;
+            struct input_absinfo ai;
+            for (int a = 0; a < 8; a++) {
+                gp->abs_max[a] = (ioctl(fd, EVIOCGABS(a), &ai) == 0 && ai.maximum > 0)
+                                 ? ai.maximum : 32767;
+            }
+            fprintf(stderr, "[input] gamepad: %s\n", path);
+            continue;
+        }
         close(fd);
     }
     closedir(d);
@@ -477,6 +521,86 @@ void input_poll(void) {
             }
         }
     }
+
+    /* ── Gamepad events ────────────────────────────────────────────────── */
+    for (int gi = 0; gi < g_gp_cnt; gi++) {
+        gamepad_t *gp = &g_gamepads[gi];
+        struct input_event ev;
+        bool prev_changed = gp->changed;
+        gp->changed = false;
+        while (read(gp->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+            if (ev.type == EV_KEY) {
+                uint16_t bit = 0;
+                switch (ev.code) {
+                case BTN_SOUTH:   bit = GP_BTN_A;      break;
+                case BTN_EAST:    bit = GP_BTN_B;      break;
+                case BTN_NORTH:   bit = GP_BTN_X;      break;
+                case BTN_WEST:    bit = GP_BTN_Y;      break;
+                case BTN_TL:      bit = GP_BTN_LB;     break;
+                case BTN_TR:      bit = GP_BTN_RB;     break;
+                case BTN_START:   bit = GP_BTN_START;  break;
+                case BTN_SELECT:  bit = GP_BTN_SELECT; break;
+                case BTN_THUMBL:  bit = GP_BTN_LS;     break;
+                case BTN_THUMBR:  bit = GP_BTN_RS;     break;
+                }
+                if (bit) {
+                    if (ev.value) gp->buttons |=  bit;
+                    else          gp->buttons &= ~bit;
+                    gp->changed = true;
+                }
+            } else if (ev.type == EV_ABS) {
+                int32_t max = (ev.code < 8) ? gp->abs_max[ev.code] : 32767;
+                if (max == 0) max = 32767;
+                /* Normalize to -32767..32767 (triggers: 0..32767) */
+                int32_t n = (int32_t)((int64_t)ev.value * 32767 / max);
+                switch (ev.code) {
+                case ABS_X:     gp->lx = (int16_t)n; gp->changed = true; break;
+                case ABS_Y:     gp->ly = (int16_t)n; gp->changed = true; break;
+                case ABS_Z:     gp->lt = (int16_t)n; gp->changed = true; break;
+                case ABS_RX:    gp->rx = (int16_t)n; gp->changed = true; break;
+                case ABS_RY:    gp->ry = (int16_t)n; gp->changed = true; break;
+                case ABS_RZ:    gp->rt = (int16_t)n; gp->changed = true; break;
+                case ABS_HAT0X:
+                    gp->buttons &= ~(GP_BTN_DLEFT | GP_BTN_DRIGHT);
+                    if (ev.value < 0) gp->buttons |= GP_BTN_DLEFT;
+                    if (ev.value > 0) gp->buttons |= GP_BTN_DRIGHT;
+                    gp->changed = true; break;
+                case ABS_HAT0Y:
+                    gp->buttons &= ~(GP_BTN_DUP | GP_BTN_DDOWN);
+                    if (ev.value < 0) gp->buttons |= GP_BTN_DUP;
+                    if (ev.value > 0) gp->buttons |= GP_BTN_DDOWN;
+                    gp->changed = true; break;
+                }
+            }
+        }
+        (void)prev_changed;
+    }
+}
+
+/* Gamepad query API */
+bool input_gamepad_connected(void)   { return g_gp_cnt > 0; }
+
+bool input_gamepad_state(int idx, uint16_t *btns,
+                         int16_t *lx, int16_t *ly,
+                         int16_t *rx, int16_t *ry,
+                         int16_t *lt, int16_t *rt) {
+    if (idx < 0 || idx >= g_gp_cnt) return false;
+    gamepad_t *gp = &g_gamepads[idx];
+    if (btns) *btns = gp->buttons;
+    if (lx)   *lx   = gp->lx;
+    if (ly)   *ly   = gp->ly;
+    if (rx)   *rx   = gp->rx;
+    if (ry)   *ry   = gp->ry;
+    if (lt)   *lt   = gp->lt;
+    if (rt)   *rt   = gp->rt;
+    return true;
+}
+
+bool input_gamepad_changed(int idx) {
+    if (idx < 0 || idx >= g_gp_cnt) return false;
+    bool c = g_gamepads[idx].changed;
+    g_gamepads[idx].changed = false;
+    return c;
 }
 
 /* ── keyboard.h API (implemented without including keyboard.h to avoid
@@ -585,5 +709,6 @@ int input_get_all_fds(int *buf, int maxn) {
     for (int i = 0; i < g_kbd_cnt && n < maxn; i++) buf[n++] = g_kbd_fds[i];
     for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
     for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
+    for (int i = 0; i < g_gp_cnt  && n < maxn; i++) buf[n++] = g_gamepads[i].fd;
     return n;
 }
