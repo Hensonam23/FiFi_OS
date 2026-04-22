@@ -44,7 +44,8 @@ struct limine_framebuffer *drm_open(void) {
     if (g_fd < 0) { fprintf(stderr, "[drm] no card\n"); return NULL; }
 
     /* DRM master — may fail if not VT-active; QEMU is usually fine */
-    ioctl(g_fd, DRM_IOCTL_SET_MASTER, 0);
+    int master_r = ioctl(g_fd, DRM_IOCTL_SET_MASTER, 0);
+    fprintf(stderr, "[drm] SET_MASTER: %s (errno=%d)\n", master_r == 0 ? "ok" : "fail", master_r ? errno : 0);
 
     /* Tell the kernel we understand universal planes — required by some drivers */
     {
@@ -67,6 +68,7 @@ struct limine_framebuffer *drm_open(void) {
     res.connector_id_ptr = (uint64_t)(uintptr_t)conn_ids;
     res.crtc_id_ptr      = (uint64_t)(uintptr_t)crtc_ids;
     if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        fprintf(stderr, "[drm] GETRESOURCES (fill) failed errno=%d\n", errno);
         free(conn_ids); free(crtc_ids); goto fail;
     }
 

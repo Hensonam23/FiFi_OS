@@ -397,6 +397,8 @@ static uint64_t g_vol_chime_bx = 0, g_vol_chime_by = 0;
 static uint64_t g_vol_chime_bw = 0, g_vol_chime_bh = 0u;
 static uint64_t g_gaming_btn_bx = 0, g_gaming_btn_by = 0;
 static uint64_t g_gaming_btn_bw = 0, g_gaming_btn_bh = 0u;
+static uint64_t g_gaming_mode_bx = 0, g_gaming_mode_by = 0;
+static uint64_t g_gaming_mode_bw = 0, g_gaming_mode_bh = 0u;
 
 /* ── Volume tray popup state ─────────────────────────────────────────── */
 static bool     g_vol_popup_open  = false;
@@ -677,7 +679,22 @@ static void taskbar_draw_tray(void) {
         }
     }
 
-    /* ── FPS counter (shown in gaming mode, left of gamepad indicator) ── */
+    /* ── Network indicator ── */
+    {
+        bool has_nic = net_nic_present();
+        bool has_ip  = (net_ip != 0);
+        const char *net_lbl = has_ip ? "LAN" : (has_nic ? "NIC" : "---");
+        uint32_t net_bg  = has_ip  ? 0x00102820u : (has_nic ? 0x00201010u : 0x00141414u);
+        uint32_t net_fg  = has_ip  ? 0x0050e880u : (has_nic ? 0x00e07050u : COL_TASKBAR);
+        uint64_t nw      = 3u * fw + 8u;
+        uint64_t nx      = tray_right > nw ? tray_right - nw : 0u;
+        console_fill_rect(nx, ty + 3u, nw, TASKBAR_H - 6u, net_bg);
+        if (has_nic || has_ip)
+            gui_draw_str(nx + 4u, ty + (TASKBAR_H - fh) / 2u, net_lbl, net_fg, net_bg);
+        tray_right = nx > 4u ? nx - 4u : 0u;
+    }
+
+    /* ── FPS counter (shown in gaming mode, left of network indicator) ── */
     uint64_t fps_right_edge = tray_right;
     {
         extern uint32_t compositor_fps(void);
@@ -5894,6 +5911,24 @@ static void settings_render(window_t *w) {
                 cy += SET_ROW_H;
             }
 
+            /* Launch Gamepad Visualizer button */
+            if (cy + gm_btn_h <= iy + ih) {
+                static const char *gvlbl = "Launch";
+                uint64_t gvl = (uint64_t)gui_strlen(gvlbl);
+                uint64_t gvw = (gvl + 2u) * fw;
+                uint64_t gvx = val_x;
+                uint64_t gvy = cy;
+                console_fill_rect(ix, cy, iw, gm_btn_h, COL_SET_BG);
+                gui_draw_str(cx, cy + (gm_btn_h - fh) / 2u, "Gamepad App:", COL_SET_KEY_FG, COL_SET_BG);
+                console_fill_rect(gvx, gvy, gvw, gm_btn_h, 0x00182838u);
+                uint64_t gvpx = gvx + (gvw - gvl * fw) / 2u;
+                gui_draw_str(gvpx, gvy + (gm_btn_h - fh) / 2u, gvlbl, 0x0060a0e0u, 0x00182838u);
+                /* Store button bounds for click handler (reuse chime layout) */
+                g_gaming_btn_bx = gvx; g_gaming_btn_by = gvy;
+                g_gaming_btn_bw = gvw; g_gaming_btn_bh = gm_btn_h;
+                cy += gm_btn_h + 4u;
+            }
+
             /* Gaming Mode toggle button */
             if (cy + gm_btn_h <= iy + ih) {
                 extern bool gaming_mode_active(void);
@@ -5910,11 +5945,11 @@ static void settings_render(window_t *w) {
                 console_fill_rect(gbx, gby, gbw, gm_btn_h, gm_bg);
                 uint64_t gpx = gbx + (gbw - gbl * fw) / 2u;
                 gui_draw_str(gpx, gby + (gm_btn_h - fh) / 2u, gm_lbl, gm_fg, gm_bg);
-                g_gaming_btn_bx = gbx; g_gaming_btn_by = gby;
-                g_gaming_btn_bw = gbw; g_gaming_btn_bh = gm_btn_h;
+                g_gaming_mode_bx = gbx; g_gaming_mode_by = gby;
+                g_gaming_mode_bw = gbw; g_gaming_mode_bh = gm_btn_h;
                 cy += gm_btn_h + 4u;
             } else {
-                g_gaming_btn_bh = 0u;
+                g_gaming_mode_bh = 0u;
             }
 
             console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
@@ -10022,12 +10057,21 @@ void gui_on_tick(void) {
                         (uint64_t)mx <  g_vol_chime_bx + g_vol_chime_bw) {
                         hda_play_tone(750, 400);
                     }
-                    /* Gaming Mode toggle button */
+                    /* Launch Gamepad Visualizer button */
                     if (g_gaming_btn_bh > 0 &&
                         (uint64_t)my >= g_gaming_btn_by &&
                         (uint64_t)my <  g_gaming_btn_by + g_gaming_btn_bh &&
                         (uint64_t)mx >= g_gaming_btn_bx &&
                         (uint64_t)mx <  g_gaming_btn_bx + g_gaming_btn_bw) {
+                        __attribute__((weak)) void gui_spawn_app(const char *path);
+                        if (gui_spawn_app) gui_spawn_app("/bin/fifi-gamepad");
+                    }
+                    /* Gaming Mode toggle button */
+                    if (g_gaming_mode_bh > 0 &&
+                        (uint64_t)my >= g_gaming_mode_by &&
+                        (uint64_t)my <  g_gaming_mode_by + g_gaming_mode_bh &&
+                        (uint64_t)mx >= g_gaming_mode_bx &&
+                        (uint64_t)mx <  g_gaming_mode_bx + g_gaming_mode_bw) {
                         extern bool gaming_mode_active(void);
                         extern void gaming_mode_set(bool on);
                         gaming_mode_set(!gaming_mode_active());
