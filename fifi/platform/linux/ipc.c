@@ -122,8 +122,11 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         /* Assign initial z-order */
         c->z_order = g_next_z++;
 
-        /* Center the window — gui_get_screen_size() gives framebuffer dims */
-        uint32_t fb_w = 1920, fb_h = 1080;  /* TODO: query from console */
+        /* Center the window using actual framebuffer dimensions */
+        uint32_t fb_w = (uint32_t)console_fb_width();
+        uint32_t fb_h = (uint32_t)console_fb_height();
+        if (fb_w == 0) fb_w = 1920;
+        if (fb_h == 0) fb_h = 1080;
         c->win_w = req_w;
         c->win_h = req_h;
         c->win_x = (fb_w > req_w) ? (fb_w - req_w) / 2 : 0;
@@ -131,6 +134,9 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
 
         fprintf(stderr, "[ipc] app '%s' connected, window %ux%u at (%u,%u)\n",
                 c->title, c->win_w, c->win_h, c->win_x, c->win_y);
+
+        /* Pre-fill window area with dark color so no stale content shows before first frame */
+        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0xFF0D1117u);
 
         /* Reply with window info */
         uint32_t resp[5] = {
