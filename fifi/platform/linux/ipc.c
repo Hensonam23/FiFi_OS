@@ -922,6 +922,12 @@ void ipc_draw_drag_overlay(void) {
     }
 }
 
+/* Close the currently focused IPC window (Alt+F4) */
+void ipc_close_focused(void) {
+    if (g_focused_idx >= 0 && g_focused_idx < IPC_MAX_APPS)
+        ipc_kill_client(g_focused_idx);
+}
+
 /* Clear IPC keyboard focus (compositor GUI reclaimed focus) */
 void ipc_clear_focus(void) { g_focused_idx = -1; }
 
