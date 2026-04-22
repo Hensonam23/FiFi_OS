@@ -49,12 +49,14 @@
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_FOCUS         0x13u
 #define IPC_INPUT_GAMEPAD 0x14u  /* {uint16_t btns; int16_t lx,ly,rx,ry,lt,rt} = 14 bytes */
+#define IPC_INVALIDATE    0x15u  /* ask app to push a fresh full frame (no payload) */
 
 typedef struct {
     int      fd;
     bool     active;
     bool     frame_dirty;  /* true after a new IPC_APP_FRAME was blitted this tick */
     uint32_t win_id;    /* ID returned from gui_app_create_window() — 0 if not yet created */
+    uint32_t z_order;   /* higher = on top; raised on focus */
     uint32_t win_x, win_y, win_w, win_h;
     char     title[64];
     /* partial-read state */
@@ -68,6 +70,12 @@ typedef struct {
 static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
+static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter */
+
+/* Raise a window to the top of the z-stack */
+static void ipc_raise(int i) {
+    g_clients[i].z_order = g_next_z++;
+}
 
 /* ── Window drag state ────────────────────────────────────────────────────── */
 #define IPC_DRAG_STRIP   24   /* top N pixels of an IPC window act as drag handle */
@@ -102,6 +110,9 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         /* Clamp window size to 1920×1080 if larger */
         if (req_w > 1920) req_w = 1920;
         if (req_h > 1080) req_h = 1080;
+
+        /* Assign initial z-order */
+        c->z_order = g_next_z++;
 
         /* Center the window — gui_get_screen_size() gives framebuffer dims */
         uint32_t fb_w = 1920, fb_h = 1080;  /* TODO: query from console */
@@ -359,29 +370,43 @@ void ipc_draw_overlays(void) {
 }
 
 /* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit.
- * Also starts a drag if the click is in the top IPC_DRAG_STRIP pixels of the window. */
+ * Iterates in reverse z-order (topmost window wins), raises the hit window to front,
+ * and starts a drag if the click is in the top IPC_DRAG_STRIP pixels. */
 bool ipc_hit_test(int32_t mx, int32_t my) {
+    /* Find the topmost (highest z_order) window under the cursor */
+    int best_i = -1;
+    uint32_t best_z = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0) continue;
         if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
             (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
-            if (g_focused_idx != i) {
-                g_focused_idx = i;
-                fprintf(stderr, "[ipc] focus → '%s'\n", c->title);
+            if (c->z_order > best_z) {
+                best_z = c->z_order;
+                best_i = i;
             }
-            /* Start drag if click is in the top drag strip (but NOT on close button) */
-            if (g_drag_idx < 0 &&
-                (uint32_t)my < c->win_y + IPC_DRAG_STRIP &&
-                !close_btn_hit(c, mx, my)) {
-                g_drag_idx = i;
-                g_drag_ox  = mx - (int32_t)c->win_x;
-                g_drag_oy  = my - (int32_t)c->win_y;
-            }
-            return true;
         }
     }
-    return false;
+    if (best_i < 0) return false;
+
+    if (g_focused_idx != best_i) {
+        g_focused_idx = best_i;
+        fprintf(stderr, "[ipc] focus → '%s'\n", g_clients[best_i].title);
+    }
+    /* Raise to top of z-stack and request a fresh frame so it paints over siblings */
+    ipc_raise(best_i);
+    ipc_send(&g_clients[best_i], IPC_INVALIDATE, NULL, 0);
+    g_clients[best_i].frame_dirty = true;
+
+    /* Start drag if click is in the top drag strip (but NOT on close button) */
+    if (g_drag_idx < 0 &&
+        (uint32_t)my < g_clients[best_i].win_y + IPC_DRAG_STRIP &&
+        !close_btn_hit(&g_clients[best_i], mx, my)) {
+        g_drag_idx = best_i;
+        g_drag_ox  = mx - (int32_t)g_clients[best_i].win_x;
+        g_drag_oy  = my - (int32_t)g_clients[best_i].win_y;
+    }
+    return true;
 }
 
 /* Update drag position; returns true if a drag is active (caller should not send mouse events). */

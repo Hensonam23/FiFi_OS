@@ -29,6 +29,7 @@
 #define IPC_WIN_CREATED   0x10u
 #define IPC_INPUT_KEY     0x11u
 #define IPC_INPUT_MOUSE   0x12u
+#define IPC_INVALIDATE    0x15u
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define WIN_W   640
@@ -439,7 +440,7 @@ int main(void) {
                     }
                 } else {
                     /* Zero-length message fully received */
-                    if (type == IPC_WIN_CREATED) { /* already handled */ }
+                    if (type == IPC_INVALIDATE) dirty = true;
                     in_got = 0; in_plen = 0; in_pgot = 0;
                 }
             }

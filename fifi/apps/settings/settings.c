@@ -28,6 +28,7 @@
 #define IPC_WIN_CREATED  0x10u
 #define IPC_INPUT_KEY    0x11u
 #define IPC_INPUT_MOUSE  0x12u
+#define IPC_INVALIDATE   0x15u
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W 480
@@ -420,6 +421,10 @@ int main(void) {
                         igot = 0; iplen = 0; ipgot = 0;
                     }
                 } else {
+                    if (type == IPC_INVALIDATE) {
+                        render(fb);
+                        send_frame(sock, fb);
+                    }
                     igot = 0; iplen = 0; ipgot = 0;
                 }
             }
