@@ -40,10 +40,21 @@ void ipc_poll(void);
 void ipc_shutdown(void);
 int  ipc_server_fd(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
+bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_keyboard_active(void);
 void ipc_send_focused_key(uint8_t key);
 void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
+void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
+                      int16_t rx, int16_t ry, int16_t lt, int16_t rt);
 void ipc_clear_focus(void);
+
+/* Gamepad input query */
+bool input_gamepad_connected(void);
+bool input_gamepad_state(int idx, uint16_t *btns,
+                         int16_t *lx, int16_t *ly,
+                         int16_t *rx, int16_t *ry,
+                         int16_t *lt, int16_t *rt);
+bool input_gamepad_changed(int idx);
 
 #define CUR_H 20   /* must match input.c / input_sdl.c */
 
@@ -66,7 +77,25 @@ static int      g_fb_fd   = -1;
 static uint32_t *g_fb_mem = NULL;
 static size_t   g_fb_size = 0;
 static struct   limine_framebuffer g_lmfb;
-static bool     g_using_drm = false;
+static bool     g_using_drm  = false;
+static bool     g_gaming_mode = false;  /* set by GUI; removes poll cap */
+static uint32_t g_fps_current = 0;      /* last measured frame rate */
+
+bool gaming_mode_active(void)   { return g_gaming_mode; }
+uint32_t compositor_fps(void)   { return g_fps_current; }
+void gaming_mode_set(bool on)   {
+    g_gaming_mode = on;
+    fprintf(stderr, "[compositor] gaming mode %s\n", on ? "ON" : "OFF");
+    /* Hint CPU governor — best-effort, non-fatal */
+    const char *gov = on ? "performance" : "schedutil";
+    for (int cpu = 0; cpu < 8; cpu++) {
+        char path[80];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
+        int fd = open(path, O_WRONLY);
+        if (fd >= 0) { write(fd, gov, strlen(gov)); close(fd); }
+    }
+}
 
 static struct termios g_orig_term;
 static bool           g_term_saved = false;
@@ -210,6 +239,11 @@ int main(void) {
 #define MAX_PFD 24
     struct pollfd pfd[MAX_PFD];
 
+    /* FPS tracking */
+    struct timespec fps_ts;
+    clock_gettime(CLOCK_MONOTONIC, &fps_ts);
+    uint32_t fps_frames = 0;
+
     for (;;) {
         /* ── Build poll set ────────────────────────────────────────────── */
         int nfds = 0;
@@ -233,11 +267,21 @@ int main(void) {
             nfds++;
         }
 
-        /* Wait up to 4 ms (250 Hz cap) — wakes immediately on input */
-        poll(pfd, (nfds_t)nfds, 4);
+        /* 4 ms cap (250 Hz) normally; 0 in gaming mode for max frame rate */
+        poll(pfd, (nfds_t)nfds, g_gaming_mode ? 0 : 4);
 
         /* ── IPC: accept new app connections, read app messages ──────────── */
         ipc_poll();
+
+        /* ── Gamepad → IPC focused app ───────────────────────────────────── */
+        if (ipc_keyboard_active() && input_gamepad_connected()) {
+            for (int gi = 0; gi < 2; gi++) {
+                if (!input_gamepad_changed(gi)) continue;
+                uint16_t btns; int16_t lx, ly, rx, ry, lt, rt;
+                if (input_gamepad_state(gi, &btns, &lx, &ly, &rx, &ry, &lt, &rt))
+                    ipc_send_gamepad(btns, lx, ly, rx, ry, lt, rt);
+            }
+        }
 
         /* ── PTY output → console buffer ───────────────────────────────── */
         pty_poll_output();
@@ -252,12 +296,15 @@ int main(void) {
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
-            if (mlb) {
+            /* Update drag (move IPC window) — do this before hit-test */
+            bool dragging = ipc_drag_update(mcx, mcy, mlb);
+
+            if (mlb && !dragging) {
                 /* On left-click: check if it lands on an IPC window */
                 if (!ipc_hit_test(mcx, mcy))
                     ipc_clear_focus();  /* click on compositor GUI — clear IPC focus */
             }
-            if (ipc_keyboard_active())
+            if (ipc_keyboard_active() && !dragging)
                 ipc_send_focused_mouse(mcx, mcy, btns);
         }
 
@@ -299,6 +346,18 @@ int main(void) {
 
         /* ── Single DRM flush covers both content and cursor ────────────── */
         if ((flipped || cursor_moved) && g_using_drm) drm_flush();
+
+        /* ── FPS counter: update once per second ────────────────────────── */
+        fps_frames++;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec - fps_ts.tv_sec) * 1000L
+                        + (now.tv_nsec - fps_ts.tv_nsec) / 1000000L;
+        if (elapsed_ms >= 1000) {
+            g_fps_current = (uint32_t)(fps_frames * 1000u / (uint32_t)elapsed_ms);
+            fps_frames = 0;
+            fps_ts = now;
+        }
     }
 
     return 0;

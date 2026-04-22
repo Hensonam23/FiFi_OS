@@ -78,6 +78,12 @@ echo "[initramfs] building fifi-settings..."
     echo "[initramfs] included fifi-settings"
 } || echo "[initramfs] WARNING: fifi-settings build failed"
 
+echo "[initramfs] building fifi-gamepad..."
+(cd "$REPO_ROOT/fifi/apps/gamepad" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/gamepad/fifi-gamepad" "$STAGE/bin/"
+    echo "[initramfs] included fifi-gamepad"
+} || echo "[initramfs] WARNING: fifi-gamepad build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 

@@ -48,6 +48,7 @@
 #define IPC_INPUT_KEY     0x11u
 #define IPC_INPUT_MOUSE   0x12u
 #define IPC_FOCUS         0x13u
+#define IPC_INPUT_GAMEPAD 0x14u  /* {uint16_t btns; int16_t lx,ly,rx,ry,lt,rt} = 14 bytes */
 
 typedef struct {
     int      fd;
@@ -66,6 +67,12 @@ typedef struct {
 static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
+
+/* ── Window drag state ────────────────────────────────────────────────────── */
+#define IPC_DRAG_STRIP  24   /* top N pixels of an IPC window act as drag handle */
+static int   g_drag_idx   = -1;   /* which client is being dragged */
+static int32_t g_drag_ox  = 0;    /* cursor offset within window at drag start */
+static int32_t g_drag_oy  = 0;
 
 /* ── Send a message to an app ────────────────────────────────────────────── */
 static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len) {
@@ -274,7 +281,8 @@ void ipc_poll(void) {
     }
 }
 
-/* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit. */
+/* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit.
+ * Also starts a drag if the click is in the top IPC_DRAG_STRIP pixels of the window. */
 bool ipc_hit_test(int32_t mx, int32_t my) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
@@ -285,10 +293,35 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
                 g_focused_idx = i;
                 fprintf(stderr, "[ipc] focus → '%s'\n", c->title);
             }
+            /* Start drag if click is in the top drag strip */
+            if (g_drag_idx < 0 &&
+                (uint32_t)my < c->win_y + IPC_DRAG_STRIP) {
+                g_drag_idx = i;
+                g_drag_ox  = mx - (int32_t)c->win_x;
+                g_drag_oy  = my - (int32_t)c->win_y;
+            }
             return true;
         }
     }
     return false;
+}
+
+/* Update drag position; returns true if a drag is active (caller should not send mouse events). */
+bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
+    if (!lbtn) {
+        g_drag_idx = -1;
+        return false;
+    }
+    if (g_drag_idx < 0) return false;
+    ipc_client_t *c = &g_clients[g_drag_idx];
+    if (!c->active || c->fd < 0) { g_drag_idx = -1; return false; }
+    int32_t new_x = mx - g_drag_ox;
+    int32_t new_y = my - g_drag_oy;
+    if (new_x < 0) new_x = 0;
+    if (new_y < 0) new_y = 0;
+    c->win_x = (uint32_t)new_x;
+    c->win_y = (uint32_t)new_y;
+    return true;
 }
 
 bool ipc_keyboard_active(void) {
@@ -328,6 +361,21 @@ void ipc_send_key(uint32_t focused_win_id, uint8_t key) {
             return;
         }
     }
+}
+
+/* Broadcast gamepad state to the focused app (called from main loop) */
+void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
+                      int16_t rx, int16_t ry, int16_t lt, int16_t rt) {
+    if (!ipc_keyboard_active()) return;
+    uint8_t buf[14];
+    memcpy(buf,      &btns, 2);
+    memcpy(buf + 2,  &lx,   2);
+    memcpy(buf + 4,  &ly,   2);
+    memcpy(buf + 6,  &rx,   2);
+    memcpy(buf + 8,  &ry,   2);
+    memcpy(buf + 10, &lt,   2);
+    memcpy(buf + 12, &rt,   2);
+    ipc_send(&g_clients[g_focused_idx], IPC_INPUT_GAMEPAD, buf, sizeof(buf));
 }
 
 /* Returns the IPC server fd for inclusion in the main poll set */

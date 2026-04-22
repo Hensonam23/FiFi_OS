@@ -46,10 +46,20 @@ struct limine_framebuffer *drm_open(void) {
     /* DRM master — may fail if not VT-active; QEMU is usually fine */
     ioctl(g_fd, DRM_IOCTL_SET_MASTER, 0);
 
+    /* Tell the kernel we understand universal planes — required by some drivers */
+    {
+        struct drm_set_client_cap cap = {.capability = 2 /*DRM_CLIENT_CAP_UNIVERSAL_PLANES*/, .value = 1};
+        ioctl(g_fd, DRM_IOCTL_SET_CLIENT_CAP, &cap);
+    }
+
     /* ── Resource list (two-pass: sizes, then fill) ─────────────────── */
     struct drm_mode_card_res res = {0};
-    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0)
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        fprintf(stderr, "[drm] GETRESOURCES failed errno=%d\n", errno);
         goto fail;
+    }
+    fprintf(stderr, "[drm] resources: %u connectors %u crtcs\n",
+            res.count_connectors, res.count_crtcs);
 
     uint32_t *conn_ids = calloc(res.count_connectors, sizeof(uint32_t));
     uint32_t *crtc_ids = calloc(res.count_crtcs,      sizeof(uint32_t));
