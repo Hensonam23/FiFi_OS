@@ -29,11 +29,11 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  9u
+#define LAUNCHER_ITEMS  10u
 #define LAUNCHER_W      110u
 #define CTX_W           130u
 #define CTX_ITEM_H      22u
-#define CTX_ITEMS       8u   /* 4 built-in windows + separator + 3 IPC apps */
+#define CTX_ITEMS       9u   /* 4 built-in windows + separator + 4 IPC apps */
 
 /* File browser context menu */
 #define FB_CTX_W         120u
@@ -808,10 +808,10 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4-7: spawned IPC apps */
+    /* Items 0-3: built-in windows; 4-8: spawned IPC apps */
     static const char *items[] = {
         "Terminal", "Files", "Settings", "Viewer",
-        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor",
+        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term",
     };
 
     int32_t mx, my;
@@ -944,7 +944,7 @@ static void ctx_draw(void) {
     static const char *ctx_items[] = {
         "Terminal", "Files", "Settings", "Viewer",
         NULL,               /* separator */
-        "File Browser", "Sys Monitor", "Net Monitor",
+        "File Browser", "Sys Monitor", "Net Monitor", "New Term",
     };
     int32_t cx = g_ctx_x;
     int32_t cy = g_ctx_y;
@@ -7419,6 +7419,7 @@ void gui_on_tick(void) {
                                 "/bin/fifi-gamepad",
                                 "/bin/fifi-sysmon",
                                 "/bin/fifi-netmon",
+                                "/bin/fifi-terminal",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
@@ -7447,6 +7448,7 @@ void gui_on_tick(void) {
                                 "/bin/fifi-filebrowser",
                                 "/bin/fifi-sysmon",
                                 "/bin/fifi-netmon",
+                                "/bin/fifi-terminal",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_cc[_ci - 5]);
@@ -9209,6 +9211,7 @@ void gui_on_tick(void) {
                     "/bin/fifi-gamepad",
                     "/bin/fifi-sysmon",
                     "/bin/fifi-netmon",
+                    "/bin/fifi-terminal",
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app)
@@ -9324,9 +9327,10 @@ void gui_on_tick(void) {
                 z_raise(item);
                 if (w->state == WIN_HIDDEN) win_show(w, item);
                 else full_redraw();
-            } else if (item >= 5 && item <= 7) {
+            } else if (item >= 5 && item <= 8) {
                 static const char *_cp[] = {
-                    "/bin/fifi-filebrowser", "/bin/fifi-sysmon", "/bin/fifi-netmon"
+                    "/bin/fifi-filebrowser", "/bin/fifi-sysmon",
+                    "/bin/fifi-netmon", "/bin/fifi-terminal"
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app) gui_spawn_app(_cp[item - 5]);

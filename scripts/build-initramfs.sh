@@ -97,6 +97,12 @@ echo "[initramfs] building fifi-netmon..."
     echo "[initramfs] included fifi-netmon"
 } || echo "[initramfs] WARNING: fifi-netmon build failed"
 
+echo "[initramfs] building fifi-terminal..."
+(cd "$REPO_ROOT/fifi/apps/terminal" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/terminal/fifi-terminal" "$STAGE/bin/"
+    echo "[initramfs] included fifi-terminal"
+} || echo "[initramfs] WARNING: fifi-terminal build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 
