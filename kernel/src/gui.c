@@ -6824,6 +6824,7 @@ static void fb_ctx_run(int item) {
 
 void gui_on_tick(void) {
     g_gui_tick++;
+    bool g_needs_redraw = false;
 
     /* ── Once-per-second: redraw status bar and live settings if open ── */
     {
@@ -6996,7 +6997,7 @@ void gui_on_tick(void) {
         if (new_chrome_win != g_chrome_win || new_chrome_btn != g_chrome_btn) {
             g_chrome_win = new_chrome_win;
             g_chrome_btn = new_chrome_btn;
-            full_redraw();
+            g_needs_redraw = true;
         }
     }
 
@@ -7011,7 +7012,7 @@ void gui_on_tick(void) {
         if (new_rw != g_resize_hover_win || new_rd != g_resize_hover_dir) {
             g_resize_hover_win = new_rw;
             g_resize_hover_dir = new_rd;
-            full_redraw();
+            g_needs_redraw = true;
         }
     }
 
@@ -9924,4 +9925,7 @@ void gui_on_tick(void) {
         }
     }
     if (inertial_dirty) full_redraw();
+
+    /* Coalesced hover redraw: at most one full_redraw() per tick for hover changes */
+    if (g_needs_redraw) full_redraw();
 }
