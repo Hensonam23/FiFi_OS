@@ -70,7 +70,7 @@ Everything visible transfers. Only the kernel layer is replaced:
 
 ## Current State
 
-**Phase 3 complete. Phase 4 nearly complete.**
+**Phase 3 complete. Phase 4 feature-complete (pending audio chime test).**
 
 FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. The GUI launcher can spawn IPC apps (`fifi-filebrowser`, `fifi-settings`, `fifi-gamepad`) directly without opening a terminal. IPC windows are draggable by their top edge. CPU frequency and gamepad status are shown in the Settings panel. Both QEMU and SDL2 native runner work.
 
@@ -122,9 +122,16 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, 
 - [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
 - [x] Gamepad visualizer app: `fifi-gamepad` shows live button/axis state (IPC demo)
 - [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar without terminal
-- [x] IPC window drag: grab any IPC app window by its top strip to move it
+- [x] IPC window drag: grab any IPC app window by its top strip to move it; clears ghost pixels on move
 - [x] CPU frequency in Settings: reads from sysfs, shown in System Information panel
 - [x] Gamepad status in Settings: shows Connected/None in Gaming section
+- [x] IPC window close button: red X in top-right of each app window, click to kill
+- [x] IPC window z-ordering: click-to-front with IPC_INVALIDATE repaint; topmost window wins hit-test
+- [x] IPC taskbar buttons: each open IPC app gets a taskbar button; click to focus/raise, click again to minimize
+- [x] IPC window minimize: hide window, clear backbuffer, restore via taskbar button click
+- [x] F-key pass-through: F1-F4 always reach GUI even when IPC app has keyboard focus
+- [x] Screen blanking: display goes black after 5 minutes idle; any input wakes instantly
+- [x] Audio chime PCM fix: BUFFER_SIZE/BUFFER_BYTES constraints set correctly for ALSA HW_PARAMS
 - [ ] PipeWire audio: game audio routing, multi-app mixing
 - [ ] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
 - [ ] Steam installed in image, launches in a FiFi window
