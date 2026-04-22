@@ -39,6 +39,11 @@ void ipc_init(void);
 void ipc_poll(void);
 void ipc_shutdown(void);
 int  ipc_server_fd(void);
+bool ipc_hit_test(int32_t mx, int32_t my);
+bool ipc_keyboard_active(void);
+void ipc_send_focused_key(uint8_t key);
+void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
+void ipc_clear_focus(void);
 
 #define CUR_H 20   /* must match input.c / input_sdl.c */
 
@@ -240,11 +245,29 @@ int main(void) {
         /* ── evdev events ──────────────────────────────────────────────── */
         input_poll();
 
-        /* ── Route keyboard to PTY when terminal window is focused ───────
-         * gui_capture=false means the terminal is on top and visible;
-         * keys sit in g_kb_ring waiting for the (now absent) bare-metal
-         * shell.  We drain them here and write to the PTY instead.       */
-        if (!keyboard_gui_capture_active()) {
+        /* ── Input routing: IPC app > PTY > GUI ────────────────────────
+         * Check mouse first so we can update IPC focus before routing keys. */
+        {
+            int32_t mcx, mcy; bool mlb, mrb;
+            mouse_get_state(&mcx, &mcy, &mlb, &mrb);
+            uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
+
+            if (mlb) {
+                /* On left-click: check if it lands on an IPC window */
+                if (!ipc_hit_test(mcx, mcy))
+                    ipc_clear_focus();  /* click on compositor GUI — clear IPC focus */
+            }
+            if (ipc_keyboard_active())
+                ipc_send_focused_mouse(mcx, mcy, btns);
+        }
+
+        if (ipc_keyboard_active()) {
+            /* Keys go to the focused IPC app, not PTY or GUI */
+            int c;
+            while ((c = keyboard_try_getchar()) != -1)
+                ipc_send_focused_key((uint8_t)c);
+        } else if (!keyboard_gui_capture_active()) {
+            /* Terminal is focused — keys go to PTY */
             int c;
             while ((c = keyboard_try_getchar()) != -1)
                 pty_write_input((uint8_t)c);

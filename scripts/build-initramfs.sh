@@ -65,6 +65,19 @@ if [ -x "$COMP_BIN" ]; then
     echo "[initramfs] included fifi-compositor"
 fi
 
+# ── Build and include standalone IPC apps ────────────────────────────────────
+echo "[initramfs] building fifi-filebrowser..."
+(cd "$REPO_ROOT/fifi/apps/filebrowser" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/filebrowser/fifi-filebrowser" "$STAGE/bin/"
+    echo "[initramfs] included fifi-filebrowser"
+} || echo "[initramfs] WARNING: fifi-filebrowser build failed"
+
+echo "[initramfs] building fifi-settings..."
+(cd "$REPO_ROOT/fifi/apps/settings" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/settings/fifi-settings" "$STAGE/bin/"
+    echo "[initramfs] included fifi-settings"
+} || echo "[initramfs] WARNING: fifi-settings build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 

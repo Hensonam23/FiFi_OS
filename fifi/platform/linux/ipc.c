@@ -63,8 +63,9 @@ typedef struct {
     uint32_t pld_got;
 } ipc_client_t;
 
-static int          g_srv_fd   = -1;
+static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
+static int          g_focused_idx = -1;  /* which client has keyboard focus */
 
 /* ── Send a message to an app ────────────────────────────────────────────── */
 static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len) {
@@ -273,7 +274,53 @@ void ipc_poll(void) {
     }
 }
 
-/* Send a key event to the focused app (call from keyboard routing) */
+/* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit. */
+bool ipc_hit_test(int32_t mx, int32_t my) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0) continue;
+        if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
+            (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
+            if (g_focused_idx != i) {
+                g_focused_idx = i;
+                fprintf(stderr, "[ipc] focus → '%s'\n", c->title);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ipc_keyboard_active(void) {
+    return g_focused_idx >= 0 &&
+           g_clients[g_focused_idx].active &&
+           g_clients[g_focused_idx].fd >= 0;
+}
+
+/* Send a key event to the focused app */
+void ipc_send_focused_key(uint8_t key) {
+    if (!ipc_keyboard_active()) return;
+    ipc_send(&g_clients[g_focused_idx], IPC_INPUT_KEY, &key, 1);
+}
+
+/* Send mouse event (absolute screen coords) to the focused app translated to
+ * window-relative coords. */
+void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns) {
+    if (!ipc_keyboard_active()) return;
+    ipc_client_t *c = &g_clients[g_focused_idx];
+    int32_t rx = mx - (int32_t)c->win_x;
+    int32_t ry = my - (int32_t)c->win_y;
+    uint8_t buf[9];
+    memcpy(buf,     &rx,  4);
+    memcpy(buf + 4, &ry,  4);
+    buf[8] = btns;
+    ipc_send(c, IPC_INPUT_MOUSE, buf, sizeof(buf));
+}
+
+/* Clear IPC keyboard focus (compositor GUI reclaimed focus) */
+void ipc_clear_focus(void) { g_focused_idx = -1; }
+
+/* Keep old API for any callers */
 void ipc_send_key(uint32_t focused_win_id, uint8_t key) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         if (g_clients[i].active && g_clients[i].win_id == focused_win_id) {
