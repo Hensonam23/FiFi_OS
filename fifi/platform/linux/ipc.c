@@ -56,6 +56,7 @@
 #define IPC_CLIP_GET      0x18u  /* app → compositor: (no payload) — request clipboard contents */
 #define IPC_CLIP_DATA     0x19u  /* compositor → app: {char text[]} — clipboard contents */
 #define IPC_OPEN_FILE     0x1Au  /* app → compositor: {char path[]} — open path in text viewer */
+#define IPC_WIN_RESIZE    0x1Bu  /* compositor → app: {uint16_t new_w, new_h} — window resized */
 
 typedef struct {
     int      fd;
@@ -63,8 +64,12 @@ typedef struct {
     bool     minimized;    /* window is hidden (task button remains, process alive) */
     uint32_t win_id;    /* ID returned from gui_app_create_window() — 0 if not yet created */
     uint32_t z_order;   /* higher = on top; raised on focus */
-    uint32_t win_x, win_y, win_w, win_h;
-    uint32_t *frame_buf; /* cached pixel frame — win_w × win_h, repainted every tick */
+    uint32_t win_x, win_y, win_w, win_h;   /* current display position/size */
+    uint32_t frame_w, frame_h;             /* native frame size the app renders at */
+    uint32_t *frame_buf; /* native frame pixels (frame_w × frame_h) */
+    uint32_t *disp_buf;  /* NULL = use frame_buf directly; else = scaled win_w×win_h copy */
+    bool     snapped;
+    uint32_t pre_snap_x, pre_snap_y, pre_snap_w, pre_snap_h;
     char     title[64];
     /* partial-read state */
     uint8_t  hdr[IPC_HDR_SZ];
@@ -96,9 +101,83 @@ static void ipc_raise(int i) {
 /* ── Window drag state ────────────────────────────────────────────────────── */
 #define IPC_DRAG_STRIP   24   /* top N pixels of an IPC window act as drag handle */
 #define IPC_CLOSE_BTN_SZ 18   /* close button square size (in the drag strip) */
+#define IPC_SNAP_ZONE    40   /* px from screen edge that activates snap */
 static int   g_drag_idx   = -1;   /* which client is being dragged */
 static int32_t g_drag_ox  = 0;    /* cursor offset within window at drag start */
 static int32_t g_drag_oy  = 0;
+static int   g_snap_preview = 0;  /* 0=none, 1=left, 2=right, 3=max */
+
+static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len);  /* fwd */
+
+/* Nearest-neighbour scale src (sw×sh) into dst (dw×dh) */
+static void scale_buf(const uint32_t *src, uint32_t sw, uint32_t sh,
+                      uint32_t *dst, uint32_t dw, uint32_t dh) {
+    for (uint32_t y = 0; y < dh; y++) {
+        uint32_t sy = y * sh / dh;
+        const uint32_t *srow = src + sy * sw;
+        uint32_t       *drow = dst + y  * dw;
+        for (uint32_t x = 0; x < dw; x++)
+            drow[x] = srow[x * sw / dw];
+    }
+}
+
+/* Apply a snap zone to client i (l=left half, 2=right half, 3=maximize) */
+static void ipc_apply_snap(int i, int zone) {
+    ipc_client_t *c = &g_clients[i];
+    uint32_t fb_w = (uint32_t)console_fb_width();
+    uint32_t fb_h = (uint32_t)console_fb_height();
+    uint32_t tb_h = 32u;  /* TASKBAR_H */
+
+    if (!c->snapped) {
+        c->pre_snap_x = c->win_x;
+        c->pre_snap_y = c->win_y;
+        c->pre_snap_w = c->win_w;
+        c->pre_snap_h = c->win_h;
+    }
+    /* Clear old area */
+    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
+
+    switch (zone) {
+    case 1:  /* left half */
+        c->win_x = 0; c->win_y = 0;
+        c->win_w = fb_w / 2; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        break;
+    case 2:  /* right half */
+        c->win_x = fb_w / 2; c->win_y = 0;
+        c->win_w = fb_w - fb_w / 2; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        break;
+    case 3:  /* maximize */
+        c->win_x = 0; c->win_y = 0;
+        c->win_w = fb_w; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        break;
+    }
+    c->snapped = true;
+
+    /* Allocate or reallocate scaled display buffer */
+    free(c->disp_buf);
+    c->disp_buf = malloc(c->win_w * c->win_h * 4);
+    if (c->disp_buf && c->frame_buf)
+        scale_buf(c->frame_buf, c->frame_w, c->frame_h, c->disp_buf, c->win_w, c->win_h);
+
+    /* Notify app of new size */
+    uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
+    ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
+}
+
+/* Restore a snapped window to its pre-snap dimensions */
+static void ipc_unsnap(int i) {
+    ipc_client_t *c = &g_clients[i];
+    if (!c->snapped) return;
+    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
+    c->win_x = c->pre_snap_x;
+    c->win_y = c->pre_snap_y;
+    c->win_w = c->pre_snap_w;
+    c->win_h = c->pre_snap_h;
+    free(c->disp_buf); c->disp_buf = NULL;
+    c->snapped = false;
+    uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
+    ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
+}
 
 /* ── Send a message to an app ────────────────────────────────────────────── */
 static void ipc_send(ipc_client_t *c, uint32_t type, const void *data, uint32_t len) {
@@ -137,17 +216,19 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint32_t fb_h = (uint32_t)console_fb_height();
         if (fb_w == 0) fb_w = 1920;
         if (fb_h == 0) fb_h = 1080;
-        c->win_w = req_w;
-        c->win_h = req_h;
-        c->win_x = (fb_w > req_w) ? (fb_w - req_w) / 2 : 0;
-        c->win_y = (fb_h > req_h) ? (fb_h - req_h) / 2 : 80;
+        c->win_w   = req_w; c->frame_w = req_w;
+        c->win_h   = req_h; c->frame_h = req_h;
+        c->win_x   = (fb_w > req_w) ? (fb_w - req_w) / 2 : 0;
+        c->win_y   = (fb_h > req_h) ? (fb_h - req_h) / 2 : 80;
+        c->snapped = false;
+        c->disp_buf = NULL;
 
         fprintf(stderr, "[ipc] app '%s' connected, window %ux%u at (%u,%u)\n",
                 c->title, c->win_w, c->win_h, c->win_x, c->win_y);
 
-        /* Allocate cached frame buffer — compositor repaints this every tick */
-        free(c->frame_buf);
-        c->frame_buf = calloc(c->win_w * c->win_h, 4);  /* zero = black until first frame */
+        /* Allocate native frame buffer */
+        free(c->frame_buf); free(c->disp_buf); c->disp_buf = NULL;
+        c->frame_buf = calloc(c->frame_w * c->frame_h, 4);
 
         /* Reply with window info */
         uint32_t resp[5] = {
@@ -167,13 +248,17 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint32_t expected = 16 + fw * fh * 4;
         if (pld_len < expected || fw == 0 || fh == 0) break;
 
-        /* Cache pixels into frame_buf — ipc_blit_all() paints this every tick */
+        /* Update native frame_buf at the app's original dimensions */
         if (!c->minimized && c->frame_buf &&
-            fx + fw <= c->win_w && fy + fh <= c->win_h) {
+            fx + fw <= c->frame_w && fy + fh <= c->frame_h) {
             const uint32_t *src = (const uint32_t *)(pld + 16);
             for (uint32_t row = 0; row < fh; row++)
-                memcpy(c->frame_buf + (fy + row) * c->win_w + fx,
+                memcpy(c->frame_buf + (fy + row) * c->frame_w + fx,
                        src + row * fw, fw * 4);
+            /* If snapped, keep disp_buf in sync */
+            if (c->snapped && c->disp_buf)
+                scale_buf(c->frame_buf, c->frame_w, c->frame_h,
+                          c->disp_buf, c->win_w, c->win_h);
         }
         break;
     }
@@ -235,6 +320,8 @@ static void ipc_disconnect_client(ipc_client_t *c) {
     close(c->fd); c->fd = -1; c->active = false;
     if (c->payload)   { free(c->payload);   c->payload   = NULL; }
     if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
+    if (c->disp_buf)  { free(c->disp_buf);  c->disp_buf  = NULL; }
+    c->snapped = false;
     if (g_focused_idx >= 0 && &g_clients[g_focused_idx] == c) g_focused_idx = -1;
     int i = (int)(c - g_clients);
     if (g_drag_idx == i) g_drag_idx = -1;
@@ -395,6 +482,8 @@ static void ipc_kill_client(int i) {
     c->active = false;
     if (c->payload)   { free(c->payload);   c->payload   = NULL; }
     if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
+    if (c->disp_buf)  { free(c->disp_buf);  c->disp_buf  = NULL; }
+    c->snapped = false;
     if (g_focused_idx == i) g_focused_idx = -1;
     if (g_drag_idx    == i) g_drag_idx    = -1;
     fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
@@ -426,7 +515,10 @@ void ipc_blit_all(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
-        console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->win_w, c->win_h);
+        if (c->snapped && c->disp_buf)
+            console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
+        else
+            console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
     }
 }
 
@@ -498,6 +590,23 @@ void ipc_draw_overlays(void) {
         console_fill_rect(c->win_x,              c->win_y,              1u, c->win_h, br_col);
         console_fill_rect(c->win_x + c->win_w - 1u, c->win_y,          1u, c->win_h, br_col);
     }
+
+    /* ── Snap preview overlay while dragging ─────────────────────────────── */
+    if (g_snap_preview && g_drag_idx >= 0) {
+        uint32_t fb_w  = (uint32_t)console_fb_width();
+        uint32_t fb_h  = (uint32_t)console_fb_height();
+        uint32_t tb_h  = 32u;
+        uint32_t vis_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        uint32_t px = 0, py = 0, pw = fb_w, ph = vis_h;
+        if (g_snap_preview == 1) { pw = fb_w / 2; }
+        else if (g_snap_preview == 2) { px = fb_w / 2; pw = fb_w - fb_w / 2; }
+        /* Semi-transparent blue overlay: draw a 4-px border */
+        uint32_t ov = 0x603878d8u;  /* semi-transparent blue */
+        console_fill_rect(px,          py,          pw, 4u,  ov);
+        console_fill_rect(px,          py + ph - 4u, pw, 4u,  ov);
+        console_fill_rect(px,          py,          4u,  ph, ov);
+        console_fill_rect(px + pw - 4u, py,          4u,  ph, ov);
+    }
 }
 
 /* Check if mouse is over any IPC window; if so, give it focus. Returns true if hit.
@@ -533,32 +642,50 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
         (uint32_t)my < g_clients[best_i].win_y + IPC_DRAG_STRIP &&
         !close_btn_hit(&g_clients[best_i], mx, my) &&
         !min_btn_hit(&g_clients[best_i], mx, my)) {
+        /* If snapped, unsnap first so we drag the native-size window */
+        if (g_clients[best_i].snapped) ipc_unsnap(best_i);
         g_drag_idx = best_i;
         g_drag_ox  = mx - (int32_t)g_clients[best_i].win_x;
         g_drag_oy  = my - (int32_t)g_clients[best_i].win_y;
+        g_snap_preview = 0;
     }
     return true;
 }
 
 /* Update drag position; returns true if a drag is active (caller should not send mouse events). */
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
+    if (g_drag_idx < 0) { g_snap_preview = 0; return false; }
+    ipc_client_t *c = &g_clients[g_drag_idx];
+    if (!c->active || c->fd < 0) { g_drag_idx = -1; g_snap_preview = 0; return false; }
+
     if (!lbtn) {
+        /* Drag released — apply snap if near an edge */
+        int snap = g_snap_preview;
+        g_snap_preview = 0;
         g_drag_idx = -1;
+        if (snap) ipc_apply_snap((int)(c - g_clients), snap);
         return false;
     }
-    if (g_drag_idx < 0) return false;
-    ipc_client_t *c = &g_clients[g_drag_idx];
-    if (!c->active || c->fd < 0) { g_drag_idx = -1; return false; }
+
     int32_t new_x = mx - g_drag_ox;
     int32_t new_y = my - g_drag_oy;
     if (new_x < 0) new_x = 0;
     if (new_y < 0) new_y = 0;
     if ((uint32_t)new_x != c->win_x || (uint32_t)new_y != c->win_y) {
-        /* Clear old window position in backbuffer before moving */
         console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
         c->win_x = (uint32_t)new_x;
         c->win_y = (uint32_t)new_y;
     }
+
+    /* Determine snap preview zone from cursor position */
+    uint32_t fb_w = (uint32_t)console_fb_width();
+    uint32_t fb_h = (uint32_t)console_fb_height();
+    int new_snap = 0;
+    if (mx < IPC_SNAP_ZONE)                       new_snap = 1;  /* left half */
+    else if (mx >= (int32_t)(fb_w - IPC_SNAP_ZONE)) new_snap = 2;  /* right half */
+    else if (my < IPC_SNAP_ZONE)                  new_snap = 3;  /* maximize */
+    (void)fb_h;
+    g_snap_preview = new_snap;
     return true;
 }
 
@@ -743,6 +870,7 @@ void ipc_shutdown(void) {
             close(g_clients[i].fd);
             free(g_clients[i].payload);
             free(g_clients[i].frame_buf);
+            free(g_clients[i].disp_buf);
         }
     }
     if (g_srv_fd >= 0) {
