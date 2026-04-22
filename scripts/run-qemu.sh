@@ -30,8 +30,10 @@ MODE="${1:-gui}"   # gui | serial
 QEMU_BASE=(
     qemu-system-x86_64
     -M q35
-    -m 512M
-    -smp 2
+    -enable-kvm
+    -cpu host
+    -m 4G
+    -smp 4
     -kernel "$BZIMAGE"
     -initrd "$INITRAMFS"
     -no-reboot
@@ -39,6 +41,7 @@ QEMU_BASE=(
     $DISK_ARG
     -netdev user,id=net0
     -device virtio-net-pci,netdev=net0
+    -device virtio-mouse-pci
     -audiodev pa,id=snd0
     -device intel-hda,id=hda0
     -device hda-output,audiodev=snd0
@@ -52,7 +55,8 @@ if [ "$MODE" = "serial" ]; then
 else
     # GUI mode: framebuffer window + serial log to file
     "${QEMU_BASE[@]}" \
-        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 video=1024x768-32" \
-        -device virtio-vga,xres=1024,yres=768 \
+        -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 video=2560x1440-32" \
+        -device virtio-vga,xres=2560,yres=1440 \
+        -display sdl,gl=off \
         -serial file:"$REPO_ROOT/serial-linux.log"
 fi

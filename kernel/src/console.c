@@ -185,8 +185,10 @@ static uint8_t cell_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
 /* ── Double buffer ───────────────────────────────────────────────────────────
  * g_back: regular RAM mirror of the framebuffer.  All rendering goes here.
  * console_flip_if_dirty() copies it to VRAM in one pass to eliminate tearing. */
-static uint32_t *g_back  = NULL;
-static bool      g_dirty = false;
+static uint32_t *g_back     = NULL;
+static bool      g_dirty    = false;
+static uint32_t  g_dirty_y0 = 0xFFFFFFFFu;  /* min dirty row */
+static uint32_t  g_dirty_y1 = 0u;            /* max dirty row (exclusive) */
 
 /* ── Terminal scrollback ring buffer ────────────────────────────────────── */
 static uint8_t  g_tsb_ring[CONSOLE_TSB_CAP];
@@ -452,6 +454,8 @@ static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
 
     if (g_back) {
         g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        if ((uint32_t)(py + g_fh) > g_dirty_y1) g_dirty_y1 = (uint32_t)(py + g_fh);
         for (uint32_t y = 0; y < g_fh; y++) {
             uint32_t *row = g_back + (py + y) * con.pitch32 + px;
             const uint8_t *scan = glyph + y * bpr;
@@ -482,6 +486,8 @@ static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c
     if (y + h > con.h) h = con.h - y;
     if (g_back) {
         g_dirty = true;
+        if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+        if ((uint32_t)(y + h) > g_dirty_y1) g_dirty_y1 = (uint32_t)(y + h);
         for (uint64_t yy = 0; yy < h; yy++) {
             uint32_t *row = g_back + (y + yy) * con.pitch32 + x;
             for (uint64_t xx = 0; xx < w; xx++)
@@ -521,7 +527,10 @@ static void scroll_one_line(void) {
         }
         /* Clear last character row */
         fill_rect(con.x_off, con.y_offset + (vr - 1) * g_fh, vp_w, g_fh, con.bg);
-        g_dirty = true;
+        /* Mark full viewport dirty — memmove above shifted all pixel rows */
+        if ((uint32_t)con.y_offset < g_dirty_y0) g_dirty_y0 = (uint32_t)con.y_offset;
+        uint32_t _sy1 = (uint32_t)(con.y_offset + vr * g_fh);
+        if (_sy1 > g_dirty_y1) g_dirty_y1 = _sy1;
     } else {
         /* No back buffer: re-render from cell buf (bare-metal path) */
         uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
@@ -645,6 +654,8 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
     uint32_t bpr = (g_fw + 7u) / 8u;
     if (g_back) {
         g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        if ((uint32_t)(py + g_fh) > g_dirty_y1) g_dirty_y1 = (uint32_t)(py + g_fh);
         for (uint32_t y = 0; y < g_fh; y++) {
             uint32_t *row = g_back + (py + y) * con.pitch32 + px;
             const uint8_t *scan = glyph + y * bpr;
@@ -684,7 +695,12 @@ void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
     uint32_t *target_back = g_back;
-    if (target_back) g_dirty = true;
+    if (target_back) {
+        g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        uint32_t _rsy1 = (uint32_t)(py + g_fh * scale);
+        if (_rsy1 > g_dirty_y1) g_dirty_y1 = _rsy1;
+    }
     for (uint32_t r = 0; r < g_fh; r++) {
         const uint8_t *scan = glyph + r * bpr;
         for (uint32_t col = 0; col < g_fw; col++) {
@@ -910,18 +926,22 @@ void console_backbuf_init(void) {
 #else
     for (uint64_t i = 0; i < npix; i++) g_back[i] = 0;
 #endif
-    g_dirty = false;
+    g_dirty    = false;
+    g_dirty_y0 = 0xFFFFFFFFu;
+    g_dirty_y1 = 0u;
 }
 
-/* Copy backbuf → VRAM if dirty.  Returns true when a flip happened. */
+/* Copy only dirty rows of backbuf → VRAM.  Returns true when a flip happened. */
 bool console_flip_if_dirty(void) {
     if (!g_back || !g_dirty) return false;
     g_dirty = false;
-    uint64_t n = con.pitch32 * con.h;
-    const uint32_t *src = g_back;
-    /* Cast away volatile so the compiler can auto-vectorize the bulk copy.
-     * WC framebuffer writes are always visible; volatile is not needed here. */
-    uint32_t *dst = (uint32_t *)(uintptr_t)con.pix;
+    uint32_t y0 = g_dirty_y0, y1 = g_dirty_y1;
+    g_dirty_y0 = 0xFFFFFFFFu; g_dirty_y1 = 0u;
+    if (y0 >= y1) return true;
+    if (y1 > (uint32_t)con.h) y1 = (uint32_t)con.h;
+    uint64_t n = (uint64_t)(y1 - y0) * con.pitch32;
+    const uint32_t *src = g_back + (uint64_t)y0 * con.pitch32;
+    uint32_t *dst = (uint32_t *)(uintptr_t)con.pix + (uint64_t)y0 * con.pitch32;
 #ifdef __linux__
     memcpy(dst, src, n * sizeof(uint32_t));
 #else
@@ -947,6 +967,9 @@ bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uin
 void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
     if (!g_back || !buf) return;
     g_dirty = true;
+    if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+    uint32_t _pry1 = (uint32_t)(y + h);
+    if (_pry1 > g_dirty_y1) g_dirty_y1 = _pry1;
     for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
         const uint32_t *src = buf + yy * w;
         uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;

@@ -39,6 +39,7 @@ void  pty_set_winsize(uint16_t cols, uint16_t rows);
 bool  keyboard_gui_capture_active(void);
 int   input_get_all_fds(int *buf, int maxn);
 int   keyboard_try_getchar(void);
+void  mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
 
 /* ── Framebuffer setup ───────────────────────────────────────────────────── */
 
@@ -187,8 +188,8 @@ int main(void) {
             nfds++;
         }
 
-        /* Wait up to 16 ms (60 Hz) — wakes immediately on input */
-        poll(pfd, (nfds_t)nfds, 16);
+        /* Wait up to 4 ms (250 Hz cap) — wakes immediately on input */
+        poll(pfd, (nfds_t)nfds, 4);
 
         /* ── PTY output → console buffer ───────────────────────────────── */
         pty_poll_output();
@@ -209,9 +210,15 @@ int main(void) {
         /* ── GUI tick ──────────────────────────────────────────────────── */
         gui_on_tick();
 
-        /* ── Flip backbuffer → framebuffer, redraw cursor ─────────────── */
-        if (console_flip_if_dirty())
+        /* ── Flip only dirty rows, then update cursor only if it moved ─────── */
+        bool flipped = console_flip_if_dirty();
+        int32_t cx, cy; bool lb, rb;
+        mouse_get_state(&cx, &cy, &lb, &rb);
+        static int32_t s_last_cx = -1, s_last_cy = -1;
+        if (flipped || cx != s_last_cx || cy != s_last_cy) {
             mouse_cursor_update();
+            s_last_cx = cx; s_last_cy = cy;
+        }
     }
 
     return 0;
