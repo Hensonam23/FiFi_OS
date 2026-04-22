@@ -69,3 +69,5 @@ build-linux/
 # linux-desktop: keep the config fragment but ignore build byproducts
 linux/*.o
 linux/*.a
+build-sdl/
+fifi/apps/hello/hello-fifi-app

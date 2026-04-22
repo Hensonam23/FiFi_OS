@@ -931,6 +931,18 @@ void console_backbuf_init(void) {
     g_dirty_y1 = 0u;
 }
 
+/* Expand the dirty range so the cursor layer can force-flush its own rows
+ * without having to draw anything into the back buffer. */
+void console_mark_dirty_rows(uint32_t y0, uint32_t y1) {
+    if (!g_back) return;
+    g_dirty = true;
+    if (y0 < g_dirty_y0) g_dirty_y0 = y0;
+    if (y1 > g_dirty_y1) g_dirty_y1 = y1;
+}
+
+uint32_t *console_backbuf_ptr(void)     { return g_back; }
+uint64_t  console_backbuf_pitch32(void) { return g_back ? con.pitch32 : 0; }
+
 /* Copy only dirty rows of backbuf → VRAM.  Returns true when a flip happened. */
 bool console_flip_if_dirty(void) {
     if (!g_back || !g_dirty) return false;

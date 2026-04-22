@@ -35,6 +35,10 @@ uint64_t           console_pitch32(void);
  * at the end of each frame tick to push the completed frame to VRAM. */
 void console_backbuf_init(void);
 bool console_flip_if_dirty(void);
+/* Dirty range helpers — let the cursor layer force-flush specific rows */
+void      console_mark_dirty_rows(uint32_t y0, uint32_t y1);
+uint32_t *console_backbuf_ptr(void);
+uint64_t  console_backbuf_pitch32(void);
 /* Pixel capture/paste for shadow-buffer drag.  buf must be w*h uint32_t's. */
 bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);

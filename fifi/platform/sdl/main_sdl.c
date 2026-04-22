@@ -13,6 +13,7 @@
 #include "console.h"
 #include "gui.h"
 #include "limine.h"
+#include "mouse.h"
 
 #ifndef SDL_WIN_W
 #define SDL_WIN_W 1280
@@ -183,13 +184,21 @@ int main(void) {
         /* ── GUI tick ──────────────────────────────────────────────────────── */
         gui_on_tick();
 
-        /* ── Flip dirty backbuffer rows → pixel buffer ─────────────────────── */
-        console_flip_if_dirty();
-
-        /* ── Cursor: update only if moved ──────────────────────────────────── */
+        /* ── Cursor erase: mark old cursor rows dirty before flip so the
+         * flip pulls clean backbuffer content there (erases stale cursor) ──── */
         int32_t cx, cy; bool lb, rb;
         mouse_get_state(&cx, &cy, &lb, &rb);
-        if (cx != last_cx || cy != last_cy) {
+        bool cursor_moved = (cx != last_cx || cy != last_cy);
+        if (cursor_moved && last_cy >= 0) {
+            uint32_t ey0 = (uint32_t)(last_cy < 0 ? 0 : last_cy);
+            console_mark_dirty_rows(ey0, ey0 + 20u /* CUR_H */);
+        }
+
+        /* ── Flip dirty backbuffer rows → pixel buffer ─────────────────────── */
+        bool flipped = console_flip_if_dirty();
+
+        /* ── Cursor redraw: save from backbuf (always correct), draw on front ── */
+        if (flipped || cursor_moved) {
             mouse_cursor_update();
             last_cx = cx; last_cy = cy;
         }
