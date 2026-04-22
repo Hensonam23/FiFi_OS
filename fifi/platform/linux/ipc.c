@@ -490,6 +490,55 @@ void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
 /* Returns the IPC server fd for inclusion in the main poll set */
 int ipc_server_fd(void) { return g_srv_fd; }
 
+/* ── Window list query API (called from gui.c taskbar) ──────────────────── */
+
+int ipc_window_count(void) {
+    int n = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++)
+        if (g_clients[i].active && g_clients[i].fd >= 0 && g_clients[i].win_w > 0) n++;
+    return n;
+}
+
+/* Fill title (truncated to title_max-1) and focused flag for the nth active window.
+ * Returns false if slot is out of range. */
+bool ipc_window_info(int slot, char *title, int title_max, bool *focused) {
+    int found = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        if (!g_clients[i].active || g_clients[i].fd < 0 || g_clients[i].win_w == 0)
+            continue;
+        if (found == slot) {
+            if (title && title_max > 0) {
+                int len = (int)strlen(g_clients[i].title);
+                if (len >= title_max) len = title_max - 1;
+                memcpy(title, g_clients[i].title, (size_t)len);
+                title[len] = '\0';
+            }
+            if (focused) *focused = (g_focused_idx == i);
+            return true;
+        }
+        found++;
+    }
+    return false;
+}
+
+/* Raise and focus the nth active IPC window */
+void ipc_window_focus_slot(int slot) {
+    int found = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        if (!g_clients[i].active || g_clients[i].fd < 0 || g_clients[i].win_w == 0)
+            continue;
+        if (found == slot) {
+            g_focused_idx = i;
+            ipc_raise(i);
+            ipc_send(&g_clients[i], IPC_INVALIDATE, NULL, 0);
+            g_clients[i].frame_dirty = true;
+            fprintf(stderr, "[ipc] taskbar raised '%s'\n", g_clients[i].title);
+            return;
+        }
+        found++;
+    }
+}
+
 void ipc_shutdown(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         if (g_clients[i].fd >= 0) {
