@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <time.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -99,6 +100,9 @@ int   input_get_all_fds(int *buf, int maxn);
 int   keyboard_try_getchar(void);
 void  mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
 
+/* console internal: mark rows dirty so flip picks them up */
+void  console_mark_dirty_rows(uint32_t y0, uint32_t y1);
+
 /* ── Framebuffer setup ───────────────────────────────────────────────────── */
 
 static int      g_fb_fd   = -1;
@@ -106,18 +110,17 @@ static uint32_t *g_fb_mem = NULL;
 static size_t   g_fb_size = 0;
 static struct   limine_framebuffer g_lmfb;
 static bool     g_using_drm  = false;
-static bool     g_gaming_mode = false;  /* set by GUI; removes poll cap */
-static uint32_t g_fps_current = 0;      /* last measured frame rate */
-static bool     g_blanked     = false;  /* display blanked due to inactivity */
-static struct timespec g_last_input;    /* time of last user input */
-#define BLANK_TIMEOUT_S 300             /* blank after 5 minutes of no input */
+static bool     g_gaming_mode = false;
+static uint32_t g_fps_current = 0;
+static bool     g_blanked     = false;
+static struct timespec g_last_input;
+#define BLANK_TIMEOUT_S 300
 
 bool gaming_mode_active(void)   { return g_gaming_mode; }
 uint32_t compositor_fps(void)   { return g_fps_current; }
 void gaming_mode_set(bool on)   {
     g_gaming_mode = on;
     fprintf(stderr, "[compositor] gaming mode %s\n", on ? "ON" : "OFF");
-    /* Hint CPU governor — best-effort, non-fatal */
     const char *gov = on ? "performance" : "schedutil";
     for (int cpu = 0; cpu < 8; cpu++) {
         char path[80];
@@ -127,6 +130,14 @@ void gaming_mode_set(bool on)   {
         if (fd >= 0) { write(fd, gov, strlen(gov)); close(fd); }
     }
 }
+
+/* ── Threading: event thread (main) + render thread ────────────────────── */
+
+static pthread_mutex_t g_mx   = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_cond = PTHREAD_COND_INITIALIZER;
+static volatile bool   g_quit = false;
+
+/* ── Terminal / signal setup ─────────────────────────────────────────────── */
 
 static struct termios g_orig_term;
 static bool           g_term_saved = false;
@@ -138,6 +149,8 @@ static void restore_term(void) {
 
 static void sig_handler(int sig) {
     (void)sig;
+    g_quit = true;
+    pthread_cond_signal(&g_cond);
     restore_term();
     write(STDOUT_FILENO, "\033[?25h", 6);
     _exit(0);
@@ -211,13 +224,127 @@ static void take_screenshot(void) {
     gui_toast_extern("Screenshot saved", 0x0080c8a0u);
 }
 
+/* ── Render thread ───────────────────────────────────────────────────────── */
+/*
+ * Runs compositing, flip, and DRM flush on a dedicated core so the event
+ * thread (main) can continuously service I/O while rendering is in progress.
+ *
+ * Protocol: event thread signals g_cond each loop iteration under g_mx.
+ * Render thread uses a timedwait capped at 16 ms (60 fps) so it also ticks
+ * autonomously when there is no input.  DRM flush happens outside the mutex
+ * so the event thread can do the next poll()+ipc_poll() concurrently.
+ */
+static void *render_thread_fn(void *arg)
+{
+    (void)arg;
+    static int32_t s_last_cx = -1, s_last_cy = -1;
+    struct timespec fps_ts;
+    clock_gettime(CLOCK_MONOTONIC, &fps_ts);
+    uint32_t fps_frames = 0;
+    struct timespec last_render = {0};
+
+    pthread_mutex_lock(&g_mx);
+    while (!g_quit) {
+        /*
+         * Rate-limit to 60 fps in normal mode (unlimited in gaming mode).
+         * Deadline is anchored to last_render so early signals don't cause us
+         * to render again before the next 16 ms window is up.
+         */
+        long frame_ns = g_gaming_mode ? 1000000L : 16000000L;
+        struct timespec deadline;
+        long next_ns = last_render.tv_nsec + frame_ns;
+        deadline.tv_sec  = last_render.tv_sec  + next_ns / 1000000000L;
+        deadline.tv_nsec = next_ns % 1000000000L;
+
+        /* Convert to REALTIME (timedwait uses CLOCK_REALTIME). */
+        {
+            struct timespec mono, real;
+            clock_gettime(CLOCK_MONOTONIC, &mono);
+            clock_gettime(CLOCK_REALTIME,  &real);
+            long off_s  = real.tv_sec  - mono.tv_sec;
+            long off_ns = real.tv_nsec - mono.tv_nsec;
+            deadline.tv_sec  += off_s;
+            deadline.tv_nsec += off_ns;
+            if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+            if (deadline.tv_nsec < 0)            { deadline.tv_sec--; deadline.tv_nsec += 1000000000L; }
+        }
+
+        pthread_cond_timedwait(&g_cond, &g_mx, &deadline);
+        if (g_quit) break;
+
+        /* Skip render if we woke early (signal before frame window elapsed). */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec  - last_render.tv_sec)  * 1000L
+                        + (now.tv_nsec - last_render.tv_nsec) / 1000000L;
+        if (!g_gaming_mode && elapsed_ms < 15) continue;
+        last_render = now;
+
+        bool do_flush = false;
+
+        if (!g_blanked) {
+            gui_on_tick();
+            ipc_blit_all();
+            wayland_blit_surfaces();
+
+            /* Erase old cursor position from backbuf before flip */
+            int32_t cx, cy; bool lb, rb;
+            mouse_get_state(&cx, &cy, &lb, &rb);
+            bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
+            if (cursor_moved && s_last_cy >= 0) {
+                uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
+                console_mark_dirty_rows(ey0, ey0 + CUR_H);
+            }
+
+            ipc_draw_overlays();
+            ipc_draw_resize_handles();
+            ipc_draw_drag_overlay();
+            ipc_notify_draw();
+
+            bool flipped = console_flip_if_dirty();
+            if (flipped || cursor_moved) {
+                mouse_cursor_update();
+                s_last_cx = cx; s_last_cy = cy;
+            }
+
+            do_flush = (flipped || cursor_moved) && g_using_drm;
+        } else {
+            /* Keep state ticking even when blanked (clock, animations). */
+            gui_on_tick();
+        }
+
+        /* FPS counter: updated here since render thread owns the frame clock. */
+        fps_frames++;
+        {
+            struct timespec fps_now;
+            clock_gettime(CLOCK_MONOTONIC, &fps_now);
+            long fps_elapsed = (fps_now.tv_sec  - fps_ts.tv_sec)  * 1000L
+                             + (fps_now.tv_nsec - fps_ts.tv_nsec) / 1000000L;
+            if (fps_elapsed >= 1000) {
+                g_fps_current = (uint32_t)(fps_frames * 1000u / (uint32_t)fps_elapsed);
+                fps_frames = 0;
+                fps_ts = fps_now;
+            }
+        }
+
+        /* Release the mutex while flushing so the event thread can do I/O. */
+        if (do_flush) {
+            pthread_mutex_unlock(&g_mx);
+            drm_flush();
+            pthread_mutex_lock(&g_mx);
+        }
+    }
+    pthread_mutex_unlock(&g_mx);
+    return NULL;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────────── */
 
 int main(void) {
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
-    write(STDOUT_FILENO, "\033[?25l", 6);  /* hide cursor */
+    write(STDOUT_FILENO, "\033[?25l", 6);
 
     if (tcgetattr(STDIN_FILENO, &g_orig_term) == 0) {
         g_term_saved = true;
@@ -227,8 +354,6 @@ int main(void) {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
 
-    /* Try DRM/KMS first (virtio-gpu: triggers explicit flush → instant QEMU update).
-     * Fall back to /dev/fb0 if DRM isn't available (e.g. virtio-vga or bare fb). */
     struct limine_framebuffer *drm_fb = drm_open();
     if (drm_fb) {
         g_lmfb      = *drm_fb;
@@ -243,11 +368,9 @@ int main(void) {
     pmm_init(NULL, 0);
     vfs_init();
 
-    /* net_init detects NICs from /proc/net/dev */
     extern void net_init(void);
     net_init();
 
-    /* ALSA volume control — non-fatal if audio device not present */
     extern bool hda_init(void);
     hda_init();
 
@@ -259,19 +382,15 @@ int main(void) {
     mouse_init();
     input_init();
 
-    /* Start PTY shell before GUI so the shell prompt arrives early */
     pty_init();
 
-    /* Set PTY size from actual framebuffer + expected terminal window geometry */
     {
         uint32_t fw = console_font_width();
         uint32_t fh = console_font_height();
         if (fw > 0 && fh > 0) {
-            /* Terminal window is ~88% of fb width, ~90% of desk height (STATUS_H=20, TASKBAR_H=32) */
             uint64_t desk_h = g_lmfb.height > 52u ? g_lmfb.height - 52u : g_lmfb.height;
             uint64_t win_w  = g_lmfb.width * 88u / 100u;
             uint64_t win_h  = desk_h * 90u / 100u;
-            /* Inner content after TITLE_H=24, BORDER=1, PAD=4 each side */
             uint64_t inner_w = win_w > 10u ? win_w - 10u : 1u;
             uint64_t inner_h = win_h > 33u ? win_h - 33u : 1u;
             uint16_t cols = (uint16_t)(inner_w / fw);
@@ -286,33 +405,28 @@ int main(void) {
     gui_init();
     mouse_cursor_update();
 
-    /* IPC socket — apps connect here to create windows and push frames */
     ipc_init();
 
-    /* Wayland compositor socket — native Wayland clients connect here */
     wayland_set_display_size((int)g_lmfb.width, (int)g_lmfb.height);
     if (!wayland_init())
         fprintf(stderr, "[compositor] Wayland init failed — continuing without it\n");
 
     fprintf(stderr, "[compositor] running\n");
 
-    /* Gather evdev fds for poll() */
     int evdev_fds[20];
     int nevdev = input_get_all_fds(evdev_fds, 20);
 
 #define MAX_PFD 24
     struct pollfd pfd[MAX_PFD];
 
-    /* FPS tracking */
-    struct timespec fps_ts;
-    clock_gettime(CLOCK_MONOTONIC, &fps_ts);
-    uint32_t fps_frames = 0;
-
-    /* Screen-blank inactivity timer */
     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
 
+    /* Spawn the render thread — it takes over all compositing + DRM flush. */
+    pthread_t render_tid;
+    pthread_create(&render_tid, NULL, render_thread_fn, NULL);
+
+    /* ── Event loop: I/O only ────────────────────────────────────────────── */
     for (;;) {
-        /* ── Build poll set ────────────────────────────────────────────── */
         int nfds = 0;
         for (int i = 0; i < nevdev && nfds < MAX_PFD; i++) {
             pfd[nfds].fd     = evdev_fds[i];
@@ -325,16 +439,12 @@ int main(void) {
             pfd[nfds].events = POLLIN;
             nfds++;
         }
-
-        /* Include IPC server fd so new app connections wake us immediately */
         int ipc_fd = ipc_server_fd();
         if (ipc_fd >= 0 && nfds < MAX_PFD) {
             pfd[nfds].fd     = ipc_fd;
             pfd[nfds].events = POLLIN;
             nfds++;
         }
-
-        /* Include Wayland server fd */
         int wl_fd = wayland_server_fd();
         if (wl_fd >= 0 && nfds < MAX_PFD) {
             pfd[nfds].fd     = wl_fd;
@@ -342,14 +452,19 @@ int main(void) {
             nfds++;
         }
 
-        /* 4 ms cap (250 Hz) normally; 0 in gaming mode for max frame rate */
+        /* poll() outside the mutex — render thread can flush concurrently. */
         poll(pfd, (nfds_t)nfds, g_gaming_mode ? 0 : 4);
 
-        /* ── IPC: accept new app connections, read app messages ──────────── */
+        pthread_mutex_lock(&g_mx);
+
+        /* ── IPC: accept new connections, read app frame messages ──────── */
         ipc_poll();
         wayland_poll();
 
-        /* ── Gamepad → IPC focused app ───────────────────────────────────── */
+        /* ── PTY output → console backbuf ──────────────────────────────── */
+        pty_poll_output();
+
+        /* ── Gamepad → focused IPC app ─────────────────────────────────── */
         if (ipc_keyboard_active() && input_gamepad_connected()) {
             for (int gi = 0; gi < 2; gi++) {
                 if (!input_gamepad_changed(gi)) continue;
@@ -359,30 +474,20 @@ int main(void) {
             }
         }
 
-        /* ── PTY output → console buffer ───────────────────────────────── */
-        pty_poll_output();
+        /* ── evdev: read input events into rings ───────────────────────── */
+        int32_t px, py; bool pb_l, pb_r;
+        mouse_get_state(&px, &py, &pb_l, &pb_r);
+        input_poll();
+        int32_t nx, ny; bool nb_l, nb_r;
+        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
+        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
 
-        /* ── evdev events ──────────────────────────────────────────────── */
-        bool had_input_before = false;
-        {
-            /* Snapshot mouse state before polling so we can detect changes */
-            int32_t px, py; bool pb_l, pb_r;
-            mouse_get_state(&px, &py, &pb_l, &pb_r);
-            input_poll();
-            int32_t nx, ny; bool nb_l, nb_r;
-            mouse_get_state(&nx, &ny, &nb_l, &nb_r);
-            had_input_before = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
-        }
-
-        /* ── Input routing: IPC app > PTY > GUI ────────────────────────
-         * Check mouse first so we can update IPC focus before routing keys. */
+        /* ── Mouse routing ──────────────────────────────────────────────── */
         {
             int32_t mcx, mcy; bool mlb, mrb;
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
-            /* Update resize (must check before drag to avoid conflict) */
-            /* File drag in progress: update cursor and handle release */
             if (ipc_file_drag_active()) {
                 ipc_file_drag_update(mcx, mcy);
                 if (!mlb) ipc_file_drag_drop(mcx, mcy);
@@ -390,16 +495,11 @@ int main(void) {
             }
 
             bool resizing = ipc_resize_update(mcx, mcy, mlb);
-
-            /* Update drag (move IPC window) — do this before hit-test */
             bool dragging = !resizing && ipc_drag_update(mcx, mcy, mlb);
 
             if (mlb && !dragging && !resizing) {
-                /* Close button takes priority over hit-test and drag */
                 if (!ipc_try_close_at(mcx, mcy)) {
-                    /* Try resize handle first */
                     if (!ipc_resize_begin(mcx, mcy)) {
-                        /* On left-click: check if it lands on an IPC window */
                         if (!ipc_hit_test(mcx, mcy))
                             ipc_clear_focus();
                     }
@@ -409,24 +509,27 @@ int main(void) {
                 ipc_send_focused_mouse(mcx, mcy, btns);
             mouse_done:;
 
-            /* Forward mouse to Wayland surfaces (when no IPC window has focus) */
             if (!ipc_keyboard_active())
                 wayland_send_mouse(mcx, mcy, btns);
         }
 
-        /* ── Activity tracking: mouse movement resets the blank timer ───── */
-        if (had_input_before)
+        /* ── Activity tracking ──────────────────────────────────────────── */
+        if (had_input)
             clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+        if (g_blanked && had_input) {
+            g_blanked = false;
+            clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+        }
 
+        /* ── Keyboard routing ───────────────────────────────────────────── */
         if (ipc_keyboard_active()) {
-            /* Keys go to the focused IPC app, except F1-F4 which always reach the GUI */
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                if (g_blanked) { g_blanked = false; break; }  /* first key wakes display */
+                if (g_blanked) { g_blanked = false; break; }
                 uint8_t uc = (uint8_t)c;
                 if (uc == 0x96u) { take_screenshot(); continue; }
-                if (uc == 0x97u) { ipc_close_focused(); continue; }  /* Alt+F4 */
+                if (uc == 0x97u) { ipc_close_focused(); continue; }
                 if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                 if (uc >= 0x8Au && uc <= 0x8Du) {
                     extern void keyboard_push_char(uint8_t c);
@@ -436,7 +539,6 @@ int main(void) {
                 }
             }
         } else if (!keyboard_gui_capture_active()) {
-            /* Terminal is focused — keys go to PTY */
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
@@ -446,7 +548,6 @@ int main(void) {
                 pty_write_input((uint8_t)c);
             }
         } else {
-            /* GUI capture active — drain kb_ring; intercept globals */
             int c;
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
@@ -454,12 +555,6 @@ int main(void) {
                 if ((uint8_t)c == 0x96u) take_screenshot();
                 if ((uint8_t)c == 0x97u) ipc_close_focused();
             }
-        }
-
-        /* Wake display on mouse input when blanked */
-        if (g_blanked && had_input_before) {
-            g_blanked = false;
-            clock_gettime(CLOCK_MONOTONIC, &g_last_input);
         }
 
         /* ── Screen blank check ─────────────────────────────────────────── */
@@ -475,61 +570,13 @@ int main(void) {
             }
         }
 
-        /* ── GUI tick (always runs — clock/state must update even when blanked) */
-        gui_on_tick();
-
-        /* ── IPC windows: blit cached frames ON TOP of GUI background ─────── */
-        ipc_blit_all();
-        wayland_blit_surfaces();
-
-        /* ── Cursor erase: mark old cursor rows dirty so the flip below
-         * pulls clean backbuffer content there (erasing the stale cursor). ── */
-        int32_t cx, cy; bool lb, rb;
-        mouse_get_state(&cx, &cy, &lb, &rb);
-        static int32_t s_last_cx = -1, s_last_cy = -1;
-        bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
-
-        if (!g_blanked) {
-            if (cursor_moved && s_last_cy >= 0) {
-                uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
-                uint32_t ey1 = ey0 + CUR_H;
-                console_mark_dirty_rows(ey0, ey1);
-            }
-
-            /* ── IPC overlays (title bars, close/min buttons, resize handles) */
-            ipc_draw_overlays();
-            ipc_draw_resize_handles();
-            ipc_draw_drag_overlay();
-            ipc_notify_draw();
-
-            /* ── Flip dirty rows (backbuf → frontbuf), then push to QEMU ── */
-            bool flipped = console_flip_if_dirty();
-
-            /* ── Cursor redraw: save from backbuf (stale-proof), draw on front */
-            if (flipped || cursor_moved) {
-                mouse_cursor_update();
-                s_last_cx = cx; s_last_cy = cy;
-            }
-
-            /* ── Single DRM flush covers both content and cursor ─────────── */
-            if ((flipped || cursor_moved) && g_using_drm) drm_flush();
-        } else {
-            /* Blanked: keep frontbuffer black, but track cursor for wake-up */
-            s_last_cx = cx; s_last_cy = cy;
-        }
-
-        /* ── FPS counter: update once per second ────────────────────────── */
-        fps_frames++;
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long elapsed_ms = (now.tv_sec - fps_ts.tv_sec) * 1000L
-                        + (now.tv_nsec - fps_ts.tv_nsec) / 1000000L;
-        if (elapsed_ms >= 1000) {
-            g_fps_current = (uint32_t)(fps_frames * 1000u / (uint32_t)elapsed_ms);
-            fps_frames = 0;
-            fps_ts = now;
-        }
+        /* Signal the render thread — new I/O may have updated frame data. */
+        pthread_cond_signal(&g_cond);
+        pthread_mutex_unlock(&g_mx);
     }
 
+    g_quit = true;
+    pthread_cond_signal(&g_cond);
+    pthread_join(render_tid, NULL);
     return 0;
 }

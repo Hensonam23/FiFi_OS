@@ -59,5 +59,6 @@ else
         -append "console=tty0 console=ttyS0,115200 quiet loglevel=3" \
         -device virtio-vga,xres=1920,yres=1080 \
         -display sdl,gl=off \
-        -serial file:"$REPO_ROOT/serial-linux.log"
+        -serial file:"$REPO_ROOT/serial-linux.log" \
+        -monitor unix:"$REPO_ROOT/qemu-monitor.sock",server,nowait
 fi
