@@ -40,11 +40,15 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
 
 # ── Bring up ethernet in background (autoneg needs time) ─────────────────────
 (
-    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
-        ip link set "$iface" up 2>/dev/null
+    # Bring up only real Ethernet interfaces (type=1, skips sit0/lo/tun/etc.)
+    for iface in $(ls /sys/class/net/ 2>/dev/null); do
+        type=$(cat /sys/class/net/$iface/type 2>/dev/null)
+        [ "$type" = "1" ] && ip link set "$iface" up 2>/dev/null
     done
     for i in $(seq 1 30); do
-        for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+        for iface in $(ls /sys/class/net/ 2>/dev/null); do
+            type=$(cat /sys/class/net/$iface/type 2>/dev/null)
+            [ "$type" != "1" ] && continue
             carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null)
             if [ "$carrier" = "1" ]; then
                 echo "carrier on $iface at attempt $i" > /fifi-data/network.log
