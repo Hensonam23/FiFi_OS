@@ -1,0 +1,24 @@
+#!/bin/sh
+# Save FiFi debug logs to the boot USB's EFI partition.
+# Run from the FiFi terminal (F1), then plug USB into main PC to read logs.
+
+mkdir -p /mnt/usb
+
+for dev in /dev/sda1 /dev/sda2 /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2; do
+    [ -b "$dev" ] || continue
+    if mount -t vfat "$dev" /mnt/usb 2>/dev/null; then
+        if [ -d /mnt/usb/EFI ]; then
+            mkdir -p /mnt/usb/fifi-logs
+            cp /fifi-data/compositor.log    /mnt/usb/fifi-logs/ 2>/dev/null
+            cp /fifi-data/input-devices.txt /mnt/usb/fifi-logs/ 2>/dev/null
+            dmesg > /mnt/usb/fifi-logs/dmesg.txt 2>/dev/null
+            sync
+            umount /mnt/usb
+            echo "Saved to $dev /fifi-logs/ — plug USB into main PC."
+            exit 0
+        fi
+        umount /mnt/usb 2>/dev/null
+    fi
+done
+
+echo "Could not find USB EFI partition."

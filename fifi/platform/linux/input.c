@@ -49,7 +49,15 @@ static int g_kbd_fds[MAX_EVDEV];
 static int g_kbd_cnt = 0;
 static int g_ptr_fds[MAX_EVDEV];   /* relative mice */
 static int g_ptr_cnt = 0;
-typedef struct { int fd; int32_t x_max, y_max; } abs_dev_t;
+typedef struct {
+    int fd;
+    int32_t x_max, y_max;
+    bool is_mt;
+    bool is_touchpad;  /* INPUT_PROP_POINTER: use delta tracking, not abs mapping */
+    int32_t prev_x, prev_y;  /* last known position; -1 = finger not down */
+    int32_t click_cooldown;  /* frames to skip delta after BTN_LEFT change (spring-back) */
+    char phys[64];           /* EVIOCGPHYS — used to skip companion REL node */
+} abs_dev_t;
 static abs_dev_t g_abs_devs[MAX_EVDEV];
 static int g_abs_cnt = 0;
 
@@ -367,38 +375,92 @@ void input_init(void) {
         int fd = open(path, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
 
+        char name[64] = "?";
+        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        char phys[64] = "";
+        ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+
         bool has_key = evdev_has_bit(fd, 0, EV_KEY);
         bool has_rel = evdev_has_bit(fd, 0, EV_REL);
+        bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
+
+        fprintf(stderr, "[input] %s \"%s\" key=%d rel=%d abs=%d\n",
+                path, name, has_key, has_rel, has_abs);
 
         if (has_key && evdev_has_bit(fd, EV_KEY, KEY_A)) {
             if (g_kbd_cnt < MAX_EVDEV) {
                 g_kbd_fds[g_kbd_cnt++] = fd;
-                fprintf(stderr, "[input] keyboard: %s\n", path);
+                fprintf(stderr, "[input] -> keyboard\n");
                 continue;
             }
         }
+
+        /* Pointer: accept legacy ABS (ABS_X/Y) or MT Type B (ABS_MT_POSITION_X/Y) */
+        bool has_legacy_abs = has_abs && evdev_has_bit(fd, EV_ABS, ABS_X) &&
+                              evdev_has_bit(fd, EV_ABS, ABS_Y);
+        bool has_mt_abs = has_abs && evdev_has_bit(fd, EV_ABS, ABS_MT_POSITION_X);
+        bool has_touch = evdev_has_bit(fd, EV_KEY, BTN_LEFT) ||
+                         evdev_has_bit(fd, EV_KEY, BTN_TOUCH) ||
+                         evdev_has_bit(fd, EV_KEY, BTN_TOOL_FINGER);
+
+        /* Distinguish touchscreen (INPUT_PROP_DIRECT) from touchpad (INPUT_PROP_POINTER).
+         * Touchpads emit a companion Mouse node with REL_X/Y — skip the ABS node so
+         * we use relative motion instead of absolute screen-coordinate mapping. */
+        uint8_t prop_bits[1] = {0};
+        ioctl(fd, EVIOCGPROP(sizeof(prop_bits)), prop_bits);
+        bool is_direct  = (prop_bits[0] >> INPUT_PROP_DIRECT)  & 1;
+        bool is_pointer = (prop_bits[0] >> INPUT_PROP_POINTER) & 1;
+
         /* Check absolute BEFORE relative — virtio-tablet has both EV_ABS and EV_REL */
-        bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
-        if (has_abs && evdev_has_bit(fd, EV_ABS, ABS_X) &&
-            evdev_has_bit(fd, EV_ABS, ABS_Y) &&
-            evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
+        if ((has_legacy_abs || has_mt_abs) && has_touch) {
             if (g_abs_cnt < MAX_EVDEV) {
                 struct input_absinfo ai;
                 abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
-                dev->fd = fd;
-                dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0)
-                             ? ai.maximum : 32767;
-                dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0)
-                             ? ai.maximum : 32767;
-                fprintf(stderr, "[input] tablet: %s (range %dx%d)\n",
-                        path, dev->x_max, dev->y_max);
+                dev->fd   = fd;
+                dev->is_mt = !has_legacy_abs && has_mt_abs;
+                /* Prefer legacy axis range; fall back to MT axis range */
+                if (has_legacy_abs) {
+                    dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0)
+                                 ? ai.maximum : 32767;
+                    dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0)
+                                 ? ai.maximum : 32767;
+                } else {
+                    dev->x_max = (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ai) == 0 && ai.maximum > 0)
+                                 ? ai.maximum : 32767;
+                    dev->y_max = (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ai) == 0 && ai.maximum > 0)
+                                 ? ai.maximum : 32767;
+                }
+                /* INPUT_PROP_POINTER = touchpad: use delta tracking, not abs mapping.
+                 * INPUT_PROP_DIRECT  = touchscreen/tablet: map abs coords to screen. */
+                dev->is_touchpad = (is_pointer && !is_direct);
+                dev->prev_x = -1;
+                dev->prev_y = -1;
+                snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
+                fprintf(stderr, "[input] -> %s %s range %dx%d\n",
+                        dev->is_touchpad ? "touchpad" : "touchscreen/tablet",
+                        dev->is_mt ? "(MT)" : "(abs)", dev->x_max, dev->y_max);
                 continue;
             }
         }
         if (has_rel && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
+            /* Skip if this is the companion REL node of a registered touchpad
+             * (same Phys string). The touchpad abs node handles all input. */
+            bool is_touchpad_companion = false;
+            for (int ti = 0; ti < g_abs_cnt; ti++) {
+                if (g_abs_devs[ti].is_touchpad &&
+                        phys[0] && strcmp(g_abs_devs[ti].phys, phys) == 0) {
+                    is_touchpad_companion = true;
+                    break;
+                }
+            }
+            if (is_touchpad_companion) {
+                fprintf(stderr, "[input] -> touchpad companion (skipped)\n");
+                close(fd);
+                continue;
+            }
             if (g_ptr_cnt < MAX_EVDEV) {
                 g_ptr_fds[g_ptr_cnt++] = fd;
-                fprintf(stderr, "[input] mouse: %s\n", path);
+                fprintf(stderr, "[input] -> mouse\n");
                 continue;
             }
         }
@@ -491,21 +553,55 @@ void input_poll(void) {
         }
     }
 
-    /* ── Absolute pointer devices (USB tablet / virtio-tablet) ───────────── */
+    /* ── Absolute pointer devices (USB tablet / virtio-tablet / touchpad) ── */
     for (int ai = 0; ai < g_abs_cnt; ai++) {
         abs_dev_t *dev = &g_abs_devs[ai];
         int32_t abs_x = -1, abs_y = -1;
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
+        int cur_slot = 0;   /* MT Type B: track active slot, only use slot 0 */
 
         while (read(dev->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type == EV_ABS) {
-                if (ev.code == ABS_X) abs_x = ev.value;
-                else if (ev.code == ABS_Y) abs_y = ev.value;
+                switch (ev.code) {
+                case ABS_X:               abs_x = ev.value; break;
+                case ABS_Y:               abs_y = ev.value; break;
+                case ABS_MT_SLOT:         cur_slot = ev.value; break;
+                /* MT Type B: continuously track slot 0 position */
+                case ABS_MT_POSITION_X:   if (cur_slot == 0) abs_x = ev.value; break;
+                case ABS_MT_POSITION_Y:   if (cur_slot == 0) abs_y = ev.value; break;
+                /* MT tracking ID = -1 means finger lifted */
+                case ABS_MT_TRACKING_ID:
+                    if (ev.value == -1 && cur_slot == 0) {
+                        dev->prev_x = -1;
+                        dev->prev_y = -1;
+                    }
+                    break;
+                default: break;
+                }
                 had_event = true;
             } else if (ev.type == EV_KEY) {
-                if (ev.code == BTN_LEFT)  lbtn = (ev.value != 0);
-                if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                if (dev->is_touchpad) {
+                    /* BTN_TOUCH = finger contact, not a click — ignore for lbtn.
+                     * Only BTN_LEFT (physical clickpad press) counts.
+                     * Reset prev on click AND release: the clickpad mechanism
+                     * physically shifts the pad on press and springs back on
+                     * release, both causing position jumps. Resetting absorbs them. */
+                    if (ev.code == BTN_LEFT) {
+                        bool new_lbtn = (ev.value != 0);
+                        if (new_lbtn != lbtn) {
+                            dev->prev_x = -1;
+                            dev->prev_y = -1;
+                            dev->click_cooldown = 4;
+                        }
+                        lbtn = new_lbtn;
+                    }
+                    if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                } else {
+                    if (ev.code == BTN_LEFT || ev.code == BTN_TOUCH)
+                        lbtn = (ev.value != 0);
+                    if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                }
                 had_event = true;
             } else if (ev.type == EV_SYN) {
                 had_event = true;
@@ -515,15 +611,48 @@ void input_poll(void) {
         if (had_event) {
             bool prev = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
-            /* Scale using actual device axis range */
-            if (abs_x >= 0)
-                g_mx = (int32_t)((int64_t)abs_x * g_fb_w / (dev->x_max + 1));
-            if (abs_y >= 0)
-                g_my = (int32_t)((int64_t)abs_y * g_fb_h / (dev->y_max + 1));
-            if (g_mx < 0) g_mx = 0;
-            if (g_my < 0) g_my = 0;
-            if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;
-            if (g_my >= g_fb_h) g_my = g_fb_h - 1;
+            if (dev->is_touchpad) {
+                /* Delta tracking: compute movement relative to last known position.
+                 * Scale so a full-width swipe moves ~half the screen width. */
+                if (abs_x >= 0 && abs_y >= 0) {
+                    if (dev->click_cooldown > 0) {
+                        /* Skip delta for a few frames after BTN_LEFT change to
+                         * absorb the clickpad spring-back position drift. */
+                        dev->click_cooldown--;
+                        dev->prev_x = abs_x;
+                        dev->prev_y = abs_y;
+                    } else if (dev->prev_x >= 0) {
+                        int32_t dx = abs_x - dev->prev_x;
+                        int32_t dy = abs_y - dev->prev_y;
+                        /* Discard deltas larger than 1/8 pad range — mechanical
+                         * jumps or tracking resets, not real finger movement. */
+                        if (dx > dev->x_max / 8 || dx < -(dev->x_max / 8) ||
+                            dy > dev->y_max / 8 || dy < -(dev->y_max / 8)) {
+                            dev->prev_x = abs_x;
+                            dev->prev_y = abs_y;
+                        } else {
+                            int32_t dxpx = (int32_t)((int64_t)dx * g_fb_w * 3 / ((int64_t)(dev->x_max + 1) * 4));
+                            int32_t dypx = (int32_t)((int64_t)dy * g_fb_h * 3 / ((int64_t)(dev->y_max + 1) * 4));
+                            mouse_push_rel(dxpx, dypx, lbtn, rbtn);
+                        }
+                        dev->prev_x = abs_x;
+                        dev->prev_y = abs_y;
+                    } else {
+                        dev->prev_x = abs_x;
+                        dev->prev_y = abs_y;
+                    }
+                }
+            } else {
+                /* Touchscreen / tablet: map abs coords directly to screen */
+                if (abs_x >= 0)
+                    g_mx = (int32_t)((int64_t)abs_x * g_fb_w / (dev->x_max + 1));
+                if (abs_y >= 0)
+                    g_my = (int32_t)((int64_t)abs_y * g_fb_h / (dev->y_max + 1));
+                if (g_mx < 0) g_mx = 0;
+                if (g_my < 0) g_my = 0;
+                if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;
+                if (g_my >= g_fb_h) g_my = g_fb_h - 1;
+            }
             if (lbtn && !prev) {
                 if (g_clk_used < CLK_RING) {
                     g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =

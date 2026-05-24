@@ -29,9 +29,39 @@ export WAYLAND_DISPLAY=wayland-0
 clear
 cat /etc/fifi-banner
 
-# ── Launch FiFi compositor (Phase 2) ─────────────────────────────────────────
+# ── Wait for input drivers to settle ─────────────────────────────────────────
+sleep 3
+
+mkdir -p /fifi-data
+
+# Log input devices for debugging
+cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
+ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
+
+# ── Bring up ethernet in background (autoneg needs time) ─────────────────────
+(
+    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+        ip link set "$iface" up 2>/dev/null
+    done
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+            carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null)
+            if [ "$carrier" = "1" ]; then
+                udhcpc -i "$iface" -q -n -t 5 2>/dev/null && \
+                    echo "$iface" > /fifi-data/network.log
+                exit 0
+            fi
+        done
+        sleep 1
+    done
+) &
+
+# ── Launch FiFi compositor ────────────────────────────────────────────────────
+# Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not
+# fully initialise ZMM XSAVE state, causing SIGILL on zmm instructions.
+export GLIBC_TUNABLES="glibc.cpu.hwcaps=-AVX512F,-AVX512VL,-AVX512BW,-AVX512CD,-AVX512DQ,-AVX512IFMA,-AVX512VBMI"
 if [ -x /bin/fifi-compositor ]; then
-    exec /bin/fifi-compositor
+    exec /bin/fifi-compositor 2>/fifi-data/compositor.log
 fi
 
 # Fallback: shell if compositor not present

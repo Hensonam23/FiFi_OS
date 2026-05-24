@@ -1,0 +1,50 @@
+#!/bin/sh
+# Send FiFi debug logs to a netcat listener on your main PC.
+#
+# On your main PC, run FIRST:
+#   nc -l -p 9999 > /tmp/fifi-logs.txt
+#
+# Then run this with the main PC's local IP:
+#   send-logs 192.168.x.x
+
+TARGET_IP="${1:-}"
+if [ -z "$TARGET_IP" ]; then
+    echo "Usage: send-logs <ip>"
+    echo ""
+    echo "On your main PC run: nc -l -p 9999 > /tmp/fifi-logs.txt"
+    echo "Then: send-logs <main-pc-ip>"
+    exit 1
+fi
+
+echo "Bringing up ethernet..."
+for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+    ip link set "$iface" up 2>/dev/null
+done
+NET_IFACE=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+        carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null)
+        if [ "$carrier" = "1" ]; then
+            NET_IFACE="$iface"
+            break 2
+        fi
+    done
+    echo "Waiting for link... $i"
+    sleep 1
+done
+if [ -n "$NET_IFACE" ]; then
+    udhcpc -i "$NET_IFACE" -q -n -t 5 2>/dev/null && echo "Network up on $NET_IFACE" || echo "DHCP failed on $NET_IFACE"
+else
+    echo "No ethernet carrier found after 10s"
+fi
+
+echo "Sending logs to $TARGET_IP:9999..."
+{
+    echo "=== compositor.log ==="
+    cat /fifi-data/compositor.log 2>/dev/null
+    echo ""
+    echo "=== input-devices.txt ==="
+    cat /fifi-data/input-devices.txt 2>/dev/null
+} | nc "$TARGET_IP" 9999
+
+echo "Done."

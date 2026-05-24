@@ -220,7 +220,47 @@ void net_init(void) {
             (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
             (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
-void net_poll(void)  { }
+void net_poll(void) {
+    /* Re-read IP every ~2s so the display updates after DHCP completes. */
+    static time_t last_refresh = 0;
+    time_t now = time(NULL);
+    if (now - last_refresh < 2) return;
+    last_refresh = now;
+
+    if (!g_net_present) return;
+
+    /* Find first non-loopback interface */
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) return;
+    char line[256], iface[32] = {0};
+    while (fgets(line, sizeof(line), f)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        char name[32]; int ni = 0;
+        for (char *p = line; p < colon && *p && ni < 31; p++)
+            if (*p != ' ' && *p != '\t') name[ni++] = *p;
+        name[ni] = '\0';
+        if (strcmp(name, "lo") == 0) continue;
+        snprintf(iface, sizeof(iface), "%s", name);
+        break;
+    }
+    fclose(f);
+    if (!iface[0]) return;
+
+    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sk < 0) return;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    if (ioctl(sk, SIOCGIFADDR, &ifr) == 0) {
+        uint32_t ip_nbo;
+        memcpy(&ip_nbo, ifr.ifr_addr.sa_data + 2, 4);
+        net_ip = ntohl(ip_nbo);
+    } else {
+        net_ip = 0;
+    }
+    close(sk);
+}
 bool net_nic_present(void) { return g_net_present; }
 bool net_send_eth(const uint8_t dst[6], uint16_t et,
                   const void *payload, size_t len) {
