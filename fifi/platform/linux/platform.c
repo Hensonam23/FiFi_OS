@@ -221,11 +221,11 @@ void net_init(void) {
             (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
 void net_poll(void) {
-    /* Re-read IP every ~2s so the display updates after DHCP completes. */
-    static time_t last_refresh = 0;
-    time_t now = time(NULL);
-    if (now - last_refresh < 2) return;
-    last_refresh = now;
+    /* Re-read IP every ~120 frames (~2s at 60fps). time() is unreliable in
+     * the initramfs environment (clock may not advance), so use a counter. */
+    static int frame = 0;
+    if (++frame < 120) return;
+    frame = 0;
 
     if (!g_net_present) return;
 
@@ -260,9 +260,6 @@ void net_poll(void) {
         net_ip = 0;
     }
     close(sk);
-    fprintf(stderr, "[net_poll] %s -> %u.%u.%u.%u\n", iface,
-            (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
-            (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
 bool net_nic_present(void) { return g_net_present; }
 bool net_send_eth(const uint8_t dst[6], uint16_t et,
