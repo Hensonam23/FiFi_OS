@@ -297,3 +297,102 @@ void kprintf(const char *fmt, ...) {
 void kvprintf(const char *fmt, va_list ap) {
     vfprintf(stderr, fmt, ap);
 }
+
+/* ── Image loader: BMP (24/32-bit BI_RGB) + PPM P6 ───────────────────────── */
+/* Returns heap-allocated XRGB pixels (top-down). Caller frees with free(). */
+#include <fcntl.h>
+#include <sys/stat.h>
+
+static int ppm_read_int(const uint8_t *d, size_t sz, size_t *p) {
+    for (;;) {
+        while (*p < sz && (d[*p]==' '||d[*p]=='\t'||d[*p]=='\r'||d[*p]=='\n')) (*p)++;
+        if (*p >= sz) return -1;
+        if (d[*p] != '#') break;
+        while (*p < sz && d[*p] != '\n') (*p)++;
+    }
+    int v = 0;
+    while (*p < sz && d[*p] >= '0' && d[*p] <= '9')
+        v = v * 10 + (int)(d[(*p)++] - '0');
+    return v;
+}
+
+bool platform_load_image(const char *path, uint32_t **out_px,
+                         uint32_t *out_w, uint32_t *out_h) {
+    if (!path || !out_px || !out_w || !out_h) return false;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st;
+    fstat(fd, &st);
+    if (st.st_size <= 0 || st.st_size > 128 * 1024 * 1024) { close(fd); return false; }
+    size_t fsz = (size_t)st.st_size;
+    uint8_t *buf = malloc(fsz);
+    if (!buf) { close(fd); return false; }
+    size_t got = 0;
+    while (got < fsz) {
+        ssize_t n = read(fd, buf + got, fsz - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    close(fd);
+
+    uint32_t *px = NULL;
+    int w = 0, h = 0;
+
+    if (got >= 2 && buf[0] == 'B' && buf[1] == 'M') {
+        /* BMP */
+        if (got >= 54) {
+            uint32_t data_off; memcpy(&data_off, buf + 10, 4);
+            int32_t  bw;       memcpy(&bw,       buf + 18, 4);
+            int32_t  bh;       memcpy(&bh,       buf + 22, 4);
+            uint16_t bpp;      memcpy(&bpp,       buf + 28, 2);
+            uint32_t compr;    memcpy(&compr,     buf + 30, 4);
+            if (bw > 0 && bw <= 16384 && bh != 0 && (bpp == 24 || bpp == 32) &&
+                (compr == 0 || compr == 3)) {
+                h = bh < 0 ? -bh : bh;
+                w = bw;
+                int stride = (w * (bpp / 8) + 3) & ~3;
+                int Bpp = bpp / 8;
+                if ((size_t)data_off + (size_t)stride * (size_t)h <= got) {
+                    px = malloc((size_t)w * (size_t)h * 4);
+                    if (px) {
+                        for (int y = 0; y < h; y++) {
+                            int sr = (bh > 0) ? (h - 1 - y) : y;
+                            const uint8_t *row = buf + data_off + (size_t)sr * stride;
+                            uint32_t *dst = px + y * w;
+                            for (int x = 0; x < w; x++) {
+                                uint8_t b=row[x*Bpp], g2=row[x*Bpp+1], r=row[x*Bpp+2];
+                                dst[x] = 0xFF000000u|((uint32_t)r<<16)|((uint32_t)g2<<8)|b;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if (got >= 2 && buf[0] == 'P' && buf[1] == '6') {
+        /* PPM P6 */
+        size_t pos = 2;
+        int pw = ppm_read_int(buf, got, &pos);
+        int ph = ppm_read_int(buf, got, &pos);
+        int mv = ppm_read_int(buf, got, &pos);
+        if (pw > 0 && ph > 0 && mv == 255 && pw <= 16384 && ph <= 16384) {
+            if (pos < got) pos++;
+            if (pos + (size_t)pw * ph * 3 <= got) {
+                px = malloc((size_t)pw * ph * 4);
+                if (px) {
+                    w = pw; h = ph;
+                    const uint8_t *rgb = buf + pos;
+                    for (int i = 0; i < w * h; i++) {
+                        uint8_t r=rgb[i*3], g2=rgb[i*3+1], b=rgb[i*3+2];
+                        px[i] = 0xFF000000u|((uint32_t)r<<16)|((uint32_t)g2<<8)|b;
+                    }
+                }
+            }
+        }
+    }
+
+    free(buf);
+    if (!px) return false;
+    *out_px = px; *out_w = (uint32_t)w; *out_h = (uint32_t)h;
+    return true;
+}

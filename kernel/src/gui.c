@@ -29,26 +29,27 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  12u
+#define LAUNCHER_ITEMS  13u
 #define LAUNCHER_W      110u
 #define CTX_W           130u
 #define CTX_ITEM_H      22u
 #define CTX_ITEMS       10u  /* 4 built-in windows + separator + 5 IPC apps */
 
 /* File browser context menu */
-#define FB_CTX_W         120u
-#define FB_CTX_MAX_ITEMS  11
-#define FB_CTX_ACT_OPEN    0
-#define FB_CTX_ACT_EDIT    1
-#define FB_CTX_ACT_RENAME  2
-#define FB_CTX_ACT_DELETE  3
-#define FB_CTX_ACT_NEW_FILE 4
-#define FB_CTX_ACT_NEW_DIR  5
-#define FB_CTX_ACT_REFRESH  6
-#define FB_CTX_ACT_COPY    7
-#define FB_CTX_ACT_CUT     8
-#define FB_CTX_ACT_PASTE   9
+#define FB_CTX_W         130u
+#define FB_CTX_MAX_ITEMS  12
+#define FB_CTX_ACT_OPEN       0
+#define FB_CTX_ACT_EDIT       1
+#define FB_CTX_ACT_RENAME     2
+#define FB_CTX_ACT_DELETE     3
+#define FB_CTX_ACT_NEW_FILE   4
+#define FB_CTX_ACT_NEW_DIR    5
+#define FB_CTX_ACT_REFRESH    6
+#define FB_CTX_ACT_COPY       7
+#define FB_CTX_ACT_CUT        8
+#define FB_CTX_ACT_PASTE      9
 #define FB_CTX_ACT_COPY_PATH 10
+#define FB_CTX_ACT_ADD_DESK  11
 
 /* File browser layout */
 #define FB_TOOLBAR_H    ((console_font_height() + 10u) * 2u)  /* 2 rows */
@@ -117,7 +118,8 @@
 #define WALLPAPER_STARS     2   /* static starfield */
 #define WALLPAPER_GRID      3   /* fine grid lines */
 #define WALLPAPER_WAVES     4   /* diagonal wave stripes */
-#define WALLPAPER_COUNT     5
+#define WALLPAPER_IMAGE     5   /* custom image file */
+#define WALLPAPER_COUNT     6
 
 typedef struct {
     uint32_t accent;        /* primary accent colour (borders, highlights) */
@@ -131,6 +133,33 @@ typedef struct {
 
 /* Default theme: FiFi blue accent, gradient wallpaper */
 static gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, false, true, true, true, 0 };
+
+/* Wallpaper image (WALLPAPER_IMAGE mode) — loaded by gui_set_wallpaper_image() */
+static uint32_t *g_wall_img   = NULL;
+static uint32_t  g_wall_img_w = 0;
+static uint32_t  g_wall_img_h = 0;
+
+/* Desktop icons — session-only shortcuts shown on the background */
+#define DESK_ICON_MAX   12
+#define DESK_ICON_W     72
+#define DESK_ICON_H     72
+#define DESK_ICON_PAD    8
+typedef struct {
+    char path[256];
+    char label[48];
+    bool active;
+} desk_icon_t;
+static desk_icon_t g_desk_icons[DESK_ICON_MAX];
+static int         g_desk_icon_hover = -1;
+static int         g_desk_icon_sel   = -1;
+static int         g_desk_icon_dbl   = -1;   /* index of icon awaiting dbl-click */
+static uint64_t    g_desk_icon_click_t = 0;  /* tick of last icon click */
+
+/* weak: real impl in platform.c for linux-desktop */
+__attribute__((weak)) bool platform_load_image(const char *path __attribute__((unused)),
+    uint32_t **px __attribute__((unused)),
+    uint32_t *w  __attribute__((unused)),
+    uint32_t *h  __attribute__((unused))) { return false; }
 
 /* 16 accent colour presets */
 #define ACCENT_PRESET_COUNT 16
@@ -808,10 +837,10 @@ static void launcher_draw(void) {
     uint64_t ly = launcher_ly();
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4-10: spawned IPC apps */
+    /* Items 0-3: built-in windows; 4+: spawned IPC apps */
     static const char *items[] = {
         "Terminal", "Files", "Settings", "Viewer",
-        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator",
+        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
     };
 
     int32_t mx, my;
@@ -1006,7 +1035,7 @@ static void txt_ctx_draw(void) {
 
 static const char *fb_ctx_labels[] = {
     "Open", "Edit", "Rename", "Delete", "New File", "New Folder", "Refresh",
-    "Copy", "Cut", "Paste", "Copy Path"
+    "Copy", "Cut", "Paste", "Copy Path", "Add to Desktop"
 };
 
 static void fb_ctx_draw(void) {
@@ -1031,7 +1060,8 @@ static void fb_ctx_draw(void) {
                        (act == FB_CTX_ACT_CUT)       ? 0x00e8b060u :
                        (act == FB_CTX_ACT_PASTE)     ? 0x0080c8e8u :
                        (act == FB_CTX_ACT_EDIT)      ? 0x0080d8a0u :
-                       (act == FB_CTX_ACT_COPY_PATH) ? 0x00a0b8d0u : COL_LAUNCH_FG;
+                       (act == FB_CTX_ACT_COPY_PATH) ? 0x00a0b8d0u :
+                       (act == FB_CTX_ACT_ADD_DESK)  ? 0x0060c880u : COL_LAUNCH_FG;
         console_fill_rect(cx + 1u, ry, FB_CTX_W - 2u, CTX_ITEM_H, bg);
         const char *lbl  = fb_ctx_labels[act];
         uint64_t slen    = (uint64_t)gui_strlen(lbl);
@@ -1062,6 +1092,8 @@ static void fb_ctx_open_at(int win_slot, int row, bool is_dir, int32_t x, int32_
             g_fb_ctx_acts[g_fb_ctx_n++] = FB_CTX_ACT_DELETE;
         }
         g_fb_ctx_acts[g_fb_ctx_n++] = FB_CTX_ACT_COPY_PATH;
+        if (!is_dir)
+            g_fb_ctx_acts[g_fb_ctx_n++] = FB_CTX_ACT_ADD_DESK;
         if (g_fb_clip_path[0])
             g_fb_ctx_acts[g_fb_ctx_n++] = FB_CTX_ACT_PASTE;
         g_fb_ctx_acts[g_fb_ctx_n++] = FB_CTX_ACT_NEW_FILE;
@@ -5756,7 +5788,7 @@ static void settings_render(window_t *w) {
         gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u + 2u, "Wallpaper:", COL_SET_KEY_FG, COL_SET_BG);
 
         static const char *wall_names[WALLPAPER_COUNT] = {
-            "Gradient", "Solid", "Stars", "Grid", "Waves"
+            "Gradient", "Solid", "Stars", "Grid", "Waves", "Image"
         };
         uint64_t wall_bh = (uint64_t)(fh + 6u);
         uint64_t wall_bw = 0u;
@@ -6366,6 +6398,104 @@ static void draw_resize_hint(int slot, resize_dir_t dir) {
     }
 }
 
+/* ── Desktop icons ───────────────────────────────────────────────────── */
+
+static const char *desk_icon_basename(const char *path) {
+    const char *b = strrchr(path, '/');
+    return b ? b + 1 : path;
+}
+
+static void draw_desktop_icons(void) {
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    uint64_t dt = desk_top();
+    uint64_t db = desk_bot();
+    /* Icons column along the right edge, top-down */
+    uint64_t icon_x = console_fb_width() - DESK_ICON_W - DESK_ICON_PAD;
+    uint64_t icon_y = dt + DESK_ICON_PAD;
+
+    for (int i = 0; i < DESK_ICON_MAX; i++) {
+        if (!g_desk_icons[i].active) continue;
+        if (icon_y + DESK_ICON_H > db) break;
+
+        bool hov = (g_desk_icon_hover == i);
+        bool sel = (g_desk_icon_sel   == i);
+
+        /* Icon background */
+        uint32_t bg = sel ? (g_theme.accent & 0x00ffffffu) | 0x00182030u
+                     : hov ? 0x001a2840u : 0x00000000u;
+        if (bg) console_fill_rect(icon_x - 2u, icon_y - 2u,
+                                  DESK_ICON_W + 4u, DESK_ICON_H + 4u, bg);
+
+        /* Colored file-type square */
+        const char *name = g_desk_icons[i].label[0]
+                           ? g_desk_icons[i].label
+                           : desk_icon_basename(g_desk_icons[i].path);
+        /* Pick color by extension */
+        const char *ext = strrchr(g_desk_icons[i].path, '.');
+        uint32_t ic = 0x00304878u; /* default blue */
+        const char *ic_txt = "FILE";
+        if (ext) {
+            if (strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".ppm") == 0 ||
+                strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0) {
+                ic = 0x00305848u; ic_txt = "IMG";
+            } else if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0 ||
+                       strcasecmp(ext, ".log") == 0) {
+                ic = 0x00384860u; ic_txt = "TXT";
+            } else if (strcasecmp(ext, ".sh") == 0) {
+                ic = 0x00305030u; ic_txt = "SH";
+            }
+        }
+        uint64_t isz  = 40u;
+        uint64_t iix  = icon_x + (DESK_ICON_W - isz) / 2u;
+        uint64_t iiy  = icon_y + 4u;
+        console_fill_rect(iix, iiy, isz, isz, ic);
+        /* border */
+        uint32_t ibc = (ic >> 1) | 0x00404040u;
+        console_fill_rect(iix,        iiy,        isz, 1u, ibc);
+        console_fill_rect(iix,        iiy+isz-1u, isz, 1u, ibc);
+        console_fill_rect(iix,        iiy,        1u, isz, ibc);
+        console_fill_rect(iix+isz-1u, iiy,        1u, isz, ibc);
+        /* type label in center of icon */
+        uint64_t tl  = (uint64_t)gui_strlen(ic_txt);
+        uint64_t ttx = iix + (isz > tl * fw ? (isz - tl * fw) / 2u : 0u);
+        uint64_t tty = iiy + (isz - fh) / 2u;
+        gui_draw_str(ttx, tty, ic_txt, 0x00c0d8f0u, ic);
+
+        /* Label below icon (truncate to fit) */
+        char lbuf[20];
+        strncpy(lbuf, name, sizeof(lbuf) - 1);
+        lbuf[sizeof(lbuf) - 1] = '\0';
+        uint64_t llen = (uint64_t)gui_strlen(lbuf);
+        uint64_t llx  = icon_x + (llen * fw < DESK_ICON_W
+                        ? (DESK_ICON_W - llen * fw) / 2u : 0u);
+        uint64_t lly  = icon_y + isz + 8u;
+        uint32_t lbg  = (bg && g_theme.wallpaper != WALLPAPER_IMAGE) ? bg : 0x00000000u;
+        gui_draw_str(llx, lly, lbuf, hov ? 0x00e0efffU : 0x00c0d8f0u, lbg);
+
+        g_desk_icons[i].active = g_desk_icons[i].active; /* touch to suppress warn */
+        icon_y += DESK_ICON_H + DESK_ICON_PAD;
+    }
+}
+
+/* ── Desktop icon position helper ────────────────────────────────────── */
+/* Returns icon index at (mx,my), -1 if none */
+static int desk_icon_at(int mx, int my) {
+    uint64_t dt = desk_top();
+    uint64_t db = desk_bot();
+    uint64_t icon_x = console_fb_width() - DESK_ICON_W - DESK_ICON_PAD;
+    uint64_t icon_y = dt + DESK_ICON_PAD;
+    for (int i = 0; i < DESK_ICON_MAX; i++) {
+        if (!g_desk_icons[i].active) continue;
+        if (icon_y + DESK_ICON_H > db) break;
+        if ((uint64_t)mx >= icon_x - 2u && (uint64_t)mx < icon_x + DESK_ICON_W + 2u &&
+            (uint64_t)my >= icon_y - 2u && (uint64_t)my < icon_y + DESK_ICON_H + 2u)
+            return i;
+        icon_y += DESK_ICON_H + DESK_ICON_PAD;
+    }
+    return -1;
+}
+
 /* ── Desktop info overlay (neofetch-style) ───────────────────────────── */
 
 static void draw_desktop_info(void) {
@@ -6534,6 +6664,17 @@ static void draw_desktop_bg(void) {
         break;
     }
 
+    case WALLPAPER_IMAGE:
+        /* Scale-blit the loaded wallpaper image to fill the desktop area */
+        if (g_wall_img && g_wall_img_w > 0 && g_wall_img_h > 0) {
+            console_blit_scaled(g_wall_img, g_wall_img_w, g_wall_img_h,
+                                0, dt, fb_w, dav);
+        } else {
+            /* Fallback gradient if no image loaded */
+            console_fill_rect(0, dt, fb_w, dav, 0x00101018u);
+        }
+        break;
+
     default:  /* WALLPAPER_GRADIENT */
         /* Subtle vertical gradient: dark navy top → slightly lighter bottom */
         for (uint64_t y = 0; y < dav; y++) {
@@ -6554,7 +6695,8 @@ static void draw_desktop_bg(void) {
             }
         break;
     }
-    draw_desktop_info();  /* overlay on top of wallpaper, beneath windows */
+    draw_desktop_icons();  /* desktop icons above wallpaper, beneath windows */
+    draw_desktop_info();   /* overlay on top of wallpaper, beneath windows */
 }
 
 /* Punch out 4px rounded corners on a window by overwriting with desktop bg. */
@@ -6923,6 +7065,10 @@ void gui_init(void) {
     win_show(&g_wins[0], 0);
 }
 
+/* Forward declarations for public API functions defined later in this file */
+void gui_add_desktop_icon(const char *path, const char *label);
+void gui_set_wallpaper_image(const char *path);
+
 /* Execute a file browser context menu item (shared by mouse-click and keyboard handlers) */
 static void fb_ctx_run(int item) {
     if (item < 0 || item >= g_fb_ctx_n || g_fb_ctx_win < 0 || g_fb_ctx_win >= MAX_WINS) return;
@@ -7019,6 +7165,14 @@ static void fb_ctx_run(int item) {
                 } else { gui_toast("Read failed", 0x00e08060u); g_fb_clip_path[0] = '\0'; }
                 fb_navigate(&fw2->fb, fw2->fb.path); full_redraw();
             }
+        }
+        break;
+    case FB_CTX_ACT_ADD_DESK:
+        if (row2 >= 0 && row2 < fw2->fb.entry_count && !fw2->fb.is_dir[row2]) {
+            char _dpath[256];
+            fb_path_join(_dpath, fw2->fb.path, fw2->fb.entries[row2]);
+            gui_add_desktop_icon(_dpath, NULL);
+            gui_toast("Added to Desktop", 0x0060c880u);
         }
         break;
     default: break;
@@ -9162,6 +9316,51 @@ void gui_on_tick(void) {
         }
     }
 
+    /* ── Desktop icon hover ── */
+    {
+        int new_hov = desk_icon_at(mx, my);
+        if (new_hov != g_desk_icon_hover) {
+            g_desk_icon_hover = new_hov;
+            if (!g_launcher_open && !g_ctx_open) full_redraw();
+        }
+        /* Left-click on desktop icon: select + open on double-click */
+        if (btn_pressed && new_hov >= 0) {
+            uint64_t now = pit_ticks();
+            if (g_desk_icon_dbl == new_hov && now - g_desk_icon_click_t < 30u) {
+                /* Double-click → open */
+                const char *ipath = g_desk_icons[new_hov].path;
+                const char *ext   = strrchr(ipath, '.');
+                bool is_img = false;
+                if (ext) {
+                    static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
+                    for (int _ii = 0; imgs[_ii]; _ii++)
+                        if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
+                }
+                __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
+                if (is_img && gui_spawn_app_with_arg)
+                    gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
+                else if (gui_spawn_app_with_arg)
+                    gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
+                g_desk_icon_dbl = -1;
+            } else {
+                g_desk_icon_sel   = new_hov;
+                g_desk_icon_dbl   = new_hov;
+                g_desk_icon_click_t = now;
+            }
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+        }
+        /* Right-click on desktop icon: remove */
+        if (rbtn_pressed && new_hov >= 0) {
+            g_desk_icons[new_hov].active = false;
+            if (g_desk_icon_sel == new_hov) g_desk_icon_sel = -1;
+            if (g_desk_icon_dbl == new_hov) g_desk_icon_dbl = -1;
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+            return;
+        }
+    }
+
     /* ── Right-click: context menu on desktop ── */
     if (rbtn_pressed && (uint64_t)my < ty) {
         /* Check if click is on any window */
@@ -9237,6 +9436,7 @@ void gui_on_tick(void) {
                     "/bin/fifi-terminal",
                     "/bin/fifi-editor",
                     "/bin/fifi-calc",
+                    "/bin/fifi-imageviewer",
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app)
@@ -10256,6 +10456,42 @@ void gui_open_in_viewer(const char *path) {
     text_open(&g_wins[3], path);
     win_show(&g_wins[3], 3);
     z_raise(3);
+}
+
+/* Load an image file and set it as the desktop wallpaper. */
+void gui_set_wallpaper_image(const char *path) {
+    if (!path) return;
+    uint32_t *new_px = NULL;
+    uint32_t nw = 0, nh = 0;
+    if (!platform_load_image(path, &new_px, &nw, &nh)) {
+        gui_toast("Wallpaper: unsupported format or load failed", 0x00c04030u);
+        return;
+    }
+    free(g_wall_img);
+    g_wall_img   = new_px;
+    g_wall_img_w = nw;
+    g_wall_img_h = nh;
+    g_theme.wallpaper = WALLPAPER_IMAGE;
+    full_redraw();
+}
+
+/* Add a desktop icon shortcut. label may be NULL (defaults to basename of path). */
+void gui_add_desktop_icon(const char *path, const char *label) {
+    if (!path) return;
+    /* Find an empty slot */
+    for (int i = 0; i < DESK_ICON_MAX; i++) {
+        if (!g_desk_icons[i].active) {
+            strncpy(g_desk_icons[i].path, path, sizeof(g_desk_icons[i].path) - 1);
+            if (label && label[0])
+                strncpy(g_desk_icons[i].label, label, sizeof(g_desk_icons[i].label) - 1);
+            else
+                g_desk_icons[i].label[0] = '\0';
+            g_desk_icons[i].active = true;
+            full_redraw();
+            return;
+        }
+    }
+    gui_toast("Desktop full (max 12 icons)", 0x00c04030u);
 }
 
 void gui_toast_extern(const char *msg, uint32_t color) {

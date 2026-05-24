@@ -989,3 +989,23 @@ void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w,
             dst[xx] = src[xx];
     }
 }
+
+/* Scale-blit src (sw×sh pixels) into the back buffer at (dx,dy) with size dw×dh.
+ * Nearest-neighbor interpolation. Used for wallpaper images. */
+void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
+                         uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh) {
+    if (!g_back || !src || !sw || !sh || !dw || !dh) return;
+    g_dirty = true;
+    if ((uint32_t)dy < g_dirty_y0) g_dirty_y0 = (uint32_t)dy;
+    uint32_t _bsy1 = (uint32_t)(dy + dh);
+    if (_bsy1 > g_dirty_y1) g_dirty_y1 = _bsy1;
+    for (uint64_t y = 0; y < dh && dy + y < con.h; y++) {
+        uint64_t sy = y * sh / dh;
+        const uint32_t *src_row = src + sy * sw;
+        uint32_t *dst_row = g_back + (dy + y) * con.pitch32 + dx;
+        for (uint64_t x = 0; x < dw && dx + x < con.w; x++) {
+            uint64_t sx = x * sw / dw;
+            dst_row[x] = src_row[sx];
+        }
+    }
+}

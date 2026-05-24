@@ -115,6 +115,12 @@ echo "[initramfs] building fifi-calc..."
     echo "[initramfs] included fifi-calc"
 } || echo "[initramfs] WARNING: fifi-calc build failed"
 
+echo "[initramfs] building fifi-imageviewer..."
+(cd "$REPO_ROOT/fifi/apps/imageviewer" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" "$STAGE/bin/"
+    echo "[initramfs] included fifi-imageviewer"
+} || echo "[initramfs] WARNING: fifi-imageviewer build failed"
+
 # Create VFS data directory (file browser root) + fonts + initial content
 mkdir -p "$STAGE/fifi-data"
 
@@ -127,7 +133,7 @@ if [ -d "$FONT_SRC" ]; then
 fi
 
 # Populate initial fifi-data content for the file browser
-mkdir -p "$STAGE/fifi-data/docs" "$STAGE/fifi-data/config"
+mkdir -p "$STAGE/fifi-data/docs" "$STAGE/fifi-data/config" "$STAGE/fifi-data/images"
 
 cat > "$STAGE/fifi-data/docs/welcome.txt" << 'WELCOME'
 FiFi OS — Linux Desktop

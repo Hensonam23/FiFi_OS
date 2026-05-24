@@ -42,6 +42,8 @@ uint64_t  console_backbuf_pitch32(void);
 /* Pixel capture/paste for shadow-buffer drag.  buf must be w*h uint32_t's. */
 bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
+void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
+                         uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);
 
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);

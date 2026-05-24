@@ -59,6 +59,8 @@
 #define IPC_WIN_RESIZE    0x1Bu  /* compositor → app: {uint16_t new_w, new_h} — window resized */
 #define IPC_DRAG_START    0x1Cu  /* app → compositor: {char path[]} — begin file drag */
 #define IPC_DROP_FILE     0x1Du  /* compositor → app: {char path[]} — file dropped on window */
+#define IPC_SET_WALLPAPER 0x1Eu  /* app → compositor: {char path[]} — set image as wallpaper */
+#define IPC_ADD_DESK_ICON 0x1Fu  /* app → compositor: {char path[]\0char label[]} — add desktop icon */
 
 typedef struct {
     int      fd;
@@ -356,25 +358,57 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             char path[512];
             memcpy(path, pld, pld_len);
             path[pld_len] = '\0';
-            /* Launch fifi-editor for text-like files; fall back to built-in viewer */
             const char *ext = strrchr(path, '.');
-            bool use_editor = false;
+            bool use_editor = false, use_image = false;
             if (ext) {
                 static const char *editable[] = {
                     ".txt", ".md", ".c", ".h", ".sh", ".cfg", ".conf",
                     ".ini", ".json", ".xml", ".py", ".lua", ".log", NULL
                 };
+                static const char *images[] = {
+                    ".bmp", ".ppm", ".pgm", ".png", ".jpg", ".jpeg", NULL
+                };
                 for (int ei = 0; editable[ei]; ei++) {
                     if (strcasecmp(ext, editable[ei]) == 0) { use_editor = true; break; }
                 }
+                for (int ii = 0; images[ii]; ii++) {
+                    if (strcasecmp(ext, images[ii]) == 0) { use_image = true; break; }
+                }
             }
-            if (use_editor) {
-                extern void gui_spawn_app_with_arg(const char *path, const char *arg);
+            extern void gui_spawn_app_with_arg(const char *path, const char *arg);
+            if (use_image) {
+                gui_spawn_app_with_arg("/bin/fifi-imageviewer", path);
+            } else if (use_editor) {
                 gui_spawn_app_with_arg("/bin/fifi-editor", path);
             } else {
                 extern void gui_open_in_viewer(const char *path);
                 gui_open_in_viewer(path);
             }
+        }
+        break;
+    }
+    case IPC_SET_WALLPAPER: {
+        if (pld_len > 0 && pld_len < 512) {
+            char path[512];
+            memcpy(path, pld, pld_len);
+            path[pld_len] = '\0';
+            extern void gui_set_wallpaper_image(const char *path);
+            gui_set_wallpaper_image(path);
+        }
+        break;
+    }
+    case IPC_ADD_DESK_ICON: {
+        if (pld_len > 1 && pld_len < 512) {
+            char buf[512];
+            memcpy(buf, pld, pld_len);
+            buf[pld_len] = '\0';
+            /* payload: path\0label (label is optional, defaults to basename) */
+            const char *ipath = buf;
+            const char *ilabel = NULL;
+            size_t plen = strlen(ipath);
+            if (plen + 1 < pld_len) ilabel = buf + plen + 1;
+            extern void gui_add_desktop_icon(const char *path, const char *label);
+            gui_add_desktop_icon(ipath, ilabel);
         }
         break;
     }
