@@ -43,7 +43,7 @@ chmod +x "$STAGE/bin/busybox"
 # Populate symlinks: sh, mount, ls, cat, echo, etc.
 for applet in sh ash mount umount ls cat echo cp mv rm mkdir mknod \
               ln chmod chown hostname dmesg free ps kill sleep \
-              modprobe insmod lsmod ifconfig ip udhcpc; do
+              modprobe insmod lsmod ifconfig ip udhcpc ntpd nc wget; do
     ln -sf busybox "$STAGE/bin/$applet" 2>/dev/null || true
 done
 

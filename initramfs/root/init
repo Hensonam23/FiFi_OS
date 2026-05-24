@@ -56,6 +56,10 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
                     echo "dhcp ok" >> /fifi-data/network.log || \
                     echo "dhcp failed" >> /fifi-data/network.log
                 ip addr show "$iface" >> /fifi-data/network.log 2>&1
+                # Sync system clock via NTP (one-shot, best-effort)
+                ntpd -q -n -p pool.ntp.org >> /fifi-data/network.log 2>&1 && \
+                    echo "ntp ok" >> /fifi-data/network.log || \
+                    echo "ntp failed (ok)" >> /fifi-data/network.log
                 exit 0
             fi
         done

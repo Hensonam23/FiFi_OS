@@ -409,10 +409,12 @@ static int g_term_scroll = 0;  /* lines scrolled back (0 = live view) */
 static int g_font_idx = 0;
 static const char *g_font_paths[] = {
     "/fonts/ter16b.psf", "/fonts/ter20b.psf", "/fonts/ter24b.psf",
+    "/fonts/ter28b.psf", "/fonts/ter32b.psf",
     "/fonts/default.psf", NULL
 };
 static const char *g_font_labels[] = {
-    "Terminus Bold 8x16", "Terminus Bold 10x20", "Terminus Bold 12x24",
+    "Terminus 8x16", "Terminus 10x20", "Terminus 12x24",
+    "Terminus 14x28", "Terminus 16x32",
     "Default 8x16", NULL
 };
 /* Absolute screen coords of font prev/next buttons (updated each settings render) */
@@ -7027,10 +7029,16 @@ static void win_do_resize(window_t *w, int32_t mx, int32_t my) {
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void gui_init(void) {
-    /* Load a cleaner font if available in the initrd */
-    console_load_psf("/fonts/ter16b.psf");
-
     uint64_t fb_w = console_fb_width();
+
+    /* Pick font based on display resolution so text is readable at any DPI. */
+    if      (fb_w >= 3840) g_font_idx = 4;  /* ter32b — 4K */
+    else if (fb_w >= 2560) g_font_idx = 3;  /* ter28b — 2.5K (e.g. 2560x1600) */
+    else if (fb_w >= 1920) g_font_idx = 2;  /* ter24b — 1080p */
+    else if (fb_w >= 1280) g_font_idx = 1;  /* ter20b — 720p */
+    else                   g_font_idx = 0;  /* ter16b — small/QEMU */
+    if (!console_load_psf(g_font_paths[g_font_idx]))
+        console_load_psf("/fonts/ter16b.psf");
 
     /* Initialize z-order: 0=bottom ... MAX_WINS-1=top */
     for (int i = 0; i < MAX_WINS; i++) g_z[i] = i;

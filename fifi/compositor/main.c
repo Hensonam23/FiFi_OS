@@ -390,6 +390,9 @@ int main(void) {
 
     pty_init();
 
+    gui_init();  /* loads resolution-appropriate font before terminal size is computed */
+    mouse_cursor_update();
+
     {
         uint32_t fw = console_font_width();
         uint32_t fh = console_font_height();
@@ -407,9 +410,6 @@ int main(void) {
             fprintf(stderr, "[compositor] terminal %ux%u chars\n", cols, rows);
         }
     }
-
-    gui_init();
-    mouse_cursor_update();
 
     ipc_init();
 
