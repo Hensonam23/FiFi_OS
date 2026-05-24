@@ -260,6 +260,9 @@ void net_poll(void) {
         net_ip = 0;
     }
     close(sk);
+    fprintf(stderr, "[net_poll] %s -> %u.%u.%u.%u\n", iface,
+            (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
+            (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
 bool net_nic_present(void) { return g_net_present; }
 bool net_send_eth(const uint8_t dst[6], uint16_t et,

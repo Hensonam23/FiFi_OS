@@ -1,0 +1,12 @@
+#!/bin/sh
+# udhcpc default script — configures the interface when DHCP completes
+case "$1" in
+    bound|renew)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip addr add "$ip/$mask" dev "$interface" 2>/dev/null
+        [ -n "$router" ] && ip route replace default via "$router" dev "$interface" 2>/dev/null
+        ;;
+    deconfig)
+        ip addr flush dev "$interface" 2>/dev/null
+        ;;
+esac
