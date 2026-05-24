@@ -252,6 +252,7 @@ void net_poll(void) {
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    uint32_t old_ip = net_ip;
     if (ioctl(sk, SIOCGIFADDR, &ifr) == 0) {
         uint32_t ip_nbo;
         memcpy(&ip_nbo, ifr.ifr_addr.sa_data + 2, 4);
@@ -260,6 +261,10 @@ void net_poll(void) {
         net_ip = 0;
     }
     close(sk);
+    if (net_ip != old_ip)
+        fprintf(stderr, "[net] ip updated: %u.%u.%u.%u\n",
+                (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
+                (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
 bool net_nic_present(void) { return g_net_present; }
 bool net_send_eth(const uint8_t dst[6], uint16_t et,

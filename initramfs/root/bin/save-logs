@@ -11,6 +11,7 @@ for dev in /dev/sda1 /dev/sda2 /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2; do
             mkdir -p /mnt/usb/fifi-logs
             cp /fifi-data/compositor.log    /mnt/usb/fifi-logs/ 2>/dev/null
             cp /fifi-data/input-devices.txt /mnt/usb/fifi-logs/ 2>/dev/null
+            cp /fifi-data/network.log       /mnt/usb/fifi-logs/ 2>/dev/null
             dmesg > /mnt/usb/fifi-logs/dmesg.txt 2>/dev/null
             sync
             umount /mnt/usb
