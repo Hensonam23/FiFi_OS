@@ -313,6 +313,12 @@ static void *render_thread_fn(void *arg)
             gui_on_tick();
         }
 
+        /* Refresh network IP display every ~2 s (rate-limited inside net_poll). */
+        {
+            extern void net_poll(void);
+            net_poll();
+        }
+
         /* FPS counter: updated here since render thread owns the frame clock. */
         fps_frames++;
         {
