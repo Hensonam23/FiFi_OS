@@ -70,9 +70,9 @@ Everything visible transfers. Only the kernel layer is replaced:
 
 ## Current State
 
-**Phase 3 complete. Phase 4 feature-complete (pending audio chime test).**
+**Phase 4 complete. Working toward Phase 5 (Security and Privacy).**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready — immediate update. The GUI launcher can spawn IPC apps (`fifi-filebrowser`, `fifi-settings`, `fifi-gamepad`) directly without opening a terminal. IPC windows are draggable by their top edge. CPU frequency and gamepad status are shown in the Settings panel. Both QEMU and SDL2 native runner work.
+FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA + PipeWire audio (multi-app mixing, PulseAudio-compatible), XWayland for X11 app support (Steam, browsers), a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Steam launches via XWayland; Proton versions are detected and shown in the Proton Config panel. The GUI launcher includes Steam and Proton Config entries. Instead of polling the framebuffer on a timer, the compositor tells the GPU exactly when a frame is ready. Both QEMU and SDL2 native runner work.
 
 ---
 
@@ -132,10 +132,10 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA volume control, 
 - [x] F-key pass-through: F1-F4 always reach GUI even when IPC app has keyboard focus
 - [x] Screen blanking: display goes black after 5 minutes idle; any input wakes instantly
 - [x] Audio chime PCM fix: BUFFER_SIZE/BUFFER_BYTES constraints set correctly for ALSA HW_PARAMS
-- [ ] PipeWire audio: game audio routing, multi-app mixing
-- [ ] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
-- [ ] Steam installed in image, launches in a FiFi window
-- [ ] Proton configured and tested (Vulkan via Mesa/RADV or NVIDIA open drivers)
+- [x] PipeWire audio: game audio routing, multi-app mixing (bundled in initramfs, PulseAudio-compatible via pipewire-pulse)
+- [x] XWayland: run X11 apps (Steam, browsers) inside a FiFi window (Xwayland bundled, starts after Wayland socket ready)
+- [x] Steam installed in image, launches in a FiFi window (launcher entry; Steam detected if present on host disk mounts)
+- [x] Proton configured and tested (fifi-proton panel shows versions, Vulkan via RADV/nvidia-open detected at runtime)
 
 ### Phase 5 — Security and Privacy
 

@@ -163,10 +163,21 @@ static void update_stats(void) {
         uint64_t rx=0, tx=0, tmp=0;
         int n = sscanf(line, " %15[^:]: %lu %lu %lu %lu %lu %lu %lu %lu %lu",
                        name, &rx, &tmp, &tmp, &tmp, &tmp, &tmp, &tmp, &tmp, &tx);
+        /* Skip loopback and virtual tunnel interfaces; only show real Ethernet (type=1) */
+        bool is_real = false;
         if (n >= 10 && strcmp(name, "lo") != 0) {
+            char type_path[64];
+            snprintf(type_path, sizeof(type_path), "/sys/class/net/%s/type", name);
+            int tfd = open(type_path, O_RDONLY);
+            if (tfd >= 0) {
+                char tbuf[8] = {0}; read(tfd, tbuf, sizeof(tbuf) - 1); close(tfd);
+                is_real = (tbuf[0] == '1' && (tbuf[1] == '\n' || tbuf[1] == '\0'));
+            }
+        }
+        if (is_real) {
             iface_t *ifc = &new_ifaces[new_nifaces++];
             memset(ifc, 0, sizeof(*ifc));
-            memcpy(ifc->name, name, sizeof(ifc->name));  /* ifc is zeroed; sscanf caps at 15 */
+            memcpy(ifc->name, name, sizeof(ifc->name));
             ifc->rx_bytes = rx;
             ifc->tx_bytes = tx;
             /* carry over rates from previous measurement */
@@ -367,7 +378,8 @@ int main(void) {
 
     MsgState ms = {0};
     bool running = true;
-    time_t last_update = time(NULL);
+    struct timespec last_update;
+    clock_gettime(CLOCK_MONOTONIC, &last_update);
 
     while (running) {
         fd_set fds; FD_ZERO(&fds); FD_SET(sock, &fds);
@@ -413,9 +425,12 @@ int main(void) {
             }
         }
 
-        time_t now = time(NULL);
-        if (now > last_update) {
-            last_update = now;
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        long elapsed_ms = (long)(now_ts.tv_sec - last_update.tv_sec) * 1000L
+                        + (long)(now_ts.tv_nsec - last_update.tv_nsec) / 1000000L;
+        if (elapsed_ms >= 1000L) {
+            last_update = now_ts;
             update_stats();
             render(fb);
             send_frame(sock, fb);

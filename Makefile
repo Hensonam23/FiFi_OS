@@ -199,7 +199,7 @@ clean:
 # These targets build and run the linux-desktop branch version.
 # The bare-metal targets above (run, rundbg, iso, etc.) are unchanged.
 
-.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-clean
+.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-usb linux-flash linux-clean
 
 linux-setup:
 	bash scripts/setup-linux.sh
@@ -218,6 +218,17 @@ linux-run: linux-initrd
 
 linux-rundbg: linux-initrd
 	bash scripts/run-qemu.sh serial
+
+linux-usb: linux-initrd
+	bash scripts/build-linux-usb.sh
+
+linux-flash: linux-usb
+	@echo ""
+	@echo "Available drives:"
+	@lsblk -d -o NAME,SIZE,MODEL,TRAN | grep -v "^loop"
+	@echo ""
+	@echo "Flash command (replace sdX with your USB drive):"
+	@echo "  sudo dd if=build-linux/fifi-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync"
 
 linux-clean:
 	rm -rf build-linux/

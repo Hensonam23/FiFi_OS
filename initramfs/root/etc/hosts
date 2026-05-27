@@ -1,0 +1,95 @@
+127.0.0.1  localhost fifios
+::1        localhost
+
+# ── FiFi OS Privacy Mode — Telemetry and Tracking Block List ──────────────
+# These domains are blocked system-wide. No traffic reaches them.
+# Source: community-maintained telemetry blocklists.
+
+# Microsoft telemetry
+0.0.0.0 telemetry.microsoft.com
+0.0.0.0 vortex.data.microsoft.com
+0.0.0.0 settings-win.data.microsoft.com
+0.0.0.0 watson.telemetry.microsoft.com
+0.0.0.0 watson.live.com
+0.0.0.0 watson.microsoft.com
+0.0.0.0 sqm.telemetry.microsoft.com
+0.0.0.0 redir.metaservices.microsoft.com
+0.0.0.0 choice.microsoft.com
+0.0.0.0 df.telemetry.microsoft.com
+0.0.0.0 reports.wes.df.telemetry.microsoft.com
+0.0.0.0 wes.df.telemetry.microsoft.com
+0.0.0.0 services.wes.df.telemetry.microsoft.com
+0.0.0.0 sqm.df.telemetry.microsoft.com
+0.0.0.0 oca.telemetry.microsoft.com
+0.0.0.0 oca.microsoft.com
+0.0.0.0 kmwatsonc.events.data.microsoft.com
+0.0.0.0 v10.events.data.microsoft.com
+0.0.0.0 v20.events.data.microsoft.com
+
+# Google analytics / tracking
+0.0.0.0 google-analytics.com
+0.0.0.0 www.google-analytics.com
+0.0.0.0 ssl.google-analytics.com
+0.0.0.0 analytics.google.com
+0.0.0.0 stats.g.doubleclick.net
+0.0.0.0 adservice.google.com
+0.0.0.0 pagead2.googlesyndication.com
+0.0.0.0 tpc.googlesyndication.com
+
+# Facebook tracking
+0.0.0.0 graph.facebook.com
+0.0.0.0 an.facebook.com
+0.0.0.0 pixel.facebook.com
+0.0.0.0 connect.facebook.net
+
+# Amazon tracking
+0.0.0.0 fls-na.amazon.com
+0.0.0.0 analytics.mopub.com
+
+# Apple telemetry
+0.0.0.0 metrics.apple.com
+0.0.0.0 icloud-diagnostics.apple.com
+
+# Common ad / tracking networks
+0.0.0.0 doubleclick.net
+0.0.0.0 ad.doubleclick.net
+0.0.0.0 adsense.google.com
+0.0.0.0 adwords.google.com
+0.0.0.0 static.doubleclick.net
+0.0.0.0 m.doubleclick.net
+0.0.0.0 mediavisor.doubleclick.net
+0.0.0.0 googleads.g.doubleclick.net
+0.0.0.0 pubads.g.doubleclick.net
+0.0.0.0 securepubads.g.doubleclick.net
+0.0.0.0 scorecardresearch.com
+0.0.0.0 b.scorecardresearch.com
+0.0.0.0 sb.scorecardresearch.com
+0.0.0.0 pixel.quantserve.com
+0.0.0.0 pixel.mathtag.com
+0.0.0.0 image2.pubmatic.com
+0.0.0.0 rubiconproject.com
+0.0.0.0 pixel.rubiconproject.com
+0.0.0.0 fastclick.net
+0.0.0.0 beacon.krxd.net
+0.0.0.0 tracking.opencandy.com
+0.0.0.0 scdn.cootlogix.com
+0.0.0.0 cdn.doubleverify.com
+
+# Mozilla telemetry
+0.0.0.0 telemetry.mozilla.org
+0.0.0.0 incoming.telemetry.mozilla.org
+0.0.0.0 crash-stats.mozilla.org
+
+# Valve / Steam (opt-out of crash reporting)
+0.0.0.0 crash.steampowered.com
+
+# Various crash reporters / analytics SDKs
+0.0.0.0 reports.crashlytics.com
+0.0.0.0 e.crashlytics.com
+0.0.0.0 settings.crashlytics.com
+0.0.0.0 dl.fabric.io
+0.0.0.0 update.googleapis.com
+0.0.0.0 clients1.google.com
+0.0.0.0 clients2.google.com
+0.0.0.0 clients4.google.com
+0.0.0.0 clients6.google.com

@@ -25,6 +25,7 @@
 #define IPC_APP_CLOSE    0x04u
 #define IPC_WIN_CREATED  0x10u
 #define IPC_INPUT_KEY    0x11u
+#define IPC_WIN_RESIZE   0x1Bu
 #define IPC_INVALIDATE   0x15u
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
@@ -34,6 +35,9 @@
 #define PAD       14
 #define ROW_H     22
 #define BAR_H     10
+
+static int g_win_w = WIN_W;
+static int g_win_h = WIN_H;
 
 /* ── Colours ─────────────────────────────────────────────────────────────── */
 #define C_BG      0x00101820u
@@ -79,8 +83,8 @@ static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
         for (int col = 0; col < 8; col++) {
             if (b & (0x80u >> col)) {
                 int x = px + col, y = py + row;
-                if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H)
-                    fb[y * WIN_W + x] = fg;
+                if (x >= 0 && x < g_win_w && y >= 0 && y < g_win_h)
+                    fb[y * g_win_w + x] = fg;
             }
         }
     }
@@ -90,19 +94,19 @@ static void draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
 }
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int r = y; r < y+h; r++) {
-        if (r < 0 || r >= WIN_H) continue;
-        int x0 = x < 0 ? 0 : x, x1 = x+w > WIN_W ? WIN_W : x+w;
-        for (int c = x0; c < x1; c++) fb[r * WIN_W + c] = col;
+        if (r < 0 || r >= g_win_h) continue;
+        int x0 = x < 0 ? 0 : x, x1 = x+w > g_win_w ? g_win_w : x+w;
+        for (int c = x0; c < x1; c++) fb[r * g_win_w + c] = col;
     }
 }
 static void hline(uint32_t *fb, int y, uint32_t col) {
-    if (y < 0 || y >= WIN_H) return;
-    for (int x = 0; x < WIN_W; x++) fb[y * WIN_W + x] = col;
+    if (y < 0 || y >= g_win_h) return;
+    for (int x = 0; x < g_win_w; x++) fb[y * g_win_w + x] = col;
 }
 
 /* ── CPU usage tracking ──────────────────────────────────────────────────── */
 typedef struct { unsigned long long user, nice, sys, idle, iowait, irq, softirq; } CpuStat;
-#define MAX_CPUS 32
+#define MAX_CPUS 64
 static CpuStat g_prev[MAX_CPUS + 1];  /* [0]=total, [1..N]=per-core */
 static int     g_ncpus = 0;
 static float   g_cpu_pct[MAX_CPUS + 1];  /* [0]=total */
@@ -123,13 +127,13 @@ static float cpu_pct(const CpuStat *a, const CpuStat *b) {
 }
 
 static void update_cpu(void) {
-    char buf[4096] = {0};
+    char buf[8192] = {0};
     int fd = open("/proc/stat", O_RDONLY);
     if (fd < 0) return;
     read(fd, buf, sizeof(buf)-1);
     close(fd);
 
-    CpuStat cur[MAX_CPUS + 1] = {0};
+    CpuStat cur[MAX_CPUS + 1] = {{0}};
     int ncpus = 0;
     char *line = buf;
     while (*line) {
@@ -139,8 +143,13 @@ static void update_cpu(void) {
             if (line[3] == ' ') {
                 parse_cpu_line(line, &cur[0]);
             } else if (line[3] >= '0' && line[3] <= '9' && ncpus < MAX_CPUS) {
-                int idx = line[3] - '0' + 1;
-                if (idx <= MAX_CPUS) { parse_cpu_line(line, &cur[idx]); ncpus++; }
+                /* Parse multi-digit core numbers (e.g. cpu10, cpu15) */
+                int core_num = atoi(line + 3);
+                int idx = core_num + 1;
+                if (idx > 0 && idx <= MAX_CPUS) {
+                    parse_cpu_line(line, &cur[idx]);
+                    if (core_num + 1 > ncpus) ncpus = core_num + 1;
+                }
             }
         }
         if (!nl) break;
@@ -253,7 +262,8 @@ static void draw_graph(uint32_t *fb, int x, int y, int w, int h) {
 
 /* ── Render ──────────────────────────────────────────────────────────────── */
 static void render(uint32_t *fb) {
-    fill(fb, 0, 0, WIN_W, WIN_H, C_BG);
+    int ww = g_win_w, wh = g_win_h;
+    fill(fb, 0, 0, ww, wh, C_BG);
     /* Top TITLE_H blank — compositor draws title bar */
 
     int y = TITLE_H + 6;
@@ -267,30 +277,35 @@ static void render(uint32_t *fb) {
     char cpu_lbl[16];
     snprintf(cpu_lbl, sizeof(cpu_lbl), "Total  %3.0f%%", g_cpu_pct[0]);
     draw_str(fb, cpu_lbl, PAD, y + (BAR_H + 4 - g_glyph_h)/2, C_VAL);
-    draw_bar(fb, PAD + 100, y + 2, WIN_W - PAD - 100 - PAD, BAR_H, g_cpu_pct[0],
+    draw_bar(fb, PAD + 100, y + 2, ww - PAD - 100 - PAD, BAR_H, g_cpu_pct[0],
              g_cpu_pct[0] > 75.0f ? C_CPU_HI : C_CPU_LO);
     y += BAR_H + 6;
 
-    /* Per-core bars (up to 8 shown) */
+    /* Per-core bars (up to 8 shown, or fewer if window is short) */
     int show = g_ncpus < 8 ? g_ncpus : 8;
     for (int i = 0; i < show; i++) {
-        char lbl[12];
-        snprintf(lbl, sizeof(lbl), "Core %d %2.0f%%", i, g_cpu_pct[i+1]);
-        fill(fb, 0, y, WIN_W, ROW_H - 4, (i & 1) ? C_ROW_B : C_ROW_A);
+        if (y + ROW_H - 4 > wh - 4) break;
+        char lbl[14];
+        snprintf(lbl, sizeof(lbl), "Core%2d %2.0f%%", i, g_cpu_pct[i+1]);
+        fill(fb, 0, y, ww, ROW_H - 4, (i & 1) ? C_ROW_B : C_ROW_A);
         draw_str(fb, lbl, PAD, y + (ROW_H - 4 - g_glyph_h)/2, C_GREY);
         draw_bar(fb, PAD + 100, y + (ROW_H - 4 - BAR_H)/2,
-                 WIN_W - PAD - 100 - PAD, BAR_H, g_cpu_pct[i+1],
+                 ww - PAD - 100 - PAD, BAR_H, g_cpu_pct[i+1],
                  g_cpu_pct[i+1] > 75.0f ? C_CPU_HI : C_CPU_LO);
         y += ROW_H - 4;
     }
 
     /* CPU history graph */
-    y += 4;
-    draw_graph(fb, PAD, y, WIN_W - PAD*2, 50);
-    draw_str(fb, "1min history", WIN_W - PAD - 9*9, y + 2, C_GREY);
-    y += 56;
+    if (y + 60 <= wh - 4) {
+        y += 4;
+        int graph_w = ww - PAD*2;
+        draw_graph(fb, PAD, y, graph_w, 50);
+        draw_str(fb, "1min history", ww - PAD - 9*12, y + 2, C_GREY);
+        y += 56;
+    }
 
     /* ── Memory section ── */
+    if (y + g_glyph_h + 5 + BAR_H + 6 > wh - 4) goto sys_section;
     draw_str(fb, "Memory", PAD, y, C_KEY);
     hline(fb, y + g_glyph_h + 2, C_BORDER);
     y += g_glyph_h + 5;
@@ -298,22 +313,30 @@ static void render(uint32_t *fb) {
     if (g_mem_total_mb > 0) {
         float mem_pct = (float)g_mem_used_mb * 100.0f / (float)g_mem_total_mb;
         char mem_lbl[48];
-        snprintf(mem_lbl, sizeof(mem_lbl), "RAM   %4lu/%4lu MB", g_mem_used_mb, g_mem_total_mb);
+        snprintf(mem_lbl, sizeof(mem_lbl), "RAM  %lu/%lu MB", g_mem_used_mb, g_mem_total_mb);
+        int mem_bar_x = PAD + (int)strlen(mem_lbl) * 9 + 8;
+        int mem_bar_w = ww - mem_bar_x - PAD;
         draw_str(fb, mem_lbl, PAD, y + (BAR_H + 4 - g_glyph_h)/2, C_VAL);
-        draw_bar(fb, PAD + 128, y + 2, WIN_W - PAD - 128 - PAD, BAR_H, mem_pct, C_RAM);
+        if (mem_bar_w > 10)
+            draw_bar(fb, mem_bar_x, y + 2, mem_bar_w, BAR_H, mem_pct, C_RAM);
         y += BAR_H + 6;
 
-        if (g_swap_total_mb > 0) {
+        if (g_swap_total_mb > 0 && y + BAR_H + 6 <= wh - 4) {
             float sw_pct = (float)g_swap_used_mb * 100.0f / (float)g_swap_total_mb;
             char sw_lbl[48];
-            snprintf(sw_lbl, sizeof(sw_lbl), "Swap  %4lu/%4lu MB", g_swap_used_mb, g_swap_total_mb);
+            snprintf(sw_lbl, sizeof(sw_lbl), "Swap %lu/%lu MB", g_swap_used_mb, g_swap_total_mb);
+            int sw_bar_x = PAD + (int)strlen(sw_lbl) * 9 + 8;
+            int sw_bar_w = ww - sw_bar_x - PAD;
             draw_str(fb, sw_lbl, PAD, y + (BAR_H + 4 - g_glyph_h)/2, C_GREY);
-            draw_bar(fb, PAD + 128, y + 2, WIN_W - PAD - 128 - PAD, BAR_H, sw_pct, C_CPU_HI);
+            if (sw_bar_w > 10)
+                draw_bar(fb, sw_bar_x, y + 2, sw_bar_w, BAR_H, sw_pct, C_CPU_HI);
             y += BAR_H + 6;
         }
     }
 
+sys_section:
     /* ── System section ── */
+    if (y + g_glyph_h + 5 + (ROW_H - 2)*2 > wh - 4) return;
     y += 4;
     draw_str(fb, "System", PAD, y, C_KEY);
     hline(fb, y + g_glyph_h + 2, C_BORDER);
@@ -324,17 +347,19 @@ static void render(uint32_t *fb) {
         long up = si.uptime;
         char buf[64];
 
-        fill(fb, 0, y, WIN_W, ROW_H - 2, C_ROW_A);
+        fill(fb, 0, y, ww, ROW_H - 2, C_ROW_A);
         snprintf(buf, sizeof(buf), "Uptime   %ldh %02ldm %02lds",
                  up/3600, (up%3600)/60, up%60);
         draw_str(fb, buf, PAD, y + (ROW_H - 2 - g_glyph_h)/2, C_VAL);
         y += ROW_H - 2;
 
-        fill(fb, 0, y, WIN_W, ROW_H - 2, C_ROW_B);
-        int np = count_procs();
-        snprintf(buf, sizeof(buf), "Procs    %d   Load %.2f",
-                 np, (double)si.loads[0] / 65536.0);
-        draw_str(fb, buf, PAD, y + (ROW_H - 2 - g_glyph_h)/2, C_VAL);
+        if (y + ROW_H - 2 <= wh - 4) {
+            fill(fb, 0, y, ww, ROW_H - 2, C_ROW_B);
+            int np = count_procs();
+            snprintf(buf, sizeof(buf), "Procs    %d   Load %.2f",
+                     np, (double)si.loads[0] / 65536.0);
+            draw_str(fb, buf, PAD, y + (ROW_H - 2 - g_glyph_h)/2, C_VAL);
+        }
     }
 }
 
@@ -347,12 +372,13 @@ static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) 
 }
 
 static void send_frame(int fd, uint32_t *px) {
-    uint32_t frm[4] = {0, 0, WIN_W, WIN_H};
-    uint32_t total = 16 + WIN_W * WIN_H * 4;
+    uint32_t fw = (uint32_t)g_win_w, fh = (uint32_t)g_win_h;
+    uint32_t frm[4] = {0, 0, fw, fh};
+    uint32_t total = 16 + fw * fh * 4;
     uint8_t *msg = malloc(total);
     if (!msg) return;
     memcpy(msg, frm, 16);
-    memcpy(msg+16, px, WIN_W * WIN_H * 4);
+    memcpy(msg+16, px, fw * fh * 4);
     ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
     free(msg);
 }
@@ -362,7 +388,7 @@ int main(void) {
     font_load("/fifi-data/fonts/ter16b.psf");
     if (!g_glyph) { g_glyph = calloc(256*16, 1); g_glyph_h = 16; }
 
-    uint32_t *fb = malloc(WIN_W * WIN_H * 4);
+    uint32_t *fb = malloc((size_t)WIN_W * WIN_H * 4);
     if (!fb) return 1;
 
     /* Initial stats (prev baseline) */
@@ -393,15 +419,17 @@ int main(void) {
 
     uint8_t ibuf[8]; int igot = 0;
     uint32_t itype = 0, iplen = 0, ipgot = 0;
+    uint8_t payload[16] = {0};
     bool running = true;
-    time_t last_tick = time(NULL);
+    struct timespec last_tick;
+    clock_gettime(CLOCK_MONOTONIC, &last_tick);
 
     while (running) {
         fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
         struct timeval tv = {0, 50000};  /* 50ms = 20Hz */
         if (select(sock + 1, &rfds, NULL, NULL, &tv) < 0) break;
 
-        uint8_t tbuf[256];
+        uint8_t tbuf[512];
         ssize_t n = 0;
         if (FD_ISSET(sock, &rfds)) {
             n = read(sock, tbuf, sizeof(tbuf));
@@ -418,29 +446,48 @@ int main(void) {
                         memcpy(&iplen, ibuf+4, 4);
                         if (iplen > 65536) { igot = 0; break; }
                         ipgot = 0;
+                        memset(payload, 0, sizeof(payload));
                         if (iplen == 0) {
                             if (itype == IPC_INVALIDATE) {
                                 update_cpu(); update_mem();
                                 push_hist(g_cpu_pct[0]);
                                 render(fb); send_frame(sock, fb);
-                            } else if (itype == IPC_INPUT_KEY) {
-                                /* key with zero len shouldn't happen, skip */
+                            } else if (itype == IPC_APP_CLOSE) {
+                                running = false;
                             }
                             igot = 0;
                         }
                     }
                 } else {
-                    /* drain payload bytes */
+                    /* accumulate payload bytes (up to sizeof(payload)) */
                     uint32_t have = (uint32_t)(n - pos);
                     uint32_t need = iplen - ipgot;
                     uint32_t take = have < need ? have : need;
-                    uint8_t key = 0;
-                    if (itype == IPC_INPUT_KEY && ipgot == 0 && take > 0)
-                        key = tbuf[pos];
+                    for (uint32_t k = 0; k < take && ipgot + k < (uint32_t)sizeof(payload); k++)
+                        payload[ipgot + k] = tbuf[pos + k];
                     pos += (ssize_t)take; ipgot += take;
                     if (ipgot >= iplen) {
-                        if (itype == IPC_INPUT_KEY && key) {
-                            if (key == 'q' || key == 'Q' || key == 0x1B) running = false;
+                        switch (itype) {
+                        case IPC_INPUT_KEY:
+                            if (iplen >= 1) {
+                                uint8_t key = payload[0];
+                                if (key == 'q' || key == 'Q' || key == 0x1B) running = false;
+                            }
+                            break;
+                        case IPC_WIN_RESIZE:
+                            if (iplen >= 4) {
+                                uint16_t nw, nh;
+                                memcpy(&nw, payload, 2); memcpy(&nh, payload+2, 2);
+                                if (nw >= 200 && nh >= 100) {
+                                    uint32_t *nb = realloc(fb, (size_t)nw * nh * 4);
+                                    if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
+                                }
+                            }
+                            render(fb); send_frame(sock, fb);
+                            break;
+                        case IPC_APP_CLOSE:
+                            running = false;
+                            break;
                         }
                         igot = 0; itype = 0; iplen = 0; ipgot = 0;
                     }
@@ -448,10 +495,13 @@ int main(void) {
             }
         }
 
-        /* Update every second */
-        time_t now = time(NULL);
-        if (now != last_tick) {
-            last_tick = now;
+        /* Update every second using monotonic clock (time() unreliable in initramfs) */
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        long elapsed_ms2 = (long)(now_ts.tv_sec - last_tick.tv_sec) * 1000L
+                         + (long)(now_ts.tv_nsec - last_tick.tv_nsec) / 1000000L;
+        if (elapsed_ms2 >= 1000L) {
+            last_tick = now_ts;
             update_cpu();
             update_mem();
             push_hist(g_cpu_pct[0]);

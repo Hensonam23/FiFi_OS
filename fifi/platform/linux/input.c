@@ -54,8 +54,15 @@ typedef struct {
     int32_t x_max, y_max;
     bool is_mt;
     bool is_touchpad;  /* INPUT_PROP_POINTER: use delta tracking, not abs mapping */
+    bool tool_doubletap;      /* two fingers on pad — BTN_LEFT while set = right-click */
+    bool prev_tool_doubletap; /* previous frame state — detects 0→1 transition */
+    bool btn_touch;      /* BTN_TOUCH state: finger physically on pad */
     int32_t prev_x, prev_y;  /* last known position; -1 = finger not down */
     int32_t click_cooldown;  /* frames to skip delta after BTN_LEFT change (spring-back) */
+    int32_t lift_cooldown;   /* debounce: ticks until prev_x resets after id=-1 */
+    int64_t sub_x, sub_y;   /* subpixel accumulator for slow movement precision */
+    int64_t ema_x_q8,  ema_y_q8;      /* Q8 EMA of abs position; negative = uninit */
+    int64_t pema_x_q8, pema_y_q8;     /* previous EMA snapshot for delta (full Q8, no truncation) */
     char phys[64];           /* EVIOCGPHYS — used to skip companion REL node */
 } abs_dev_t;
 static abs_dev_t g_abs_devs[MAX_EVDEV];
@@ -118,6 +125,9 @@ typedef struct { int32_t x, y; } click_t;
 static click_t  g_clk_ring[CLK_RING];
 static uint32_t g_clk_head = 0;
 static uint32_t g_clk_used = 0;
+static click_t  g_rclk_ring[CLK_RING];
+static uint32_t g_rclk_head = 0;
+static uint32_t g_rclk_used = 0;
 static int8_t   g_scroll_pending = 0;
 
 /* ── Mouse cursor (drawn on real framebuffer after backbuf flip) ─────────── */
@@ -166,6 +176,8 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_TAB:       return '\t';
         case KEY_ENTER:     return '\n';
         case KEY_ESC:       return 0x1Bu;
+        /* Numpad keys whose codes fall in the printable-key range */
+        case KEY_KPASTERISK: return '*';
     }
 
     /* Ctrl+letter → control code */
@@ -233,6 +245,17 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
     if (code < 58) {
         char c = shift ? ks[code] : kn[code];
         return (uint8_t)c;
+    }
+    /* Numpad keys */
+    switch (code) {
+    case 71: return '7'; case 72: return '8'; case 73: return '9';
+    case 75: return '4'; case 76: return '5'; case 77: return '6';
+    case 79: return '1'; case 80: return '2'; case 81: return '3';
+    case 82: return '0'; case 83: return '.';
+    case 74: return '-'; case 78: return '+';
+    case 55: return '*'; case 98: return '/';
+    case 96: return '\r';  /* KP_ENTER */
+    default: break;
     }
     return 0;
 }
@@ -533,17 +556,26 @@ void input_poll(void) {
                 else if (ev.code == REL_WHEEL) scroll += (int8_t)ev.value;
             } else if (ev.type == EV_KEY) {
                 if (ev.code == BTN_LEFT)  lbtn = (ev.value != 0);
-                if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                if (ev.code == BTN_RIGHT) {
+                    bool new_r = (ev.value != 0);
+                    if (new_r && !rbtn) {  /* rising edge — capture before release can clear it */
+                        if (g_rclk_used < CLK_RING) {
+                            g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
+                                (click_t){ g_mx, g_my };
+                            g_rclk_used++;
+                        }
+                    }
+                    rbtn = new_r;
+                }
             }
         }
 
         if (had_event) {
-            bool prev = g_lbtn;
+            bool prev_l = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
             if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
             mouse_push_rel(dx, dy, lbtn, rbtn);
-            /* click on rising edge */
-            if (lbtn && !prev) {
+            if (lbtn && !prev_l) {
                 if (g_clk_used < CLK_RING) {
                     g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =
                         (click_t){ g_mx, g_my };
@@ -557,24 +589,79 @@ void input_poll(void) {
     for (int ai = 0; ai < g_abs_cnt; ai++) {
         abs_dev_t *dev = &g_abs_devs[ai];
         int32_t abs_x = -1, abs_y = -1;
+        int32_t abs_x1 = -1, abs_y1 = -1; /* slot 1 — dragging finger in 2-finger mode */
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
-        int cur_slot = 0;   /* MT Type B: track active slot, only use slot 0 */
+        int cur_slot = 0;   /* MT Type B: track active slot */
+
+        /* Debounce: count down after finger lift; reset origin when it expires */
+        if (dev->lift_cooldown > 0 && --dev->lift_cooldown == 0) {
+            dev->prev_x    = -1; dev->prev_y    = -1;
+            dev->sub_x     = 0;  dev->sub_y     = 0;
+            dev->ema_x_q8  = -1; dev->ema_y_q8  = -1;
+            dev->pema_x_q8 = -1; dev->pema_y_q8 = -1;
+        }
 
         while (read(dev->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type == EV_ABS) {
                 switch (ev.code) {
-                case ABS_X:               abs_x = ev.value; break;
-                case ABS_Y:               abs_y = ev.value; break;
+                /* ABS_X is the legacy single-touch axis.  When 2 fingers are on the
+                 * pad (tool_doubletap) the kernel synthesises ABS_X by alternating
+                 * between slot 0 and slot 1 positions, causing wild cursor jumps.
+                 * Ignore it in that state; ABS_MT_POSITION_X slot 0/1 are used instead. */
+                case ABS_X: if (!dev->tool_doubletap) abs_x = ev.value; break;
+                case ABS_Y: if (!dev->tool_doubletap) abs_y = ev.value; break;
                 case ABS_MT_SLOT:         cur_slot = ev.value; break;
-                /* MT Type B: continuously track slot 0 position */
-                case ABS_MT_POSITION_X:   if (cur_slot == 0) abs_x = ev.value; break;
-                case ABS_MT_POSITION_Y:   if (cur_slot == 0) abs_y = ev.value; break;
+                /* MT Type B: track slot 0 (click/anchor finger) and slot 1 (drag finger) */
+                case ABS_MT_POSITION_X:
+                    if (cur_slot == 0) abs_x  = ev.value;
+                    else if (cur_slot == 1) abs_x1 = ev.value;
+                    break;
+                case ABS_MT_POSITION_Y:
+                    if (cur_slot == 0) abs_y  = ev.value;
+                    else if (cur_slot == 1) abs_y1 = ev.value;
+                    break;
                 /* MT tracking ID = -1 means finger lifted */
                 case ABS_MT_TRACKING_ID:
-                    if (ev.value == -1 && cur_slot == 0) {
-                        dev->prev_x = -1;
-                        dev->prev_y = -1;
+                    if (cur_slot == 0) {
+#ifdef __linux__
+                        fprintf(stderr, "[mt_id] id=%d prev_x=%d abs_x=%d\n",
+                                ev.value, dev->prev_x, abs_x);
+#endif
+                        if (ev.value == -1) {
+                            /* Finger lifted — check BTN_TOUCH first.
+                             * If BTN_TOUCH=1 the finger is still physically on
+                             * the pad; id cycling is a light-touch artefact.
+                             * Keep abs_x (ABS_X legacy axis stays current) so
+                             * deltas are computed without stalling.
+                             * If BTN_TOUCH=0 (or not yet received) this is a
+                             * real lift — debounce before resetting origin. */
+                            if (!dev->btn_touch) {
+                                if (dev->lift_cooldown == 0)
+                                    dev->lift_cooldown = 100;
+                                abs_x = -1;
+                                abs_y = -1;
+                            }
+                        } else {
+                            /* New contact — cancel pending debounce reset.
+                             * If btn_touch=0 (real lift already seen), the finger
+                             * may land at a different raw position. Reset prev_x
+                             * so the first abs_x is an anchor, not a delta source.
+                             * This prevents new-contact cursor jumps.
+                             * If btn_touch=1 (light-touch id cycling, finger never
+                             * left), keep prev_x so movement stays continuous. */
+                            dev->lift_cooldown = 0;
+                            if (!dev->btn_touch) {
+                                dev->prev_x    = -1;
+                                dev->prev_y    = -1;
+                                dev->sub_x     = 0;
+                                dev->sub_y     = 0;
+                                dev->ema_x_q8  = -1;
+                                dev->ema_y_q8  = -1;
+                                dev->pema_x_q8 = -1;
+                                dev->pema_y_q8 = -1;
+                            }
+                        }
                     }
                     break;
                 default: break;
@@ -582,6 +669,42 @@ void input_poll(void) {
                 had_event = true;
             } else if (ev.type == EV_KEY) {
                 if (dev->is_touchpad) {
+                    /* Track two-finger tool state for buttonpad right-click emulation.
+                     * Many clickpads (e.g. FTCS0038) have no BTN_RIGHT — two-finger
+                     * physical click (BTN_LEFT while BTN_TOOL_DOUBLETAP is active)
+                     * is how right-click is expressed. */
+                    if (ev.code == BTN_TOOL_DOUBLETAP)
+                        dev->tool_doubletap = (ev.value != 0);
+
+                    if (ev.code == BTN_TOUCH) {
+                        bool was = dev->btn_touch;
+                        dev->btn_touch = (ev.value != 0);
+#ifdef __linux__
+                        fprintf(stderr, "[btn_touch] %d->%d prev_x=%d\n",
+                                was, dev->btn_touch, dev->prev_x);
+#endif
+                        if (!dev->btn_touch) {
+                            /* Finger lifted — start debounce before resetting origin. */
+                            if (dev->lift_cooldown == 0)
+                                dev->lift_cooldown = 100;
+                        } else {
+                            dev->lift_cooldown = 0;
+                            /* Fresh contact from lifted state: reset anchor so the
+                             * first abs_x of the new contact doesn't produce a delta
+                             * against the old position (which could be far away). */
+                            if (!was) {
+                                dev->prev_x    = -1;
+                                dev->prev_y    = -1;
+                                dev->sub_x     = 0;
+                                dev->sub_y     = 0;
+                                dev->ema_x_q8  = -1;
+                                dev->ema_y_q8  = -1;
+                                dev->pema_x_q8 = -1;
+                                dev->pema_y_q8 = -1;
+                            }
+                        }
+                    }
+
                     /* BTN_TOUCH = finger contact, not a click — ignore for lbtn.
                      * Only BTN_LEFT (physical clickpad press) counts.
                      * Reset prev on click AND release: the clickpad mechanism
@@ -589,18 +712,54 @@ void input_poll(void) {
                      * release, both causing position jumps. Resetting absorbs them. */
                     if (ev.code == BTN_LEFT) {
                         bool new_lbtn = (ev.value != 0);
-                        if (new_lbtn != lbtn) {
+                        bool changed  = (new_lbtn != lbtn);
+                        /* Always absorb spring-back regardless of click type */
+                        if (changed) {
                             dev->prev_x = -1;
                             dev->prev_y = -1;
                             dev->click_cooldown = 4;
                         }
-                        lbtn = new_lbtn;
+                        if (dev->tool_doubletap) {
+                            /* Two-finger click = right-click on buttonpad */
+                            bool new_r = new_lbtn;
+                            if (new_r && !rbtn) {
+                                if (g_rclk_used < CLK_RING) {
+                                    g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
+                                        (click_t){ g_mx, g_my };
+                                    g_rclk_used++;
+                                }
+                            }
+                            rbtn = new_r;
+                            /* Do NOT update lbtn — prevent a left-click from also firing */
+                        } else {
+                            lbtn = new_lbtn;
+                        }
                     }
-                    if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                    if (ev.code == BTN_RIGHT) {
+                        bool new_r = (ev.value != 0);
+                        if (new_r && !rbtn) {
+                            if (g_rclk_used < CLK_RING) {
+                                g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
+                                    (click_t){ g_mx, g_my };
+                                g_rclk_used++;
+                            }
+                        }
+                        rbtn = new_r;
+                    }
                 } else {
                     if (ev.code == BTN_LEFT || ev.code == BTN_TOUCH)
                         lbtn = (ev.value != 0);
-                    if (ev.code == BTN_RIGHT) rbtn = (ev.value != 0);
+                    if (ev.code == BTN_RIGHT) {
+                        bool new_r = (ev.value != 0);
+                        if (new_r && !rbtn) {
+                            if (g_rclk_used < CLK_RING) {
+                                g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
+                                    (click_t){ g_mx, g_my };
+                                g_rclk_used++;
+                            }
+                        }
+                        rbtn = new_r;
+                    }
                 }
                 had_event = true;
             } else if (ev.type == EV_SYN) {
@@ -612,6 +771,22 @@ void input_poll(void) {
             bool prev = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
             if (dev->is_touchpad) {
+                /* 2-finger mode (doubletap): slot 0 = click/anchor finger, slot 1 = drag finger.
+                 * On transition 0→1 reset EMA so the new finger position is an anchor, not a delta.
+                 * When doubletap active and slot 1 reported a position, use it as movement source. */
+                bool cur_dt = dev->tool_doubletap;
+                if (cur_dt && !dev->prev_tool_doubletap) {
+                    dev->ema_x_q8  = -1; dev->ema_y_q8  = -1;
+                    dev->pema_x_q8 = -1; dev->pema_y_q8 = -1;
+                    dev->prev_x    = -1; dev->prev_y    = -1;
+                    dev->sub_x     = 0;  dev->sub_y     = 0;
+                }
+                dev->prev_tool_doubletap = cur_dt;
+                if (cur_dt && abs_x1 >= 0 && abs_y1 >= 0) {
+                    abs_x = abs_x1;
+                    abs_y = abs_y1;
+                }
+
                 /* Delta tracking: compute movement relative to last known position.
                  * Scale so a full-width swipe moves ~half the screen width. */
                 if (abs_x >= 0 && abs_y >= 0) {
@@ -622,24 +797,60 @@ void input_poll(void) {
                         dev->prev_x = abs_x;
                         dev->prev_y = abs_y;
                     } else if (dev->prev_x >= 0) {
-                        int32_t dx = abs_x - dev->prev_x;
-                        int32_t dy = abs_y - dev->prev_y;
-                        /* Discard deltas larger than 1/8 pad range — mechanical
-                         * jumps or tracking resets, not real finger movement. */
-                        if (dx > dev->x_max / 8 || dx < -(dev->x_max / 8) ||
-                            dy > dev->y_max / 8 || dy < -(dev->y_max / 8)) {
+                        /* EMA position smoother (alpha=1/4, Q8 fixed-point).
+                         * The FTCS0038 sensor produces large per-event noise on a
+                         * stationary finger. EMA reduces cursor shimmer while
+                         * pema_x_q8 tracks the full Q8 previous EMA (no integer
+                         * truncation) so noise doesn't get re-counted each step. */
+                        if (dev->ema_x_q8 < 0) {
+                            dev->ema_x_q8  = (int64_t)abs_x << 8;
+                            dev->ema_y_q8  = (int64_t)abs_y << 8;
+                            dev->pema_x_q8 = dev->ema_x_q8;
+                            dev->pema_y_q8 = dev->ema_y_q8;
+                        } else {
+                            dev->ema_x_q8 = (dev->ema_x_q8 * 3 + ((int64_t)abs_x << 8)) >> 2;
+                            dev->ema_y_q8 = (dev->ema_y_q8 * 3 + ((int64_t)abs_y << 8)) >> 2;
+                        }
+
+                        /* Delta from full Q8 previous — no truncation re-counting */
+                        int64_t dx_q8 = dev->ema_x_q8 - dev->pema_x_q8;
+                        int64_t dy_q8 = dev->ema_y_q8 - dev->pema_y_q8;
+                        dev->pema_x_q8 = dev->ema_x_q8;
+                        dev->pema_y_q8 = dev->ema_y_q8;
+                        dev->prev_x = (int32_t)(dev->ema_x_q8 >> 8);
+                        dev->prev_y = (int32_t)(dev->ema_y_q8 >> 8);
+
+                        /* Jump guard (in Q8 space) */
+                        int64_t xg = ((int64_t)dev->x_max / 8) << 8;
+                        int64_t yg = ((int64_t)dev->y_max / 8) << 8;
+                        if (dx_q8 > xg || dx_q8 < -xg || dy_q8 > yg || dy_q8 < -yg) {
+                            dev->ema_x_q8  = (int64_t)abs_x << 8;
+                            dev->ema_y_q8  = (int64_t)abs_y << 8;
+                            dev->pema_x_q8 = dev->ema_x_q8;
+                            dev->pema_y_q8 = dev->ema_y_q8;
                             dev->prev_x = abs_x;
                             dev->prev_y = abs_y;
+                            dev->sub_x = 0; dev->sub_y = 0;
                         } else {
-                            int32_t dxpx = (int32_t)((int64_t)dx * g_fb_w * 3 / ((int64_t)(dev->x_max + 1) * 4));
-                            int32_t dypx = (int32_t)((int64_t)dy * g_fb_h * 3 / ((int64_t)(dev->y_max + 1) * 4));
-                            mouse_push_rel(dxpx, dypx, lbtn, rbtn);
+                            /* Subpixel accumulation in Q8 space: denom * 256 to match */
+                            int64_t denom = (int64_t)(dev->x_max + 1) * 4 * 256;
+                            dev->sub_x += dx_q8 * g_fb_w * 4;
+                            dev->sub_y += dy_q8 * g_fb_h * 4;
+                            int32_t dxpx = (int32_t)(dev->sub_x / denom);
+                            int32_t dypx = (int32_t)(dev->sub_y / denom);
+                            dev->sub_x -= (int64_t)dxpx * denom;
+                            dev->sub_y -= (int64_t)dypx * denom;
+                            if (dxpx || dypx)
+                                mouse_push_rel(dxpx, dypx, lbtn, rbtn);
                         }
-                        dev->prev_x = abs_x;
-                        dev->prev_y = abs_y;
                     } else {
-                        dev->prev_x = abs_x;
-                        dev->prev_y = abs_y;
+                        dev->prev_x    = abs_x;
+                        dev->prev_y    = abs_y;
+                        dev->ema_x_q8  = (int64_t)abs_x << 8;
+                        dev->ema_y_q8  = (int64_t)abs_y << 8;
+                        dev->pema_x_q8 = dev->ema_x_q8;
+                        dev->pema_y_q8 = dev->ema_y_q8;
+                        dev->sub_x = 0; dev->sub_y = 0;
                     }
                 }
             } else {
@@ -821,6 +1032,16 @@ bool mouse_consume_click(int32_t *x, int32_t *y) {
     click_t c = g_clk_ring[g_clk_head];
     g_clk_head = (g_clk_head + 1) % CLK_RING;
     g_clk_used--;
+    if (x) *x = c.x;
+    if (y) *y = c.y;
+    return true;
+}
+
+bool mouse_consume_rclick(int32_t *x, int32_t *y) {
+    if (!g_rclk_used) return false;
+    click_t c = g_rclk_ring[g_rclk_head];
+    g_rclk_head = (g_rclk_head + 1) % CLK_RING;
+    g_rclk_used--;
     if (x) *x = c.x;
     if (y) *y = c.y;
     return true;

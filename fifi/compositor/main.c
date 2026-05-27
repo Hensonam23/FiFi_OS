@@ -56,6 +56,7 @@ bool wayland_has_focus(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
+void gui_draw_popups(void);
 void ipc_blit_all(void);
 void ipc_draw_overlays(void);
 void ipc_draw_resize_handles(void);
@@ -67,6 +68,7 @@ void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
                       int16_t rx, int16_t ry, int16_t lt, int16_t rt);
 void ipc_clear_focus(void);
 void ipc_close_focused(void);
+void ipc_cycle_focus(void);
 bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
@@ -246,11 +248,11 @@ static void *render_thread_fn(void *arg)
     pthread_mutex_lock(&g_mx);
     while (!g_quit) {
         /*
-         * Rate-limit to 60 fps in normal mode (unlimited in gaming mode).
+         * Rate-limit to ~60 fps in normal mode, ~250 fps in gaming mode.
          * Deadline is anchored to last_render so early signals don't cause us
-         * to render again before the next 16 ms window is up.
+         * to render again before the next frame window is up.
          */
-        long frame_ns = g_gaming_mode ? 1000000L : 16000000L;
+        long frame_ns = g_gaming_mode ? 4000000L : 16666666L;
         struct timespec deadline;
         long next_ns = last_render.tv_nsec + frame_ns;
         deadline.tv_sec  = last_render.tv_sec  + next_ns / 1000000000L;
@@ -277,13 +279,16 @@ static void *render_thread_fn(void *arg)
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed_ms = (now.tv_sec  - last_render.tv_sec)  * 1000L
                         + (now.tv_nsec - last_render.tv_nsec) / 1000000L;
-        if (!g_gaming_mode && elapsed_ms < 15) continue;
+        if (!g_gaming_mode && elapsed_ms < 14) continue;
         last_render = now;
 
         bool do_flush = false;
 
         if (!g_blanked) {
+            struct timespec t0, t1, t2, t3;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
             gui_on_tick();
+            clock_gettime(CLOCK_MONOTONIC, &t1);
             ipc_blit_all();
             wayland_blit_surfaces();
 
@@ -300,11 +305,25 @@ static void *render_thread_fn(void *arg)
             ipc_draw_resize_handles();
             ipc_draw_drag_overlay();
             ipc_notify_draw();
+            gui_draw_popups();
 
+            clock_gettime(CLOCK_MONOTONIC, &t2);
             bool flipped = console_flip_if_dirty();
+            clock_gettime(CLOCK_MONOTONIC, &t3);
             if (flipped || cursor_moved) {
                 mouse_cursor_update();
                 s_last_cx = cx; s_last_cy = cy;
+            }
+
+            /* Log slow frames and frame components for cursor lag diagnosis */
+            {
+                long tick_ms  = (t1.tv_sec - t0.tv_sec)*1000 + (t1.tv_nsec - t0.tv_nsec)/1000000;
+                long flip_ms  = (t3.tv_sec - t2.tv_sec)*1000 + (t3.tv_nsec - t2.tv_nsec)/1000000;
+                long total_ms = (t3.tv_sec - t0.tv_sec)*1000 + (t3.tv_nsec - t0.tv_nsec)/1000000;
+                extern int g_redraw_src;
+                if (total_ms >= 8)
+                    fprintf(stderr, "[slow_frame] total=%ldms tick=%ldms flip=%ldms cx=%d cy=%d flipped=%d src=%d\n",
+                            total_ms, tick_ms, flip_ms, cx, cy, (int)flipped, g_redraw_src);
             }
 
             do_flush = (flipped || cursor_moved) && g_using_drm;
@@ -536,10 +555,12 @@ int main(void) {
                 uint8_t uc = (uint8_t)c;
                 if (uc == 0x96u) { take_screenshot(); continue; }
                 if (uc == 0x97u) { ipc_close_focused(); continue; }
+                if (uc == 0x89u) { ipc_cycle_focus(); continue; }
+                if (uc == 0x17u) { ipc_close_focused(); continue; }
                 if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
-                if (uc >= 0x8Au && uc <= 0x8Du) {
-                    extern void keyboard_push_char(uint8_t c);
-                    keyboard_push_char(uc);
+                if (uc >= 0x8Au && uc <= 0x90u) {
+                    /* F1-F7: already in GUI ring via kb_push_internal — just consume */
+                    continue;
                 } else {
                     ipc_send_focused_key(uc);
                 }
@@ -551,6 +572,7 @@ int main(void) {
                 if (g_blanked) { g_blanked = false; break; }
                 if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                 if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
                 pty_write_input((uint8_t)c);
             }
         } else {
@@ -558,8 +580,9 @@ int main(void) {
             while ((c = keyboard_try_getchar()) != -1) {
                 clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                 if (g_blanked) { g_blanked = false; break; }
-                if ((uint8_t)c == 0x96u) take_screenshot();
-                if ((uint8_t)c == 0x97u) ipc_close_focused();
+                if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
+                if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
             }
         }
 

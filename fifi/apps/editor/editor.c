@@ -327,12 +327,26 @@ static void render(uint32_t *fb) {
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
+static void write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n > 0) { p += n; len -= (size_t)n; }
+        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec ts = {0, 1000000};
+            nanosleep(&ts, NULL);
+        } else if (n < 0 && errno == EINTR) {
+            /* retry */
+        } else { break; }
+    }
+}
+
 static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
     uint8_t hdr[8];
     memcpy(hdr,     &type, 4);
     memcpy(hdr + 4, &len,  4);
-    write(fd, hdr, 8);
-    if (len > 0 && data) write(fd, data, len);
+    write_all(fd, hdr, 8);
+    if (len > 0 && data) write_all(fd, data, len);
 }
 
 static void send_frame(int fd, uint32_t *fb) {

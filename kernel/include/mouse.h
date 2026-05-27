@@ -20,6 +20,7 @@ void  mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn);
 void  mouse_warp(int32_t x, int32_t y);
 void  mouse_click(int32_t x, int32_t y);
 bool  mouse_consume_click(int32_t *x, int32_t *y);
+bool  mouse_consume_rclick(int32_t *x, int32_t *y);
 void  mouse_set_intellimouse(bool enabled);
 int8_t mouse_consume_scroll(void);
 void  mouse_cursor_update(void);

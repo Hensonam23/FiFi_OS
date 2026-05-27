@@ -4,7 +4,9 @@
 
 mkdir -p /mnt/usb
 
-for dev in /dev/sda1 /dev/sda2 /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2; do
+for dev in /dev/sda1 /dev/sda2 /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2 \
+           /dev/sdd1 /dev/sdd2 /dev/sde1 /dev/sde2 /dev/sdf1 /dev/sdf2 \
+           /dev/mmcblk0p1 /dev/mmcblk0p2; do
     [ -b "$dev" ] || continue
     if mount -t vfat "$dev" /mnt/usb 2>/dev/null; then
         if [ -d /mnt/usb/EFI ]; then

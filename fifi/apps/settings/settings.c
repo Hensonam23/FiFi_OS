@@ -37,6 +37,10 @@
 #define TITLE_H  24   /* reserved for compositor title bar */
 #define PAD      14
 #define ROW_H    24
+#define IPC_WIN_RESIZE 0x1Bu
+
+static int g_win_w = WIN_W;
+static int g_win_h = WIN_H;
 
 /* ── Colours ─────────────────────────────────────────────────────────────── */
 #define C_BG      0x00121820u
@@ -84,8 +88,8 @@ static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
         for (int col = 0; col < 8; col++) {
             if (b & (0x80u >> col)) {
                 int x = px + col, y = py + r;
-                if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H)
-                    fb[y * WIN_W + x] = fg;
+                if (x >= 0 && x < g_win_w && y >= 0 && y < g_win_h)
+                    fb[y * g_win_w + x] = fg;
             }
         }
     }
@@ -95,19 +99,25 @@ static void draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
     for (; *s; s++, x += 9) draw_char(fb, (unsigned char)*s, x, y, fg);
 }
 
+static void draw_str_clip(uint32_t *fb, const char *s, int x, int y,
+                          uint32_t fg, int max_px) {
+    for (; *s && max_px > 9; s++, x += 9, max_px -= 9)
+        draw_char(fb, (unsigned char)*s, x, y, fg);
+}
+
 static int str_w(const char *s) { return (int)strlen(s) * 9; }
 
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int r = y; r < y + h; r++) {
-        if (r < 0 || r >= WIN_H) continue;
-        int x0 = x < 0 ? 0 : x, x1 = x + w > WIN_W ? WIN_W : x + w;
-        for (int c = x0; c < x1; c++) fb[r * WIN_W + c] = col;
+        if (r < 0 || r >= g_win_h) continue;
+        int x0 = x < 0 ? 0 : x, x1 = x + w > g_win_w ? g_win_w : x + w;
+        for (int c = x0; c < x1; c++) fb[r * g_win_w + c] = col;
     }
 }
 
 static void hline(uint32_t *fb, int y, uint32_t col) {
-    if (y < 0 || y >= WIN_H) return;
-    for (int x = 0; x < WIN_W; x++) fb[y * WIN_W + x] = col;
+    if (y < 0 || y >= g_win_h) return;
+    for (int x = 0; x < g_win_w; x++) fb[y * g_win_w + x] = col;
 }
 
 /* ── ALSA volume (direct ioctl — no library) ─────────────────────────────── */
@@ -235,7 +245,7 @@ static bool g_dragging = false;
 
 /* ── Render ──────────────────────────────────────────────────────────────── */
 static void render(uint32_t *fb) {
-    fill(fb, 0, 0, WIN_W, WIN_H, C_BG);
+    fill(fb, 0, 0, g_win_w, g_win_h, C_BG);
     /* Top TITLE_H px left blank — compositor draws the title bar there */
 
     int y = TITLE_H + 8;
@@ -248,10 +258,12 @@ static void render(uint32_t *fb) {
     gather_info();
     for (int i = 0; i < N_INFO; i++) {
         uint32_t bg = (i & 1) ? C_ROW_B : C_ROW_A;
-        fill(fb, 0, y, WIN_W, ROW_H, bg);
-        draw_str(fb, g_info[i].key, PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
-        int kw = 11 * 9;
-        draw_str(fb, g_info[i].val, PAD + kw, y + (ROW_H - g_glyph_h)/2, C_VAL);
+        fill(fb, 0, y, g_win_w, ROW_H, bg);
+        int ty2 = y + (ROW_H - g_glyph_h)/2;
+        int kw = 11 * 9;  /* 11 chars for longest key ("CPU Freq") + margin */
+        draw_str(fb, g_info[i].key, PAD, ty2, C_KEY);
+        int val_max = g_win_w - (PAD + kw) - PAD;
+        draw_str_clip(fb, g_info[i].val, PAD + kw, ty2, C_VAL, val_max);
         y += ROW_H;
     }
 
@@ -279,7 +291,7 @@ static void render(uint32_t *fb) {
     y += g_glyph_h + 6;
 
     /* Gamepad status */
-    fill(fb, 0, y, WIN_W, ROW_H, C_ROW_A);
+    fill(fb, 0, y, g_win_w, ROW_H, C_ROW_A);
     draw_str(fb, "Gamepad:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
     {
         int gpfd = open("/dev/input/js0", O_RDONLY | O_NONBLOCK);
@@ -288,27 +300,48 @@ static void render(uint32_t *fb) {
     }
     y += ROW_H + 10;
 
-    /* ── Hint line ── */
-    fill(fb, PAD, y, WIN_W - 2*PAD, ROW_H - 4, C_ROW_B);
-    draw_str(fb, "F1 Theme   F2 Terminal   F3 Settings   F4 Files",
-             PAD + 6, y + (ROW_H - 4 - g_glyph_h)/2, C_GREY);
+    /* ── Status hint ── */
+    fill(fb, PAD, y, g_win_w - 2*PAD, ROW_H - 4, C_ROW_B);
+    draw_str_clip(fb, "Press Q to close   Volume: drag slider above",
+             PAD + 6, y + (ROW_H - 4 - g_glyph_h)/2, C_GREY,
+             g_win_w - 2*PAD - 12);
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
+
+/* Write all bytes, retrying on EAGAIN (non-blocking socket partial writes). */
+static bool write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n > 0) { p += n; len -= (size_t)n; }
+        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec ts = {0, 1000000}; /* 1ms */
+            nanosleep(&ts, NULL);
+        } else if (n < 0 && errno == EINTR) {
+            /* retry */
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
     uint8_t hdr[8];
     memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    write(fd, hdr, 8);
-    if (len && data) write(fd, data, len);
+    write_all(fd, hdr, 8);
+    if (len && data) write_all(fd, data, len);
 }
 
 static void send_frame(int fd, uint32_t *px) {
-    uint32_t frm[4] = {0, 0, WIN_W, WIN_H};
-    uint32_t total  = 16 + WIN_W * WIN_H * 4;
+    uint32_t fw2 = (uint32_t)g_win_w, fh2 = (uint32_t)g_win_h;
+    uint32_t frm[4] = {0, 0, fw2, fh2};
+    uint32_t total  = 16 + fw2 * fh2 * 4;
     uint8_t *msg    = malloc(total);
     if (!msg) return;
     memcpy(msg, frm, 16);
-    memcpy(msg+16, px, WIN_W * WIN_H * 4);
+    memcpy(msg+16, px, fw2 * fh2 * 4);
     ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
     free(msg);
 }
@@ -319,7 +352,7 @@ int main(void) {
     if (!g_glyph) { g_glyph = calloc(256*16, 1); g_glyph_h = 16; }
     alsa_init();
 
-    uint32_t *fb = malloc(WIN_W * WIN_H * 4);
+    uint32_t *fb = malloc((size_t)g_win_w * g_win_h * 4);
     if (!fb) return 1;
 
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -334,7 +367,7 @@ int main(void) {
     uint8_t conn[68] = {0};
     uint16_t cw = WIN_W, ch = WIN_H;
     memcpy(conn, &cw, 2); memcpy(conn+2, &ch, 2);
-    snprintf((char*)(conn+4), 64, "Settings");
+    snprintf((char*)(conn+4), 64, "System Info");
     ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     uint8_t hdr8[8] = {0};
@@ -408,6 +441,14 @@ int main(void) {
                                     ipc_send_msg(sock, IPC_NOTIFY, ntxt, (uint32_t)nlen);
                             }
                             prev_lb = lb;
+                        } else if (type == IPC_WIN_RESIZE && iplen >= 4 && ipld) {
+                            uint16_t nw, nh;
+                            memcpy(&nw, ipld, 2); memcpy(&nh, ipld+2, 2);
+                            if (nw >= 200 && nh >= 100) {
+                                uint32_t *nb = realloc(fb, (size_t)nw * nh * 4);
+                                if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
+                            }
+                            render(fb); send_frame(sock, fb);
                         }
                         free(ipld); ipld = NULL;
                         igot = 0; iplen = 0; ipgot = 0;
@@ -416,6 +457,8 @@ int main(void) {
                     if (type == IPC_INVALIDATE) {
                         render(fb);
                         send_frame(sock, fb);
+                    } else if (type == IPC_APP_CLOSE) {
+                        running = false;
                     }
                     igot = 0; iplen = 0; ipgot = 0;
                 }

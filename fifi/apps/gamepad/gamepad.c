@@ -152,7 +152,9 @@ static const uint8_t micro3x5[96][5] = {
     ['H'-' ']={0b101,0b101,0b111,0b101,0b101},
     ['I'-' ']={0b111,0b010,0b010,0b010,0b111},
     ['J'-' ']={0b001,0b001,0b001,0b101,0b010},
+    ['K'-' ']={0b101,0b101,0b110,0b101,0b101},
     ['L'-' ']={0b100,0b100,0b100,0b100,0b111},
+    ['M'-' ']={0b101,0b111,0b101,0b101,0b101},
     ['N'-' ']={0b101,0b111,0b111,0b101,0b101},
     ['O'-' ']={0b010,0b101,0b101,0b101,0b010},
     ['P'-' ']={0b110,0b101,0b110,0b100,0b100},
@@ -193,6 +195,28 @@ static void draw_char_micro(int x, int y, char c, uint32_t col) {
 static void draw_str_micro(int x, int y, const char *s, uint32_t col) {
     for (; *s; s++, x += 4)
         draw_char_micro(x, y, *s, col);
+}
+
+/* 2× scaled version — each micro pixel drawn as 2×2 block (6×10 effective char) */
+static void draw_char_micro2(int x, int y, char c, uint32_t col) {
+    int idx = (int)c - ' ';
+    if (idx < 0 || idx >= 96) return;
+    for (int row = 0; row < 5; row++) {
+        uint8_t bits = micro3x5[idx][row];
+        for (int col2 = 0; col2 < 3; col2++) {
+            if (bits & (1 << (2 - col2))) {
+                put_pixel(x + col2*2,     y + row*2,     col);
+                put_pixel(x + col2*2 + 1, y + row*2,     col);
+                put_pixel(x + col2*2,     y + row*2 + 1, col);
+                put_pixel(x + col2*2 + 1, y + row*2 + 1, col);
+            }
+        }
+    }
+}
+
+static void draw_str_micro2(int x, int y, const char *s, uint32_t col) {
+    for (; *s; s++, x += 8)
+        draw_char_micro2(x, y, *s, col);
 }
 
 /* ── Game controller layout drawing ────────────────────────────────────────── */
@@ -273,8 +297,9 @@ static void render(void) {
     draw_str_micro(WIN_W - (int)(strlen(status) * 4) - 8, TITLE_H + 5, status, status_col);
 
     if (!g_connected) {
-        draw_str_micro(WIN_W/2 - 40, WIN_H/2 + TITLE_H/2 - 4, "NO GAMEPAD CONNECTED", COL_DIM);
-        draw_str_micro(WIN_W/2 - 44, WIN_H/2 + TITLE_H/2 + 8, "PLUG IN A CONTROLLER", COL_DIM);
+        /* 20 chars × 8px/char = 160px wide; center in 480px window */
+        draw_str_micro2(WIN_W/2 - 80, WIN_H/2 + TITLE_H/2 - 10, "NO GAMEPAD CONNECTED", COL_TEXT);
+        draw_str_micro2(WIN_W/2 - 80, WIN_H/2 + TITLE_H/2 + 6,  "PLUG IN A CONTROLLER", COL_DIM);
         return;
     }
 
@@ -344,12 +369,26 @@ static void render(void) {
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
 
+static void write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n > 0) { p += n; len -= (size_t)n; }
+        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec ts = {0, 1000000};
+            nanosleep(&ts, NULL);
+        } else if (n < 0 && errno == EINTR) {
+            /* retry */
+        } else { break; }
+    }
+}
+
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
     uint8_t hdr[8];
     memcpy(hdr,     &type, 4);
     memcpy(hdr + 4, &len,  4);
-    write(fd, hdr, 8);
-    if (len > 0 && data) write(fd, data, len);
+    write_all(fd, hdr, 8);
+    if (len > 0 && data) write_all(fd, data, len);
 }
 
 static void push_frame(int fd) {
@@ -365,9 +404,9 @@ static void push_frame(int fd) {
     uint32_t type = IPC_APP_FRAME;
     memcpy(hdr,     &type,    4);
     memcpy(hdr + 4, &pld_len, 4);
-    write(fd, hdr, 8);
-    write(fd, frame_hdr, 16);
-    write(fd, g_fb, WIN_W * WIN_H * 4);
+    write_all(fd, hdr, 8);
+    write_all(fd, frame_hdr, 16);
+    write_all(fd, g_fb, WIN_W * WIN_H * 4);
 }
 
 static void dispatch_msg(uint32_t type, const uint8_t *pld, uint32_t len) {
@@ -450,15 +489,12 @@ int main(void) {
     /* Make socket non-blocking */
     fcntl(g_sock, F_SETFL, O_NONBLOCK);
 
-    /* Wait for IPC_WIN_CREATED */
+    /* Wait for IPC_WIN_CREATED — use a blocking poll+read without touching g_sock flags */
     {
-        int fd2 = dup(g_sock);
-        fcntl(fd2, F_SETFL, 0);
-        struct pollfd pf = {fd2, POLLIN, 0};
+        struct pollfd pf = {g_sock, POLLIN, 0};
         poll(&pf, 1, 2000);
         g_hdr_got = 0;
-        ipc_read_once(fd2);
-        close(fd2);
+        ipc_read_once(g_sock);
     }
 
     /* Main loop */

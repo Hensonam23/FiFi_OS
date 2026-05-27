@@ -87,6 +87,7 @@ static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
 static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter */
+static bool         g_ipc_needs_redraw = false;  /* set when a window closes; cleared by gui_on_tick */
 /* Cascading spawn position: new windows offset by 28px from each other */
 static uint32_t     g_cascade_x   = 60;
 static uint32_t     g_cascade_y   = 60;
@@ -155,9 +156,6 @@ static void ipc_apply_snap(int i, int zone) {
         c->pre_snap_w = c->win_w;
         c->pre_snap_h = c->win_h;
     }
-    /* Clear old area */
-    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
-
     switch (zone) {
     case 1:  /* left half */
         c->win_x = 0; c->win_y = 0;
@@ -180,6 +178,7 @@ static void ipc_apply_snap(int i, int zone) {
     if (c->disp_buf && c->frame_buf)
         scale_buf(c->frame_buf, c->frame_w, c->frame_h, c->disp_buf, c->win_w, c->win_h);
 
+    g_ipc_needs_redraw = true;
     /* Notify app of new size */
     uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
     ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
@@ -189,7 +188,6 @@ static void ipc_apply_snap(int i, int zone) {
 static void ipc_unsnap(int i) {
     ipc_client_t *c = &g_clients[i];
     if (!c->snapped) return;
-    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
     c->win_x = c->pre_snap_x;
     c->win_y = c->pre_snap_y;
     c->win_w = c->pre_snap_w;
@@ -205,6 +203,7 @@ static void ipc_unsnap(int i) {
     } else {
         free(c->disp_buf); c->disp_buf = NULL;
     }
+    g_ipc_needs_redraw = true;
     uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
     ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
 }
@@ -265,6 +264,9 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         /* Allocate native frame buffer */
         free(c->frame_buf); free(c->disp_buf); c->disp_buf = NULL;
         c->frame_buf = calloc(c->frame_w * c->frame_h, 4);
+
+        /* New windows steal keyboard focus immediately */
+        g_focused_idx = (int)(c - g_clients);
 
         /* Reply with window info */
         uint32_t resp[5] = {
@@ -431,8 +433,6 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
 static void ipc_disconnect_client(ipc_client_t *c) {
     if (!c->active) return;
     fprintf(stderr, "[ipc] app '%s' disconnected\n", c->title);
-    if (c->win_w > 0 && c->win_h > 0 && !c->minimized)
-        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
     close(c->fd); c->fd = -1; c->active = false;
     if (c->payload)   { free(c->payload);   c->payload   = NULL; }
     if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
@@ -441,6 +441,7 @@ static void ipc_disconnect_client(ipc_client_t *c) {
     if (g_focused_idx >= 0 && &g_clients[g_focused_idx] == c) g_focused_idx = -1;
     int i = (int)(c - g_clients);
     if (g_drag_idx == i) g_drag_idx = -1;
+    g_ipc_needs_redraw = true;
 }
 
 /* ── Read available data from one client ─────────────────────────────────── */
@@ -601,9 +602,6 @@ static inline bool max_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
 static void ipc_kill_client(int i) {
     ipc_client_t *c = &g_clients[i];
     if (!c->active) return;
-    /* Black out the backbuffer region so no stale pixels remain */
-    if (c->win_w > 0 && c->win_h > 0)
-        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
     if (c->fd >= 0) { close(c->fd); c->fd = -1; }
     c->active = false;
     if (c->payload)   { free(c->payload);   c->payload   = NULL; }
@@ -612,6 +610,7 @@ static void ipc_kill_client(int i) {
     c->snapped = false;
     if (g_focused_idx == i) g_focused_idx = -1;
     if (g_drag_idx    == i) g_drag_idx    = -1;
+    g_ipc_needs_redraw = true;
     fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
 }
 
@@ -626,8 +625,8 @@ bool ipc_try_close_at(int32_t mx, int32_t my) {
         }
         if (min_btn_hit(c, mx, my)) {
             c->minimized = true;
-            console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
             if (g_focused_idx == i) g_focused_idx = -1;
+            g_ipc_needs_redraw = true;
             fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
             return true;
         }
@@ -644,12 +643,35 @@ bool ipc_try_close_at(int32_t mx, int32_t my) {
 
 /* Blit every active IPC window's cached frame into the backbuffer.
  * Call this AFTER gui_on_tick() so IPC windows appear on top of the wallpaper. */
+/* Check-and-clear flag: returns true if an IPC window closed since last call */
+bool ipc_needs_redraw(void) {
+    bool v = g_ipc_needs_redraw;
+    g_ipc_needs_redraw = false;
+    return v;
+}
+
 void ipc_blit_all(void) {
+    /* Build a z-sorted render list so the highest-z window is blitted last (on top) */
+    int order[IPC_MAX_APPS];
+    int n = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
+        order[n++] = i;
+    }
+    /* Insertion sort by z_order ascending (lowest z blitted first, highest last = on top) */
+    for (int a = 1; a < n; a++) {
+        int key = order[a];
+        int b = a - 1;
+        while (b >= 0 && g_clients[order[b]].z_order > g_clients[key].z_order) {
+            order[b + 1] = order[b];
+            b--;
+        }
+        order[b + 1] = key;
+    }
+    for (int j = 0; j < n; j++) {
+        ipc_client_t *c = &g_clients[order[j]];
         if (c->disp_buf)
-            /* snapped OR resized: disp_buf already scaled to win_w × win_h */
             console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
         else
             console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
@@ -662,9 +684,23 @@ void ipc_draw_overlays(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
 
+    /* Draw overlays in z_order so the topmost window's title bar renders last (on top) */
+    int order2[IPC_MAX_APPS];
+    int n2 = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
+        order2[n2++] = i;
+    }
+    for (int a = 1; a < n2; a++) {
+        int key = order2[a]; int b = a - 1;
+        while (b >= 0 && g_clients[order2[b]].z_order > g_clients[key].z_order) { order2[b+1]=order2[b]; b--; }
+        order2[b+1] = key;
+    }
+
+    for (int ji = 0; ji < n2; ji++) {
+        int i = order2[ji];
+        ipc_client_t *c = &g_clients[i];
         if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
 
         bool focused = (g_focused_idx == i);
@@ -815,12 +851,19 @@ bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
 
     int32_t new_x = mx - g_drag_ox;
     int32_t new_y = my - g_drag_oy;
+    uint32_t fb_h2 = (uint32_t)console_fb_height();
+    uint32_t fb_w2 = (uint32_t)console_fb_width();
+    uint32_t ipc_status_h = 20u;  /* STATUS_H: status bar at top */
     if (new_x < 0) new_x = 0;
-    if (new_y < 0) new_y = 0;
+    if (new_y < (int32_t)ipc_status_h) new_y = (int32_t)ipc_status_h;
+    /* Clamp so window can't go fully off-screen right or bottom */
+    uint32_t min_vis = (uint32_t)IPC_DRAG_STRIP;
+    if (new_x + (int32_t)min_vis > (int32_t)fb_w2) new_x = (int32_t)fb_w2 - (int32_t)min_vis;
+    if (new_y + (int32_t)min_vis > (int32_t)(fb_h2 - 32u)) new_y = (int32_t)(fb_h2 - 32u) - (int32_t)min_vis;
     if ((uint32_t)new_x != c->win_x || (uint32_t)new_y != c->win_y) {
-        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
         c->win_x = (uint32_t)new_x;
         c->win_y = (uint32_t)new_y;
+        g_ipc_needs_redraw = true;
     }
 
     /* Determine snap preview zone from cursor position */
@@ -935,9 +978,9 @@ bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn) {
         new_h = h < IPC_MIN_WIN_H ? IPC_MIN_WIN_H : (uint32_t)h;
     }
     if (new_w != c->win_w || new_h != c->win_h) {
-        console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
         c->win_w = new_w;
         c->win_h = new_h;
+        g_ipc_needs_redraw = true;
         /* Maintain a scaled disp_buf so the content fills the resized window */
         if (c->frame_buf) {
             free(c->disp_buf);
@@ -1060,6 +1103,32 @@ void ipc_close_focused(void) {
 
 /* Clear IPC keyboard focus (compositor GUI reclaimed focus) */
 void ipc_clear_focus(void) { g_focused_idx = -1; }
+
+/* Cycle keyboard focus to the next active IPC window (Alt+Tab) */
+void ipc_cycle_focus(void) {
+    int count = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++)
+        if (g_clients[i].active && g_clients[i].fd >= 0 && !g_clients[i].minimized) count++;
+    if (count == 0) { g_focused_idx = -1; return; }
+
+    /* Start searching after current focused index (wrap around) */
+    int start = (g_focused_idx >= 0) ? (g_focused_idx + 1) % IPC_MAX_APPS : 0;
+    for (int n = 0; n < IPC_MAX_APPS; n++) {
+        int i = (start + n) % IPC_MAX_APPS;
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->minimized) continue;
+        g_focused_idx = i;
+        /* Bring to front by raising z_order above all others */
+        uint32_t max_z = 0;
+        for (int j = 0; j < IPC_MAX_APPS; j++)
+            if (g_clients[j].active && g_clients[j].z_order > max_z)
+                max_z = g_clients[j].z_order;
+        c->z_order = max_z + 1;
+        /* Send an IPC_INVALIDATE so the window redraws itself */
+        ipc_send(c, IPC_INVALIDATE, NULL, 0);
+        return;
+    }
+}
 
 /* Keep old API for any callers */
 void ipc_send_key(uint32_t focused_win_id, uint8_t key) {
@@ -1190,8 +1259,8 @@ void ipc_window_focus_slot(int slot) {
             if (!c->minimized && g_focused_idx == i) {
                 /* Already focused → minimize */
                 c->minimized = true;
-                console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0x00000000u);
                 if (g_focused_idx == i) g_focused_idx = -1;
+                g_ipc_needs_redraw = true;
                 fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
             } else {
                 /* Restore / raise */

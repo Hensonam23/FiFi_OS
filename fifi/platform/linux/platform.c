@@ -147,6 +147,56 @@ uint32_t net_dns     = 0;
 
 static bool g_net_present = false;
 
+/* Read mask, gateway, and DNS for a given iface — called at init and on each
+ * poll so DHCP-assigned values show up after they're written. */
+static void net_read_config(const char *iface) {
+    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sk >= 0) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+        if (ioctl(sk, SIOCGIFNETMASK, &ifr) == 0) {
+            uint32_t mask_nbo;
+            memcpy(&mask_nbo, ifr.ifr_netmask.sa_data + 2, 4);
+            net_mask = ntohl(mask_nbo);
+        }
+        close(sk);
+    }
+
+    /* Default gateway from /proc/net/route */
+    FILE *gr = fopen("/proc/net/route", "r");
+    if (gr) {
+        char rline[256];
+        fgets(rline, sizeof(rline), gr);  /* skip header */
+        uint32_t new_gw = 0;
+        while (fgets(rline, sizeof(rline), gr)) {
+            char riface[16]; unsigned int dest, gw;
+            if (sscanf(rline, "%15s %x %x", riface, &dest, &gw) == 3 && dest == 0) {
+                new_gw = ntohl(gw);
+                break;
+            }
+        }
+        fclose(gr);
+        net_gateway = new_gw;
+    }
+
+    /* DNS from /etc/resolv.conf (written by udhcpc) */
+    FILE *rc = fopen("/etc/resolv.conf", "r");
+    if (rc) {
+        char rline[256];
+        uint32_t new_dns = 0;
+        while (fgets(rline, sizeof(rline), rc)) {
+            unsigned int a, b, c, d;
+            if (sscanf(rline, "nameserver %u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                new_dns = (a << 24) | (b << 16) | (c << 8) | d;
+                break;
+            }
+        }
+        fclose(rc);
+        net_dns = new_dns;
+    }
+}
+
 void net_init(void) {
     /* Scan /proc/net/dev for real NICs (non-loopback) */
     FILE *f = fopen("/proc/net/dev", "r");
@@ -187,39 +237,19 @@ void net_init(void) {
         }
         memset(&ifr, 0, sizeof(ifr));
         strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
-        if (ioctl(sk, SIOCGIFNETMASK, &ifr) == 0) {
-            uint32_t mask_nbo;
-            memcpy(&mask_nbo, ifr.ifr_netmask.sa_data + 2, 4);
-            net_mask = ntohl(mask_nbo);
-        }
-        memset(&ifr, 0, sizeof(ifr));
-        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
         if (ioctl(sk, SIOCGIFHWADDR, &ifr) == 0)
             memcpy(net_mac, ifr.ifr_hwaddr.sa_data, 6);
 
         close(sk);
     }
 
-    /* Default gateway from /proc/net/route (hex IP in network byte order) */
-    FILE *gr = fopen("/proc/net/route", "r");
-    if (gr) {
-        char rline[256];
-        fgets(rline, sizeof(rline), gr);  /* skip header */
-        while (fgets(rline, sizeof(rline), gr)) {
-            char riface[16]; unsigned int dest, gw;
-            if (sscanf(rline, "%15s %x %x", riface, &dest, &gw) == 3 && dest == 0) {
-                /* gw is in little-endian hex on Linux */
-                net_gateway = ntohl(gw);
-                break;
-            }
-        }
-        fclose(gr);
-    }
+    net_read_config(iface);
 
     fprintf(stderr, "[net] %s: ip=%u.%u.%u.%u\n", iface,
             (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,
             (net_ip >> 8) & 0xFF,  net_ip & 0xFF);
 }
+
 void net_poll(void) {
     /* Re-read IP every ~120 frames (~2s at 60fps). time() is unreliable in
      * the initramfs environment (clock may not advance), so use a counter. */
@@ -261,6 +291,9 @@ void net_poll(void) {
         net_ip = 0;
     }
     close(sk);
+
+    net_read_config(iface);
+
     if (net_ip != old_ip)
         fprintf(stderr, "[net] ip updated: %u.%u.%u.%u\n",
                 (net_ip >> 24) & 0xFF, (net_ip >> 16) & 0xFF,

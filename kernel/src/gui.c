@@ -1,6 +1,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifdef __linux__
+#include <stdio.h>
+#include <time.h>
+#endif
 #include "gui.h"
 #include "console.h"
 #include "mouse.h"
@@ -29,10 +33,10 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  13u
+#define LAUNCHER_ITEMS  16u
 #define LAUNCHER_W      110u
 #define CTX_W           130u
-#define CTX_ITEM_H      22u
+#define CTX_ITEM_H      26u
 #define CTX_ITEMS       10u  /* 4 built-in windows + separator + 5 IPC apps */
 
 /* File browser context menu */
@@ -498,8 +502,11 @@ static char g_recent[RECENT_MAX][128];
 static int  g_recent_count = 0;
 
 /* ── Resize edge hover ───────────────────────────────────────────────── */
-static int          g_resize_hover_win = -1;
-static resize_dir_t g_resize_hover_dir = RES_NONE;
+static int          g_resize_hover_win     = -1;
+static resize_dir_t g_resize_hover_dir     = RES_NONE;
+static int          g_resize_pending_win   = -1;
+static resize_dir_t g_resize_pending_dir   = RES_NONE;
+static int          g_resize_pending_ticks = 0;
 
 /* ── Theme settings UI hit boxes (updated each settings render) ──────── */
 static uint64_t g_theme_accent_bx[ACCENT_PRESET_COUNT]; /* left x of each accent swatch */
@@ -507,6 +514,7 @@ static uint64_t g_theme_accent_by;      /* common y of swatches row */
 static uint64_t g_theme_swatch_sz;      /* swatch size in pixels */
 static uint64_t g_theme_accent_by2;     /* y of second accent row */
 static uint64_t g_theme_wall_bx[WALLPAPER_COUNT]; /* wallpaper button x */
+static uint64_t g_theme_wall_by_arr[WALLPAPER_COUNT]; /* per-button y (for multi-row) */
 static uint64_t g_theme_wall_by;
 static uint64_t g_theme_wall_bw;
 static uint64_t g_theme_wall_bh;
@@ -608,12 +616,29 @@ static void gui_itoa_pad2(uint64_t n, char *out) {
 
 /* ── Taskbar ─────────────────────────────────────────────────────────── */
 
+static uint64_t logo_eff_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t w  = (uint64_t)gui_strlen("FiFi OS") * fw + 16u;
+    return (w > LOGO_W) ? w : LOGO_W;
+}
+
+static uint64_t taskbtn_start_x(void) {
+    return LOGO_X + logo_eff_w() + 8u;
+}
+
+static uint64_t taskbtn_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t w  = 16u * fw;   /* fits "Security Center" (15 chars) + margin */
+    return w > (uint64_t)TASKBTN_W ? w : (uint64_t)TASKBTN_W;
+}
+
 static void taskbar_draw_btn(int slot, const char *label) {
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = fb_h - TASKBAR_H;
-    uint64_t bx   = TASKBTN_X + (uint64_t)slot * (TASKBTN_W + TASKBTN_GAP);
+    uint64_t tbw  = taskbtn_w();
+    uint64_t bx   = taskbtn_start_x() + (uint64_t)slot * (tbw + TASKBTN_GAP);
     bool     vis  = (slot < MAX_WINS && g_wins[slot].active &&
                      (g_wins[slot].state != WIN_HIDDEN ||
                       g_wins[slot].anim_phase == ANIM_CLOSE));
@@ -624,15 +649,15 @@ static void taskbar_draw_btn(int slot, const char *label) {
                     vis     ? COL_TASKBTN_A :
                     hov     ? 0x00283848u : COL_TASKBTN;
 
-    console_fill_rect(bx, ty + 3u, TASKBTN_W, TASKBAR_H - 6u, bg);
+    console_fill_rect(bx, ty + 3u, tbw, TASKBAR_H - 6u, bg);
     /* Active indicator bar at bottom */
     if (vis)
-        console_fill_rect(bx, ty + TASKBAR_H - 5u, TASKBTN_W, 3u,
+        console_fill_rect(bx, ty + TASKBAR_H - 5u, tbw, 3u,
                           focused ? 0x0060a0f0u : COL_BORDER);
     uint64_t llen     = (uint64_t)gui_strlen(label);
-    uint64_t max_ch   = TASKBTN_W / fw;
+    uint64_t max_ch   = tbw / fw;
     uint64_t disp_len = llen < max_ch ? llen : max_ch;
-    uint64_t lpx      = bx + (TASKBTN_W > disp_len * fw ? (TASKBTN_W - disp_len * fw) / 2u : 0u);
+    uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
     uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
     gui_draw_str_clip(lpx, lpy, label, COL_TASKBTN_FG, bg, max_ch);
 }
@@ -785,11 +810,12 @@ static void taskbar_draw(void) {
     console_fill_rect(0, ty, fb_w, 2u, g_theme.accent);
 
     uint32_t logo_bg = g_launcher_open ? COL_TASKBTN_A : COL_LOGO;
-    console_fill_rect(LOGO_X, ty + 4u, LOGO_W, TASKBAR_H - 8u, logo_bg);
+    uint64_t lw = logo_eff_w();
+    console_fill_rect(LOGO_X, ty + 4u, lw, TASKBAR_H - 8u, logo_bg);
     const char *logo = "FiFi OS";
     uint64_t llen = (uint64_t)gui_strlen(logo);
-    uint64_t lpx  = LOGO_X + (LOGO_W - llen * fw) / 2u;
-    uint64_t lpy  = ty + (TASKBAR_H - fh) / 2u;
+    uint64_t lpx  = LOGO_X + (lw - llen * fw) / 2u;
+    uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
     gui_draw_str(lpx, lpy, logo, COL_TASKBTN_FG, logo_bg);
 
     taskbar_draw_btn(0, "Terminal");
@@ -810,15 +836,16 @@ static void taskbar_draw(void) {
             bool ipc_focused = false;
             ipc_window_info(wi, ipc_title, (int)sizeof(ipc_title), &ipc_focused);
             int islot = MAX_WINS + wi;
-            uint64_t bx = TASKBTN_X + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
+            uint64_t ibtw = taskbtn_w();
+            uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (ibtw + TASKBTN_GAP);
             uint64_t bg = ipc_focused ? 0x003878d8u : COL_TASKBTN_A;
-            console_fill_rect(bx, ty + 3u, TASKBTN_W, TASKBAR_H - 6u, bg);
+            console_fill_rect(bx, ty + 3u, ibtw, TASKBAR_H - 6u, bg);
             if (ipc_focused)
-                console_fill_rect(bx, ty + TASKBAR_H - 5u, TASKBTN_W, 3u, 0x0060a0f0u);
-            uint64_t max_ch = TASKBTN_W / fw;
+                console_fill_rect(bx, ty + TASKBAR_H - 5u, ibtw, 3u, 0x0060a0f0u);
+            uint64_t max_ch = ibtw / fw;
             uint64_t tlen = (uint64_t)gui_strlen(ipc_title);
             if (tlen > max_ch) tlen = max_ch;
-            uint64_t lpx2 = bx + (TASKBTN_W > tlen * fw ? (TASKBTN_W - tlen * fw) / 2u : 0u);
+            uint64_t lpx2 = bx + (ibtw > tlen * fw ? (ibtw - tlen * fw) / 2u : 0u);
             uint64_t lpy2 = ty + (TASKBAR_H - fh) / 2u;
             gui_draw_str_clip(lpx2, lpy2, ipc_title, COL_TASKBTN_FG, bg, max_ch);
         }
@@ -829,40 +856,57 @@ static void taskbar_draw(void) {
 
 /* ── Launcher popup ──────────────────────────────────────────────────── */
 
+/* Items 0-3: built-in windows; 4+: spawned IPC apps */
+static const char * const g_launcher_items[LAUNCHER_ITEMS] = {
+    "Terminal", "Files", "Settings", "Viewer",
+    "File Browser", "Sys Info", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
+    "Security", "Steam", "Proton Config",
+};
+
+static uint64_t launcher_item_h(void) {
+    uint64_t fh = console_font_height();
+    return (fh + 4u > LAUNCHER_ITEM_H) ? fh + 4u : LAUNCHER_ITEM_H;
+}
+
+static uint64_t launcher_eff_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t max_len = 0;
+    for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
+        uint64_t l = (uint64_t)gui_strlen(g_launcher_items[i]);
+        if (l > max_len) max_len = l;
+    }
+    uint64_t w = max_len * fw + 20u;
+    return (w > LAUNCHER_W) ? w : LAUNCHER_W;
+}
+
 static uint64_t launcher_lx(void) { return LOGO_X; }
 static uint64_t launcher_ly(void) {
-    return console_fb_height() - TASKBAR_H - LAUNCHER_ITEMS * LAUNCHER_ITEM_H - 2u;
+    return console_fb_height() - TASKBAR_H - LAUNCHER_ITEMS * launcher_item_h() - 2u;
 }
 
 static void launcher_draw(void) {
-    uint64_t lx = launcher_lx();
-    uint64_t ly = launcher_ly();
-    uint64_t fw = console_font_width();
-    uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4+: spawned IPC apps */
-    static const char *items[] = {
-        "Terminal", "Files", "Settings", "Viewer",
-        "File Browser", "Settings", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
-    };
-
-    int32_t mx, my;
-    bool lbtn, rbtn;
-    mouse_get_state(&mx, &my, &lbtn, &rbtn);
+    uint64_t lx  = launcher_lx();
+    uint64_t ly  = launcher_ly();
+    uint64_t fw  = console_font_width();
+    uint64_t fh  = console_font_height();
+    uint64_t lw  = launcher_eff_w();
+    uint64_t lih = launcher_item_h();
 
     for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
-        uint64_t ry = ly + (uint64_t)i * LAUNCHER_ITEM_H;
+        uint64_t ry = ly + (uint64_t)i * lih;
         bool hov = (g_launcher_hover == i);
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
-        console_fill_rect(lx, ry, LAUNCHER_W, LAUNCHER_ITEM_H, bg);
-        uint64_t slen = (uint64_t)gui_strlen(items[i]);
-        uint64_t spx  = lx + (LAUNCHER_W - slen * fw) / 2u;
-        uint64_t spy  = ry + (LAUNCHER_ITEM_H - fh) / 2u;
-        gui_draw_str(spx, spy, items[i], COL_LAUNCH_FG, bg);
+        console_fill_rect(lx, ry, lw, lih, bg);
+        uint64_t slen   = (uint64_t)gui_strlen(g_launcher_items[i]);
+        uint64_t text_w = slen * fw;
+        uint64_t spx    = (lw > text_w) ? lx + (lw - text_w) / 2u : lx + 4u;
+        uint64_t spy    = ry + (lih > fh ? (lih - fh) / 2u : 0u);
+        gui_draw_str(spx, spy, g_launcher_items[i], COL_LAUNCH_FG, bg);
     }
-    console_fill_rect(lx, ly, LAUNCHER_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx, ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H, LAUNCHER_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx + LAUNCHER_W - 1u, ly, 1u, LAUNCHER_ITEMS * LAUNCHER_ITEM_H + 1u, COL_LAUNCH_HL);
+    console_fill_rect(lx, ly, lw, 1u, COL_LAUNCH_HL);
+    console_fill_rect(lx, ly + LAUNCHER_ITEMS * lih, lw, 1u, COL_LAUNCH_HL);
+    console_fill_rect(lx, ly, 1u, LAUNCHER_ITEMS * lih + 1u, COL_LAUNCH_HL);
+    console_fill_rect(lx + lw - 1u, ly, 1u, LAUNCHER_ITEMS * lih + 1u, COL_LAUNCH_HL);
 }
 
 /* ── Volume tray popup ───────────────────────────────────────────────── */
@@ -1001,8 +1045,8 @@ static void ctx_draw(void) {
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
         console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, CTX_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(ctx_items[i]);
-        uint64_t spx  = (uint64_t)cx + (CTX_W - slen * fw) / 2u;
-        uint64_t spy  = ry + (CTX_ITEM_H - fh) / 2u;
+        uint64_t spx  = (uint64_t)cx + (CTX_W > slen * fw ? (CTX_W - slen * fw) / 2u : 0u);
+        uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str(spx, spy, ctx_items[i], COL_LAUNCH_FG, bg);
         ry += CTX_ITEM_H;
     }
@@ -1027,8 +1071,8 @@ static void txt_ctx_draw(void) {
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
         console_fill_rect((uint64_t)cx + 1u, ry, TXT_CTX_W - 2u, CTX_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(txt_ctx_items[i]);
-        uint64_t spx  = (uint64_t)cx + (TXT_CTX_W - slen * fw) / 2u;
-        uint64_t spy  = ry + (CTX_ITEM_H - fh) / 2u;
+        uint64_t spx  = (uint64_t)cx + (TXT_CTX_W > slen * fw ? (TXT_CTX_W - slen * fw) / 2u : 0u);
+        uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str(spx, spy, txt_ctx_items[i], COL_LAUNCH_FG, bg);
     }
 }
@@ -1068,7 +1112,7 @@ static void fb_ctx_draw(void) {
         const char *lbl  = fb_ctx_labels[act];
         uint64_t slen    = (uint64_t)gui_strlen(lbl);
         uint64_t spx     = cx + 10u;  /* left-align with small indent */
-        uint64_t spy     = ry + (CTX_ITEM_H - fh) / 2u;
+        uint64_t spy     = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         (void)slen;
         gui_draw_str(spx, spy, lbl, fg, bg);
     }
@@ -1134,7 +1178,41 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     bool active = (g_z[MAX_WINS - 1] == slot);
     uint32_t title_bg = active ? COL_BORDER : 0x00182840u;
 
-    /* Subtle 1-px focus ring just outside the active window */
+    /* Compute button positions (needed for both full and partial paths) */
+    w->btn_cls_x = w->x + w->w - BTN_W;
+    w->btn_max_x = w->btn_cls_x - BTN_W;
+    w->btn_min_x = w->btn_max_x - BTN_W;
+
+    uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
+
+    if (!fill_content) {
+        /* Hover-only repaint: only redraw the 3 buttons (3×BTN_W×TITLE_H pixels).
+         * Skipping the full-width title bar fill and title text saves ~200KB of
+         * backbuffer writes and font rendering on every hover transition at 250fps. */
+        uint32_t cls_bg = (g_chrome_win == slot && g_chrome_btn == 1)
+                        ? 0x00cc3333u : COL_CLOSE;
+        console_fill_rect(w->btn_cls_x, w->y, BTN_W, TITLE_H, cls_bg);
+        console_render_glyph(w->btn_cls_x + (BTN_W - fw) / 2u, tpy,
+                             'x', COL_TITLE_FG, cls_bg);
+
+        uint32_t max_bg = (g_chrome_win == slot && g_chrome_btn == 2)
+                        ? 0x004878a0u : COL_BTN_BG;
+        console_fill_rect(w->btn_max_x, w->y, BTN_W, TITLE_H, max_bg);
+        console_render_glyph(w->btn_max_x + (BTN_W - fw) / 2u, tpy,
+                             w->state == WIN_MAXIMIZED ? '-' : '+',
+                             COL_BTN_FG, max_bg);
+
+        uint32_t min_bg = (g_chrome_win == slot && g_chrome_btn == 3)
+                        ? 0x004878a0u : COL_BTN_BG;
+        console_fill_rect(w->btn_min_x, w->y, BTN_W, TITLE_H, min_bg);
+        console_render_glyph(w->btn_min_x + (BTN_W - fw) / 2u, tpy,
+                             '_', COL_BTN_FG, min_bg);
+        return;
+    }
+
+    /* Full repaint path (fill_content=true) ─────────────────────────────── */
+
+    /* Focus ring and full-height border strips only on full redraws. */
     if (active) {
         uint64_t fb_w = console_fb_width();
         uint64_t dtop = desk_top();
@@ -1161,11 +1239,6 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     /* Bottom separator line */
     console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);
 
-    /* Compute button positions first so we know available title width */
-    w->btn_cls_x = w->x + w->w - BTN_W;
-    w->btn_max_x = w->btn_cls_x - BTN_W;
-    w->btn_min_x = w->btn_max_x - BTN_W;
-
     /* Build display title: prefix '*' when text editor has unsaved changes */
     const char *disp_title = w->title;
     char _mod_title[68];
@@ -1179,16 +1252,14 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
 
     /* Title: centered if it fits, left-aligned+clipped if too wide */
     uint64_t tlen     = (uint64_t)gui_strlen(disp_title);
-    uint64_t tpy      = w->y + (TITLE_H - fh) / 2u;
     uint64_t avail    = w->btn_min_x > w->x + 8u ? w->btn_min_x - w->x - 8u : 0u;
     uint64_t max_ch   = fw > 0u ? avail / fw : 0u;
     uint64_t tpx;
     if (tlen <= max_ch) {
         tpx = w->x + (w->w - tlen * fw) / 2u;
-        if (w->w < tlen * fw) tpx = w->x + 4u;  /* safety against wrap */
+        if (w->w < tlen * fw) tpx = w->x + 4u;
         gui_draw_str_clip(tpx, tpy, disp_title, COL_TITLE_FG, title_bg, max_ch);
     } else {
-        /* Title too long: show clipped text with trailing "…" */
         tpx = w->x + 4u;
         if (max_ch > 3u) {
             gui_draw_str_clip(tpx, tpy, disp_title, COL_TITLE_FG, title_bg, max_ch - 3u);
@@ -1220,12 +1291,14 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     console_render_glyph(w->btn_min_x + (BTN_W - fw) / 2u, tpy,
                          '_', COL_BTN_FG, min_bg);
 
-    console_fill_rect(w->x, w->y + TITLE_H,
-                      BORDER, w->h - TITLE_H, COL_BORDER);
-    console_fill_rect(w->x + w->w - BORDER, w->y + TITLE_H,
-                      BORDER, w->h - TITLE_H, COL_BORDER);
-    console_fill_rect(w->x, w->y + w->h - BORDER,
-                      w->w, BORDER, COL_BORDER);
+    if (fill_content) {
+        console_fill_rect(w->x, w->y + TITLE_H,
+                          BORDER, w->h - TITLE_H, COL_BORDER);
+        console_fill_rect(w->x + w->w - BORDER, w->y + TITLE_H,
+                          BORDER, w->h - TITLE_H, COL_BORDER);
+        console_fill_rect(w->x, w->y + w->h - BORDER,
+                          w->w, BORDER, COL_BORDER);
+    }
 
     if (fill_content) {
         uint64_t ix = w->x + BORDER;
@@ -1366,6 +1439,12 @@ static bool fb_is_viewable(const char *name) {
            fb_has_ext(name, ".yaml")|| fb_has_ext(name, ".html")||
            fb_has_ext(name, ".htm") || fb_has_ext(name, ".css") ||
            fb_has_ext(name, ".diff")|| fb_has_ext(name, ".patch");
+}
+
+static bool fb_is_image(const char *name) {
+    return fb_has_ext(name, ".bmp") || fb_has_ext(name, ".ppm") ||
+           fb_has_ext(name, ".pgm") || fb_has_ext(name, ".png") ||
+           fb_has_ext(name, ".jpg") || fb_has_ext(name, ".jpeg");
 }
 
 /* Returns icon string and sets *col */
@@ -1563,15 +1642,17 @@ static void fb_draw_toolbar_btn(uint64_t bx, uint64_t by, uint64_t bw, uint64_t 
 }
 
 /* Full file browser render */
-static void fb_render(window_t *w) {
-    win_draw_chrome(w, false);
+/* Redraw only the two toolbar rows of the file browser (nav + search).
+ * Called from fb_on_motion when only toolbar/path hover changed, avoiding
+ * the expensive full file-list repaint (~2M pixels) on every cursor move
+ * near the title bar area. */
+static void fb_render_toolbar(window_t *w) {
+    win_draw_chrome(w, true);
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
-    uint64_t ix   = w->x + BORDER;
-    uint64_t iy   = w->y + TITLE_H;
-    uint64_t iw   = w->w - 2u * BORDER;
-    uint64_t ih   = w->h - TITLE_H - BORDER;
-    uint64_t tb_h = FB_TOOLBAR_H;
+    uint64_t ix  = w->x + BORDER;
+    uint64_t iy  = w->y + TITLE_H;
+    uint64_t iw  = w->w - 2u * BORDER;
 
     /* ── Toolbar row 1: nav buttons + path bar ── */
     uint64_t r1_h   = FB_ROW1_H;
@@ -1705,6 +1786,17 @@ static void fb_render(window_t *w) {
                                   2u, btn_h - 4u, COL_FB_SEARCH_CUR);
         }
     }
+}
+
+static void fb_render(window_t *w) {
+    fb_render_toolbar(w);
+    uint64_t fw  = console_font_width();
+    uint64_t fh  = console_font_height();
+    uint64_t ix  = w->x + BORDER;
+    uint64_t iy  = w->y + TITLE_H;
+    uint64_t iw  = w->w - 2u * BORDER;
+    uint64_t ih  = w->h - TITLE_H - BORDER;
+    uint64_t tb_h = FB_TOOLBAR_H;
 
     /* ── Body: sidebar + file list ── */
     uint64_t body_y = iy + tb_h;
@@ -5313,11 +5405,104 @@ static bool fb_hit_col_sep(window_t *w, int32_t mx, int32_t my) {
     return (mx >= sep_x - 3 && mx <= sep_x + 3);
 }
 
+/* Draw a single file-list row. Used by fb_render_hover_rows for O(1) hover updates. */
+static void fb_draw_list_row(window_t *w, int i, int row_idx,
+                              uint64_t lx, uint64_t lw, uint64_t ry, uint64_t row_h,
+                              uint64_t fh, uint64_t fw,
+                              uint64_t name_col_x, uint64_t size_col_x, uint64_t size_col_w) {
+    bool hov     = (i == w->fb.hover_row);
+    bool sel     = (i == w->fb.sel_row) || w->fb.multi_sel[i];
+    bool matched = (w->fb.search_len > 0);
+    uint32_t row_bg = sel     ? COL_FB_SEL :
+                      hov     ? COL_FB_HOV :
+                      matched ? COL_FB_MATCH_HL :
+                      (row_idx & 1) ? COL_FB_LIST_ALT : COL_FB_LIST_BG;
+    console_fill_rect(lx, ry, lw, row_h, row_bg);
+    if (!w->fb.is_dir[i] && g_fb_clip_path[0]) {
+        char _cp[256]; fb_path_join(_cp, w->fb.path, w->fb.entries[i]);
+        if (gui_streq(_cp, g_fb_clip_path)) {
+            uint32_t cc = g_fb_clip_is_cut ? 0x00e8a040u : 0x0040d080u;
+            console_fill_rect(lx, ry, 3u, row_h, cc);
+        }
+    }
+    const char *icon; uint32_t icon_fg;
+    if (w->fb.is_dir[i]) { icon = "[/]"; icon_fg = COL_FB_DIR; }
+    else                  icon = fb_file_icon(w->fb.entries[i], &icon_fg);
+    gui_draw_str(lx + 2u, ry + (row_h - fh) / 2u, icon, icon_fg, row_bg);
+    uint64_t name_avail = size_col_x > name_col_x + fw ? size_col_x - name_col_x - fw : fw;
+    uint64_t name_max   = name_avail / fw;
+    const char *name    = w->fb.entries[i];
+    uint32_t    name_fg = w->fb.is_dir[i] ? COL_FB_DIR : icon_fg;
+    if (w->fb.is_dir[i]) {
+        char db[130]; size_t nl = gui_strlen(name);
+        for (size_t k = 0; k < nl && k < 127; k++) db[k] = name[k];
+        db[nl < 127 ? nl : 127] = '/'; db[nl < 127 ? nl+1 : 128] = '\0';
+        gui_draw_str_clip(name_col_x, ry + (row_h - fh) / 2u, db, name_fg, row_bg, name_max);
+    } else {
+        gui_draw_str_clip(name_col_x, ry + (row_h - fh) / 2u, name, name_fg, row_bg, name_max);
+    }
+    if (!w->fb.is_dir[i]) {
+        uint32_t sz = w->fb.file_sizes[i];
+        char sb[16];
+        if (sz >= 1024u*1024u) {
+            char n[8]; gui_itoa((int)(sz>>20),n,8); int si=0; const char *p;
+            for(p=n;*p&&si<12;) sb[si++]=*p++; for(p=" MB";*p&&si<14;) sb[si++]=*p++; sb[si]='\0';
+        } else if (sz >= 1024u) {
+            char n[8]; gui_itoa((int)(sz>>10),n,8); int si=0; const char *p;
+            for(p=n;*p&&si<12;) sb[si++]=*p++; for(p=" KB";*p&&si<14;) sb[si++]=*p++; sb[si]='\0';
+        } else {
+            char n[8]; gui_itoa((int)sz,n,8); int si=0; const char *p;
+            for(p=n;*p&&si<12;) sb[si++]=*p++; for(p=" B";*p&&si<14;) sb[si++]=*p++; sb[si]='\0';
+        }
+        uint64_t sl = (uint64_t)gui_strlen(sb);
+        uint64_t sx = size_col_x + (size_col_w > sl*fw ? size_col_w - sl*fw : 0u);
+        gui_draw_str(sx, ry + (row_h - fh) / 2u, sb, 0x00405060u, row_bg);
+    }
+    /* restore col separator within this row */
+    console_fill_rect(size_col_x - 1u, ry, 1u, row_h,
+                      w->fb.col_drag_active ? 0x00253545u : 0x00182030u);
+}
+
+/* Redraw only the previously-hovered and newly-hovered rows — O(1) cost vs O(N)
+ * for a full fb_render.  Falls back to fb_render for icon view. */
+static void fb_render_hover_rows(window_t *w, int old_row, int new_row) {
+    if (w->fb.view_mode != FB_VIEW_LIST) { fb_render(w); return; }
+    uint64_t lx, ly, lw, lh;
+    fb_list_region(w, &lx, &ly, &lw, &lh);
+    uint64_t fw       = console_font_width();
+    uint64_t fh       = console_font_height();
+    uint64_t row_h    = FB_ROW_H;
+    uint64_t max_rows = lh / row_h;
+    uint64_t icon_col_w = (FB_ICON_COLS + 1u) * fw;
+    uint64_t name_col_x = lx + icon_col_w + 4u;
+    uint64_t size_col_w = (uint64_t)w->fb.size_col_chars * fw;
+    uint64_t size_col_x = lx + lw - size_col_w - 8u;
+    bool need_old = (old_row >= 0), need_new = (new_row >= 0);
+    if (!need_old && !need_new) return;
+    int row_idx = 0, skipped = 0;
+    for (int i = 0; i < w->fb.entry_count && row_idx < (int)max_rows; i++) {
+        if (!fb_name_matches(w->fb.entries[i], w->fb.search_query)) continue;
+        if (skipped < w->fb.scroll) { skipped++; continue; }
+        if ((need_old && i == old_row) || (need_new && i == new_row)) {
+            uint64_t ry = ly + (uint64_t)row_idx * row_h;
+            fb_draw_list_row(w, i, row_idx, lx, lw, ry, row_h, fh, fw,
+                             name_col_x, size_col_x, size_col_w);
+            if (need_old && i == old_row) need_old = false;
+            if (need_new && i == new_row) need_new = false;
+            if (!need_old && !need_new) break;
+        }
+        row_idx++;
+    }
+}
+
 static void fb_on_motion(window_t *w, int32_t mx, int32_t my) {
-    bool changed = false;
+    bool toolbar_changed = false;
+    bool body_changed    = false;
+    bool hover_row_only  = false;
+    int  old_hover       = w->fb.hover_row;
 
     int new_hover = fb_hit_row(w, mx, my);
-    if (new_hover != w->fb.hover_row) { w->fb.hover_row = new_hover; changed = true; }
+    if (new_hover != old_hover) { w->fb.hover_row = new_hover; body_changed = true; hover_row_only = true; }
 
     /* Path bar hover: track which char in path string the mouse is over */
     {
@@ -5334,18 +5519,18 @@ static void fb_on_motion(window_t *w, int32_t mx, int32_t my) {
             int plen = (int)gui_strlen(w->fb.path);
             new_phov = (cp < plen) ? (int)cp : (plen > 0 ? plen - 1 : -1);
         }
-        if (new_phov != w->fb.path_hov_char) { w->fb.path_hov_char = new_phov; changed = true; }
+        if (new_phov != w->fb.path_hov_char) { w->fb.path_hov_char = new_phov; toolbar_changed = true; }
     }
 
     /* Header hover */
     int new_hh = fb_hit_header(w, mx, my);
-    if (new_hh != w->fb.header_hover) { w->fb.header_hover = new_hh; changed = true; }
+    if (new_hh != w->fb.header_hover) { w->fb.header_hover = new_hh; body_changed = true; hover_row_only = false; }
 
     /* Toolbar button hover */
     {
         int _tbh = fb_hit_toolbar(w, mx, my);
         int new_tbh = (_tbh == 0) ? 0 : (_tbh == 5) ? 1 : (_tbh == 1) ? 2 : (_tbh == 2) ? 3 : (_tbh == 6) ? 4 : -1;
-        if (new_tbh != w->fb.toolbar_hover) { w->fb.toolbar_hover = new_tbh; changed = true; }
+        if (new_tbh != w->fb.toolbar_hover) { w->fb.toolbar_hover = new_tbh; toolbar_changed = true; }
     }
 
     /* Column separator drag */
@@ -5356,10 +5541,19 @@ static void fb_on_motion(window_t *w, int32_t mx, int32_t my) {
         int new_chars = w->fb.col_drag_start_chars - (int)(dx / (int)fw2);
         if (new_chars < 4)  new_chars = 4;
         if (new_chars > 16) new_chars = 16;
-        if (new_chars != w->fb.size_col_chars) { w->fb.size_col_chars = new_chars; changed = true; }
+        if (new_chars != w->fb.size_col_chars) { w->fb.size_col_chars = new_chars; body_changed = true; hover_row_only = false; }
     }
 
-    if (changed) fb_render(w);
+    if (body_changed) {
+        if (hover_row_only && w->fb.view_mode == FB_VIEW_LIST) {
+            /* Fast path: only the hovered row changed — repaint just old + new rows.
+             * ~50x cheaper than a full fb_render on a 2560-wide window. */
+            fb_render_hover_rows(w, old_hover, new_hover);
+            if (toolbar_changed) fb_render_toolbar(w);
+        } else {
+            fb_render(w);
+        }
+    } else if (toolbar_changed) fb_render_toolbar(w);
 }
 
 static void win_show(window_t *w, int slot);  /* forward decl */
@@ -5556,14 +5750,26 @@ static void fb_on_click(window_t *w, int32_t mx, int32_t my) {
         fb_path_join(newpath, w->fb.path, w->fb.entries[idx]);
         fb_navigate(&w->fb, newpath);
     } else {
-        /* Open files in the viewer */
-        const char *name = w->fb.entries[idx];
-        if (fb_is_viewable(name)) {
+        /* Double-click to open files; single click just selects */
+        static int      fb_dbl_idx  = -1;
+        static uint64_t fb_dbl_tick = 0;
+        uint64_t now = pit_ticks();
+        if (idx == fb_dbl_idx && now - fb_dbl_tick < 30u) {
+            const char *name = w->fb.entries[idx];
             char full[256];
             fb_path_join(full, w->fb.path, name);
-            text_open(&g_wins[3], full);
-            win_show(&g_wins[3], 3);
-            return;
+            if (fb_is_image(name)) {
+                __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
+                if (gui_spawn_app_with_arg)
+                    gui_spawn_app_with_arg("/bin/fifi-imageviewer", full);
+            } else if (fb_is_viewable(name)) {
+                text_open(&g_wins[3], full);
+                win_show(&g_wins[3], 3);
+            }
+            fb_dbl_idx = -1;
+        } else {
+            fb_dbl_idx  = idx;
+            fb_dbl_tick = now;
         }
     }
     fb_render(w);
@@ -5572,8 +5778,8 @@ static void fb_on_click(window_t *w, int32_t mx, int32_t my) {
 /* ── Settings window ─────────────────────────────────────────────────── */
 
 #define SET_PAD     12u
-#define SET_ROW_H   20u
-#define SET_SEC_H   22u
+#define SET_ROW_H   (console_font_height() < 14u ? 20u : console_font_height() + 8u)
+#define SET_SEC_H   (console_font_height() < 14u ? 22u : console_font_height() + 8u)
 #define COL_SET_BG      0x000c1018u
 #define COL_SET_SEC_BG  0x00141e28u
 #define COL_SET_SEC_FG  0x005898e8u
@@ -5581,6 +5787,12 @@ static void fb_on_click(window_t *w, int32_t mx, int32_t my) {
 #define COL_SET_VAL_FG  0x00d0dce8u
 #define COL_SET_SEP     0x00182838u
 #define COL_SET_HINT    0x00405060u
+
+/* Visibility helpers for settings scroll — cy is int64 here */
+#define SVIS     (cy >= (int64_t)iy && cy < (int64_t)(iy + ih))
+#define SBOT     (cy >= (int64_t)(iy + ih))
+#define SCY      ((uint64_t)cy)           /* cast for draw calls */
+#define SADVBOT  do { if (SBOT) goto settings_done; } while(0)
 
 static void settings_render(window_t *w) {
     uint64_t ix = w->x + BORDER;
@@ -5590,508 +5802,47 @@ static void settings_render(window_t *w) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t cx = ix + SET_PAD;
-    uint64_t cy = iy + SET_PAD;
     uint64_t val_x = ix + SET_PAD + 18u * fw;  /* value column */
-
-    console_fill_rect(ix, iy, iw, ih, COL_SET_BG);
-
-    /* ── Section: System ── */
-    console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-    gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "System Information",
-                 COL_SET_SEC_FG, COL_SET_SEC_BG);
-    cy += SET_SEC_H + 4u;
-
-    /* Build dynamic resolution string */
-    char res_str[24];
-    {
-        char ws[8], hs[8];
-        gui_itoa((int)console_fb_width(),  ws, 8);
-        gui_itoa((int)console_fb_height(), hs, 8);
-        int ri = 0;
-        for (int k = 0; ws[k] && ri < 20; ) res_str[ri++] = ws[k++];
-        res_str[ri++] = ' '; res_str[ri++] = 'x'; res_str[ri++] = ' ';
-        for (int k = 0; hs[k] && ri < 23; ) res_str[ri++] = hs[k++];
-        res_str[ri] = '\0';
-    }
-    /* Build dynamic memory string: "used / total MB" */
-    char mem_str[32];
-    {
-        uint64_t total_p = pmm_get_total_pages();
-        uint64_t free_p  = pmm_get_free_pages();
-        uint64_t used_mb = ((total_p - free_p) * 4096u) >> 20u;
-        uint64_t tot_mb  = (total_p * 4096u) >> 20u;
-        char ub[8], tb[8];
-        gui_itoa((int)used_mb, ub, 8); gui_itoa((int)tot_mb, tb, 8);
-        int ri = 0;
-        const char *p;
-        for (p=ub; *p && ri<28; ) mem_str[ri++]=*p++;
-        for (p=" / "; *p && ri<28; ) mem_str[ri++]=*p++;
-        for (p=tb; *p && ri<28; ) mem_str[ri++]=*p++;
-        for (p=" MB"; *p && ri<28; ) mem_str[ri++]=*p++;
-        mem_str[ri] = '\0';
-    }
-    /* Build uptime string */
-    char up_str[12];
-    {
-        uint64_t hz2 = pit_get_hz(); if (!hz2) hz2 = 100;
-        uint64_t sc  = pit_ticks() / hz2;
-        uint64_t mn  = sc / 60u; sc %= 60u;
-        uint64_t hr  = mn / 60u; mn %= 60u;
-        gui_itoa_pad2((int)hr, up_str + 0); up_str[2] = ':';
-        gui_itoa_pad2((int)mn, up_str + 3); up_str[5] = ':';
-        gui_itoa_pad2((int)sc, up_str + 6); up_str[8] = '\0';
-    }
-    /* Build CPU frequency string */
-    char cpu_str[16];
-    {
-        /* sys_cpu_freq_mhz() is provided by Linux platform.c; returns 0 if unavailable */
-        __attribute__((weak)) uint32_t sys_cpu_freq_mhz(void);
-        uint32_t mhz = sys_cpu_freq_mhz ? sys_cpu_freq_mhz() : 0u;
-        if (mhz == 0) {
-            cpu_str[0] = '?'; cpu_str[1] = '\0';
-        } else if (mhz >= 1000) {
-            char gb[6];
-            gui_itoa((int)(mhz / 1000), gb, 6);
-            int ri = 0;
-            for (int k = 0; gb[k] && ri < 12; ) cpu_str[ri++] = gb[k++];
-            cpu_str[ri++] = '.';
-            cpu_str[ri++] = (char)('0' + (mhz % 1000) / 100);
-            cpu_str[ri++] = ' '; cpu_str[ri++] = 'G'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
-            cpu_str[ri] = '\0';
-        } else {
-            char mb[6];
-            gui_itoa((int)mhz, mb, 6);
-            int ri = 0;
-            for (int k = 0; mb[k] && ri < 9; ) cpu_str[ri++] = mb[k++];
-            cpu_str[ri++] = ' '; cpu_str[ri++] = 'M'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
-            cpu_str[ri] = '\0';
-        }
-    }
-    struct { const char *key; const char *val; } sysinfo[] = {
-        { "OS:",         "FiFi OS linux-desktop"  },
-        { "Arch:",       "x86_64"                 },
-        { "Kernel:",     "Linux zen"              },
-        { "Boot:",       "Direct kernel boot"     },
-        { "Memory:",     mem_str                  },
-        { "Resolution:", res_str                  },
-        { "CPU:",        cpu_str                  },
-        { "Font:",       console_font_name()      },
-        { "Uptime:",     up_str                   },
-        { NULL, NULL }
-    };
-    for (int i = 0; sysinfo[i].key; i++) {
-        uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
-        console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
-        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u, sysinfo[i].key, COL_SET_KEY_FG, bg);
-        gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u, sysinfo[i].val, COL_SET_VAL_FG, bg);
-        cy += SET_ROW_H;
+    /* One-shot debug: print dimensions on first render so logs reveal any layout issue */
+    static bool s_dbg_logged = false;
+    if (!s_dbg_logged) {
+        s_dbg_logged = true;
+        uint64_t cy0 = (uint64_t)((int64_t)(iy + SET_PAD) - (int64_t)g_settings_scroll);
+        fprintf(stderr, "[settings] fb=%ux%u win=%ux%u ix=%u iy=%u iw=%u ih=%u fw=%u fh=%u scroll=%d cy0=%u SET_ROW_H=%u SET_SEC_H=%u val_x=%u\n",
+                (unsigned)console_fb_width(), (unsigned)console_fb_height(),
+                (unsigned)w->w, (unsigned)w->h,
+                (unsigned)ix, (unsigned)iy, (unsigned)iw, (unsigned)ih,
+                (unsigned)fw, (unsigned)fh, g_settings_scroll,
+                (unsigned)cy0, (unsigned)SET_ROW_H, (unsigned)SET_SEC_H,
+                (unsigned)(ix + SET_PAD + 18u * fw));
     }
 
-    /* Memory usage bar */
-    cy += 6u;
-    {
-        uint64_t bar_w  = iw > 2u * (uint64_t)SET_PAD ? iw - 2u * (uint64_t)SET_PAD : 1u;
-        uint64_t used_p = pmm_get_total_pages() - pmm_get_free_pages();
-        uint64_t tot_p  = pmm_get_total_pages();
-        uint64_t fill   = tot_p > 0 ? used_p * bar_w / tot_p : 0u;
-        console_fill_rect(cx, cy, bar_w, 8u, 0x0008101cu);
-        if (fill > 0) console_fill_rect(cx, cy, fill, 8u, 0x00306898u);
-        console_fill_rect(cx, cy, bar_w, 1u, 0x00203040u);
-        console_fill_rect(cx, cy + 7u, bar_w, 1u, 0x00203040u);
-    }
-    cy += 12u;
+    /* Compute total content height for scroll clamping */
+    uint64_t h_sys   = (uint64_t)(SET_SEC_H + 4u) + 7u * SET_ROW_H + 6u + 12u + 5u;
+    uint64_t h_disp  = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + 5u;
 
-    console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-    cy += 5u;
+    /* Dynamic button-row wrapping: how many wallpaper/toggle buttons fit per row */
+    uint64_t btn_avail_w = iw > (2u * (uint64_t)SET_PAD + 18u * fw)
+                         ? iw - 2u * (uint64_t)SET_PAD - 18u * fw : 10u * fw;
+    uint64_t wall_bw_c   = (8u + 2u) * fw;   /* "Gradient" longest name + 2-char pad */
+    int wall_per_row = (int)((btn_avail_w + 4u) / (wall_bw_c + 4u));
+    if (wall_per_row < 1) wall_per_row = 1;
+    if (wall_per_row > WALLPAPER_COUNT) wall_per_row = WALLPAPER_COUNT;
+    int wall_rows = (WALLPAPER_COUNT + wall_per_row - 1) / wall_per_row;
 
-    /* ── Section: Display ── */
-    if (cy + SET_SEC_H + SET_ROW_H + 8u <= iy + ih) {
-        console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-        gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Display",
-                     COL_SET_SEC_FG, COL_SET_SEC_BG);
-        cy += SET_SEC_H + 4u;
+    uint64_t tog_bw_c = 11u * fw;   /* toggle button width */
+    int tog_per_row = (int)((btn_avail_w + 6u) / (tog_bw_c + 6u));
+    if (tog_per_row < 1) tog_per_row = 1;
+    if (tog_per_row > 4) tog_per_row = 4;
+    int tog_rows = (4 + tog_per_row - 1) / tog_per_row;
 
-        /* Font row: [<] FontName [>] */
-        uint64_t btn_h = fh + 6u;
-        console_fill_rect(ix, cy, iw, btn_h, COL_SET_BG);
-        gui_draw_str(cx, cy + (btn_h - fh) / 2u, "Font:", COL_SET_KEY_FG, COL_SET_BG);
-
-        /* Prev button */
-        uint64_t pb_x = val_x;
-        console_fill_rect(pb_x, cy, g_font_btn_bw, btn_h, 0x00182838u);
-        gui_draw_str(pb_x + (g_font_btn_bw - fw) / 2u, cy + (btn_h - fh) / 2u,
-                     "<", 0x0060a0e0u, 0x00182838u);
-        g_font_prev_bx = pb_x;
-
-        /* Font label */
-        uint64_t fl_x = pb_x + g_font_btn_bw + 4u;
-        uint64_t nxt_x = ix + iw - SET_PAD - g_font_btn_bw;
-        uint64_t fl_w  = nxt_x > fl_x + 2u ? nxt_x - fl_x - 2u : 1u;
-        uint64_t fl_max = fl_w / fw;
-        int nf = 0; while (g_font_paths[nf]) nf++;
-        int idx = g_font_idx < nf ? g_font_idx : 0;
-        gui_draw_str_clip(fl_x, cy + (btn_h - fh) / 2u,
-                          g_font_labels[idx], COL_SET_VAL_FG, COL_SET_BG, fl_max);
-
-        /* Next button */
-        console_fill_rect(nxt_x, cy, g_font_btn_bw, btn_h, 0x00182838u);
-        gui_draw_str(nxt_x + (g_font_btn_bw - fw) / 2u, cy + (btn_h - fh) / 2u,
-                     ">", 0x0060a0e0u, 0x00182838u);
-        g_font_next_bx = nxt_x;
-        g_font_btn_by  = cy;
-        g_font_btn_bh  = btn_h;
-        cy += btn_h + 4u;
-
-        console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-        cy += 5u;
-    }
-
-    /* ── Section: Theme ── */
-    if (cy + SET_SEC_H + SET_ROW_H + 40u <= iy + ih) {
-        console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-        gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Theme",
-                     COL_SET_SEC_FG, COL_SET_SEC_BG);
-        cy += SET_SEC_H + 4u;
-
-        /* Accent colour rows (16 swatches, 8 per row) */
-        uint64_t sw_sz = (uint64_t)(fh + 4u);
-        uint64_t sw_gap = 4u;
-        /* Row 1 */
-        console_fill_rect(ix, cy, iw, SET_ROW_H + 8u, COL_SET_BG);
-        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u + 2u, "Accent:", COL_SET_KEY_FG, COL_SET_BG);
-        uint64_t sw_x = val_x;
-        uint64_t sw_y = cy + (SET_ROW_H + 8u - sw_sz) / 2u;
-        g_theme_swatch_sz = sw_sz;
-        g_theme_accent_by = sw_y;
-        for (int ai = 0; ai < ACCENT_PRESET_COUNT; ai++) {
-            if (ai == 8) {
-                /* Wrap to second row */
-                cy += SET_ROW_H + 8u;
-                console_fill_rect(ix, cy, iw, SET_ROW_H + 4u, COL_SET_BG);
-                sw_x = val_x;
-                sw_y = cy + (SET_ROW_H + 4u - sw_sz) / 2u;
-                g_theme_accent_by2 = sw_y;
-            }
-            g_theme_accent_bx[ai] = sw_x;
-            bool active = (g_accent_presets[ai] == g_theme.accent);
-            console_fill_rect(sw_x, sw_y, sw_sz, sw_sz, g_accent_presets[ai]);
-            if (active) {
-                console_fill_rect(sw_x, sw_y, sw_sz, 2u, 0x00ffffffu);
-                console_fill_rect(sw_x, sw_y + sw_sz - 2u, sw_sz, 2u, 0x00ffffffu);
-                console_fill_rect(sw_x, sw_y, 2u, sw_sz, 0x00ffffffu);
-                console_fill_rect(sw_x + sw_sz - 2u, sw_y, 2u, sw_sz, 0x00ffffffu);
-            }
-            sw_x += sw_sz + sw_gap;
-        }
-        cy += SET_ROW_H + 12u;
-
-        /* Wallpaper selector row */
-        console_fill_rect(ix, cy, iw, SET_ROW_H + 4u, COL_SET_BG);
-        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u + 2u, "Wallpaper:", COL_SET_KEY_FG, COL_SET_BG);
-
-        static const char *wall_names[WALLPAPER_COUNT] = {
-            "Gradient", "Solid", "Stars", "Grid", "Waves", "Image"
-        };
-        uint64_t wall_bh = (uint64_t)(fh + 6u);
-        uint64_t wall_bw = 0u;
-        {
-            uint64_t max_namelen = 0;
-            for (int wi = 0; wi < WALLPAPER_COUNT; wi++) {
-                uint64_t nl = (uint64_t)gui_strlen(wall_names[wi]);
-                if (nl > max_namelen) max_namelen = nl;
-            }
-            wall_bw = (max_namelen + 2u) * fw;
-        }
-        g_theme_wall_bh = wall_bh;
-        g_theme_wall_bw = wall_bw;
-        uint64_t wx  = val_x;
-        uint64_t wy  = cy + (SET_ROW_H + 4u - wall_bh) / 2u;
-        g_theme_wall_by = wy;
-        for (int wi = 0; wi < WALLPAPER_COUNT; wi++) {
-            g_theme_wall_bx[wi] = wx;
-            bool active = (wi == g_theme.wallpaper);
-            uint32_t bbg = active ? g_theme.accent : 0x00182838u;
-            uint32_t bfg = active ? 0x00ffffffu : 0x0090b0d0u;
-            console_fill_rect(wx, wy, wall_bw, wall_bh, bbg);
-            uint64_t nl   = (uint64_t)gui_strlen(wall_names[wi]);
-            uint64_t bpx  = wx + (wall_bw > nl * fw ? (wall_bw - nl * fw) / 2u : 0u);
-            uint64_t bpy  = wy + (wall_bh - fh) / 2u;
-            gui_draw_str(bpx, bpy, wall_names[wi], bfg, bbg);
-            wx += wall_bw + 4u;
-        }
-        cy += SET_ROW_H + 8u;
-
-        /* Toggle row: four ON/OFF buttons — Clock 12h, Animations, Status Bar, Desk Info */
-        {
-            console_fill_rect(ix, cy, iw, SET_ROW_H + 4u, COL_SET_BG);
-            static const char *tog_labels[4] = { "12h Clock", "Animations", "Status Bar", "Desk Info" };
-            bool tog_vals[4] = { g_theme.clock_12h, g_theme.animations, g_theme.statusbar, g_theme.desktop_info };
-
-            uint64_t tbh = (uint64_t)(fh + 6u);
-            uint64_t tbw = 11u * fw; /* fits all labels with padding */
-            uint64_t tx  = val_x;
-            uint64_t ty2 = cy + (SET_ROW_H + 4u - tbh) / 2u;
-            g_theme_toggle_h = tbh;
-            g_theme_toggle_w = tbw;
-            for (int ti = 0; ti < 4; ti++) {
-                g_theme_toggle_x[ti] = tx;
-                g_theme_toggle_y[ti] = ty2;
-                bool on = tog_vals[ti];
-                uint32_t tbg = on ? g_theme.accent : 0x00182838u;
-                uint32_t tfg = on ? 0x00ffffffu : 0x00607080u;
-                console_fill_rect(tx, ty2, tbw, tbh, tbg);
-                uint64_t nl  = (uint64_t)gui_strlen(tog_labels[ti]);
-                uint64_t tpx = tx + (tbw > nl * fw ? (tbw - nl * fw) / 2u : 0u);
-                uint64_t tpy = ty2 + (tbh - fh) / 2u;
-                gui_draw_str(tpx, tpy, tog_labels[ti], tfg, tbg);
-                tx += tbw + 6u;
-            }
-            cy += SET_ROW_H + 8u;
-        }
-
-        /* UTC offset row: [−]  UTC+N  [+] */
-        {
-            uint64_t btn_h2 = fh + 6u;
-            console_fill_rect(ix, cy, iw, btn_h2, COL_SET_BG);
-            gui_draw_str(cx, cy + (btn_h2 - fh) / 2u, "Clock UTC:", COL_SET_KEY_FG, COL_SET_BG);
-
-            uint64_t pb2 = val_x;
-            console_fill_rect(pb2, cy, g_font_btn_bw, btn_h2, 0x00182838u);
-            gui_draw_str(pb2 + (g_font_btn_bw - fw) / 2u, cy + (btn_h2 - fh) / 2u,
-                         "-", 0x0060a0e0u, 0x00182838u);
-            g_utc_minus_bx = pb2;
-
-            char utc_lbl[8];
-            {
-                int8_t off = g_theme.utc_offset;
-                int abs_off = off < 0 ? (int)-off : (int)off;
-                int ri = 0;
-                utc_lbl[ri++] = 'U'; utc_lbl[ri++] = 'T'; utc_lbl[ri++] = 'C';
-                utc_lbl[ri++] = (off < 0) ? '-' : '+';
-                if (abs_off >= 10) utc_lbl[ri++] = (char)('0' + abs_off / 10);
-                utc_lbl[ri++] = (char)('0' + abs_off % 10);
-                utc_lbl[ri] = '\0';
-            }
-            uint64_t lbl_len = (uint64_t)gui_strlen(utc_lbl);
-            uint64_t lbl_x   = pb2 + g_font_btn_bw + 4u;
-            uint64_t plus2   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
-            uint64_t lbl_w   = plus2 > lbl_x + 2u ? plus2 - lbl_x - 2u : 1u;
-            uint64_t lbl_cx2 = lbl_x + (lbl_w > lbl_len * fw ? (lbl_w - lbl_len * fw) / 2u : 0u);
-            console_fill_rect(lbl_x, cy, lbl_w, btn_h2, COL_SET_BG);
-            gui_draw_str(lbl_cx2, cy + (btn_h2 - fh) / 2u, utc_lbl, COL_SET_VAL_FG, COL_SET_BG);
-
-            console_fill_rect(plus2, cy, g_font_btn_bw, btn_h2, 0x00182838u);
-            gui_draw_str(plus2 + (g_font_btn_bw - fw) / 2u, cy + (btn_h2 - fh) / 2u,
-                         "+", 0x0060a0e0u, 0x00182838u);
-            g_utc_plus_bx = plus2;
-            g_utc_btn_by  = cy;
-            g_utc_btn_bh  = btn_h2;
-            cy += btn_h2 + 4u;
-        }
-
-        console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-        cy += 5u;
-    }
-
-    /* ── Section: Audio ── */
-    if (cy + SET_SEC_H + SET_ROW_H + 4u <= iy + ih) {
-        console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-        gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Audio",
-                     COL_SET_SEC_FG, COL_SET_SEC_BG);
-        cy += SET_SEC_H + 4u;
-
-        uint64_t btn_ha = fh + 6u;
-
-        /* Volume row: [−]  NN%  [+] */
-        console_fill_rect(ix, cy, iw, btn_ha, COL_SET_BG);
-        if (hda_is_ready()) {
-            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "Volume:", COL_SET_KEY_FG, COL_SET_BG);
-
-            uint64_t vm_x = val_x;
-            console_fill_rect(vm_x, cy, g_font_btn_bw, btn_ha, 0x00182838u);
-            gui_draw_str(vm_x + (g_font_btn_bw - fw) / 2u, cy + (btn_ha - fh) / 2u,
-                         "-", 0x0060a0e0u, 0x00182838u);
-            g_vol_minus_bx = vm_x;
-
-            char vol_lbl[6];
-            {
-                int vv = hda_get_volume();
-                int ri = 0;
-                if (vv >= 100) { vol_lbl[ri++]='1'; vol_lbl[ri++]='0'; vol_lbl[ri++]='0'; }
-                else if (vv >= 10) { vol_lbl[ri++]=(char)('0'+vv/10); vol_lbl[ri++]=(char)('0'+vv%10); }
-                else { vol_lbl[ri++]=(char)('0'+vv); }
-                vol_lbl[ri++] = '%'; vol_lbl[ri] = '\0';
-            }
-            uint64_t vl_len = (uint64_t)gui_strlen(vol_lbl);
-            uint64_t vl_x   = vm_x + g_font_btn_bw + 4u;
-            uint64_t vp_x   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
-            uint64_t vl_w   = vp_x > vl_x + 2u ? vp_x - vl_x - 2u : 1u;
-            uint64_t vl_cx  = vl_x + (vl_w > vl_len * fw ? (vl_w - vl_len * fw) / 2u : 0u);
-            console_fill_rect(vl_x, cy, vl_w, btn_ha, COL_SET_BG);
-            gui_draw_str(vl_cx, cy + (btn_ha - fh) / 2u, vol_lbl, COL_SET_VAL_FG, COL_SET_BG);
-
-            console_fill_rect(vp_x, cy, g_font_btn_bw, btn_ha, 0x00182838u);
-            gui_draw_str(vp_x + (g_font_btn_bw - fw) / 2u, cy + (btn_ha - fh) / 2u,
-                         "+", 0x0060a0e0u, 0x00182838u);
-            g_vol_plus_bx = vp_x;
-            g_vol_btn_by  = cy;
-            g_vol_btn_bh  = btn_ha;
-        } else {
-            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "No audio device", COL_SET_HINT, COL_SET_BG);
-            g_vol_btn_bh = 0u;
-        }
-        cy += btn_ha + 4u;
-
-        /* Test Tone button */
-        if (hda_is_ready() && cy + btn_ha <= iy + ih) {
-            static const char *chime_lbl = "Chime";
-            uint64_t cbl = (uint64_t)gui_strlen(chime_lbl);
-            uint64_t cbw = (cbl + 2u) * fw;
-            uint64_t cbx = val_x;
-            uint64_t cby = cy;
-            console_fill_rect(ix, cy, iw, btn_ha, COL_SET_BG);
-            gui_draw_str(cx, cy + (btn_ha - fh) / 2u, "Test:", COL_SET_KEY_FG, COL_SET_BG);
-            console_fill_rect(cbx, cby, cbw, btn_ha, 0x00182838u);
-            uint64_t cpx = cbx + (cbw - cbl * fw) / 2u;
-            gui_draw_str(cpx, cby + (btn_ha - fh) / 2u, chime_lbl, 0x0060a0e0u, 0x00182838u);
-            g_vol_chime_bx = cbx; g_vol_chime_by = cby;
-            g_vol_chime_bw = cbw; g_vol_chime_bh = btn_ha;
-            cy += btn_ha + 4u;
-        } else {
-            g_vol_chime_bh = 0u;
-        }
-
-        console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-        cy += 5u;
-    }
-
-    /* ── Section: Gaming ── */
-    {
-        uint64_t gm_btn_h = fh + 6u;
-        if (cy + SET_SEC_H + gm_btn_h < iy + ih) {
-            console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-            gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Gaming",
-                         COL_SET_SEC_FG, COL_SET_SEC_BG);
-            cy += SET_SEC_H + 4u;
-
-            /* Gamepad status row */
-            if (cy + SET_ROW_H <= iy + ih) {
-                extern bool input_gamepad_connected(void);
-                bool gp = input_gamepad_connected();
-                uint32_t bg = COL_SET_BG;
-                console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
-                gui_draw_str(cx,    cy + (SET_ROW_H - fh) / 2u, "Gamepad:", COL_SET_KEY_FG, bg);
-                gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u,
-                             gp ? "Connected" : "None",
-                             gp ? 0x0060d880u : COL_SET_HINT, bg);
-                cy += SET_ROW_H;
-            }
-
-            /* Launch Gamepad Visualizer button */
-            if (cy + gm_btn_h <= iy + ih) {
-                static const char *gvlbl = "Launch";
-                uint64_t gvl = (uint64_t)gui_strlen(gvlbl);
-                uint64_t gvw = (gvl + 2u) * fw;
-                uint64_t gvx = val_x;
-                uint64_t gvy = cy;
-                console_fill_rect(ix, cy, iw, gm_btn_h, COL_SET_BG);
-                gui_draw_str(cx, cy + (gm_btn_h - fh) / 2u, "Gamepad App:", COL_SET_KEY_FG, COL_SET_BG);
-                console_fill_rect(gvx, gvy, gvw, gm_btn_h, 0x00182838u);
-                uint64_t gvpx = gvx + (gvw - gvl * fw) / 2u;
-                gui_draw_str(gvpx, gvy + (gm_btn_h - fh) / 2u, gvlbl, 0x0060a0e0u, 0x00182838u);
-                /* Store button bounds for click handler (reuse chime layout) */
-                g_gaming_btn_bx = gvx; g_gaming_btn_by = gvy;
-                g_gaming_btn_bw = gvw; g_gaming_btn_bh = gm_btn_h;
-                cy += gm_btn_h + 4u;
-            }
-
-            /* Gaming Mode toggle button */
-            if (cy + gm_btn_h <= iy + ih) {
-                extern bool gaming_mode_active(void);
-                bool gm_on = gaming_mode_active();
-                const char *gm_lbl = gm_on ? "ON " : "OFF";
-                uint64_t gbl = 3u;
-                uint64_t gbw = (gbl + 2u) * fw;
-                uint64_t gbx = val_x;
-                uint64_t gby = cy;
-                console_fill_rect(ix, cy, iw, gm_btn_h, COL_SET_BG);
-                gui_draw_str(cx, cy + (gm_btn_h - fh) / 2u, "Gaming Mode:", COL_SET_KEY_FG, COL_SET_BG);
-                uint32_t gm_bg = gm_on ? 0x00103820u : 0x00182838u;
-                uint32_t gm_fg = gm_on ? 0x0050e880u : 0x0060a0e0u;
-                console_fill_rect(gbx, gby, gbw, gm_btn_h, gm_bg);
-                uint64_t gpx = gbx + (gbw - gbl * fw) / 2u;
-                gui_draw_str(gpx, gby + (gm_btn_h - fh) / 2u, gm_lbl, gm_fg, gm_bg);
-                g_gaming_mode_bx = gbx; g_gaming_mode_by = gby;
-                g_gaming_mode_bw = gbw; g_gaming_mode_bh = gm_btn_h;
-                cy += gm_btn_h + 4u;
-            } else {
-                g_gaming_mode_bh = 0u;
-            }
-
-            console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-            cy += 5u;
-        } else {
-            g_gaming_btn_bh = 0u;
-        }
-    }
-
-    /* ── Section: Network ── */
-    if (cy + SET_SEC_H + SET_ROW_H < iy + ih) {
-        console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-        gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Network",
-                     COL_SET_SEC_FG, COL_SET_SEC_BG);
-        cy += SET_SEC_H + 4u;
-
-        char ip_str[16], mask_str[16], gw_str[16], dns_str[16];
-        gui_ip4_str(net_ip,      ip_str,   16);
-        gui_ip4_str(net_mask,    mask_str, 16);
-        gui_ip4_str(net_gateway, gw_str,   16);
-        gui_ip4_str(net_dns,     dns_str,  16);
-
-        /* MAC address string */
-        char mac_str[20];
-        {
-            static const char hex[] = "0123456789abcdef";
-            int mi = 0;
-            for (int b = 0; b < 6; b++) {
-                mac_str[mi++] = hex[(net_mac[b] >> 4) & 0xF];
-                mac_str[mi++] = hex[ net_mac[b]       & 0xF];
-                if (b < 5) mac_str[mi++] = ':';
-            }
-            mac_str[mi] = '\0';
-        }
-
-        struct { const char *key; const char *val; } netinfo[] = {
-            { "Status:",  net_nic_present() ? (net_ip ? "Connected" : "No IP") : "No NIC" },
-            { "IP:",      net_ip ? ip_str   : "0.0.0.0"  },
-            { "Mask:",    net_ip ? mask_str : "0.0.0.0"  },
-            { "Gateway:", net_ip ? gw_str   : "0.0.0.0"  },
-            { "DNS:",     net_ip ? dns_str  : "0.0.0.0"  },
-            { "MAC:",     mac_str                         },
-            { NULL, NULL }
-        };
-        for (int i = 0; netinfo[i].key; i++) {
-            if (cy + SET_ROW_H > iy + ih) break;
-            uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
-            console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
-            gui_draw_str(cx,    cy + (SET_ROW_H - fh) / 2u, netinfo[i].key, COL_SET_KEY_FG, bg);
-            uint32_t vfg = (i == 0 && net_ip)    ? 0x0060d880u :
-                           (i == 0 && !net_ip)   ? 0x00e88060u : COL_SET_VAL_FG;
-            gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u, netinfo[i].val, vfg, bg);
-            cy += SET_ROW_H;
-        }
-
-        console_fill_rect(ix, cy, iw, 1u, COL_SET_SEP);
-        cy += 5u;
-    }
-
-    /* ── Section: Keyboard Shortcuts ── */
-    if (cy + SET_SEC_H + SET_ROW_H >= iy + ih) goto settings_done;
-    console_fill_rect(ix, cy, iw, SET_SEC_H, COL_SET_SEC_BG);
-    gui_draw_str(cx, cy + (SET_SEC_H - fh) / 2u, "Keyboard Shortcuts",
-                 COL_SET_SEC_FG, COL_SET_SEC_BG);
-    cy += SET_SEC_H + 4u;
-
+    uint64_t h_theme = (uint64_t)(SET_SEC_H + 4u) + 2u * SET_ROW_H + 20u
+                       + (uint64_t)wall_rows * (SET_ROW_H + 8u)
+                       + (uint64_t)tog_rows  * (SET_ROW_H + 8u)
+                       + (fh + 6u) + 4u + 5u;
+    uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
+    uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + 5u;
+    /* shortcuts table — defined here so we can count it for total_h */
     struct { const char *key; const char *desc; } shortcuts[] = {
         { "F1",             "Toggle Terminal"             },
         { "F2",             "Toggle Files"                },
@@ -6179,43 +5930,643 @@ static void settings_render(window_t *w) {
         { "Esc",            "Find: close search"         },
         { NULL, NULL }
     };
-    /* Count total shortcuts for clamping scroll */
     int nsc = 0; while (shortcuts[nsc].key) nsc++;
-    int vis_rows = (int)((iy + ih > cy) ? (iy + ih - cy) / SET_ROW_H : 0u);
-    if (g_settings_scroll > nsc - vis_rows) g_settings_scroll = nsc - vis_rows;
+    uint64_t h_sc = (uint64_t)(SET_SEC_H + 4u) + (uint64_t)nsc * SET_ROW_H;
+    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_sc + (uint64_t)SET_PAD;
+    /* Clamp scroll */
+    if ((int64_t)total_h > (int64_t)ih) {
+        int max_scroll = (int)(total_h - ih);
+        if (g_settings_scroll > max_scroll) g_settings_scroll = max_scroll;
+    } else {
+        g_settings_scroll = 0;
+    }
     if (g_settings_scroll < 0) g_settings_scroll = 0;
 
-    for (int i = g_settings_scroll; shortcuts[i].key; i++) {
-        uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
-        console_fill_rect(ix, cy, iw, SET_ROW_H, bg);
-        gui_draw_str(cx, cy + (SET_ROW_H - fh) / 2u, shortcuts[i].key, COL_SET_KEY_FG, bg);
-        gui_draw_str(val_x, cy + (SET_ROW_H - fh) / 2u, shortcuts[i].desc, COL_SET_VAL_FG, bg);
-        cy += SET_ROW_H;
-        if (cy + SET_ROW_H > iy + ih) break;
+    /* cy is int64 so we can handle scroll offset: negative cy → above viewport → no-op draws */
+    int64_t cy = (int64_t)(iy + SET_PAD) - (int64_t)g_settings_scroll;
+
+    /* Reset all hitboxes — only re-set when section is in the visible area */
+    g_font_prev_bx = 0; g_font_next_bx = 0; g_font_btn_by = 0; g_font_btn_bh = 0;
+    g_theme_accent_by = 0; g_theme_accent_by2 = 0;
+    g_theme_wall_by = 0; g_theme_wall_bh = 0; g_theme_wall_bw = 0;
+    g_theme_toggle_h = 0; g_theme_toggle_w = 0;
+    g_utc_btn_by = 0; g_utc_btn_bh = 0;
+    g_vol_btn_by = 0; g_vol_btn_bh = 0;
+    g_vol_pop_btn_y = 0; g_vol_chime_bw = 0; g_vol_chime_bh = 0;
+    g_gaming_btn_bh = 0; g_gaming_mode_bh = 0;
+
+    console_fill_rect(ix, iy, iw, ih, COL_SET_BG);
+
+    /* ── Section: System ── */
+    if (SVIS) {
+        console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+        gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "System Information",
+                     COL_SET_SEC_FG, COL_SET_SEC_BG);
     }
-    /* Scroll indicator */
-    if (g_settings_scroll > 0 || vis_rows < nsc) {
-        uint64_t sb_x = ix + iw - 6u;
-        uint64_t sb_h = ih > SET_SEC_H + 4u ? ih - SET_SEC_H - 4u : 4u;
-        uint64_t sb_y = iy + SET_SEC_H + 4u;
-        console_fill_rect(sb_x, sb_y, 4u, sb_h, 0x00101820u);
-        if (nsc > 0) {
-            uint64_t th = sb_h * (uint64_t)vis_rows / (uint64_t)nsc;
-            if (th < 8u) th = 8u;
-            uint64_t ty2 = sb_y + sb_h * (uint64_t)g_settings_scroll / (uint64_t)nsc;
-            if (ty2 + th > sb_y + sb_h) ty2 = sb_y + sb_h - th;
-            console_fill_rect(sb_x, ty2, 4u, th, 0x00304878u);
+    cy += SET_SEC_H + 4u;
+
+    /* Build dynamic resolution string */
+    char res_str[24];
+    {
+        char ws[8], hs[8];
+        gui_itoa((int)console_fb_width(),  ws, 8);
+        gui_itoa((int)console_fb_height(), hs, 8);
+        int ri = 0;
+        for (int k = 0; ws[k] && ri < 20; ) res_str[ri++] = ws[k++];
+        res_str[ri++] = ' '; res_str[ri++] = 'x'; res_str[ri++] = ' ';
+        for (int k = 0; hs[k] && ri < 23; ) res_str[ri++] = hs[k++];
+        res_str[ri] = '\0';
+    }
+    /* Build dynamic memory string: "used / total MB" */
+    char mem_str[32];
+    {
+        uint64_t total_p = pmm_get_total_pages();
+        uint64_t free_p  = pmm_get_free_pages();
+        uint64_t used_mb = ((total_p - free_p) * 4096u) >> 20u;
+        uint64_t tot_mb  = (total_p * 4096u) >> 20u;
+        char ub[8], tb[8];
+        gui_itoa((int)used_mb, ub, 8); gui_itoa((int)tot_mb, tb, 8);
+        int ri = 0;
+        const char *p;
+        for (p=ub; *p && ri<28; ) mem_str[ri++]=*p++;
+        for (p=" / "; *p && ri<28; ) mem_str[ri++]=*p++;
+        for (p=tb; *p && ri<28; ) mem_str[ri++]=*p++;
+        for (p=" MB"; *p && ri<28; ) mem_str[ri++]=*p++;
+        mem_str[ri] = '\0';
+    }
+    /* Build uptime string */
+    char up_str[12];
+    {
+        uint64_t hz2 = pit_get_hz(); if (!hz2) hz2 = 100;
+        uint64_t sc  = pit_ticks() / hz2;
+        uint64_t mn  = sc / 60u; sc %= 60u;
+        uint64_t hr  = mn / 60u; mn %= 60u;
+        gui_itoa_pad2((int)hr, up_str + 0); up_str[2] = ':';
+        gui_itoa_pad2((int)mn, up_str + 3); up_str[5] = ':';
+        gui_itoa_pad2((int)sc, up_str + 6); up_str[8] = '\0';
+    }
+    /* Build CPU frequency string */
+    char cpu_str[16];
+    {
+        /* sys_cpu_freq_mhz() is provided by Linux platform.c; returns 0 if unavailable */
+        __attribute__((weak)) uint32_t sys_cpu_freq_mhz(void);
+        uint32_t mhz = sys_cpu_freq_mhz ? sys_cpu_freq_mhz() : 0u;
+        if (mhz == 0) {
+            cpu_str[0] = '?'; cpu_str[1] = '\0';
+        } else if (mhz >= 1000) {
+            char gb[6];
+            gui_itoa((int)(mhz / 1000), gb, 6);
+            int ri = 0;
+            for (int k = 0; gb[k] && ri < 12; ) cpu_str[ri++] = gb[k++];
+            cpu_str[ri++] = '.';
+            cpu_str[ri++] = (char)('0' + (mhz % 1000) / 100);
+            cpu_str[ri++] = ' '; cpu_str[ri++] = 'G'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
+            cpu_str[ri] = '\0';
+        } else {
+            char mb[6];
+            gui_itoa((int)mhz, mb, 6);
+            int ri = 0;
+            for (int k = 0; mb[k] && ri < 9; ) cpu_str[ri++] = mb[k++];
+            cpu_str[ri++] = ' '; cpu_str[ri++] = 'M'; cpu_str[ri++] = 'H'; cpu_str[ri++] = 'z';
+            cpu_str[ri] = '\0';
+        }
+    }
+    /* Use human-readable font label from picker instead of raw filename */
+    int nfonts = 0; while (g_font_paths[nfonts]) nfonts++;
+    const char *font_label = g_font_labels[g_font_idx < nfonts ? g_font_idx : 0];
+
+    struct { const char *key; const char *val; } sysinfo[] = {
+        { "OS:",         "FiFi OS linux-desktop"  },
+        { "Kernel:",     "Linux zen"              },
+        { "Memory:",     mem_str                  },
+        { "Resolution:", res_str                  },
+        { "CPU:",        cpu_str                  },
+        { "Font:",       font_label               },
+        { "Uptime:",     up_str                   },
+        { NULL, NULL }
+    };
+    for (int i = 0; sysinfo[i].key; i++) {
+        SADVBOT;
+        if (SVIS) {
+            uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
+            uint64_t row_y = (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u));
+            uint64_t val_max = (ix + iw > val_x + (uint64_t)SET_PAD)
+                             ? (ix + iw - val_x - (uint64_t)SET_PAD) / fw : 1u;
+            console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+            gui_draw_str(cx, row_y, sysinfo[i].key, COL_SET_KEY_FG, bg);
+            gui_draw_str_clip(val_x, row_y, sysinfo[i].val, COL_SET_VAL_FG, bg, val_max);
+        }
+        cy += SET_ROW_H;
+    }
+
+    /* Memory usage bar */
+    cy += 6u;
+    if (SVIS) {
+        uint64_t bar_w  = iw > 2u * (uint64_t)SET_PAD ? iw - 2u * (uint64_t)SET_PAD : 1u;
+        uint64_t used_p = pmm_get_total_pages() - pmm_get_free_pages();
+        uint64_t tot_p  = pmm_get_total_pages();
+        uint64_t fill   = tot_p > 0 ? used_p * bar_w / tot_p : 0u;
+        console_fill_rect(cx, SCY, bar_w, 8u, 0x0008101cu);
+        if (fill > 0) console_fill_rect(cx, SCY, fill, 8u, 0x00306898u);
+        console_fill_rect(cx, SCY, bar_w, 1u, 0x00203040u);
+        console_fill_rect(cx, (uint64_t)(cy + 7), bar_w, 1u, 0x00203040u);
+    }
+    cy += 12u;
+
+    if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+    cy += 5u;
+    SADVBOT;
+
+    /* ── Section: Display ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "Display",
+                         COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+        SADVBOT;
+
+        /* Font row: [<] FontName [>] */
+        uint64_t btn_h = fh + 6u;
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, btn_h, COL_SET_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)), "Font:", COL_SET_KEY_FG, COL_SET_BG);
+            /* Prev button */
+            uint64_t pb_x = val_x;
+            console_fill_rect(pb_x, SCY, g_font_btn_bw, btn_h, 0x00182838u);
+            gui_draw_str(pb_x + (g_font_btn_bw - fw) / 2u, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
+                         "<", 0x0060a0e0u, 0x00182838u);
+            g_font_prev_bx = pb_x;
+            /* Font label */
+            uint64_t fl_x = pb_x + g_font_btn_bw + 4u;
+            uint64_t nxt_x = ix + iw - SET_PAD - g_font_btn_bw;
+            uint64_t fl_w  = nxt_x > fl_x + 2u ? nxt_x - fl_x - 2u : 1u;
+            uint64_t fl_max = fl_w / fw;
+            int nf = 0; while (g_font_paths[nf]) nf++;
+            int idx = g_font_idx < nf ? g_font_idx : 0;
+            gui_draw_str_clip(fl_x, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
+                              g_font_labels[idx], COL_SET_VAL_FG, COL_SET_BG, fl_max);
+            /* Next button */
+            console_fill_rect(nxt_x, SCY, g_font_btn_bw, btn_h, 0x00182838u);
+            gui_draw_str(nxt_x + (g_font_btn_bw - fw) / 2u, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
+                         ">", 0x0060a0e0u, 0x00182838u);
+            g_font_next_bx = nxt_x;
+            g_font_btn_by  = SCY;
+            g_font_btn_bh  = btn_h;
+        }
+        cy += btn_h + 4u;
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: Theme ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "Theme",
+                         COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+
+        /* Accent colour rows (16 swatches, 8 per row) */
+        uint64_t sw_sz = (uint64_t)(fh + 4u);
+        uint64_t sw_gap = 4u;
+        g_theme_swatch_sz = sw_sz;
+
+        /* Row 1 */
+        SADVBOT;
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_ROW_H + 8u, COL_SET_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u + 2u)),
+                         "Accent:", COL_SET_KEY_FG, COL_SET_BG);
+            g_theme_accent_by = (uint64_t)(cy + (int64_t)((SET_ROW_H + 8u - sw_sz) / 2u));
+        }
+        uint64_t sw_x = val_x;
+        for (int ai = 0; ai < ACCENT_PRESET_COUNT; ai++) {
+            if (ai == 8) {
+                cy += SET_ROW_H + 8u;
+                SADVBOT;
+                if (SVIS) {
+                    console_fill_rect(ix, SCY, iw, SET_ROW_H + 4u, COL_SET_BG);
+                    g_theme_accent_by2 = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - sw_sz) / 2u));
+                }
+                sw_x = val_x;
+            }
+            g_theme_accent_bx[ai] = sw_x;
+            uint64_t swy = (ai < 8) ? g_theme_accent_by : g_theme_accent_by2;
+            if (swy > 0u) {
+                bool active = (g_accent_presets[ai] == g_theme.accent);
+                console_fill_rect(sw_x, swy, sw_sz, sw_sz, g_accent_presets[ai]);
+                if (active) {
+                    console_fill_rect(sw_x, swy, sw_sz, 2u, 0x00ffffffu);
+                    console_fill_rect(sw_x, swy + sw_sz - 2u, sw_sz, 2u, 0x00ffffffu);
+                    console_fill_rect(sw_x, swy, 2u, sw_sz, 0x00ffffffu);
+                    console_fill_rect(sw_x + sw_sz - 2u, swy, 2u, sw_sz, 0x00ffffffu);
+                }
+            }
+            sw_x += sw_sz + sw_gap;
+        }
+        cy += SET_ROW_H + 12u;
+
+        /* Wallpaper selector row(s) — wraps dynamically based on available width */
+        {
+            static const char *wall_names[WALLPAPER_COUNT] = {
+                "Gradient", "Solid", "Stars", "Grid", "Waves", "Image"
+            };
+            uint64_t wall_bh = (uint64_t)(fh + 6u);
+            uint64_t wall_bw = wall_bw_c;
+            g_theme_wall_bh = wall_bh;
+            g_theme_wall_bw = wall_bw;
+            for (int _wi = 0; _wi < WALLPAPER_COUNT; _wi++) {
+                g_theme_wall_bx[_wi] = 0; g_theme_wall_by_arr[_wi] = 0;
+            }
+            g_theme_wall_by = 0;
+            for (int wrow = 0; wrow < wall_rows; wrow++) {
+                SADVBOT;
+                if (SVIS) {
+                    console_fill_rect(ix, SCY, iw, SET_ROW_H + 4u, COL_SET_BG);
+                    if (wrow == 0)
+                        gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u + 2u)),
+                                     "Wallpaper:", COL_SET_KEY_FG, COL_SET_BG);
+                }
+                uint64_t wx  = val_x;
+                uint64_t wy  = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - wall_bh) / 2u));
+                int i_start  = wrow * wall_per_row;
+                int i_end    = i_start + wall_per_row;
+                if (i_end > WALLPAPER_COUNT) i_end = WALLPAPER_COUNT;
+                for (int wi = i_start; wi < i_end; wi++) {
+                    g_theme_wall_bx[wi]     = wx;
+                    g_theme_wall_by_arr[wi] = wy;
+                    if (wi == 0) g_theme_wall_by = wy;
+                    if (SVIS) {
+                        bool active = (wi == g_theme.wallpaper);
+                        uint32_t bbg = active ? g_theme.accent : 0x00182838u;
+                        uint32_t bfg = active ? 0x00ffffffu   : 0x0090b0d0u;
+                        console_fill_rect(wx, wy, wall_bw, wall_bh, bbg);
+                        uint64_t nl  = (uint64_t)gui_strlen(wall_names[wi]);
+                        uint64_t bpx = wx + (wall_bw > nl * fw ? (wall_bw - nl * fw) / 2u : 0u);
+                        uint64_t bpy = wy + (wall_bh - fh) / 2u;
+                        gui_draw_str(bpx, bpy, wall_names[wi], bfg, bbg);
+                    }
+                    wx += wall_bw + 4u;
+                }
+                cy += SET_ROW_H + 8u;
+            }
+        }
+
+        /* Toggle row(s): Clock 12h, Animations, Status Bar, Desk Info — wraps dynamically */
+        {
+            static const char *tog_labels[4] = { "12h Clock", "Animations", "Status Bar", "Desk Info" };
+            bool tog_vals[4] = { g_theme.clock_12h, g_theme.animations, g_theme.statusbar, g_theme.desktop_info };
+            uint64_t tbh = (uint64_t)(fh + 6u);
+            uint64_t tbw = tog_bw_c;
+            g_theme_toggle_h = tbh;
+            g_theme_toggle_w = tbw;
+            for (int ti = 0; ti < 4; ti++) { g_theme_toggle_x[ti] = 0; g_theme_toggle_y[ti] = 0; }
+            for (int trow = 0; trow < tog_rows; trow++) {
+                SADVBOT;
+                if (SVIS)
+                    console_fill_rect(ix, SCY, iw, SET_ROW_H + 4u, COL_SET_BG);
+                uint64_t tx  = val_x;
+                uint64_t ty2 = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - tbh) / 2u));
+                int i_start  = trow * tog_per_row;
+                int i_end    = i_start + tog_per_row;
+                if (i_end > 4) i_end = 4;
+                for (int ti = i_start; ti < i_end; ti++) {
+                    g_theme_toggle_x[ti] = tx;
+                    g_theme_toggle_y[ti] = ty2;
+                    if (SVIS) {
+                        bool on = tog_vals[ti];
+                        uint32_t tbg = on ? g_theme.accent : 0x00182838u;
+                        uint32_t tfg = on ? 0x00ffffffu    : 0x00607080u;
+                        console_fill_rect(tx, ty2, tbw, tbh, tbg);
+                        uint64_t nl  = (uint64_t)gui_strlen(tog_labels[ti]);
+                        uint64_t tpx = tx + (tbw > nl * fw ? (tbw - nl * fw) / 2u : 0u);
+                        uint64_t tpy = ty2 + (tbh - fh) / 2u;
+                        gui_draw_str(tpx, tpy, tog_labels[ti], tfg, tbg);
+                    }
+                    tx += tbw + 6u;
+                }
+                cy += SET_ROW_H + 8u;
+            }
+        }
+
+        /* UTC offset row: [−]  UTC+N  [+] */
+        SADVBOT;
+        {
+            uint64_t btn_h2 = fh + 6u;
+            if (SVIS) {
+                console_fill_rect(ix, SCY, iw, btn_h2, COL_SET_BG);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_h2 - fh) / 2u)),
+                             "Clock UTC:", COL_SET_KEY_FG, COL_SET_BG);
+                uint64_t pb2 = val_x;
+                console_fill_rect(pb2, SCY, g_font_btn_bw, btn_h2, 0x00182838u);
+                gui_draw_str(pb2 + (g_font_btn_bw - fw) / 2u,
+                             (uint64_t)(cy + (int64_t)((btn_h2 - fh) / 2u)),
+                             "-", 0x0060a0e0u, 0x00182838u);
+                g_utc_minus_bx = pb2;
+
+                char utc_lbl[8];
+                {
+                    int8_t off = g_theme.utc_offset;
+                    int abs_off = off < 0 ? (int)-off : (int)off;
+                    int ri = 0;
+                    utc_lbl[ri++] = 'U'; utc_lbl[ri++] = 'T'; utc_lbl[ri++] = 'C';
+                    utc_lbl[ri++] = (off < 0) ? '-' : '+';
+                    if (abs_off >= 10) utc_lbl[ri++] = (char)('0' + abs_off / 10);
+                    utc_lbl[ri++] = (char)('0' + abs_off % 10);
+                    utc_lbl[ri] = '\0';
+                }
+                uint64_t lbl_len = (uint64_t)gui_strlen(utc_lbl);
+                uint64_t lbl_x   = pb2 + g_font_btn_bw + 4u;
+                uint64_t plus2   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
+                uint64_t lbl_w   = plus2 > lbl_x + 2u ? plus2 - lbl_x - 2u : 1u;
+                uint64_t lbl_cx2 = lbl_x + (lbl_w > lbl_len * fw ? (lbl_w - lbl_len * fw) / 2u : 0u);
+                console_fill_rect(lbl_x, SCY, lbl_w, btn_h2, COL_SET_BG);
+                gui_draw_str(lbl_cx2, (uint64_t)(cy + (int64_t)((btn_h2 - fh) / 2u)),
+                             utc_lbl, COL_SET_VAL_FG, COL_SET_BG);
+                console_fill_rect(plus2, SCY, g_font_btn_bw, btn_h2, 0x00182838u);
+                gui_draw_str(plus2 + (g_font_btn_bw - fw) / 2u,
+                             (uint64_t)(cy + (int64_t)((btn_h2 - fh) / 2u)),
+                             "+", 0x0060a0e0u, 0x00182838u);
+                g_utc_plus_bx = plus2;
+                g_utc_btn_by  = SCY;
+                g_utc_btn_bh  = btn_h2;
+            }
+            cy += btn_h2 + 4u;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: Audio ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "Audio",
+                         COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+        SADVBOT;
+
+        uint64_t btn_ha = fh + 6u;
+
+        /* Volume row: [−]  NN%  [+] */
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, btn_ha, COL_SET_BG);
+            if (hda_is_ready()) {
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             "Volume:", COL_SET_KEY_FG, COL_SET_BG);
+                uint64_t vm_x = val_x;
+                console_fill_rect(vm_x, SCY, g_font_btn_bw, btn_ha, 0x00182838u);
+                gui_draw_str(vm_x + (g_font_btn_bw - fw) / 2u,
+                             (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             "-", 0x0060a0e0u, 0x00182838u);
+                g_vol_minus_bx = vm_x;
+
+                char vol_lbl[6];
+                {
+                    int vv = hda_get_volume();
+                    int ri = 0;
+                    if (vv >= 100) { vol_lbl[ri++]='1'; vol_lbl[ri++]='0'; vol_lbl[ri++]='0'; }
+                    else if (vv >= 10) { vol_lbl[ri++]=(char)('0'+vv/10); vol_lbl[ri++]=(char)('0'+vv%10); }
+                    else { vol_lbl[ri++]=(char)('0'+vv); }
+                    vol_lbl[ri++] = '%'; vol_lbl[ri] = '\0';
+                }
+                uint64_t vl_len = (uint64_t)gui_strlen(vol_lbl);
+                uint64_t vl_x   = vm_x + g_font_btn_bw + 4u;
+                uint64_t vp_x   = ix + iw - (uint64_t)SET_PAD - g_font_btn_bw;
+                uint64_t vl_w   = vp_x > vl_x + 2u ? vp_x - vl_x - 2u : 1u;
+                uint64_t vl_cx  = vl_x + (vl_w > vl_len * fw ? (vl_w - vl_len * fw) / 2u : 0u);
+                console_fill_rect(vl_x, SCY, vl_w, btn_ha, COL_SET_BG);
+                gui_draw_str(vl_cx, (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             vol_lbl, COL_SET_VAL_FG, COL_SET_BG);
+                console_fill_rect(vp_x, SCY, g_font_btn_bw, btn_ha, 0x00182838u);
+                gui_draw_str(vp_x + (g_font_btn_bw - fw) / 2u,
+                             (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             "+", 0x0060a0e0u, 0x00182838u);
+                g_vol_plus_bx = vp_x;
+                g_vol_btn_by  = SCY;
+                g_vol_btn_bh  = btn_ha;
+            } else {
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             "No audio device", COL_SET_HINT, COL_SET_BG);
+                g_vol_btn_bh = 0u;
+            }
+        }
+        cy += btn_ha + 4u;
+
+        /* Test Tone button */
+        SADVBOT;
+        if (hda_is_ready()) {
+            if (SVIS) {
+                static const char *chime_lbl = "Chime";
+                uint64_t cbl = (uint64_t)gui_strlen(chime_lbl);
+                uint64_t cbw = (cbl + 2u) * fw;
+                uint64_t cbx = val_x;
+                console_fill_rect(ix, SCY, iw, btn_ha, COL_SET_BG);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             "Test:", COL_SET_KEY_FG, COL_SET_BG);
+                console_fill_rect(cbx, SCY, cbw, btn_ha, 0x00182838u);
+                uint64_t cpx = cbx + (cbw - cbl * fw) / 2u;
+                gui_draw_str(cpx, (uint64_t)(cy + (int64_t)((btn_ha - fh) / 2u)),
+                             chime_lbl, 0x0060a0e0u, 0x00182838u);
+                g_vol_chime_bx = cbx; g_vol_chime_by = SCY;
+                g_vol_chime_bw = cbw; g_vol_chime_bh = btn_ha;
+            }
+            cy += btn_ha + 4u;
+        } else {
+            g_vol_chime_bh = 0u;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: Gaming (only shown when gamepad connected) ── */
+    {
+        extern bool input_gamepad_connected(void);
+        if (input_gamepad_connected()) {
+            uint64_t gm_btn_h = fh + 6u;
+            if (SVIS) {
+                console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "Gaming",
+                             COL_SET_SEC_FG, COL_SET_SEC_BG);
+            }
+            cy += SET_SEC_H + 4u;
+            SADVBOT;
+
+            /* Gamepad status row */
+            if (SVIS) {
+                bool gp = input_gamepad_connected();
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx,    (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Gamepad:", COL_SET_KEY_FG, bg);
+                gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             gp ? "Connected" : "None", gp ? 0x0060d880u : COL_SET_HINT, bg);
+            }
+            cy += SET_ROW_H;
+            SADVBOT;
+
+            /* Launch Gamepad Visualizer button */
+            if (SVIS) {
+                static const char *gvlbl = "Launch";
+                uint64_t gvl = (uint64_t)gui_strlen(gvlbl);
+                uint64_t gvw = (gvl + 2u) * fw;
+                uint64_t gvx = val_x;
+                console_fill_rect(ix, SCY, iw, gm_btn_h, COL_SET_BG);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((gm_btn_h - fh) / 2u)),
+                             "Gamepad App:", COL_SET_KEY_FG, COL_SET_BG);
+                console_fill_rect(gvx, SCY, gvw, gm_btn_h, 0x00182838u);
+                uint64_t gvpx = gvx + (gvw - gvl * fw) / 2u;
+                gui_draw_str(gvpx, (uint64_t)(cy + (int64_t)((gm_btn_h - fh) / 2u)),
+                             gvlbl, 0x0060a0e0u, 0x00182838u);
+                g_gaming_btn_bx = gvx; g_gaming_btn_by = SCY;
+                g_gaming_btn_bw = gvw; g_gaming_btn_bh = gm_btn_h;
+            }
+            cy += gm_btn_h + 4u;
+            SADVBOT;
+
+            /* Gaming Mode toggle button */
+            {
+                extern bool gaming_mode_active(void);
+                bool gm_on = gaming_mode_active();
+                if (SVIS) {
+                    const char *gm_lbl = gm_on ? "ON " : "OFF";
+                    uint64_t gbl = 3u;
+                    uint64_t gbw = (gbl + 2u) * fw;
+                    uint64_t gbx = val_x;
+                    console_fill_rect(ix, SCY, iw, gm_btn_h, COL_SET_BG);
+                    gui_draw_str(cx, (uint64_t)(cy + (int64_t)((gm_btn_h - fh) / 2u)),
+                                 "Gaming Mode:", COL_SET_KEY_FG, COL_SET_BG);
+                    uint32_t gm_bg = gm_on ? 0x00103820u : 0x00182838u;
+                    uint32_t gm_fg = gm_on ? 0x0050e880u : 0x0060a0e0u;
+                    console_fill_rect(gbx, SCY, gbw, gm_btn_h, gm_bg);
+                    uint64_t gpx = gbx + (gbw - gbl * fw) / 2u;
+                    gui_draw_str(gpx, (uint64_t)(cy + (int64_t)((gm_btn_h - fh) / 2u)),
+                                 gm_lbl, gm_fg, gm_bg);
+                    g_gaming_mode_bx = gbx; g_gaming_mode_by = SCY;
+                    g_gaming_mode_bw = gbw; g_gaming_mode_bh = gm_btn_h;
+                }
+                cy += gm_btn_h + 4u;
+            }
+
+            if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+            cy += 5u;
+        }
+    }
+    SADVBOT;
+
+    /* ── Section: Network ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)), "Network",
+                         COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+        SADVBOT;
+
+        char ip_str[16], mask_str[16], gw_str[16], dns_str[16];
+        gui_ip4_str(net_ip,      ip_str,   16);
+        gui_ip4_str(net_mask,    mask_str, 16);
+        gui_ip4_str(net_gateway, gw_str,   16);
+        gui_ip4_str(net_dns,     dns_str,  16);
+
+        char mac_str[20];
+        {
+            static const char hex[] = "0123456789abcdef";
+            int mi = 0;
+            for (int b = 0; b < 6; b++) {
+                mac_str[mi++] = hex[(net_mac[b] >> 4) & 0xF];
+                mac_str[mi++] = hex[ net_mac[b]       & 0xF];
+                if (b < 5) mac_str[mi++] = ':';
+            }
+            mac_str[mi] = '\0';
+        }
+
+        struct { const char *key; const char *val; } netinfo[] = {
+            { "Status:",  net_nic_present() ? (net_ip ? "Connected" : "No IP") : "No NIC" },
+            { "IP:",      net_ip ? ip_str   : "0.0.0.0"  },
+            { "Mask:",    net_ip ? mask_str : "0.0.0.0"  },
+            { "Gateway:", net_ip ? gw_str   : "0.0.0.0"  },
+            { "DNS:",     net_ip ? dns_str  : "0.0.0.0"  },
+            { "MAC:",     mac_str                         },
+            { NULL, NULL }
+        };
+        for (int i = 0; netinfo[i].key; i++) {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx,    (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             netinfo[i].key, COL_SET_KEY_FG, bg);
+                uint32_t vfg = (i == 0 && net_ip)  ? 0x0060d880u :
+                               (i == 0 && !net_ip) ? 0x00e88060u : COL_SET_VAL_FG;
+                gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             netinfo[i].val, vfg, bg);
+            }
+            cy += SET_ROW_H;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: Keyboard Shortcuts ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)),
+                         "Keyboard Shortcuts", COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+
+        for (int i = 0; shortcuts[i].key; i++) {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = (i & 1) ? 0x000f151fu : COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx,    (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             shortcuts[i].key, COL_SET_KEY_FG, bg);
+                gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             shortcuts[i].desc, COL_SET_VAL_FG, bg);
+            }
+            cy += SET_ROW_H;
         }
     }
 
-    /* ── Hint at bottom ── */
-settings_done:
+settings_done: ;
+    /* Clip any content that overflowed below the window content area */
+    console_fill_rect(w->x, w->y + w->h - BORDER, w->w, BORDER, COL_BORDER);
+
+    /* ── Full-panel scrollbar ── */
+    if ((int64_t)total_h > (int64_t)ih) {
+        uint64_t sb_x = ix + iw - 6u;
+        console_fill_rect(sb_x, iy, 6u, ih, 0x00101820u);
+        uint64_t thumb_h = ih * ih / total_h;
+        if (thumb_h < 12u) thumb_h = 12u;
+        if (thumb_h > ih) thumb_h = ih;
+        uint64_t thumb_y = iy + (uint64_t)((int64_t)ih * (int64_t)g_settings_scroll / (int64_t)total_h);
+        if (thumb_y + thumb_h > iy + ih) thumb_y = iy + ih - thumb_h;
+        console_fill_rect(sb_x + 1u, thumb_y, 4u, thumb_h, 0x00304878u);
+    }
+
+    /* ── Hint at bottom: only when there is blank space below content ── */
     {
         uint64_t hint_y = iy + ih - fh - 8u;
-        if (hint_y > cy + 4u) {
-            console_fill_rect(ix, hint_y - 4u, iw, 1u, COL_SET_SEP);
-            gui_draw_str(cx, hint_y,
-                         "Press Esc or Ctrl+W to close", COL_SET_HINT, COL_SET_BG);
+        if ((int64_t)hint_y > cy + 4) {
+            console_fill_rect(ix, hint_y - 4u,
+                              (int64_t)total_h > (int64_t)ih ? iw - 8u : iw,
+                              1u, COL_SET_SEP);
+            gui_draw_str(cx, hint_y, "Press Esc or Ctrl+W to close", COL_SET_HINT, COL_SET_BG);
         }
     }
 }
@@ -6725,7 +7076,47 @@ static void win_round_corners(const window_t *w) {
 
 /* ── Full compositing redraw ─────────────────────────────────────────── */
 
+int g_redraw_src = 0;
+static void full_redraw(void);  /* forward decl */
+/* Partial repaint for the once-per-second clock tick.
+ * Only repaints the two bars + settings window (uptime/memory).
+ * Desktop and other windows are unchanged in the backbuffer. */
+static void tick_redraw(void) {
+    draw_status_bar();  /* top strip (STATUS_H px) */
+    taskbar_draw();     /* bottom strip (TASKBAR_H px) — clock, volume, FPS */
+    /* Redraw settings only if it is the topmost visible native window.
+     * If another window is covering it, fall through to full_redraw so
+     * the covering window isn't painted over. */
+    bool settings_on_top = false;
+    for (int _zi = MAX_WINS - 1; _zi >= 0; _zi--) {
+        window_t *_tw = &g_wins[g_z[_zi]];
+        if (!_tw->active || _tw->state == WIN_HIDDEN || _tw->anim_phase != ANIM_NONE) continue;
+        settings_on_top = (_tw->type == WIN_SETTINGS);
+        break;
+    }
+    __attribute__((weak)) int ipc_window_count(void);
+    bool any_ipc = (ipc_window_count && ipc_window_count() > 0);
+    if (settings_on_top && !any_ipc) {
+        for (int _ti = 0; _ti < MAX_WINS; _ti++) {
+            window_t *_tw = &g_wins[_ti];
+            if (!_tw->active || _tw->state == WIN_HIDDEN ||
+                _tw->type != WIN_SETTINGS || _tw->anim_phase != ANIM_NONE) continue;
+            settings_render(_tw);
+            break;
+        }
+    } else {
+        full_redraw();
+    }
+}
+
 static void full_redraw(void) {
+#ifdef __linux__
+    static int s_last_src = -1;
+    if (g_redraw_src != s_last_src) {
+        fprintf(stderr, "[redraw_src] %d\n", g_redraw_src);
+        s_last_src = g_redraw_src;
+    }
+#endif
     uint64_t fb_w = console_fb_width();
     draw_desktop_bg();
     draw_status_bar();
@@ -6795,8 +7186,7 @@ static void full_redraw(void) {
             if (w->type != WIN_TERM) suppress_term = true;
             continue;
         }
-        /* For WIN_FILES, fb_render() calls win_draw_chrome() itself — skip the fill here */
-        win_draw_chrome(w, w->type != WIN_FILES);
+        win_draw_chrome(w, true);
         win_render_content(w);
         if (w->type != WIN_TERM) suppress_term = true;
     }
@@ -6851,6 +7241,34 @@ static void full_redraw(void) {
     }
 }
 
+/* Draw all popup overlays that must appear on top of IPC windows.
+ * Called from main.c after ipc_blit_all / ipc_draw_overlays so they are
+ * never covered by IPC app framebuffers. */
+void gui_draw_popups(void) {
+    if (g_launcher_open)  launcher_draw();
+    if (g_vol_popup_open) vol_popup_draw();
+    if (g_ctx_open)       ctx_draw();
+    if (g_fb_ctx_open)    fb_ctx_draw();
+    if (g_txt_ctx_open)   txt_ctx_draw();
+    if (g_toast_ticks > 0 && g_toast_msg[0]) {
+        uint64_t fb_w  = console_fb_width();
+        uint64_t fw    = console_font_width();
+        uint64_t fh    = console_font_height();
+        uint64_t tlen  = (uint64_t)gui_strlen(g_toast_msg);
+        uint64_t tw    = tlen * fw + 24u;
+        uint64_t th    = fh + 10u;
+        uint64_t tx    = (fb_w > tw) ? (fb_w - tw) / 2u : 0u;
+        uint64_t ty    = desk_bot() - th - 12u;
+        uint32_t tbg   = 0x00101828u;
+        console_fill_rect(tx,     ty,     tw,     th,     tbg);
+        console_fill_rect(tx,     ty,     tw,     1u,     0x00303858u);
+        console_fill_rect(tx,     ty+th-1,tw,     1u,     0x00303858u);
+        console_fill_rect(tx,     ty,     1u,     th,     0x00303858u);
+        console_fill_rect(tx+tw-1,ty,     1u,     th,     0x00303858u);
+        gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
+    }
+}
+
 /* ── Window open / hide / maximize ──────────────────────────────────── */
 
 static void win_show(window_t *w, int slot) {
@@ -6862,8 +7280,10 @@ static void win_show(window_t *w, int slot) {
             w->w = fb_w * 88u / 100u;
             w->h = avail * 90u / 100u;
         } else if (w->type == WIN_SETTINGS) {
-            w->w = 540u;
-            w->h = 700u;
+            /* Scale width with font so content fits at any DPI (540px = 45*fw for fw=12) */
+            uint64_t fw_now = console_font_width();
+            w->w = fw_now > 0u ? fw_now * 45u : 540u;
+            w->h = avail * 97u / 100u;
             if (w->w > fb_w) w->w = fb_w;
             if (w->h > avail) w->h = avail;
             g_settings_scroll = 0;
@@ -6944,7 +7364,13 @@ static resize_dir_t hit_resize(window_t *w, int32_t mx, int32_t my) {
     int32_t m  = (int32_t)RESIZE_MARGIN;
     int32_t cm = m * 2;
 
-    if (mx < wx - m || mx > we + m || my < wy - m || my > wb + m)
+    if (mx < wx || mx > we || my < wy || my > wb)
+        return RES_NONE;
+
+    /* Title bar is the drag/chrome zone — never a resize target.
+     * +4 buffer below title bar prevents the close-button column from
+     * flickering between chrome and resize cursors at the boundary. */
+    if (my <= wy + (int32_t)TITLE_H + 4)
         return RES_NONE;
 
     if (mx <= wx + cm && my <= wy + cm) return RES_NW;
@@ -7022,7 +7448,7 @@ static void win_do_resize(window_t *w, int32_t mx, int32_t my) {
     console_fill_rect(w->x, w->y, w->w, w->h, COL_DESKTOP);
     w->x = (uint64_t)nx; w->y = (uint64_t)ny;
     w->w = (uint64_t)nw; w->h = (uint64_t)nh;
-    win_draw_chrome(w, w->type != WIN_FILES);
+    win_draw_chrome(w, true);
     win_render_content(w);
 }
 
@@ -7189,7 +7615,11 @@ static void fb_ctx_run(int item) {
 
 void gui_on_tick(void) {
     g_gui_tick++;
-    bool g_needs_redraw = false;
+#ifdef __linux__
+    struct timespec _st0, _stA, _stB, _stC;
+    clock_gettime(CLOCK_MONOTONIC, &_st0);
+#define _SUB_MS(a,b) (((b).tv_sec-(a).tv_sec)*1000L+((b).tv_nsec-(a).tv_nsec)/1000000L)
+#endif
 
     /* ── Once-per-second: redraw status bar and live settings if open ── */
     {
@@ -7199,9 +7629,17 @@ void gui_on_tick(void) {
         uint64_t now_sec = pit_ticks() / hz;
         if (now_sec != s_last_sec) {
             s_last_sec = now_sec;
-            /* full_redraw updates clock, taskbar tray, settings uptime/memory,
-             * and respects z-order so settings never paints over topmost windows. */
-            full_redraw();
+            /* tick_redraw repaints only the two status strips + settings window if open.
+             * Confirmed 0ms render cost on real hardware — much cheaper than full_redraw. */
+            g_redraw_src = 1; tick_redraw();
+        }
+    }
+
+    /* ── IPC window close: trigger full redraw so desktop bg covers the closed region ── */
+    {
+        __attribute__((weak)) bool ipc_needs_redraw(void);
+        if (ipc_needs_redraw && ipc_needs_redraw()) {
+            g_redraw_src = 99; full_redraw();
         }
     }
 
@@ -7231,7 +7669,7 @@ void gui_on_tick(void) {
                 }
             }
         }
-        if (any_anim) full_redraw();
+        if (any_anim) { g_redraw_src = 2; full_redraw(); }
     }
 
     /* ── Cursor blink: trigger full redraw if any window has active search or edit mode ── */
@@ -7241,7 +7679,7 @@ void gui_on_tick(void) {
             if (!bw->active || bw->state == WIN_HIDDEN || bw->anim_phase != ANIM_NONE) continue;
             if ((bw->type == WIN_FILES && bw->fb.search_active) ||
                 (bw->type == WIN_TEXT  && (bw->text.srch_active || bw->text.edit_mode))) {
-                full_redraw();
+                g_redraw_src = 3; full_redraw();
                 break;
             }
         }
@@ -7255,10 +7693,10 @@ void gui_on_tick(void) {
     bool btn_released = !lbtn && g_prev_lbtn;
     g_prev_lbtn = lbtn;
 
-    /* Track right-button edge */
-    static bool g_prev_rbtn = false;
-    bool rbtn_pressed = rbtn && !g_prev_rbtn;
-    g_prev_rbtn = rbtn;
+    /* Right-click: consumed from ring buffer so fast press/release isn't missed */
+    int32_t rcx, rcy;
+    bool rbtn_pressed = mouse_consume_rclick(&rcx, &rcy);
+    if (rbtn_pressed) { mx = rcx; my = rcy; }
 
     /* Synthetic click from mouse_click()/mclick: lbtn stays false so btn_pressed
      * won't fire — consume it here and treat it as a real press. */
@@ -7359,10 +7797,20 @@ void gui_on_tick(void) {
             }
         }
 
-        if (new_chrome_win != g_chrome_win || new_chrome_btn != g_chrome_btn) {
+        /* Partial repaint: only redraw title bars that changed hover state.
+         * Avoids full_redraw() (~9ms) on every button hover transition. */
+        {
+            int _old_cw = g_chrome_win;
+            int _old_cb = g_chrome_btn;
             g_chrome_win = new_chrome_win;
-            g_chrome_btn = new_chrome_btn;
-            g_needs_redraw = true;
+            if (new_chrome_btn != _old_cb || new_chrome_win != _old_cw) {
+                g_chrome_btn = new_chrome_btn;
+                if (_old_cw >= 0 && _old_cw < MAX_WINS && g_wins[_old_cw].active)
+                    win_draw_chrome(&g_wins[_old_cw], false);
+                if (new_chrome_win >= 0 && new_chrome_win < MAX_WINS &&
+                        new_chrome_win != _old_cw && g_wins[new_chrome_win].active)
+                    win_draw_chrome(&g_wins[new_chrome_win], false);
+            }
         }
     }
 
@@ -7374,10 +7822,30 @@ void gui_on_tick(void) {
             resize_dir_t rd = hit_resize(&g_wins[top_vis], mx, my);
             if (rd != RES_NONE) { new_rw = top_vis; new_rd = rd; }
         }
-        if (new_rw != g_resize_hover_win || new_rd != g_resize_hover_dir) {
-            g_resize_hover_win = new_rw;
-            g_resize_hover_dir = new_rd;
-            g_needs_redraw = true;
+        /* Require 3 consecutive ticks in resize zone before committing — prevents
+         * drive-by cursor flicker when passing near edges during normal movement.
+         * Exiting the zone always applies immediately so the cursor restores fast. */
+        if (new_rd == RES_NONE) {
+            g_resize_pending_win   = -1;
+            g_resize_pending_dir   = RES_NONE;
+            g_resize_pending_ticks = 0;
+            if (g_resize_hover_win != -1 || g_resize_hover_dir != RES_NONE) {
+                g_resize_hover_win = -1;
+                g_resize_hover_dir = RES_NONE;
+            }
+        } else {
+            if (new_rw == g_resize_pending_win && new_rd == g_resize_pending_dir) {
+                g_resize_pending_ticks++;
+            } else {
+                g_resize_pending_win   = new_rw;
+                g_resize_pending_dir   = new_rd;
+                g_resize_pending_ticks = 1;
+            }
+            if (g_resize_pending_ticks >= 3 &&
+                    (new_rw != g_resize_hover_win || new_rd != g_resize_hover_dir)) {
+                g_resize_hover_win = new_rw;
+                g_resize_hover_dir = new_rd;
+            }
         }
     }
 
@@ -7425,13 +7893,15 @@ void gui_on_tick(void) {
 
     /* ── Launcher hover tracking ── */
     if (g_launcher_open) {
-        uint64_t lx = launcher_lx();
-        uint64_t ly = launcher_ly();
+        uint64_t lx  = launcher_lx();
+        uint64_t ly  = launcher_ly();
+        uint64_t lw  = launcher_eff_w();
+        uint64_t lih = launcher_item_h();
         int new_hover = -1;
-        if ((uint64_t)mx >= lx && (uint64_t)mx < lx + LAUNCHER_W &&
+        if ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
             (uint64_t)my >= ly &&
-            (uint64_t)my < ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H) {
-            new_hover = (int)((uint64_t)my - ly) / (int)LAUNCHER_ITEM_H;
+            (uint64_t)my < ly + LAUNCHER_ITEMS * lih) {
+            new_hover = (int)((uint64_t)my - ly) / (int)lih;
         }
         if (new_hover != g_launcher_hover) {
             g_launcher_hover = new_hover;
@@ -7445,8 +7915,9 @@ void gui_on_tick(void) {
         if ((uint64_t)my >= ty) {
             int n_btns = g_wins[3].active ? 4 : 3;
             for (int s = 0; s < n_btns; s++) {
-                uint64_t bx = TASKBTN_X + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
-                if ((uint64_t)mx >= bx && (uint64_t)mx < bx + TASKBTN_W) {
+                uint64_t tbw2 = taskbtn_w();
+                uint64_t bx = taskbtn_start_x() + (uint64_t)s * (tbw2 + TASKBTN_GAP);
+                if ((uint64_t)mx >= bx && (uint64_t)mx < bx + tbw2) {
                     new_tbhov = s; break;
                 }
             }
@@ -7513,6 +7984,11 @@ void gui_on_tick(void) {
             txt_ctx_draw();
         }
     }
+
+
+#ifdef __linux__
+    clock_gettime(CLOCK_MONOTONIC, &_stA);
+#endif
 
     /* ── Keyboard capture + input for focused non-terminal window ── */
     {
@@ -7604,6 +8080,10 @@ void gui_on_tick(void) {
                                 "/bin/fifi-terminal",
                                 "/bin/fifi-editor",
                                 "/bin/fifi-calc",
+                                "/bin/fifi-imageviewer",
+                                "/bin/fifi-security",
+                                "/usr/bin/steam",
+                                "/bin/fifi-proton",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
@@ -9059,13 +9539,17 @@ void gui_on_tick(void) {
                     }
                 } else if (focused->type == WIN_SETTINGS) {
                     if (ch == KEY_UP || ch == 'k') {
-                        if (g_settings_scroll > 0) { g_settings_scroll--; changed = true; }
+                        if (g_settings_scroll > 0) { g_settings_scroll -= 20; if (g_settings_scroll < 0) g_settings_scroll = 0; changed = true; }
                     } else if (ch == KEY_DOWN || ch == 'j') {
-                        g_settings_scroll++; changed = true;
+                        g_settings_scroll += 20; changed = true;
+                    } else if (ch == KEY_PGUP) {
+                        g_settings_scroll -= (int)(focused->h > TITLE_H ? focused->h - TITLE_H : 100u); if (g_settings_scroll < 0) g_settings_scroll = 0; changed = true;
+                    } else if (ch == KEY_PGDN) {
+                        g_settings_scroll += (int)(focused->h > TITLE_H ? focused->h - TITLE_H : 100u); changed = true;
                     } else if (ch == KEY_HOME) {
                         g_settings_scroll = 0; changed = true;
                     } else if (ch == KEY_END) {
-                        g_settings_scroll = 9999; changed = true;
+                        g_settings_scroll = 999999; changed = true;
                     } else if (ch == 27 || ch == 23) { /* ESC or Ctrl+W */
                         int slot = (int)(focused - g_wins);
                         win_hide(focused, slot);
@@ -9086,6 +9570,9 @@ void gui_on_tick(void) {
             }
         }
     }
+#ifdef __linux__
+    clock_gettime(CLOCK_MONOTONIC, &_stB);
+#endif
 
     /* ── Mouse scroll wheel ── */
     {
@@ -9102,21 +9589,21 @@ void gui_on_tick(void) {
                     (uint64_t)my < w->y || (uint64_t)my >= w->y + w->h) continue;
                 if (w->type == WIN_TERM) {
                     int tot_sb = console_tsb_count_lines();
-                    g_term_scroll -= (int)scroll * 3;
+                    g_term_scroll += (int)scroll * 3;
                     if (g_term_scroll < 0) g_term_scroll = 0;
                     if (g_term_scroll > tot_sb) g_term_scroll = tot_sb;
                     console_set_suppress_draw(g_term_scroll > 0);
                     full_redraw();
                 } else if (w->type == WIN_FILES) {
-                    w->fb.scroll_vel += (int32_t)scroll * 24;
+                    w->fb.scroll_vel -= (int32_t)scroll * 24;
                     if (w->fb.scroll_vel >  2048) w->fb.scroll_vel =  2048;
                     if (w->fb.scroll_vel < -2048) w->fb.scroll_vel = -2048;
                 } else if (w->type == WIN_TEXT) {
-                    w->text.scroll_vel += (int32_t)scroll * 24;
+                    w->text.scroll_vel -= (int32_t)scroll * 24;
                     if (w->text.scroll_vel >  2048) w->text.scroll_vel =  2048;
                     if (w->text.scroll_vel < -2048) w->text.scroll_vel = -2048;
                 } else if (w->type == WIN_SETTINGS) {
-                    g_settings_scroll += (int)scroll;
+                    g_settings_scroll -= (int)scroll * 40;
                     if (g_settings_scroll < 0) g_settings_scroll = 0;
                     settings_render(w);
                 }
@@ -9129,7 +9616,7 @@ void gui_on_tick(void) {
     if (btn_pressed && (uint64_t)my >= ty) {
         int32_t cx, cy;
 
-        if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + LOGO_W)) {
+        if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w())) {
             g_vol_popup_open = false;
             g_launcher_open = !g_launcher_open;
             g_launcher_hover = -1;
@@ -9162,7 +9649,7 @@ void gui_on_tick(void) {
 
         for (int s = 0; s < MAX_WINS; s++) {
             if (s == 3 && !g_wins[3].active) continue;
-            uint64_t bx = TASKBTN_X + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
+            uint64_t bx = taskbtn_start_x() + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
             if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
                 window_t *w = &g_wins[s];
                 if (w->state == WIN_HIDDEN) {
@@ -9187,7 +9674,7 @@ void gui_on_tick(void) {
             int nipc = ipc_window_count();
             for (int wi = 0; wi < nipc && wi < 8; wi++) {
                 int islot = MAX_WINS + wi;
-                uint64_t bx = TASKBTN_X + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
+                uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
                 if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
                     ipc_window_focus_slot(wi);
                     full_redraw();
@@ -9416,15 +9903,17 @@ void gui_on_tick(void) {
     /* ── Launcher popup clicks ── */
     if (btn_pressed && g_launcher_open) {
         int32_t cx, cy;
-        uint64_t lx = launcher_lx();
-        uint64_t ly = launcher_ly();
-        bool inside = ((uint64_t)mx >= lx && (uint64_t)mx < lx + LAUNCHER_W &&
+        uint64_t lx  = launcher_lx();
+        uint64_t ly  = launcher_ly();
+        uint64_t lw  = launcher_eff_w();
+        uint64_t lih = launcher_item_h();
+        bool inside = ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
                        (uint64_t)my >= ly &&
-                       (uint64_t)my < ly + LAUNCHER_ITEMS * LAUNCHER_ITEM_H);
+                       (uint64_t)my < ly + LAUNCHER_ITEMS * lih);
         g_launcher_open = false;
         g_launcher_hover = -1;
         if (inside) {
-            int item = (int)((uint64_t)my - ly) / (int)LAUNCHER_ITEM_H;
+            int item = (int)((uint64_t)my - ly) / (int)lih;
             if (item >= 0 && item < 4) {
                 /* Built-in windows: show/raise */
                 window_t *w = &g_wins[item];
@@ -9445,6 +9934,9 @@ void gui_on_tick(void) {
                     "/bin/fifi-editor",
                     "/bin/fifi-calc",
                     "/bin/fifi-imageviewer",
+                    "/bin/fifi-security",
+                    "/usr/bin/steam",
+                    "/bin/fifi-proton",
                 };
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app)
@@ -9686,13 +10178,6 @@ void gui_on_tick(void) {
             if (new_y < (int32_t)desk_top()) new_y = (int32_t)desk_top();
             if ((uint64_t)new_x + w->w > fb_w2) new_x = (int32_t)(fb_w2 - w->w);
             if ((uint64_t)new_y + w->h > desk_bot()) new_y = (int32_t)(desk_bot() - w->h);
-            /* Snap to screen edges */
-            if ((uint64_t)new_x < SNAP_DIST) new_x = 0;
-            if ((uint64_t)(new_x + (int32_t)w->w) + SNAP_DIST > fb_w2)
-                new_x = (int32_t)(fb_w2 - w->w);
-            if ((uint64_t)new_y < desk_top() + SNAP_DIST) new_y = (int32_t)desk_top();
-            if ((uint64_t)(new_y + (int32_t)w->h) + SNAP_DIST > desk_bot())
-                new_y = (int32_t)(desk_bot() - w->h);
             /* Detect half-snap zone: cursor near left or right screen edge */
             int old_snap = g_snap_preview;
             if (mx <= 2)
@@ -9719,7 +10204,7 @@ void gui_on_tick(void) {
                         if (oi == g_drag_win) continue;
                         window_t *ow = &g_wins[oi];
                         if (!ow->active || ow->state == WIN_HIDDEN) continue;
-                        win_draw_chrome(ow, ow->type != WIN_FILES);
+                        win_draw_chrome(ow, true);
                         win_render_content(ow);
                     }
                     /* Drop shadow */
@@ -9880,7 +10365,10 @@ void gui_on_tick(void) {
                         g_last_click_count = dbl ? 2 : 1;
                         if (dbl) {
                             win_maximize_toggle(w);
-                        } else {
+                        } else if (lbtn) {
+                            /* Only start drag when button is physically held — a
+                             * synthetic click (tap-to-click, lbtn=false) must not
+                             * latch into a permanent drag mode. */
                             g_dragging   = true;
                             g_drag_win   = si;
                             g_drag_off_x = mx - wx;
@@ -10301,7 +10789,9 @@ void gui_on_tick(void) {
                         }
                         if (changed_font) {
                             console_load_psf(g_font_paths[g_font_idx]);
-                            full_redraw();
+                            /* Reset settings window size so win_show recomputes it at the new font metrics */
+                            g_wins[2].w = 0; g_wins[2].h = 0;
+                            win_show(&g_wins[2], 2);
                         }
                     }
                     /* Accent colour swatches (16 presets across 2 rows) */
@@ -10317,12 +10807,13 @@ void gui_on_tick(void) {
                             }
                         }
                     }
-                    /* Wallpaper buttons */
-                    if (g_theme_wall_bh > 0 &&
-                        (uint64_t)my >= g_theme_wall_by &&
-                        (uint64_t)my <  g_theme_wall_by + g_theme_wall_bh) {
+                    /* Wallpaper buttons — per-button y for multi-row support */
+                    if (g_theme_wall_bh > 0) {
                         for (int wi = 0; wi < WALLPAPER_COUNT; wi++) {
-                            if ((uint64_t)mx >= g_theme_wall_bx[wi] &&
+                            if (g_theme_wall_by_arr[wi] > 0u &&
+                                (uint64_t)my >= g_theme_wall_by_arr[wi] &&
+                                (uint64_t)my <  g_theme_wall_by_arr[wi] + g_theme_wall_bh &&
+                                (uint64_t)mx >= g_theme_wall_bx[wi] &&
                                 (uint64_t)mx <  g_theme_wall_bx[wi] + g_theme_wall_bw) {
                                 g_theme.wallpaper = wi;
                                 full_redraw();
@@ -10414,6 +10905,9 @@ void gui_on_tick(void) {
         int32_t cx, cy;
         mouse_consume_click(&cx, &cy);
     }
+#ifdef __linux__
+    clock_gettime(CLOCK_MONOTONIC, &_stC);
+#endif
 
     /* ── Inertial scroll tick ── */
     bool inertial_dirty = false;
@@ -10452,10 +10946,29 @@ void gui_on_tick(void) {
             }
         }
     }
-    if (inertial_dirty) full_redraw();
+    if (inertial_dirty) { g_redraw_src = 98; full_redraw(); }
 
-    /* Coalesced hover redraw: at most one full_redraw() per tick for hover changes */
-    if (g_needs_redraw) full_redraw();
+#ifdef __linux__
+    {
+        long _ms_hover = _SUB_MS(_st0, _stA);
+        long _ms_kbd   = _SUB_MS(_stA, _stB);
+        long _ms_click = _SUB_MS(_stB, _stC);
+        long _ms_max   = _ms_hover > _ms_kbd ? _ms_hover : _ms_kbd;
+        if (_ms_click > _ms_max) _ms_max = _ms_click;
+        if (_ms_max >= 3)
+            fprintf(stderr, "[subtick] hover=%ldms kbd=%ldms click=%ldms\n",
+                    _ms_hover, _ms_kbd, _ms_click);
+    }
+#undef _SUB_MS
+#endif
+
+#ifdef __linux__
+    /* Periodic cursor position log — once every ~2 s at 60 fps */
+    if ((g_gui_tick % 120) == 0)
+        fprintf(stderr, "[cursor] tick=%lu mx=%d my=%d edge_win=%d edge_dir=%d\n",
+                (unsigned long)g_gui_tick, mx, my,
+                g_resize_hover_win, (int)g_resize_hover_dir);
+#endif
 }
 
 /* ── Public helpers callable from platform code ─────────────────────────── */

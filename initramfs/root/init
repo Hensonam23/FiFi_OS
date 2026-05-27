@@ -24,6 +24,11 @@ export HOME=/root
 export TERM=linux
 export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0
+export TZ=PST8PDT,M3.2.0,M11.1.0
+export DISPLAY=:0
+export LD_LIBRARY_PATH=/usr/lib:/usr/lib64
+export PIPEWIRE_RUNTIME_DIR=/tmp
+export PULSE_RUNTIME_PATH=/tmp/pulse
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
@@ -57,9 +62,15 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
                     echo "dhcp failed" >> /fifi-data/network.log
                 ip addr show "$iface" >> /fifi-data/network.log 2>&1
                 # Sync system clock via NTP (one-shot, best-effort)
-                ntpd -q -n -p pool.ntp.org >> /fifi-data/network.log 2>&1 && \
-                    echo "ntp ok" >> /fifi-data/network.log || \
+                # Try hostname first (requires resolv.conf from udhcpc script),
+                # fall back to Google NTP IP if DNS not ready yet.
+                ntpd -q -n -p pool.ntp.org >> /fifi-data/network.log 2>&1 || \
+                    ntpd -q -n -p 216.239.35.0 >> /fifi-data/network.log 2>&1
+                if [ "$?" = "0" ]; then
+                    echo "ntp ok" >> /fifi-data/network.log
+                else
                     echo "ntp failed (ok)" >> /fifi-data/network.log
+                fi
                 exit 0
             fi
         done
@@ -67,6 +78,61 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
     done
     echo "no carrier after 30s" > /fifi-data/network.log
 ) &
+
+# ── DEV DEBUG ONLY — stream logs to dev machine — REMOVE BEFORE DISTRIBUTION ─
+# Sends a snapshot of dmesg + compositor.log to 10.0.0.65:9999 every 10s.
+# On dev machine run: ~/tools/fifi-watch.sh
+(
+    sleep 10
+    while true; do
+        {
+            dmesg
+            echo '=== input-devices ==='
+            cat /fifi-data/input-devices.txt 2>/dev/null
+            echo '=== compositor.log ==='
+            cat /fifi-data/compositor.log 2>/dev/null
+            echo '=== END ==='
+        } | nc -w 5 10.0.0.65 9999 2>/dev/null
+        sleep 10
+    done
+) &
+# Telnet shell on port 2323 for interactive remote access (same — REMOVE BEFORE DISTRIBUTION)
+busybox telnetd -l /bin/sh -p 2323 2>/dev/null &
+# ── END DEV DEBUG ─────────────────────────────────────────────────────────────
+
+# ── Phase 5: Firewall — apply nftables default-deny inbound rules ─────────────
+mkdir -p /fifi-data
+if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
+    /usr/sbin/nft -f /etc/nftables.conf 2>/fifi-data/firewall.log && \
+        echo "firewall: active" >> /fifi-data/firewall.log || \
+        echo "firewall: failed (kernel nftables support required)" >> /fifi-data/firewall.log
+else
+    echo "firewall: nft or rules not found" > /fifi-data/firewall.log
+fi
+
+# ── PipeWire audio daemon (multi-app mixing, PulseAudio-compatible) ──────────
+mkdir -p /tmp/pulse
+if [ -x /usr/bin/pipewire ]; then
+    /usr/bin/pipewire -c /usr/share/pipewire/fifi.conf >/fifi-data/pipewire.log 2>&1 &
+    sleep 1
+    [ -x /usr/bin/pipewire-pulse ] && \
+        /usr/bin/pipewire-pulse >/fifi-data/pipewire-pulse.log 2>&1 &
+fi
+
+# ── XWayland (enables X11 apps: Steam, browsers, legacy software) ─────────────
+# Starts after compositor brings up wayland-0; sleep provides a small window.
+# The compositor sets WAYLAND_DISPLAY=wayland-0 and XDG_RUNTIME_DIR=/tmp.
+if [ -x /usr/bin/Xwayland ]; then
+    (
+        # Wait up to 10s for wayland-0 socket to appear
+        for i in $(seq 1 20); do
+            [ -S /tmp/wayland-0 ] && break
+            sleep 0.5
+        done
+        /usr/bin/Xwayland :0 -rootless -terminate \
+            >/fifi-data/xwayland.log 2>&1
+    ) &
+fi
 
 # ── Launch FiFi compositor ────────────────────────────────────────────────────
 # Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not

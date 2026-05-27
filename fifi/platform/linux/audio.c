@@ -32,36 +32,9 @@ static long   g_vol_max   = 100;
 static int    g_vol_count = 2;
 
 bool hda_init(void) {
-    for (int card = 0; card < 4; card++) {
-        char p[32];
-        snprintf(p, sizeof(p), "/dev/snd/controlC%d", card);
-        g_ctl_fd = open(p, O_RDWR);
-        if (g_ctl_fd >= 0) {
-            g_pcm_card = card;
-            fprintf(stderr, "[audio] %s\n", p);
-            break;
-        }
-    }
-    if (g_ctl_fd < 0) { fprintf(stderr, "[audio] no ALSA control device\n"); return false; }
-
-    /* ── Enumerate all mixer elements ───────────────────────────────── */
-    struct snd_ctl_elem_list list = {0};
-    if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0) goto fail;
-
-    unsigned int total = list.count;
-    if (total == 0) goto fail;
-
-    struct snd_ctl_elem_id *ids = calloc(total, sizeof(*ids));
-    if (!ids) goto fail;
-
-    list.space = total;
-    list.pids  = ids;
-    if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0) {
-        free(ids); goto fail;
-    }
-
-    /* ── Find first INTEGER "Playback Volume" element ─────────────────
-     * Preference order: Master > PCM > Speaker > any with "Volume"    */
+    /* Scan all cards until we find one with a usable volume element.
+     * Card 0 is often HDMI (no master volume) — the analog headphone
+     * jack lives on a higher-numbered card on many laptops. */
     static const char *preferred[] = {
         "Master Playback Volume",
         "PCM Playback Volume",
@@ -71,29 +44,65 @@ bool hda_init(void) {
         NULL,
     };
 
+    struct snd_ctl_elem_id *ids = NULL;
     int found_idx = -1;
-    for (int pi = 0; preferred[pi] && found_idx < 0; pi++) {
-        for (unsigned int i = 0; i < list.used; i++) {
-            if (strcmp((char *)ids[i].name, preferred[pi]) == 0) {
-                found_idx = (int)i;
-                break;
+    struct snd_ctl_elem_list list;
+
+    for (int card = 0; card < 8; card++) {
+        char p[32];
+        snprintf(p, sizeof(p), "/dev/snd/controlC%d", card);
+        int fd = open(p, O_RDWR);
+        if (fd < 0) continue;
+        fprintf(stderr, "[audio] trying %s\n", p);
+
+        /* ── Enumerate all mixer elements on this card ───────────── */
+        memset(&list, 0, sizeof(list));
+        if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0 || list.count == 0) {
+            close(fd); continue;
+        }
+        unsigned int total = list.count;
+        ids = calloc(total, sizeof(*ids));
+        if (!ids) { close(fd); continue; }
+        list.space = total;
+        list.pids  = ids;
+        if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0) {
+            free(ids); ids = NULL; close(fd); continue;
+        }
+
+        /* ── Find volume element: preferred names first, then any "Volume" ── */
+        found_idx = -1;
+        for (int pi = 0; preferred[pi] && found_idx < 0; pi++) {
+            for (unsigned int i = 0; i < list.used; i++) {
+                if (strcmp((char *)ids[i].name, preferred[pi]) == 0) {
+                    found_idx = (int)i; break;
+                }
             }
         }
-    }
-    /* Fallback: any element with "Volume" in name and MIXER interface */
-    if (found_idx < 0) {
-        for (unsigned int i = 0; i < list.used; i++) {
-            if (ids[i].iface == SNDRV_CTL_ELEM_IFACE_MIXER &&
-                strstr((char *)ids[i].name, "Volume")) {
-                found_idx = (int)i;
-                break;
+        if (found_idx < 0) {
+            for (unsigned int i = 0; i < list.used; i++) {
+                if (ids[i].iface == SNDRV_CTL_ELEM_IFACE_MIXER &&
+                    strstr((char *)ids[i].name, "Volume")) {
+                    found_idx = (int)i; break;
+                }
             }
         }
+
+        if (found_idx >= 0) {
+            g_ctl_fd   = fd;
+            g_pcm_card = card;
+            fprintf(stderr, "[audio] card %d: found volume element '%s'\n",
+                    card, (char *)ids[found_idx].name);
+            break;
+        }
+        fprintf(stderr, "[audio] card %d: no volume element, trying next\n", card);
+        free(ids); ids = NULL;
+        close(fd);
     }
 
-    if (found_idx < 0) {
-        fprintf(stderr, "[audio] no volume element found\n");
-        free(ids); goto fail;
+    if (g_ctl_fd < 0 || found_idx < 0) {
+        if (ids) free(ids);
+        fprintf(stderr, "[audio] no card with volume control found\n");
+        return false;
     }
 
     /* ── Get info (type, min, max, count) ────────────────────────────── */
@@ -101,18 +110,40 @@ bool hda_init(void) {
     info.id = ids[found_idx];
     if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0) {
         fprintf(stderr, "[audio] ELEM_INFO failed\n");
-        free(ids); goto fail;
+        free(ids); ids = NULL; goto fail;
     }
     if (info.type != SNDRV_CTL_ELEM_TYPE_INTEGER) {
         fprintf(stderr, "[audio] volume element is not INTEGER type\n");
-        free(ids); goto fail;
+        free(ids); ids = NULL; goto fail;
     }
 
     g_vol_id    = ids[found_idx];
     g_vol_min   = info.value.integer.min;
     g_vol_max   = info.value.integer.max;
     g_vol_count = (int)info.count;
-    free(ids);
+
+    /* Unmute all Playback Switch elements (speaker, headphone, master, etc.) */
+    for (unsigned int i = 0; i < list.used; i++) {
+        if (!strstr((char *)ids[i].name, "Playback Switch")) continue;
+        struct snd_ctl_elem_info si = {0};
+        si.id = ids[i];
+        if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_INFO, &si) < 0) continue;
+        if (si.type != SNDRV_CTL_ELEM_TYPE_BOOLEAN) continue;
+        struct snd_ctl_elem_value sv = {0};
+        sv.id = ids[i];
+        if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_READ, &sv) < 0) continue;
+        int cnt = (int)si.count < 128 ? (int)si.count : 128;
+        bool any_off = false;
+        for (int j = 0; j < cnt; j++)
+            if (!sv.value.integer.value[j]) { any_off = true; break; }
+        if (any_off) {
+            for (int j = 0; j < cnt; j++) sv.value.integer.value[j] = 1;
+            if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &sv) == 0)
+                fprintf(stderr, "[audio] unmuted '%s'\n", (char *)ids[i].name);
+        }
+    }
+
+    free(ids); ids = NULL;
 
     fprintf(stderr, "[audio] '%s' range=%ld..%ld channels=%d\n",
             (char *)g_vol_id.name, g_vol_min, g_vol_max, g_vol_count);
@@ -138,6 +169,7 @@ bool hda_init(void) {
     return true;
 
 fail:
+    if (ids) { free(ids); ids = NULL; }
     if (g_ctl_fd >= 0) { close(g_ctl_fd); g_ctl_fd = -1; }
     return false;
 }
