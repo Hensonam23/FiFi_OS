@@ -1298,6 +1298,24 @@ void ipc_window_focus_slot(int slot) {
     }
 }
 
+void ipc_hide_all(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        if (g_clients[i].active && g_clients[i].fd >= 0 && !g_clients[i].minimized)
+            g_clients[i].minimized = true;
+    }
+    g_ipc_needs_redraw = true;
+}
+
+void ipc_show_all(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        if (g_clients[i].active && g_clients[i].fd >= 0 && g_clients[i].minimized) {
+            g_clients[i].minimized = false;
+            ipc_send(&g_clients[i], IPC_INVALIDATE, NULL, 0);
+        }
+    }
+    g_ipc_needs_redraw = true;
+}
+
 void ipc_shutdown(void) {
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         if (g_clients[i].fd >= 0) {

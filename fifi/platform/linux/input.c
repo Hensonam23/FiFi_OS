@@ -44,6 +44,8 @@
 #define FIFI_KEY_SUPER_RIGHT 0x99u
 #define FIFI_KEY_SUPER_UP    0x9Au
 #define FIFI_KEY_SUPER_DOWN  0x9Bu
+#define FIFI_KEY_SUPER_L     0x9Cu  /* Win+L = lock screen */
+#define FIFI_KEY_SUPER_D     0x9Du  /* Win+D = show/hide desktop */
 #define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
 #define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
@@ -151,13 +153,15 @@ void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h) {
 /* ── Key translation (linux evdev codes → FiFi chars / FIFI_KEY_*) ────────── */
 
 static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
-    /* Super+arrow = window snap */
+    /* Super+key combos */
     if (g_super) {
         switch (code) {
         case KEY_LEFT:  return FIFI_KEY_SUPER_LEFT;
         case KEY_RIGHT: return FIFI_KEY_SUPER_RIGHT;
         case KEY_UP:    return FIFI_KEY_SUPER_UP;
         case KEY_DOWN:  return FIFI_KEY_SUPER_DOWN;
+        case KEY_L:     return FIFI_KEY_SUPER_L;
+        case KEY_D:     return FIFI_KEY_SUPER_D;
         default: break;
         }
     }

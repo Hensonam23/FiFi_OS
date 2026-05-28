@@ -437,6 +437,12 @@ static uint64_t g_gaming_mode_bw = 0, g_gaming_mode_bh = 0u;
 static uint64_t g_fw_btn_bx = 0, g_fw_btn_by = 0;
 static uint64_t g_fw_btn_bw = 0, g_fw_btn_bh = 0u;
 static int      g_fw_state  = -1; /* -1=unchecked, 0=off, 1=on */
+static uint64_t g_dns_btn_bx = 0, g_dns_btn_by = 0;
+static uint64_t g_dns_btn_bw = 0, g_dns_btn_bh = 0u;
+static int      g_dns_mode   = 0; /* 0=Default, 1=Cloudflare, 2=Quad9 */
+static uint64_t g_lto_btn_bx = 0, g_lto_btn_by = 0;
+static uint64_t g_lto_btn_bw = 0, g_lto_btn_bh = 0u;
+static int      g_lto_idx    = 0; /* 0=Never,1=1min,2=5min,3=10min,4=30min */
 
 /* ── Volume tray popup state ─────────────────────────────────────────── */
 static bool     g_vol_popup_open  = false;
@@ -5844,7 +5850,7 @@ static void settings_render(window_t *w) {
                        + (uint64_t)tog_rows  * (SET_ROW_H + 8u)
                        + (fh + 6u) + 4u + 5u;
     uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
-    uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + SET_ROW_H + 5u;
+    uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + 2u * SET_ROW_H + 5u;
     /* shortcuts table — defined here so we can count it for total_h */
     struct { const char *key; const char *desc; } shortcuts[] = {
         { "F1",             "Toggle Terminal"             },
@@ -5860,6 +5866,8 @@ static void settings_render(window_t *w) {
         { "Super+Right",    "Snap window right half"      },
         { "Super+Up",       "Maximize window"             },
         { "Super+Down",     "Restore window"              },
+        { "Super+L",        "Lock screen"                 },
+        { "Super+D",        "Show/hide desktop"           },
         { "Alt+Tab",        "Cycle open windows"         },
         { "Esc / Ctrl+W",   "Close focused window"       },
         { "Up / Down",      "Navigate file list"         },
@@ -5940,8 +5948,9 @@ static void settings_render(window_t *w) {
         { NULL, NULL }
     };
     int nsc = 0; while (shortcuts[nsc].key) nsc++;
-    uint64_t h_sc = (uint64_t)(SET_SEC_H + 4u) + (uint64_t)nsc * SET_ROW_H;
-    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_sc + (uint64_t)SET_PAD;
+    uint64_t h_sc      = (uint64_t)(SET_SEC_H + 4u) + (uint64_t)nsc * SET_ROW_H;
+    uint64_t h_privacy = (uint64_t)(SET_SEC_H + 4u) + SET_ROW_H + 5u;
+    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_privacy + h_sc + (uint64_t)SET_PAD;
     /* Clamp scroll */
     if ((int64_t)total_h > (int64_t)ih) {
         int max_scroll = (int)(total_h - ih);
@@ -5963,6 +5972,7 @@ static void settings_render(window_t *w) {
     g_vol_btn_by = 0; g_vol_btn_bh = 0;
     g_vol_pop_btn_y = 0; g_vol_chime_bw = 0; g_vol_chime_bh = 0;
     g_gaming_btn_bh = 0; g_gaming_mode_bh = 0;
+    g_fw_btn_bh = 0; g_dns_btn_bh = 0; g_lto_btn_bh = 0;
 
     console_fill_rect(ix, iy, iw, ih, COL_SET_BG);
 
@@ -6550,6 +6560,67 @@ static void settings_render(window_t *w) {
             cy += SET_ROW_H;
         }
 
+        /* ── DNS server row ── */
+        {
+            static const char *dns_labels[] = { "Default", "Cloudflare", "Quad9" };
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = 0x000f151fu;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "DNS Server:", COL_SET_KEY_FG, bg);
+                const char *lbl = dns_labels[g_dns_mode];
+                uint64_t dbw = (uint64_t)(gui_strlen(lbl) + 2u) * fw;
+                uint64_t dbx = val_x;
+                uint32_t db_bg = (g_dns_mode == 0) ? 0x00203040u :
+                                 (g_dns_mode == 1) ? 0x00102820u : 0x00201030u;
+                uint32_t db_fg = (g_dns_mode == 0) ? 0x0080a8d0u :
+                                 (g_dns_mode == 1) ? 0x0050e880u : 0x00c080e0u;
+                console_fill_rect(dbx, SCY, dbw, SET_ROW_H, db_bg);
+                gui_draw_str(dbx + fw, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             lbl, db_fg, db_bg);
+                g_dns_btn_bx = dbx; g_dns_btn_by = SCY;
+                g_dns_btn_bw = dbw; g_dns_btn_bh = SET_ROW_H;
+            }
+            cy += SET_ROW_H;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: Privacy and Lock ── */
+    {
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)),
+                         "Privacy and Lock", COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+
+        /* Lock timeout row */
+        {
+            static const char *lto_labels[] = { "Never", "1 min", "5 min", "10 min", "30 min" };
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Lock Timeout:", COL_SET_KEY_FG, bg);
+                const char *lbl = lto_labels[g_lto_idx];
+                uint64_t lbw = (uint64_t)(gui_strlen(lbl) + 2u) * fw;
+                uint64_t lbx = val_x;
+                uint32_t lb_bg = (g_lto_idx == 0) ? 0x00203040u : 0x00102030u;
+                uint32_t lb_fg = (g_lto_idx == 0) ? 0x0080a8d0u : 0x0060d8f0u;
+                console_fill_rect(lbx, SCY, lbw, SET_ROW_H, lb_bg);
+                gui_draw_str(lbx + fw, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             lbl, lb_fg, lb_bg);
+                g_lto_btn_bx = lbx; g_lto_btn_by = SCY;
+                g_lto_btn_bw = lbw; g_lto_btn_bh = SET_ROW_H;
+            }
+            cy += SET_ROW_H;
+        }
         if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
         cy += 5u;
     }
@@ -6930,20 +7001,28 @@ static void draw_desktop_info(void) {
         up_str[ri]='\0';
     }
 
+    __attribute__((weak)) const char *platform_kernel_str(void);
+    const char *kern_str = (platform_kernel_str && platform_kernel_str())
+                         ? platform_kernel_str() : "freestanding";
     struct { const char *key; const char *val; } rows[] = {
         { "OS",       "FiFi OS Alpha v5.0" },
         { "Arch",     "x86_64"             },
-        { "Kernel",   "freestanding"       },
+        { "Kernel",   kern_str             },
         { "Memory",   mem_str              },
         { "Network",  ip_str               },
         { "Uptime",   up_str               },
         { NULL, NULL }
     };
 
-    /* Measure widths */
+    /* Measure widths — key col fixed, val col from actual content */
     int nrows = 0; while (rows[nrows].key) nrows++;
     uint64_t key_w = 9u * fw;   /* longest key "Network " = 8 + colon */
-    uint64_t val_w = 20u * fw;  /* max value */
+    uint64_t max_val_chars = 20u;
+    for (int _ri = 0; _ri < nrows; _ri++) {
+        uint64_t vl = (uint64_t)gui_strlen(rows[_ri].val);
+        if (vl > max_val_chars) max_val_chars = vl;
+    }
+    uint64_t val_w = max_val_chars * fw;
     uint64_t panel_w = key_w + val_w + 20u;
     uint64_t row_h2  = fh + 4u;
     uint64_t panel_h = (uint64_t)nrows * row_h2 + fh + 16u; /* title + rows + padding */
@@ -10967,6 +11046,30 @@ void gui_on_tick(void) {
                         g_fw_state = now_on ? 1 : 0;
                         settings_render(w);
                     }
+                    /* DNS server cycle button */
+                    if (g_dns_btn_bh > 0 &&
+                        (uint64_t)my >= g_dns_btn_by &&
+                        (uint64_t)my <  g_dns_btn_by + g_dns_btn_bh &&
+                        (uint64_t)mx >= g_dns_btn_bx &&
+                        (uint64_t)mx <  g_dns_btn_bx + g_dns_btn_bw) {
+                        __attribute__((weak)) void gui_set_dns(int mode);
+                        g_dns_mode = (g_dns_mode + 1) % 3;
+                        if (gui_set_dns) gui_set_dns(g_dns_mode);
+                        settings_render(w);
+                    }
+                    /* Lock timeout cycle button */
+                    if (g_lto_btn_bh > 0 &&
+                        (uint64_t)my >= g_lto_btn_by &&
+                        (uint64_t)my <  g_lto_btn_by + g_lto_btn_bh &&
+                        (uint64_t)mx >= g_lto_btn_bx &&
+                        (uint64_t)mx <  g_lto_btn_bx + g_lto_btn_bw) {
+                        static const int lto_secs[] = { 0, 60, 300, 600, 1800 };
+                        g_lto_idx = (g_lto_idx + 1) % 5;
+                        __attribute__((weak)) void compositor_set_lock_timeout(int s);
+                        if (compositor_set_lock_timeout)
+                            compositor_set_lock_timeout(lto_secs[g_lto_idx]);
+                        settings_render(w);
+                    }
                 }
             }
             break;
@@ -11017,6 +11120,67 @@ void gui_on_tick(void) {
         }
     }
     if (inertial_dirty) { g_redraw_src = 98; full_redraw(); }
+
+    /* ── Lock screen overlay ────────────────────────────────────────────── */
+    {
+        __attribute__((weak)) bool compositor_locked(void);
+        if (compositor_locked && compositor_locked()) {
+            static uint64_t s_lock_sec = (uint64_t)-1;
+            uint64_t hz = pit_get_hz(); if (!hz) hz = 100;
+            uint64_t now_sec = pit_ticks() / hz;
+            if (now_sec != s_lock_sec) {
+                s_lock_sec = now_sec;
+                uint64_t scw = console_fb_width();
+                uint64_t sch = console_fb_height();
+                uint64_t cfw = console_font_width();
+                uint64_t cfh = console_font_height();
+                /* Full-screen dark overlay */
+                console_fill_rect(0, 0, scw, sch, 0x00070a10u);
+                /* Header */
+                const char *hdr = "FiFi OS";
+                uint64_t hlen = gui_strlen(hdr);
+                uint64_t hx = (scw > hlen * cfw) ? (scw - hlen * cfw) / 2u : 0u;
+                gui_draw_str(hx, sch / 6u, hdr, 0x00304878u, 0x00070a10u);
+#ifdef __linux__
+                /* Time (HH:MM) */
+                char timebuf[8] = "--:--";
+                char datebuf[24] = "";
+                time_t now = time(NULL);
+                struct tm *lt = localtime(&now);
+                if (lt) {
+                    snprintf(timebuf, sizeof(timebuf), "%02d:%02d", lt->tm_hour, lt->tm_min);
+                    snprintf(datebuf, sizeof(datebuf), "%04d-%02d-%02d",
+                             lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+                }
+#else
+                char timebuf[8] = "--:--";
+                char datebuf[24] = "";
+                { uint8_t hr, mn, sc; rtc_read(&hr, &mn, &sc);
+                  snprintf(timebuf, sizeof(timebuf), "%02d:%02d", hr, mn); }
+#endif
+                uint64_t tlen = gui_strlen(timebuf);
+                uint64_t tx = (scw > tlen * cfw) ? (scw - tlen * cfw) / 2u : 0u;
+                uint64_t ty = sch / 3u;
+                /* Draw time with highlight box behind it */
+                console_fill_rect(tx > cfw ? tx - cfw : 0, ty > cfh/2u ? ty - cfh/2u : 0,
+                                  (tlen + 2u) * cfw, cfh * 2u, 0x00101828u);
+                gui_draw_str(tx, ty + cfh / 4u, timebuf, 0x00a0c8f0u, 0x00101828u);
+                /* Date */
+                if (datebuf[0]) {
+                    uint64_t dlen = gui_strlen(datebuf);
+                    uint64_t dx = (scw > dlen * cfw) ? (scw - dlen * cfw) / 2u : 0u;
+                    gui_draw_str(dx, ty + cfh * 2u + 4u, datebuf, 0x00506888u, 0x00070a10u);
+                }
+                /* Unlock hint */
+                const char *hint = "Press any key to unlock";
+                uint64_t hintlen = gui_strlen(hint);
+                uint64_t hintx = (scw > hintlen * cfw) ? (scw - hintlen * cfw) / 2u : 0u;
+                uint64_t hinty = sch * 2u / 3u;
+                gui_draw_str(hintx, hinty, hint, 0x00384858u, 0x00070a10u);
+                console_mark_dirty_rows(0, (uint32_t)sch);
+            }
+        }
+    }
 
 #ifdef __linux__
     {
@@ -11087,6 +11251,30 @@ void gui_add_desktop_icon(const char *path, const char *label) {
 
 void gui_toast_extern(const char *msg, uint32_t color) {
     gui_toast(msg, color);
+}
+
+void gui_show_desktop(void) {
+    static bool s_hidden = false;
+    if (!s_hidden) {
+        for (int i = 0; i < MAX_WINS; i++) {
+            if (g_wins[i].active && g_wins[i].state != WIN_HIDDEN)
+                g_wins[i].state = WIN_HIDDEN;
+        }
+        __attribute__((weak)) void ipc_hide_all(void);
+        if (ipc_hide_all) ipc_hide_all();
+        s_hidden = true;
+        gui_toast("Desktop", 0x0060a0e0u);
+    } else {
+        for (int i = 0; i < MAX_WINS; i++) {
+            if (g_wins[i].active && g_wins[i].state == WIN_HIDDEN)
+                g_wins[i].state = WIN_NORMAL;
+        }
+        __attribute__((weak)) void ipc_show_all(void);
+        if (ipc_show_all) ipc_show_all();
+        s_hidden = false;
+        gui_toast("Restore", 0x0060a0e0u);
+    }
+    /* State change only — render thread picks it up on next tick via ipc_needs_redraw */
 }
 
 void gui_snap_focused(int zone) {

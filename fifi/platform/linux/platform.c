@@ -197,6 +197,46 @@ static void net_read_config(const char *iface) {
     }
 }
 
+void gui_set_dns(int mode) {
+    extern uint32_t net_dns;
+    if (mode != 0) {
+        /* Backup current resolv.conf before first override */
+        FILE *chk = fopen("/etc/resolv.conf.dhcp", "r");
+        if (!chk) {
+            FILE *src = fopen("/etc/resolv.conf", "r");
+            if (src) {
+                FILE *dst = fopen("/etc/resolv.conf.dhcp", "w");
+                if (dst) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), src)) fputs(line, dst);
+                    fclose(dst);
+                }
+                fclose(src);
+            }
+        } else {
+            fclose(chk);
+        }
+    }
+    FILE *f = fopen("/etc/resolv.conf", "w");
+    if (!f) return;
+    if (mode == 1) {
+        fputs("nameserver 1.1.1.1\nnameserver 1.0.0.1\n", f);
+    } else if (mode == 2) {
+        fputs("nameserver 9.9.9.9\nnameserver 149.112.112.112\n", f);
+    } else {
+        FILE *bak = fopen("/etc/resolv.conf.dhcp", "r");
+        if (bak) {
+            char line[256];
+            while (fgets(line, sizeof(line), bak)) fputs(line, f);
+            fclose(bak);
+        } else {
+            fputs("# DNS: DHCP default\n", f);
+        }
+    }
+    fclose(f);
+    net_dns = 0; /* force refresh on next net_poll */
+}
+
 void net_init(void) {
     /* Scan /proc/net/dev for real NICs (non-loopback) */
     FILE *f = fopen("/proc/net/dev", "r");
@@ -491,4 +531,29 @@ bool platform_load_image(const char *path, uint32_t **out_px,
     if (!px) return false;
     *out_px = px; *out_w = (uint32_t)w; *out_h = (uint32_t)h;
     return true;
+}
+
+const char *platform_kernel_str(void) {
+    static char s_buf[48] = "";
+    if (s_buf[0]) return s_buf;
+    FILE *f = fopen("/proc/sys/kernel/osrelease", "r");
+    if (f) {
+        if (fgets(s_buf, (int)sizeof(s_buf), f)) {
+            size_t n = strlen(s_buf);
+            if (n > 0 && s_buf[n-1] == '\n') s_buf[n-1] = '\0';
+            /* Strip git hash suffix: "-gXXXXXXXX" at the end */
+            for (size_t i = 2; i < strlen(s_buf); i++) {
+                if (s_buf[i-1] == '-' && s_buf[i] == 'g') {
+                    /* Verify it looks like a hex hash */
+                    size_t j = i + 1;
+                    while (s_buf[j] && ((s_buf[j] >= '0' && s_buf[j] <= '9') ||
+                           (s_buf[j] >= 'a' && s_buf[j] <= 'f'))) j++;
+                    if (j - (i + 1) >= 7 && !s_buf[j]) { s_buf[i-1] = '\0'; break; }
+                }
+            }
+        }
+        fclose(f);
+    }
+    if (!s_buf[0]) { s_buf[0]='L'; s_buf[1]='i'; s_buf[2]='n'; s_buf[3]='u'; s_buf[4]='x'; s_buf[5]='\0'; }
+    return s_buf;
 }

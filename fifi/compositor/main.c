@@ -101,6 +101,7 @@ void  pty_set_winsize(uint16_t cols, uint16_t rows);
 bool  keyboard_gui_capture_active(void);
 int   input_get_all_fds(int *buf, int maxn);
 int   keyboard_try_getchar(void);
+void  keyboard_clear_state(void);
 void  mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
 
 /* console internal: mark rows dirty so flip picks them up */
@@ -116,12 +117,18 @@ static bool     g_using_drm  = false;
 static bool     g_gaming_mode = false;
 static uint32_t g_fps_current = 0;
 static bool     g_blanked     = false;
+static bool     g_locked      = false;
+static int      g_lock_timeout_s = 0;
 static struct timespec g_last_input;
 #define BLANK_TIMEOUT_S 300
 
-bool gaming_mode_active(void)   { return g_gaming_mode; }
-uint32_t compositor_fps(void)   { return g_fps_current; }
-void gaming_mode_set(bool on)   {
+bool gaming_mode_active(void)        { return g_gaming_mode; }
+uint32_t compositor_fps(void)        { return g_fps_current; }
+bool compositor_locked(void)         { return g_locked; }
+void compositor_lock(void)           { g_locked = true; g_blanked = false; }
+void compositor_unlock(void)         { g_locked = false; }
+void compositor_set_lock_timeout(int s) { g_lock_timeout_s = s; }
+void gaming_mode_set(bool on)        {
     g_gaming_mode = on;
     fprintf(stderr, "[compositor] gaming mode %s\n", on ? "ON" : "OFF");
     const char *gov = on ? "performance" : "schedutil";
@@ -548,62 +555,88 @@ int main(void) {
         }
 
         /* ── Keyboard routing ───────────────────────────────────────────── */
-        if (ipc_keyboard_active()) {
-            int c;
-            while ((c = keyboard_try_getchar()) != -1) {
-                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                if (g_blanked) { g_blanked = false; break; }
-                uint8_t uc = (uint8_t)c;
-                if (uc == 0x96u) { take_screenshot(); continue; }
-                if (uc == 0x97u) { ipc_close_focused(); continue; }
-                if (uc == 0x89u) { ipc_cycle_focus(); continue; }
-                if (uc == 0x17u) { ipc_close_focused(); continue; }
-                if (uc == 0x98u) { ipc_snap_focused(1); continue; }
-                if (uc == 0x99u) { ipc_snap_focused(2); continue; }
-                if (uc == 0x9Au) { ipc_snap_focused(3); continue; }
-                if (uc == 0x9Bu) { ipc_snap_focused(0); continue; }
-                if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
-                if (uc >= 0x8Au && uc <= 0x90u) {
-                    /* F1-F7: already in GUI ring via kb_push_internal — just consume */
-                    continue;
-                } else {
-                    ipc_send_focused_key(uc);
+        {
+            __attribute__((weak)) void gui_show_desktop(void);
+            /* When locked: any key unlocks, nothing else reaches the GUI */
+            if (g_locked) {
+                bool any = false;
+                int lc;
+                while ((lc = keyboard_try_getchar()) != -1) {
+                    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                    any = true;
+                }
+                keyboard_clear_state();
+                if (any) compositor_unlock();
+                goto keyboard_done;
+            }
+            if (ipc_keyboard_active()) {
+                int c;
+                while ((c = keyboard_try_getchar()) != -1) {
+                    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                    if (g_blanked) { g_blanked = false; break; }
+                    uint8_t uc = (uint8_t)c;
+                    if (uc == 0x96u) { take_screenshot(); continue; }
+                    if (uc == 0x97u) { ipc_close_focused(); continue; }
+                    if (uc == 0x89u) { ipc_cycle_focus(); continue; }
+                    if (uc == 0x17u) { ipc_close_focused(); continue; }
+                    if (uc == 0x98u) { ipc_snap_focused(1); continue; }
+                    if (uc == 0x99u) { ipc_snap_focused(2); continue; }
+                    if (uc == 0x9Au) { ipc_snap_focused(3); continue; }
+                    if (uc == 0x9Bu) { ipc_snap_focused(0); continue; }
+                    if (uc == 0x9Cu) { compositor_lock(); continue; }
+                    if (uc == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
+                    if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
+                    if (uc >= 0x8Au && uc <= 0x90u) {
+                        /* F1-F7: already in GUI ring via kb_push_internal — just consume */
+                        continue;
+                    } else {
+                        ipc_send_focused_key(uc);
+                    }
+                }
+            } else if (!keyboard_gui_capture_active()) {
+                int c;
+                while ((c = keyboard_try_getchar()) != -1) {
+                    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                    if (g_blanked) { g_blanked = false; break; }
+                    if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
+                    if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                    if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
+                    if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
+                    if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
+                    if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
+                    if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
+                    if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
+                    if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
+                    pty_write_input((uint8_t)c);
+                }
+            } else {
+                int c;
+                while ((c = keyboard_try_getchar()) != -1) {
+                    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                    if (g_blanked) { g_blanked = false; break; }
+                    if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
+                    if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                    if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
+                    if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
+                    if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
+                    if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
+                    if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
+                    if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
+                    if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
                 }
             }
-        } else if (!keyboard_gui_capture_active()) {
-            int c;
-            while ((c = keyboard_try_getchar()) != -1) {
-                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                if (g_blanked) { g_blanked = false; break; }
-                if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
-                if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
-                if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
-                if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
-                if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
-                if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
-                if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
-                pty_write_input((uint8_t)c);
-            }
-        } else {
-            int c;
-            while ((c = keyboard_try_getchar()) != -1) {
-                clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                if (g_blanked) { g_blanked = false; break; }
-                if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
-                if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
-                if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
-                if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
-                if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
-                if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
-                if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
-            }
         }
+        keyboard_done:;
 
-        /* ── Screen blank check ─────────────────────────────────────────── */
+        /* ── Screen blank / auto-lock check ────────────────────────────── */
         {
             struct timespec now_ts;
             clock_gettime(CLOCK_MONOTONIC, &now_ts);
             long idle_s = now_ts.tv_sec - g_last_input.tv_sec;
+            if (!g_locked && g_lock_timeout_s > 0 && idle_s >= g_lock_timeout_s) {
+                compositor_lock();
+                fprintf(stderr, "[compositor] auto-locked (idle %lds)\n", idle_s);
+            }
             if (!g_blanked && !g_gaming_mode && idle_s >= BLANK_TIMEOUT_S) {
                 g_blanked = true;
                 if (g_using_drm) drm_blank_display();
