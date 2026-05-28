@@ -1303,6 +1303,7 @@ void ipc_hide_all(void) {
         if (g_clients[i].active && g_clients[i].fd >= 0 && !g_clients[i].minimized)
             g_clients[i].minimized = true;
     }
+    g_focused_idx = -1;
     g_ipc_needs_redraw = true;
 }
 

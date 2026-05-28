@@ -376,6 +376,7 @@ static void *render_thread_fn(void *arg)
 int main(void) {
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
+    signal(SIGPIPE, SIG_IGN);
 
     write(STDOUT_FILENO, "\033[?25l", 6);
 

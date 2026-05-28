@@ -35,12 +35,10 @@
 #define LAUNCHER_ITEM_H 26u
 #define LAUNCHER_ITEMS  16u
 #define LAUNCHER_W      110u
-#define CTX_W           130u
 #define CTX_ITEM_H      26u
-#define CTX_ITEMS       10u  /* 4 built-in windows + separator + 5 IPC apps */
+#define CTX_ITEMS       13u  /* 4 built-in + sep + 5 IPC apps + sep + 2 desktop actions */
 
 /* File browser context menu */
-#define FB_CTX_W         130u
 #define FB_CTX_MAX_ITEMS  12
 #define FB_CTX_ACT_OPEN       0
 #define FB_CTX_ACT_EDIT       1
@@ -474,6 +472,9 @@ static bool    g_ctx_open = false;
 static int32_t g_ctx_x = 0;
 static int32_t g_ctx_y = 0;
 
+/* Forward declarations for public functions defined later in this file */
+void gui_show_desktop(void);
+
 /* ── Launcher hover ──────────────────────────────────────────────────── */
 static int g_launcher_hover = -1;
 
@@ -484,7 +485,6 @@ static int g_taskbtn_hover = -1;
 static int g_ctx_hover = -1;
 
 /* ── Text editor context menu ───────────────────────────────────────── */
-#define TXT_CTX_W        100u
 #define TXT_CTX_ITEMS    5
 static bool    g_txt_ctx_open  = false;
 static int32_t g_txt_ctx_x    = 0;
@@ -504,6 +504,12 @@ static int  g_fb_ctx_n     = 0;
 static int  g_fb_ctx_acts[FB_CTX_MAX_ITEMS];
 static char g_fb_clip_path[256] = "";   /* file browser clipboard: source path */
 static bool g_fb_clip_is_cut    = false; /* true=move, false=copy */
+
+/* ── Context menu width helpers (font-scaled) ───────────────────────── */
+/* "Show Desktop"/"File Browser" = 12 chars, "Add to Desktop" = 14, "Select All" = 10 */
+static uint64_t ctx_w(void)     { uint64_t f = console_font_width(); return f ? 12u*f+24u : 168u; }
+static uint64_t fb_ctx_w(void)  { uint64_t f = console_font_width(); return f ? 14u*f+24u : 192u; }
+static uint64_t txt_ctx_w(void) { uint64_t f = console_font_width(); return f ? 10u*f+24u : 144u; }
 
 /* ── Recent files ────────────────────────────────────────────────────── */
 #define RECENT_MAX 8
@@ -534,18 +540,19 @@ static uint64_t g_theme_toggle_w, g_theme_toggle_h;
 /* ── GUI tick counter ────────────────────────────────────────────────── */
 static uint64_t g_gui_tick = 0;
 
-/* ── Toast notification ──────────────────────────────────────────────── */
+/* ── Toast notification (single, newest replaces old) ────────────────── */
 #define TOAST_TICKS  200u  /* ~2 s at 100 Hz */
-static char     g_toast_msg[64] = {0};
-static uint32_t g_toast_color   = 0x00c8d8ffu;
-static int      g_toast_ticks   = 0;
+
+static char     g_toast_msg[64];
+static uint32_t g_toast_color;
+static int      g_toast_ticks;
 
 static void gui_toast(const char *msg, uint32_t color) {
-    int i = 0;
-    while (msg[i] && i < 62) { g_toast_msg[i] = msg[i]; i++; }
-    g_toast_msg[i] = '\0';
-    g_toast_color  = color;
-    g_toast_ticks  = (int)TOAST_TICKS;
+    int _i = 0;
+    while (msg[_i] && _i < 62) { g_toast_msg[_i] = msg[_i]; _i++; }
+    g_toast_msg[_i] = '\0';
+    g_toast_color   = color;
+    g_toast_ticks   = (int)TOAST_TICKS;
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -569,6 +576,15 @@ static void gui_draw_str(uint64_t px, uint64_t py, const char *s,
     for (size_t i = 0; s[i]; i++)
         console_render_glyph(px + (uint64_t)i * fw, py,
                              (unsigned char)s[i], fg, bg);
+}
+
+/* Draw str at integer scale (each glyph pixel = scale×scale block) */
+static void gui_draw_str_scaled(uint64_t px, uint64_t py, const char *s,
+                                 uint64_t scale, uint32_t fg, uint32_t bg) {
+    uint64_t fw = console_font_width();
+    for (size_t i = 0; s[i]; i++)
+        console_render_glyph_scaled(px + (uint64_t)i * fw * scale, py,
+                                    (unsigned char)s[i], scale, fg, bg);
 }
 
 /* Draw str clipped to max_chars wide */
@@ -1024,37 +1040,42 @@ static void vol_popup_draw(void) {
 static void ctx_draw(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    /* Items 0-3: built-in windows; 4: separator; 5-9: IPC apps */
-    static const char *ctx_items[] = {
+    uint64_t cw = ctx_w();
+    /* 0-3: built-in windows; 4: sep; 5-9: IPC apps; 10: sep; 11-12: desktop actions */
+    static const char *ctx_items[CTX_ITEMS] = {
         "Terminal", "Files", "Settings", "Viewer",
         NULL,               /* separator */
         "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
+        NULL,               /* separator */
+        "Lock Screen", "Show Desktop",
     };
     int32_t cx = g_ctx_x;
     int32_t cy = g_ctx_y;
 
-    /* Total height: CTX_ITEMS rows but row 4 is a 6px separator */
-    uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, total_h, COL_LAUNCH_BG);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, CTX_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, CTX_W, 1u, COL_LAUNCH_HL);
+    /* Dynamic total height: sum items (CTX_ITEM_H each) + separators (8px each) + 2 border */
+    uint64_t total_h = 2u;
+    for (int _i = 0; _i < (int)CTX_ITEMS; _i++)
+        total_h += ctx_items[_i] ? CTX_ITEM_H : 8u;
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, total_h, COL_LAUNCH_BG);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, COL_LAUNCH_HL);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx + CTX_W - 1u, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
 
     uint64_t ry = (uint64_t)cy + 1u;
     for (int i = 0; i < (int)CTX_ITEMS; i++) {
         if (ctx_items[i] == NULL) {
             /* Separator */
-            console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, 8u, COL_LAUNCH_BG);
-            console_fill_rect((uint64_t)cx + 6u, ry + 3u, CTX_W - 12u, 1u, COL_LAUNCH_HL);
+            console_fill_rect((uint64_t)cx + 1u, ry, cw - 2u, 8u, COL_LAUNCH_BG);
+            console_fill_rect((uint64_t)cx + 6u, ry + 3u, cw - 12u, 1u, COL_LAUNCH_HL);
             ry += 8u;
             continue;
         }
         bool hov    = (g_ctx_hover == i);
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
-        console_fill_rect((uint64_t)cx + 1u, ry, CTX_W - 2u, CTX_ITEM_H, bg);
+        console_fill_rect((uint64_t)cx + 1u, ry, cw - 2u, CTX_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(ctx_items[i]);
-        uint64_t spx  = (uint64_t)cx + (CTX_W > slen * fw ? (CTX_W - slen * fw) / 2u : 0u);
+        uint64_t spx  = (uint64_t)cx + (cw > slen * fw ? (cw - slen * fw) / 2u : 0u);
         uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str(spx, spy, ctx_items[i], COL_LAUNCH_FG, bg);
         ry += CTX_ITEM_H;
@@ -1066,21 +1087,22 @@ static void txt_ctx_draw(void) {
     if (!g_txt_ctx_open) return;
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
+    uint64_t tcw = txt_ctx_w();
     static const char *txt_ctx_items[] = { "Select All", "Copy", "Cut", "Paste", "Find..." };
     int32_t cx = g_txt_ctx_x;
     int32_t cy = g_txt_ctx_y;
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, TXT_CTX_W, TXT_CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, TXT_CTX_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy + TXT_CTX_ITEMS * CTX_ITEM_H + 1u, TXT_CTX_W, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, tcw, TXT_CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, tcw, 1u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + TXT_CTX_ITEMS * CTX_ITEM_H + 1u, tcw, 1u, COL_LAUNCH_HL);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, TXT_CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx + TXT_CTX_W - 1u, (uint64_t)cy, 1u, TXT_CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
+    console_fill_rect((uint64_t)cx + tcw - 1u, (uint64_t)cy, 1u, TXT_CTX_ITEMS * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
     for (int i = 0; i < TXT_CTX_ITEMS; i++) {
         uint64_t ry = (uint64_t)cy + 1u + (uint64_t)i * CTX_ITEM_H;
         bool hov    = (g_txt_ctx_hover == i);
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
-        console_fill_rect((uint64_t)cx + 1u, ry, TXT_CTX_W - 2u, CTX_ITEM_H, bg);
+        console_fill_rect((uint64_t)cx + 1u, ry, tcw - 2u, CTX_ITEM_H, bg);
         uint64_t slen = (uint64_t)gui_strlen(txt_ctx_items[i]);
-        uint64_t spx  = (uint64_t)cx + (TXT_CTX_W > slen * fw ? (TXT_CTX_W - slen * fw) / 2u : 0u);
+        uint64_t spx  = (uint64_t)cx + (tcw > slen * fw ? (tcw - slen * fw) / 2u : 0u);
         uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str(spx, spy, txt_ctx_items[i], COL_LAUNCH_FG, bg);
     }
@@ -1095,16 +1117,17 @@ static const char *fb_ctx_labels[] = {
 
 static void fb_ctx_draw(void) {
     if (!g_fb_ctx_open || g_fb_ctx_n <= 0) return;
-    uint64_t fh = console_font_height();
+    uint64_t fh  = console_font_height();
+    uint64_t fcw = fb_ctx_w();
     uint64_t cx = (uint64_t)g_fb_ctx_x;
     uint64_t cy = (uint64_t)g_fb_ctx_y;
     int n = g_fb_ctx_n;
 
-    console_fill_rect(cx, cy, FB_CTX_W, (uint64_t)n * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
-    console_fill_rect(cx, cy, FB_CTX_W, 1u, COL_LAUNCH_HL);
-    console_fill_rect(cx, cy + (uint64_t)n * CTX_ITEM_H + 1u, FB_CTX_W, 1u, COL_LAUNCH_HL);
+    console_fill_rect(cx, cy, fcw, (uint64_t)n * CTX_ITEM_H + 2u, COL_LAUNCH_BG);
+    console_fill_rect(cx, cy, fcw, 1u, COL_LAUNCH_HL);
+    console_fill_rect(cx, cy + (uint64_t)n * CTX_ITEM_H + 1u, fcw, 1u, COL_LAUNCH_HL);
     console_fill_rect(cx, cy, 1u, (uint64_t)n * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
-    console_fill_rect(cx + FB_CTX_W - 1u, cy, 1u, (uint64_t)n * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
+    console_fill_rect(cx + fcw - 1u, cy, 1u, (uint64_t)n * CTX_ITEM_H + 2u, COL_LAUNCH_HL);
 
     for (int i = 0; i < n; i++) {
         int act   = g_fb_ctx_acts[i];
@@ -1117,12 +1140,10 @@ static void fb_ctx_draw(void) {
                        (act == FB_CTX_ACT_EDIT)      ? 0x0080d8a0u :
                        (act == FB_CTX_ACT_COPY_PATH) ? 0x00a0b8d0u :
                        (act == FB_CTX_ACT_ADD_DESK)  ? 0x0060c880u : COL_LAUNCH_FG;
-        console_fill_rect(cx + 1u, ry, FB_CTX_W - 2u, CTX_ITEM_H, bg);
+        console_fill_rect(cx + 1u, ry, fcw - 2u, CTX_ITEM_H, bg);
         const char *lbl  = fb_ctx_labels[act];
-        uint64_t slen    = (uint64_t)gui_strlen(lbl);
-        uint64_t spx     = cx + 10u;  /* left-align with small indent */
+        uint64_t spx     = cx + 10u;
         uint64_t spy     = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
-        (void)slen;
         gui_draw_str(spx, spy, lbl, fg, bg);
     }
 }
@@ -1166,7 +1187,7 @@ static void fb_ctx_open_at(int win_slot, int row, bool is_dir, int32_t x, int32_
     uint64_t fb_w2 = console_fb_width();
     uint64_t ty2   = console_fb_height() - TASKBAR_H;
     uint64_t menu_h = (uint64_t)g_fb_ctx_n * CTX_ITEM_H + 2u;
-    if ((uint64_t)x + FB_CTX_W > fb_w2) x = (int32_t)(fb_w2 - FB_CTX_W);
+    if ((uint64_t)x + fb_ctx_w() > fb_w2) x = (int32_t)(fb_w2 - fb_ctx_w());
     if ((uint64_t)y + menu_h > ty2)      y = (int32_t)(ty2 - menu_h);
     if (x < 0) x = 0;
     if (y < (int32_t)STATUS_H) y = (int32_t)STATUS_H;
@@ -6054,9 +6075,13 @@ static void settings_render(window_t *w) {
     int nfonts = 0; while (g_font_paths[nfonts]) nfonts++;
     const char *font_label = g_font_labels[g_font_idx < nfonts ? g_font_idx : 0];
 
+    __attribute__((weak)) const char *platform_kernel_str(void);
+    const char *kern_ver = (platform_kernel_str && platform_kernel_str())
+                         ? platform_kernel_str() : "freestanding";
+
     struct { const char *key; const char *val; } sysinfo[] = {
         { "OS:",         "FiFi OS linux-desktop"  },
-        { "Kernel:",     "Linux zen"              },
+        { "Kernel:",     kern_ver                 },
         { "Memory:",     mem_str                  },
         { "Resolution:", res_str                  },
         { "CPU:",        cpu_str                  },
@@ -7338,19 +7363,20 @@ static void full_redraw(void) {
 
     /* Toast notification overlay */
     if (g_toast_ticks > 0 && g_toast_msg[0]) {
-        uint64_t fw    = console_font_width();
-        uint64_t fh    = console_font_height();
-        uint64_t tlen  = (uint64_t)gui_strlen(g_toast_msg);
-        uint64_t tw    = tlen * fw + 24u;
-        uint64_t th    = fh + 10u;
-        uint64_t tx    = (fb_w > tw) ? (fb_w - tw) / 2u : 0u;
-        uint64_t ty    = desk_bot() - th - 12u;
-        uint32_t tbg   = 0x00101828u;
-        console_fill_rect(tx,     ty,     tw,     th,     tbg);
-        console_fill_rect(tx,     ty,     tw,     1u,     0x00303858u);
-        console_fill_rect(tx,     ty+th-1,tw,     1u,     0x00303858u);
-        console_fill_rect(tx,     ty,     1u,     th,     0x00303858u);
-        console_fill_rect(tx+tw-1,ty,     1u,     th,     0x00303858u);
+        uint64_t fw = console_font_width();
+        uint64_t fh = console_font_height();
+        uint64_t th = fh + 10u;
+        uint64_t ty = desk_bot() - th - 8u;
+        uint64_t tlen = (uint64_t)gui_strlen(g_toast_msg);
+        uint64_t tw   = tlen * fw + 24u;
+        uint64_t tx   = (fb_w > tw) ? (fb_w - tw) / 2u : 0u;
+        uint32_t tbg  = 0x000e1622u;
+        console_fill_rect(tx,     ty,     tw, th, tbg);
+        console_fill_rect(tx,     ty,     tw, 1u, 0x00283448u);
+        console_fill_rect(tx,     ty+th-1,tw, 1u, 0x00283448u);
+        console_fill_rect(tx,     ty,     1u, th, 0x00283448u);
+        console_fill_rect(tx+tw-1,ty,     1u, th, 0x00283448u);
+        console_fill_rect(tx+1u, ty+1u, 3u, th-2u, g_toast_color);
         gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
     }
 }
@@ -7365,20 +7391,21 @@ void gui_draw_popups(void) {
     if (g_fb_ctx_open)    fb_ctx_draw();
     if (g_txt_ctx_open)   txt_ctx_draw();
     if (g_toast_ticks > 0 && g_toast_msg[0]) {
-        uint64_t fb_w  = console_fb_width();
+        uint64_t fb_w2 = console_fb_width();
         uint64_t fw    = console_font_width();
         uint64_t fh    = console_font_height();
+        uint64_t th    = fh + 10u;
+        uint64_t ty    = desk_bot() - th - 8u;
         uint64_t tlen  = (uint64_t)gui_strlen(g_toast_msg);
         uint64_t tw    = tlen * fw + 24u;
-        uint64_t th    = fh + 10u;
-        uint64_t tx    = (fb_w > tw) ? (fb_w - tw) / 2u : 0u;
-        uint64_t ty    = desk_bot() - th - 12u;
-        uint32_t tbg   = 0x00101828u;
-        console_fill_rect(tx,     ty,     tw,     th,     tbg);
-        console_fill_rect(tx,     ty,     tw,     1u,     0x00303858u);
-        console_fill_rect(tx,     ty+th-1,tw,     1u,     0x00303858u);
-        console_fill_rect(tx,     ty,     1u,     th,     0x00303858u);
-        console_fill_rect(tx+tw-1,ty,     1u,     th,     0x00303858u);
+        uint64_t tx    = (fb_w2 > tw) ? (fb_w2 - tw) / 2u : 0u;
+        uint32_t tbg   = 0x000e1622u;
+        console_fill_rect(tx,     ty,     tw, th, tbg);
+        console_fill_rect(tx,     ty,     tw, 1u, 0x00283448u);
+        console_fill_rect(tx,     ty+th-1,tw, 1u, 0x00283448u);
+        console_fill_rect(tx,     ty,     1u, th, 0x00283448u);
+        console_fill_rect(tx+tw-1,ty,     1u, th, 0x00283448u);
+        console_fill_rect(tx+1u, ty+1u, 3u, th-2u, g_toast_color);
         gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
     }
 }
@@ -7757,12 +7784,14 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Toast countdown: decrement and trigger full redraw when it expires ── */
-    if (g_toast_ticks > 0) {
-        g_toast_ticks--;
-        if (g_toast_ticks == 0) {
-            g_toast_msg[0] = '\0';
-            full_redraw();
+    /* ── Toast countdown ── */
+    {
+        if (g_toast_ticks > 0) {
+            g_toast_ticks--;
+            if (g_toast_ticks == 0) {
+                g_toast_msg[0] = '\0';
+                full_redraw();
+            }
         }
     }
 
@@ -8048,18 +8077,29 @@ void gui_on_tick(void) {
 
     /* ── Context menu hover tracking ── */
     if (g_ctx_open) {
-        uint64_t ctx_x  = (uint64_t)g_ctx_x;
-        uint64_t ctx_y  = (uint64_t)g_ctx_y;
-        uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
+        static const char *_ci_arr[CTX_ITEMS] = {
+            "Terminal", "Files", "Settings", "Viewer",
+            NULL, "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
+            NULL, "Lock Screen", "Show Desktop",
+        };
+        uint64_t ctx_x = (uint64_t)g_ctx_x;
+        uint64_t ctx_y = (uint64_t)g_ctx_y;
+        uint64_t tot_h = 2u;
+        for (int _k = 0; _k < (int)CTX_ITEMS; _k++)
+            tot_h += _ci_arr[_k] ? CTX_ITEM_H : 8u;
         int new_chov = -1;
-        if ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
-            (uint64_t)my >= ctx_y + 1u && (uint64_t)my < ctx_y + total_h) {
+        if ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + ctx_w() &&
+            (uint64_t)my >= ctx_y + 1u && (uint64_t)my < ctx_y + tot_h) {
             uint64_t dy = (uint64_t)my - (ctx_y + 1u);
-            uint64_t sep_start = 4u * CTX_ITEM_H;
-            if (dy < sep_start)
-                new_chov = (int)(dy / CTX_ITEM_H);
-            else if (dy >= sep_start + 8u)
-                new_chov = 5 + (int)((dy - sep_start - 8u) / CTX_ITEM_H);
+            uint64_t yoff = 0;
+            for (int _k = 0; _k < (int)CTX_ITEMS; _k++) {
+                uint64_t item_h = _ci_arr[_k] ? CTX_ITEM_H : 8u;
+                if (dy < yoff + item_h) {
+                    if (_ci_arr[_k]) new_chov = _k;
+                    break;
+                }
+                yoff += item_h;
+            }
         }
         if (new_chov != g_ctx_hover) {
             g_ctx_hover = new_chov;
@@ -8072,7 +8112,7 @@ void gui_on_tick(void) {
         uint64_t fb_cx = (uint64_t)g_fb_ctx_x;
         uint64_t fb_cy = (uint64_t)g_fb_ctx_y;
         int new_fhov = -1;
-        if ((uint64_t)mx >= fb_cx && (uint64_t)mx < fb_cx + FB_CTX_W &&
+        if ((uint64_t)mx >= fb_cx && (uint64_t)mx < fb_cx + fb_ctx_w() &&
             (uint64_t)my >= fb_cy + 1u &&
             (uint64_t)my < fb_cy + 1u + (uint64_t)g_fb_ctx_n * CTX_ITEM_H) {
             new_fhov = (int)((uint64_t)my - (fb_cy + 1u)) / (int)CTX_ITEM_H;
@@ -8088,7 +8128,7 @@ void gui_on_tick(void) {
         uint64_t tc_x = (uint64_t)g_txt_ctx_x;
         uint64_t tc_y = (uint64_t)g_txt_ctx_y;
         int new_thov = -1;
-        if ((uint64_t)mx >= tc_x && (uint64_t)mx < tc_x + TXT_CTX_W &&
+        if ((uint64_t)mx >= tc_x && (uint64_t)mx < tc_x + txt_ctx_w() &&
             (uint64_t)my >= tc_y + 1u &&
             (uint64_t)my < tc_y + 1u + (uint64_t)(TXT_CTX_ITEMS * CTX_ITEM_H)) {
             new_thov = (int)((uint64_t)my - (tc_y + 1u)) / (int)CTX_ITEM_H;
@@ -8238,7 +8278,7 @@ void gui_on_tick(void) {
                             window_t *_cw = &g_wins[_ci];
                             z_raise(_ci);
                             if (_cw->state == WIN_HIDDEN) win_show(_cw, _ci); else full_redraw();
-                        } else if (_ci >= 5 && _ci < (int)CTX_ITEMS) {
+                        } else if (_ci >= 5 && _ci <= 9) {
                             static const char *_cc[] = {
                                 "/bin/fifi-filebrowser",
                                 "/bin/fifi-sysmon",
@@ -8249,6 +8289,12 @@ void gui_on_tick(void) {
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             if (gui_spawn_app) gui_spawn_app(_cc[_ci - 5]);
                             full_redraw();
+                        } else if (_ci == 11) {
+                            __attribute__((weak)) void compositor_lock(void);
+                            if (compositor_lock) compositor_lock();
+                            full_redraw();
+                        } else if (_ci == 12) {
+                            gui_show_desktop();
                         }
                         continue;
                     } else { g_ctx_open = false; g_ctx_hover = -1; full_redraw(); continue; }
@@ -9823,7 +9869,7 @@ void gui_on_tick(void) {
     if (btn_pressed && g_txt_ctx_open) {
         int32_t cx2 = g_txt_ctx_x, cy2 = g_txt_ctx_y;
         bool hit_ctx = ((uint64_t)mx >= (uint64_t)cx2 &&
-                        (uint64_t)mx <  (uint64_t)cx2 + TXT_CTX_W &&
+                        (uint64_t)mx <  (uint64_t)cx2 + txt_ctx_w() &&
                         (uint64_t)my >= (uint64_t)cy2 + 1u &&
                         (uint64_t)my <  (uint64_t)cy2 + 1u + (uint64_t)(TXT_CTX_ITEMS * CTX_ITEM_H));
         if (hit_ctx && g_txt_ctx_win >= 0) {
@@ -9903,7 +9949,7 @@ void gui_on_tick(void) {
                 /* Position context menu clamped to screen */
                 int32_t ctx_x = mx, ctx_y = my;
                 uint64_t fb_w2 = console_fb_width();
-                if ((uint64_t)ctx_x + TXT_CTX_W > fb_w2) ctx_x = (int32_t)(fb_w2 - TXT_CTX_W);
+                if ((uint64_t)ctx_x + txt_ctx_w() > fb_w2) ctx_x = (int32_t)(fb_w2 - txt_ctx_w());
                 if ((uint64_t)ctx_y + (uint64_t)(TXT_CTX_ITEMS * CTX_ITEM_H) + 2u > ty)
                     ctx_y = (int32_t)(ty - (uint64_t)(TXT_CTX_ITEMS * CTX_ITEM_H + 2u));
                 if (ctx_x < 0) ctx_x = 0;
@@ -10018,8 +10064,8 @@ void gui_on_tick(void) {
             /* Clamp context menu to screen */
             int32_t ctx_x = mx;
             int32_t ctx_y = my;
-            if ((uint64_t)ctx_x + CTX_W > fb_w)
-                ctx_x = (int32_t)(fb_w - CTX_W);
+            if ((uint64_t)ctx_x + ctx_w() > fb_w)
+                ctx_x = (int32_t)(fb_w - ctx_w());
             if ((uint64_t)ctx_y + CTX_ITEMS * CTX_ITEM_H + 2u > ty)
                 ctx_y = (int32_t)(ty - (uint64_t)(CTX_ITEMS * CTX_ITEM_H + 2u));
             if (ctx_x < 0) ctx_x = 0;
@@ -10142,7 +10188,7 @@ void gui_on_tick(void) {
         int32_t cx2, cy2;
         uint64_t fcx = (uint64_t)g_fb_ctx_x;
         uint64_t fcy = (uint64_t)g_fb_ctx_y;
-        bool inside = ((uint64_t)mx >= fcx && (uint64_t)mx < fcx + FB_CTX_W &&
+        bool inside = ((uint64_t)mx >= fcx && (uint64_t)mx < fcx + fb_ctx_w() &&
                        (uint64_t)my >= fcy + 1u &&
                        (uint64_t)my < fcy + 1u + (uint64_t)g_fb_ctx_n * CTX_ITEM_H);
         g_fb_ctx_open = false;
@@ -10160,24 +10206,29 @@ void gui_on_tick(void) {
 
     /* ── Context menu clicks ── */
     if (btn_pressed && g_ctx_open) {
+        static const char *_ctx_a[CTX_ITEMS] = {
+            "Terminal", "Files", "Settings", "Viewer",
+            NULL, "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
+            NULL, "Lock Screen", "Show Desktop",
+        };
         int32_t cx, cy;
         uint64_t ctx_x = (uint64_t)g_ctx_x;
         uint64_t ctx_y = (uint64_t)g_ctx_y;
-        uint64_t total_h = (CTX_ITEMS - 1u) * CTX_ITEM_H + 8u + 2u;
-        bool inside = ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + CTX_W &&
+        uint64_t total_h = 2u;
+        for (int _k = 0; _k < (int)CTX_ITEMS; _k++)
+            total_h += _ctx_a[_k] ? CTX_ITEM_H : 8u;
+        bool inside = ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + ctx_w() &&
                        (uint64_t)my >= ctx_y + 1u &&
                        (uint64_t)my < ctx_y + total_h);
         g_ctx_open = false;
         if (inside) {
-            /* Map y offset to item index, accounting for the separator at index 4 */
             uint64_t dy = (uint64_t)my - (ctx_y + 1u);
             int item = -1;
-            /* Rows 0-3 are each CTX_ITEM_H; row 4 is 8px separator; rows 5-6 are CTX_ITEM_H */
-            uint64_t sep_start = 4u * CTX_ITEM_H;
-            if (dy < sep_start) {
-                item = (int)(dy / CTX_ITEM_H);
-            } else if (dy >= sep_start + 8u) {
-                item = 5 + (int)((dy - sep_start - 8u) / CTX_ITEM_H);
+            uint64_t yoff = 0;
+            for (int _k = 0; _k < (int)CTX_ITEMS; _k++) {
+                uint64_t ih = _ctx_a[_k] ? CTX_ITEM_H : 8u;
+                if (dy < yoff + ih) { if (_ctx_a[_k]) item = _k; break; }
+                yoff += ih;
             }
             if (item >= 0 && item < 4) {
                 window_t *w = &g_wins[item];
@@ -10192,6 +10243,12 @@ void gui_on_tick(void) {
                 __attribute__((weak)) void gui_spawn_app(const char *path);
                 if (gui_spawn_app) gui_spawn_app(_cp[item - 5]);
                 full_redraw();
+            } else if (item == 11) {
+                __attribute__((weak)) void compositor_lock(void);
+                if (compositor_lock) compositor_lock();
+                full_redraw();
+            } else if (item == 12) {
+                gui_show_desktop();
             } else {
                 full_redraw();
             }
@@ -11124,7 +11181,15 @@ void gui_on_tick(void) {
     /* ── Lock screen overlay ────────────────────────────────────────────── */
     {
         __attribute__((weak)) bool compositor_locked(void);
-        if (compositor_locked && compositor_locked()) {
+        bool _locked = compositor_locked && compositor_locked();
+        static bool _was_locked = false;
+        if (!_locked && _was_locked) {
+            /* Just unlocked — force a full desktop repaint to clear the overlay */
+            _was_locked = false;
+            full_redraw();
+        }
+        _was_locked = _locked;
+        if (_locked) {
             static uint64_t s_lock_sec = (uint64_t)-1;
             uint64_t hz = pit_get_hz(); if (!hz) hz = 100;
             uint64_t now_sec = pit_ticks() / hz;
@@ -11134,15 +11199,26 @@ void gui_on_tick(void) {
                 uint64_t sch = console_fb_height();
                 uint64_t cfw = console_font_width();
                 uint64_t cfh = console_font_height();
-                /* Full-screen dark overlay */
-                console_fill_rect(0, 0, scw, sch, 0x00070a10u);
-                /* Header */
+
+                /* Scale factor for the big clock: 4x at 1080p+, 3x at 720p, 2x below */
+                uint64_t clk_scale = (scw >= 1920u) ? 4u : (scw >= 1280u) ? 3u : 2u;
+
+                /* Full-screen dark overlay with subtle gradient bands */
+                console_fill_rect(0, 0, scw, sch, 0x00060810u);
+                /* Slightly lighter horizontal band behind the clock area */
+                uint64_t band_h = cfh * clk_scale + cfh * 6u;
+                uint64_t band_y = sch / 2u - band_h / 2u - cfh * 2u;
+                console_fill_rect(0, band_y, scw, band_h, 0x000c1422u);
+
+                /* "FiFi OS" branding at 2x scale, centered at ~15% from top */
                 const char *hdr = "FiFi OS";
                 uint64_t hlen = gui_strlen(hdr);
-                uint64_t hx = (scw > hlen * cfw) ? (scw - hlen * cfw) / 2u : 0u;
-                gui_draw_str(hx, sch / 6u, hdr, 0x00304878u, 0x00070a10u);
+                uint64_t hcw = cfw * 2u;
+                uint64_t hx = (scw > hlen * hcw) ? (scw - hlen * hcw) / 2u : 0u;
+                uint64_t hy = sch / 7u;
+                gui_draw_str_scaled(hx, hy, hdr, 2u, 0x00203a5cu, 0x00060810u);
+
 #ifdef __linux__
-                /* Time (HH:MM) */
                 char timebuf[8] = "--:--";
                 char datebuf[24] = "";
                 time_t now = time(NULL);
@@ -11158,25 +11234,38 @@ void gui_on_tick(void) {
                 { uint8_t hr, mn, sc; rtc_read(&hr, &mn, &sc);
                   snprintf(timebuf, sizeof(timebuf), "%02d:%02d", hr, mn); }
 #endif
-                uint64_t tlen = gui_strlen(timebuf);
-                uint64_t tx = (scw > tlen * cfw) ? (scw - tlen * cfw) / 2u : 0u;
-                uint64_t ty = sch / 3u;
-                /* Draw time with highlight box behind it */
-                console_fill_rect(tx > cfw ? tx - cfw : 0, ty > cfh/2u ? ty - cfh/2u : 0,
-                                  (tlen + 2u) * cfw, cfh * 2u, 0x00101828u);
-                gui_draw_str(tx, ty + cfh / 4u, timebuf, 0x00a0c8f0u, 0x00101828u);
-                /* Date */
+                /* Large clock: centered vertically at 45% of screen */
+                uint64_t tlen    = gui_strlen(timebuf);
+                uint64_t clk_w   = tlen * cfw * clk_scale;
+                uint64_t clk_h   = cfh * clk_scale;
+                uint64_t tx      = (scw > clk_w) ? (scw - clk_w) / 2u : 0u;
+                uint64_t ty      = sch * 9u / 20u - clk_h / 2u;
+                /* Background panel for clock */
+                uint64_t pad_x = cfw * clk_scale / 2u;
+                uint64_t pad_y = cfh * clk_scale / 4u;
+                console_fill_rect(tx - pad_x, ty - pad_y,
+                                  clk_w + pad_x * 2u, clk_h + pad_y * 2u, 0x0009111cu);
+                console_fill_rect(tx - pad_x, ty - pad_y,
+                                  clk_w + pad_x * 2u, 1u, 0x001e2c40u);
+                console_fill_rect(tx - pad_x, ty - pad_y + clk_h + pad_y * 2u - 1u,
+                                  clk_w + pad_x * 2u, 1u, 0x001e2c40u);
+                gui_draw_str_scaled(tx, ty, timebuf, clk_scale, 0x0090c4e8u, 0x0009111cu);
+
+                /* Date below clock */
                 if (datebuf[0]) {
                     uint64_t dlen = gui_strlen(datebuf);
                     uint64_t dx = (scw > dlen * cfw) ? (scw - dlen * cfw) / 2u : 0u;
-                    gui_draw_str(dx, ty + cfh * 2u + 4u, datebuf, 0x00506888u, 0x00070a10u);
+                    uint64_t dy = ty + clk_h + pad_y + cfh / 2u + 6u;
+                    gui_draw_str(dx, dy, datebuf, 0x00486080u, 0x00060810u);
                 }
-                /* Unlock hint */
+
+                /* Unlock hint near bottom */
                 const char *hint = "Press any key to unlock";
                 uint64_t hintlen = gui_strlen(hint);
                 uint64_t hintx = (scw > hintlen * cfw) ? (scw - hintlen * cfw) / 2u : 0u;
-                uint64_t hinty = sch * 2u / 3u;
-                gui_draw_str(hintx, hinty, hint, 0x00384858u, 0x00070a10u);
+                uint64_t hinty = sch * 3u / 4u;
+                gui_draw_str(hintx, hinty, hint, 0x00304050u, 0x00060810u);
+
                 console_mark_dirty_rows(0, (uint32_t)sch);
             }
         }
@@ -11255,8 +11344,10 @@ void gui_toast_extern(const char *msg, uint32_t color) {
 
 void gui_show_desktop(void) {
     static bool s_hidden = false;
+    static win_state_t s_prev_state[MAX_WINS];
     if (!s_hidden) {
         for (int i = 0; i < MAX_WINS; i++) {
+            s_prev_state[i] = g_wins[i].state;
             if (g_wins[i].active && g_wins[i].state != WIN_HIDDEN)
                 g_wins[i].state = WIN_HIDDEN;
         }
@@ -11266,15 +11357,17 @@ void gui_show_desktop(void) {
         gui_toast("Desktop", 0x0060a0e0u);
     } else {
         for (int i = 0; i < MAX_WINS; i++) {
-            if (g_wins[i].active && g_wins[i].state == WIN_HIDDEN)
-                g_wins[i].state = WIN_NORMAL;
+            if (g_wins[i].active && s_prev_state[i] != WIN_HIDDEN)
+                g_wins[i].state = s_prev_state[i];
         }
         __attribute__((weak)) void ipc_show_all(void);
         if (ipc_show_all) ipc_show_all();
         s_hidden = false;
         gui_toast("Restore", 0x0060a0e0u);
     }
-    /* State change only — render thread picks it up on next tick via ipc_needs_redraw */
+    /* No full_redraw() here -- called from event thread, would race with
+     * drm_flush() running outside g_mx in the render thread.
+     * ipc_hide_all/ipc_show_all set g_ipc_needs_redraw so render picks it up. */
 }
 
 void gui_snap_focused(int zone) {
