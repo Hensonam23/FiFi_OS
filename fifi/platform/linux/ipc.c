@@ -35,6 +35,9 @@
 #include "console.h"
 #include "gui.h"
 
+__attribute__((weak)) void gui_toast_extern(const char *msg, uint32_t col);
+__attribute__((weak)) void gui_snap_focused(int zone);
+
 #define FIFI_SOCK     "/tmp/fifi-compositor.sock"
 #define IPC_MAX_APPS  8
 #define IPC_HDR_SZ    8        /* uint32_t type + uint32_t len */
@@ -1128,6 +1131,25 @@ void ipc_cycle_focus(void) {
         ipc_send(c, IPC_INVALIDATE, NULL, 0);
         return;
     }
+}
+
+void ipc_snap_focused(int zone) {
+    int idx = g_focused_idx;
+    if (idx < 0 || idx >= IPC_MAX_APPS ||
+        !g_clients[idx].active || g_clients[idx].fd < 0) {
+        idx = -1;
+        for (int i = IPC_MAX_APPS - 1; i >= 0; i--) {
+            if (g_clients[i].active && g_clients[i].fd >= 0) { idx = i; break; }
+        }
+    }
+    if (idx < 0) {
+        if (gui_snap_focused) gui_snap_focused(zone);
+        return;
+    }
+    static const char *snap_labels[] = {"Snap restore","Snap left","Snap right","Snap max"};
+    if (zone >= 0 && zone <= 3 && gui_toast_extern) gui_toast_extern(snap_labels[zone], 0x0060a0e0u);
+    if (zone == 0) ipc_unsnap(idx);
+    else           ipc_apply_snap(idx, zone);
 }
 
 /* Keep old API for any callers */

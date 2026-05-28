@@ -69,6 +69,7 @@ void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
 void ipc_clear_focus(void);
 void ipc_close_focused(void);
 void ipc_cycle_focus(void);
+void ipc_snap_focused(int zone);
 bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
@@ -557,6 +558,10 @@ int main(void) {
                 if (uc == 0x97u) { ipc_close_focused(); continue; }
                 if (uc == 0x89u) { ipc_cycle_focus(); continue; }
                 if (uc == 0x17u) { ipc_close_focused(); continue; }
+                if (uc == 0x98u) { ipc_snap_focused(1); continue; }
+                if (uc == 0x99u) { ipc_snap_focused(2); continue; }
+                if (uc == 0x9Au) { ipc_snap_focused(3); continue; }
+                if (uc == 0x9Bu) { ipc_snap_focused(0); continue; }
                 if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                 if (uc >= 0x8Au && uc <= 0x90u) {
                     /* F1-F7: already in GUI ring via kb_push_internal — just consume */
@@ -573,6 +578,10 @@ int main(void) {
                 if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                 if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
                 if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
+                if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
+                if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
+                if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
+                if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
                 pty_write_input((uint8_t)c);
             }
         } else {
@@ -583,6 +592,10 @@ int main(void) {
                 if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                 if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
                 if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
+                if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
+                if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
+                if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
+                if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
             }
         }
 

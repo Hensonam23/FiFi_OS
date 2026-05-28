@@ -434,6 +434,9 @@ static uint64_t g_gaming_btn_bx = 0, g_gaming_btn_by = 0;
 static uint64_t g_gaming_btn_bw = 0, g_gaming_btn_bh = 0u;
 static uint64_t g_gaming_mode_bx = 0, g_gaming_mode_by = 0;
 static uint64_t g_gaming_mode_bw = 0, g_gaming_mode_bh = 0u;
+static uint64_t g_fw_btn_bx = 0, g_fw_btn_by = 0;
+static uint64_t g_fw_btn_bw = 0, g_fw_btn_bh = 0u;
+static int      g_fw_state  = -1; /* -1=unchecked, 0=off, 1=on */
 
 /* ── Volume tray popup state ─────────────────────────────────────────── */
 static bool     g_vol_popup_open  = false;
@@ -5841,7 +5844,7 @@ static void settings_render(window_t *w) {
                        + (uint64_t)tog_rows  * (SET_ROW_H + 8u)
                        + (fh + 6u) + 4u + 5u;
     uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
-    uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + 5u;
+    uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + SET_ROW_H + 5u;
     /* shortcuts table — defined here so we can count it for total_h */
     struct { const char *key; const char *desc; } shortcuts[] = {
         { "F1",             "Toggle Terminal"             },
@@ -5851,6 +5854,12 @@ static void settings_render(window_t *w) {
         { "F5",             "Launch Sys Monitor"          },
         { "F6",             "Launch Net Monitor"          },
         { "F7",             "Launch Calculator"           },
+        { "F11",            "Volume down"                 },
+        { "F12",            "Volume up"                   },
+        { "Super+Left",     "Snap window left half"       },
+        { "Super+Right",    "Snap window right half"      },
+        { "Super+Up",       "Maximize window"             },
+        { "Super+Down",     "Restore window"              },
         { "Alt+Tab",        "Cycle open windows"         },
         { "Esc / Ctrl+W",   "Close focused window"       },
         { "Up / Down",      "Navigate file list"         },
@@ -6511,6 +6520,32 @@ static void settings_render(window_t *w) {
                                (i == 0 && !net_ip) ? 0x00e88060u : COL_SET_VAL_FG;
                 gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
                              netinfo[i].val, vfg, bg);
+            }
+            cy += SET_ROW_H;
+        }
+
+        /* ── Firewall toggle row ── */
+        {
+            __attribute__((weak)) bool gui_firewall_active(void);
+            if (g_fw_state < 0 && gui_firewall_active)
+                g_fw_state = gui_firewall_active() ? 1 : 0;
+            bool fw_on = (g_fw_state == 1);
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Firewall:", COL_SET_KEY_FG, bg);
+                uint64_t fbw = 5u * fw + 2u * fw;
+                uint64_t fbx = val_x;
+                uint32_t fb_bg = fw_on ? 0x00103820u : 0x00381018u;
+                uint32_t fb_fg = fw_on ? 0x0050e880u : 0x00e05050u;
+                console_fill_rect(fbx, SCY, fbw, SET_ROW_H, fb_bg);
+                const char *fw_lbl = fw_on ? " ON  " : " OFF ";
+                gui_draw_str(fbx + fw, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             fw_lbl, fb_fg, fb_bg);
+                g_fw_btn_bx = fbx; g_fw_btn_by = SCY;
+                g_fw_btn_bw = fbw; g_fw_btn_bh = SET_ROW_H;
             }
             cy += SET_ROW_H;
         }
@@ -8053,6 +8088,23 @@ void gui_on_tick(void) {
                 if ((uint8_t)ch == KEY_F7) {
                     __attribute__((weak)) void gui_spawn_app(const char *path);
                     if (gui_spawn_app) gui_spawn_app("/bin/fifi-calc");
+                    continue;
+                }
+                /* ── F11/F12: Volume Down / Up ── */
+                if ((uint8_t)ch == KEY_F11) {
+                    int v = hda_get_volume() - 5; if (v < 0) v = 0;
+                    hda_set_volume(v);
+                    char _vm[24]; snprintf(_vm, sizeof(_vm), "Volume: %d%%", v);
+                    gui_toast_extern(_vm, 0x0060a0e0u);
+                    if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
+                    continue;
+                }
+                if ((uint8_t)ch == KEY_F12) {
+                    int v = hda_get_volume() + 5; if (v > 100) v = 100;
+                    hda_set_volume(v);
+                    char _vm[24]; snprintf(_vm, sizeof(_vm), "Volume: %d%%", v);
+                    gui_toast_extern(_vm, 0x0060a0e0u);
+                    if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
                     continue;
                 }
                 /* ── Launcher keyboard navigation ── */
@@ -9647,38 +9699,39 @@ void gui_on_tick(void) {
             return;
         }
 
-        for (int s = 0; s < MAX_WINS; s++) {
-            if (s == 3 && !g_wins[3].active) continue;
-            uint64_t bx = taskbtn_start_x() + (uint64_t)s * (TASKBTN_W + TASKBTN_GAP);
-            if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
-                window_t *w = &g_wins[s];
-                if (w->state == WIN_HIDDEN) {
-                    z_raise(s);
-                    win_show(w, s);
-                } else if (g_z[MAX_WINS - 1] == s) {
-                    /* Already focused — minimize */
-                    win_hide(w, s);
-                } else {
-                    /* Raise to front */
-                    z_raise(s);
-                    full_redraw();
-                }
-                break;
-            }
-        }
-
-        /* ── IPC window taskbar buttons ── */
-        __attribute__((weak)) int  ipc_window_count(void);
-        __attribute__((weak)) void ipc_window_focus_slot(int slot);
-        if (ipc_window_count && ipc_window_focus_slot) {
-            int nipc = ipc_window_count();
-            for (int wi = 0; wi < nipc && wi < 8; wi++) {
-                int islot = MAX_WINS + wi;
-                uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (TASKBTN_W + TASKBTN_GAP);
-                if (mx >= (int32_t)bx && mx < (int32_t)(bx + TASKBTN_W)) {
-                    ipc_window_focus_slot(wi);
-                    full_redraw();
+        {
+            uint64_t tbw = taskbtn_w();
+            for (int s = 0; s < MAX_WINS; s++) {
+                if (s == 3 && !g_wins[3].active) continue;
+                uint64_t bx = taskbtn_start_x() + (uint64_t)s * (tbw + TASKBTN_GAP);
+                if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
+                    window_t *w = &g_wins[s];
+                    if (w->state == WIN_HIDDEN) {
+                        z_raise(s);
+                        win_show(w, s);
+                    } else if (g_z[MAX_WINS - 1] == s) {
+                        win_hide(w, s);
+                    } else {
+                        z_raise(s);
+                        full_redraw();
+                    }
                     break;
+                }
+            }
+
+            /* ── IPC window taskbar buttons ── */
+            __attribute__((weak)) int  ipc_window_count(void);
+            __attribute__((weak)) void ipc_window_focus_slot(int slot);
+            if (ipc_window_count && ipc_window_focus_slot) {
+                int nipc = ipc_window_count();
+                for (int wi = 0; wi < nipc && wi < 8; wi++) {
+                    int islot = MAX_WINS + wi;
+                    uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (tbw + TASKBTN_GAP);
+                    if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
+                        ipc_window_focus_slot(wi);
+                        full_redraw();
+                        break;
+                    }
                 }
             }
         }
@@ -10897,6 +10950,23 @@ void gui_on_tick(void) {
                         gaming_mode_set(!gaming_mode_active());
                         settings_render(w);
                     }
+                    /* Firewall toggle button */
+                    if (g_fw_btn_bh > 0 &&
+                        (uint64_t)my >= g_fw_btn_by &&
+                        (uint64_t)my <  g_fw_btn_by + g_fw_btn_bh &&
+                        (uint64_t)mx >= g_fw_btn_bx &&
+                        (uint64_t)mx <  g_fw_btn_bx + g_fw_btn_bw) {
+                        __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
+                        bool now_on = (g_fw_state != 1);
+                        if (gui_exec_silent) {
+                            if (now_on)
+                                gui_exec_silent("/usr/sbin/nft", "-f", "/etc/nftables.conf");
+                            else
+                                gui_exec_silent("/usr/sbin/nft", "flush", "ruleset");
+                        }
+                        g_fw_state = now_on ? 1 : 0;
+                        settings_render(w);
+                    }
                 }
             }
             break;
@@ -11017,4 +11087,38 @@ void gui_add_desktop_icon(const char *path, const char *label) {
 
 void gui_toast_extern(const char *msg, uint32_t color) {
     gui_toast(msg, color);
+}
+
+void gui_snap_focused(int zone) {
+    int top = -1;
+    for (int i = MAX_WINS - 1; i >= 0; i--) {
+        int wi = g_z[i];
+        if (g_wins[wi].active && g_wins[wi].state != WIN_HIDDEN) { top = wi; break; }
+    }
+    if (top < 0) return;
+    window_t *w = &g_wins[top];
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t uh   = fb_h > TASKBAR_H ? fb_h - TASKBAR_H : fb_h;
+    static const char *labels[] = {"Snap restore","Snap left","Snap right","Snap max"};
+    if (zone >= 0 && zone <= 3) gui_toast(labels[zone], 0x0060a0e0u);
+    if (zone == 0) {
+        if (w->half_snapped) {
+            w->x = w->saved_x; w->y = w->saved_y;
+            w->w = w->saved_w; w->h = w->saved_h;
+            w->half_snapped = false;
+        }
+    } else {
+        if (!w->half_snapped) {
+            w->saved_x = w->x; w->saved_y = w->y;
+            w->saved_w = w->w; w->saved_h = w->h;
+        }
+        switch (zone) {
+        case 1: w->x = 0;        w->y = 0; w->w = fb_w / 2;        w->h = uh; break;
+        case 2: w->x = fb_w / 2; w->y = 0; w->w = fb_w - fb_w / 2; w->h = uh; break;
+        case 3: w->x = 0;        w->y = 0; w->w = fb_w;             w->h = uh; break;
+        }
+        w->half_snapped = true;
+    }
+    full_redraw();
 }

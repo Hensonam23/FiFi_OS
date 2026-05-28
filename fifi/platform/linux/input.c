@@ -40,6 +40,10 @@
 #define FIFI_KEY_F10    0x93u
 #define FIFI_KEY_F11    0x94u
 #define FIFI_KEY_F12    0x95u
+#define FIFI_KEY_SUPER_LEFT  0x98u
+#define FIFI_KEY_SUPER_RIGHT 0x99u
+#define FIFI_KEY_SUPER_UP    0x9Au
+#define FIFI_KEY_SUPER_DOWN  0x9Bu
 #define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
 #define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
@@ -114,6 +118,7 @@ static uint32_t g_gui_used = 0;
 static bool g_shift = false;
 static bool g_ctrl  = false;
 static bool g_alt   = false;
+static bool g_super = false;
 
 /* ── Mouse state ─────────────────────────────────────────────────────────── */
 static int32_t g_mx = 400, g_my = 300;
@@ -146,6 +151,16 @@ void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h) {
 /* ── Key translation (linux evdev codes → FiFi chars / FIFI_KEY_*) ────────── */
 
 static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
+    /* Super+arrow = window snap */
+    if (g_super) {
+        switch (code) {
+        case KEY_LEFT:  return FIFI_KEY_SUPER_LEFT;
+        case KEY_RIGHT: return FIFI_KEY_SUPER_RIGHT;
+        case KEY_UP:    return FIFI_KEY_SUPER_UP;
+        case KEY_DOWN:  return FIFI_KEY_SUPER_DOWN;
+        default: break;
+        }
+    }
     switch (code) {
         /* Navigation */
         case KEY_LEFT:     return FIFI_KEY_LEFT;
@@ -170,6 +185,8 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_F10: return FIFI_KEY_F10;
         case KEY_F11: return FIFI_KEY_F11;
         case KEY_F12: return FIFI_KEY_F12;
+        case KEY_VOLUMEDOWN: return FIFI_KEY_F11;
+        case KEY_VOLUMEUP:   return FIFI_KEY_F12;
         case KEY_SYSRQ: return FIFI_KEY_PRTSC;
         /* ASCII control */
         case KEY_BACKSPACE: return '\b';
@@ -525,6 +542,8 @@ void input_poll(void) {
                 g_ctrl = pressed;
             else if (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT)
                 g_alt = pressed;
+            else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA)
+                g_super = pressed;
 
             if (!pressed) continue;
 

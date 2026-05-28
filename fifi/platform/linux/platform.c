@@ -322,6 +322,24 @@ void gui_spawn_app(const char *path) {
         fprintf(stderr, "[platform] fork failed for %s\n", path);
 }
 
+void gui_exec_silent(const char *path, const char *arg1, const char *arg2) {
+    signal(SIGCHLD, SIG_IGN);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[4] = { (char *)path, (char *)arg1, (char *)arg2, NULL };
+        execv(path, argv);
+        _exit(127);
+    }
+}
+
+bool gui_firewall_active(void) {
+    FILE *f = popen("/usr/sbin/nft list tables 2>/dev/null", "r");
+    if (!f) return false;
+    char buf[4]; bool has_rules = (fread(buf, 1, 1, f) == 1);
+    pclose(f);
+    return has_rules;
+}
+
 void gui_spawn_app_with_arg(const char *path, const char *arg) {
     signal(SIGCHLD, SIG_IGN);
     pid_t pid = fork();
