@@ -72,9 +72,9 @@ Everything visible transfers. Only the kernel layer is replaced:
 
 **Phase 4 complete. Phase 5 (Security and Privacy) in progress.**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA + PipeWire audio (multi-app mixing, PulseAudio-compatible), XWayland for X11 app support (Steam, browsers), a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Steam launches via XWayland. Proton versions are detected and shown in the Proton Config panel. The GUI launcher includes Steam and Proton Config entries. The compositor tells the GPU exactly when a frame is ready instead of polling on a timer. Both QEMU and SDL2 native runner work.
+FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA + PipeWire audio (multi-app mixing, PulseAudio-compatible), XWayland for X11 app support (Steam, browsers), a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Steam launches via XWayland. Proton versions are detected and shown in the Proton Config panel. The compositor tells the GPU exactly when a frame is ready instead of polling on a timer. Both QEMU and SDL2 native runner work.
 
-Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap), a firewall toggle in Settings, a Security Center with privacy controls, and more security features being added in each update.
+Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap, numpad), screen lock, Super+D show desktop toggle, a firewall toggle in Settings, a Security Center with privacy controls, and context menus on the desktop and file browser. Toast notifications appear for all system actions. UI polish: context menus scale with font size, settings panel scrolls and clips correctly, right-click ring buffer fixed.
 
 ---
 
@@ -143,9 +143,16 @@ Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap), a f
 - [x] Keyboard shortcuts: Alt+Tab (cycle windows), Ctrl+W (close), F11/F12 (volume down/up)
 - [x] Volume keys: dedicated media keys on any keyboard work for volume control
 - [x] Window snap: Win+Left/Right snaps to half screen, Win+Up maximizes, Win+Down restores
+- [x] Numpad keys: all numpad digits and operators work in terminal and apps
 - [x] Taskbar click alignment fixed: buttons now match their visual position
+- [x] Screen lock: Win+L locks the screen, password required to unlock
+- [x] Super+D show desktop: hides all windows to show the desktop, press again to restore
 - [x] Firewall toggle: nftables on/off switch in Settings Network section
 - [x] Security Center app: firewall status, privacy mode (73 telemetry domains blocked), port scanner, active connections
+- [x] Context menus: right-click on desktop opens app launcher menu, right-click in file browser shows file actions; menus scale with font size
+- [x] Toast notifications: short overlay appears for volume changes, lock, show desktop, window snap, and other actions
+- [x] Settings panel scroll and clip: long settings lists scroll correctly and content does not bleed outside the window
+- [x] Right-click menu ring buffer fixed: opening menus mid-render no longer corrupts input state
 - [ ] DNS over HTTPS: system-wide encrypted DNS with no plain-text leaks
 - [ ] VPN integration: WireGuard built in, one-click connect from Settings
 - [ ] Tor mode: route all traffic through Tor from a Settings toggle
