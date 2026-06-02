@@ -1,19 +1,12 @@
-# FiFi OS: Linux Desktop Branch
+# FiFi OS
 
-**Branch:** `linux-desktop` - gaming, security, privacy, and daily driver
-**Sibling:** `main` - the bare-metal kernel project (built from scratch, no borrowed code)
-
-FiFi OS is a custom desktop operating system built from the ground up. It has its own GUI, window manager, terminal, file browser, text editor, and settings panel. This branch runs that desktop on top of a real Linux kernel so it works on actual hardware, while keeping everything you see and touch as FiFi.
-
-The Linux kernel is just the engine under the hood. Everything the user sees is FiFi.
+FiFi OS is a custom operating system for gaming, security, privacy, and everyday use. The whole desktop is its own: the window manager, taskbar, terminal, file browser, text editor, and settings are all built by hand. It runs on the Linux kernel so it works on real hardware and can play games, but everything you see and use is FiFi's own, not another desktop made to look different.
 
 ---
 
-## What this branch is
+## What it is
 
-The `main` branch of FiFi OS is a hand-written x86-64 kernel with no borrowed code. That continues as a long-term project.
-
-This branch uses the Linux kernel as the hardware layer. GPU drivers, USB, audio, and networking are all handled by Linux so FiFi can focus on being a great desktop. The result:
+FiFi OS lets Linux handle the hard, invisible parts (graphics cards, USB devices, sound, networking, and storage) so FiFi can focus on the part you actually use: the desktop. The result:
 
 - Boots straight into the FiFi desktop with no login screen
 - Runs Steam and Proton games
@@ -46,11 +39,9 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 
 ---
 
-## What carries over from `main`
+## What works today
 
-Everything visible transfers. Only the kernel layer is replaced:
-
-| Component | Status |
+| Feature | Status |
 |---|---|
 | GUI compositor: window manager, z-order, drag/resize | **Working (Phase 2)** |
 | Taskbar: launcher, window buttons, clock, volume/FPS tray | **Working** |
@@ -64,7 +55,6 @@ Everything visible transfers. Only the kernel layer is replaced:
 | Gamepad: evdev HID input routed to focused IPC app | **Working (Phase 4)** |
 | Gaming mode: CPU governor switch, uncapped frame rate | **Working (Phase 4)** |
 | App launcher: spawn IPC apps from GUI (Files, Settings, Gamepad) | **Working (Phase 4)** |
-| Kernel infrastructure: PMM, VMM, IDT, scheduler | Replaced by Linux |
 
 ---
 
@@ -185,7 +175,7 @@ The window manager was reworked so overlapping app windows layer cleanly with no
 - [ ] Full desktop: browser, terminal, file manager, text editor, settings, system monitor
 - [ ] Steam and Proton gaming on NVIDIA and AMD hardware
 - [ ] USB installer: one click to install to disk
-- [ ] Dual installer: bare-metal (main branch) or Linux-desktop at your choice
+- [ ] Dual installer: choose the everyday Linux version or the from-scratch version at install time
 - [ ] Default encrypted, default private, default hardened
 - [ ] Public release at GitHub Releases
 
@@ -249,16 +239,9 @@ The plan is a local AI assistant with no cloud, no account, and no data leaving 
 
 ---
 
-## Relationship to `main`
+## The other version
 
-| | `main` (bare-metal) | `linux-desktop` (this branch) |
-|---|---|---|
-| Kernel | Hand-written from scratch | Linux zen (custom config) |
-| GPU support | Software framebuffer only | DRM/KMS direct GPU access |
-| Steam/games | Not feasible | Yes, via Proton (Phase 4) |
-| Security tools | Not yet | Phase 5 (in progress) |
-| Goal | Research and learning | Daily-driver gaming and security OS |
-| Status | Alpha v5.1, active | Phase 5 in progress |
+There is a second version of FiFi OS that runs on its own kernel written entirely from scratch, with no Linux underneath. It is a separate, longer-term project for research and learning. The version described here is the one built for everyday use and gaming, and it is where the active work happens.
 
 ---
 
