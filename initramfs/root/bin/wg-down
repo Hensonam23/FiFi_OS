@@ -1,0 +1,4 @@
+#!/bin/sh
+# Tear down the WireGuard interface and record disconnection.
+ip link del wg0 2>/dev/null
+echo "vpn: disconnected" > /fifi-data/vpn.log

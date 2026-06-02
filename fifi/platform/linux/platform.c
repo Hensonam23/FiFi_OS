@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -199,13 +200,15 @@ static void net_read_config(const char *iface) {
 
 void gui_set_dns(int mode) {
     extern uint32_t net_dns;
+    /* DoH manages resolv.conf when active — don't override it */
+    if (access("/fifi-data/doh-enabled", F_OK) == 0) return;
     if (mode != 0) {
-        /* Backup current resolv.conf before first override */
-        FILE *chk = fopen("/etc/resolv.conf.dhcp", "r");
+        /* Back up DHCP-provided resolv.conf the first time we override it */
+        FILE *chk = fopen("/fifi-data/dhcp-dns", "r");
         if (!chk) {
             FILE *src = fopen("/etc/resolv.conf", "r");
             if (src) {
-                FILE *dst = fopen("/etc/resolv.conf.dhcp", "w");
+                FILE *dst = fopen("/fifi-data/dhcp-dns", "w");
                 if (dst) {
                     char line[256];
                     while (fgets(line, sizeof(line), src)) fputs(line, dst);
@@ -224,17 +227,18 @@ void gui_set_dns(int mode) {
     } else if (mode == 2) {
         fputs("nameserver 9.9.9.9\nnameserver 149.112.112.112\n", f);
     } else {
-        FILE *bak = fopen("/etc/resolv.conf.dhcp", "r");
+        /* Default: restore DHCP-provided DNS */
+        FILE *bak = fopen("/fifi-data/dhcp-dns", "r");
         if (bak) {
             char line[256];
             while (fgets(line, sizeof(line), bak)) fputs(line, f);
             fclose(bak);
         } else {
-            fputs("# DNS: DHCP default\n", f);
+            fputs("nameserver 8.8.8.8\nnameserver 8.8.4.4\n", f);
         }
     }
     fclose(f);
-    net_dns = 0; /* force refresh on next net_poll */
+    net_dns = 0; /* force net_poll to re-read */
 }
 
 void net_init(void) {
@@ -378,6 +382,50 @@ bool gui_firewall_active(void) {
     char buf[4]; bool has_rules = (fread(buf, 1, 1, f) == 1);
     pclose(f);
     return has_rules;
+}
+
+/* ── VPN (WireGuard) helpers ─────────────────────────────────────────────── */
+
+bool gui_vpn_connected(void) {
+    return access("/sys/class/net/wg0", F_OK) == 0;
+}
+
+bool gui_vpn_has_config(void) {
+    return access("/fifi-data/wg0.conf", F_OK) == 0;
+}
+
+bool gui_vpn_autoconnect_enabled(void) {
+    return access("/fifi-data/vpn-autoconnect", F_OK) == 0;
+}
+
+void gui_vpn_set_autoconnect(bool on) {
+    if (on) {
+        int fd = open("/fifi-data/vpn-autoconnect", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) close(fd);
+    } else {
+        unlink("/fifi-data/vpn-autoconnect");
+    }
+}
+
+void gui_vpn_connect(void) {
+    /* Run wg-up and wait so the interface is up before we re-render status */
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 3; i < 64; i++) close(i);
+        execl("/bin/sh", "sh", "/bin/wg-up", NULL);
+        _exit(1);
+    }
+    if (pid > 0) { int st; waitpid(pid, &st, 0); }
+}
+
+void gui_vpn_disconnect(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 3; i < 64; i++) close(i);
+        execl("/bin/sh", "sh", "/bin/wg-down", NULL);
+        _exit(1);
+    }
+    if (pid > 0) { int st; waitpid(pid, &st, 0); }
 }
 
 void gui_spawn_app_with_arg(const char *path, const char *arg) {

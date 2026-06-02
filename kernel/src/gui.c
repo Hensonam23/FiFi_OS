@@ -513,6 +513,10 @@ static int      g_fw_state  = -1; /* -1=unchecked, 0=off, 1=on */
 static uint64_t g_dns_btn_bx = 0, g_dns_btn_by = 0;
 static uint64_t g_dns_btn_bw = 0, g_dns_btn_bh = 0u;
 static int      g_dns_mode   = 0; /* 0=Default, 1=Cloudflare, 2=Quad9 */
+static uint64_t g_vpn_btn_bx = 0, g_vpn_btn_by = 0;
+static uint64_t g_vpn_btn_bw = 0, g_vpn_btn_bh = 0u;
+static uint64_t g_vpn_auto_bx = 0, g_vpn_auto_by = 0;
+static uint64_t g_vpn_auto_bw = 0, g_vpn_auto_bh = 0u;
 static uint64_t g_lto_btn_bx = 0, g_lto_btn_by = 0;
 static uint64_t g_lto_btn_bw = 0, g_lto_btn_bh = 0u;
 static int      g_lto_idx    = 0; /* 0=Never,1=1min,2=5min,3=10min,4=30min */
@@ -6082,7 +6086,9 @@ static void settings_render(window_t *w) {
     int nsc = 0; while (shortcuts[nsc].key) nsc++;
     uint64_t h_sc      = (uint64_t)(SET_SEC_H + 4u) + (uint64_t)nsc * SET_ROW_H;
     uint64_t h_privacy = (uint64_t)(SET_SEC_H + 4u) + SET_ROW_H + 5u;
-    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_privacy + h_sc + (uint64_t)SET_PAD;
+    /* VPN section: header + status + connect-button + auto-connect + hint/separator */
+    uint64_t h_vpn     = (uint64_t)(SET_SEC_H + 4u) + 4u * SET_ROW_H + 5u;
+    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_vpn + h_privacy + h_sc + (uint64_t)SET_PAD;
     g_settings_total_h = (int)total_h;
     /* Clamp scroll */
     if ((int64_t)total_h > (int64_t)ih) {
@@ -6105,7 +6111,7 @@ static void settings_render(window_t *w) {
     g_vol_btn_by = 0; g_vol_btn_bh = 0;
     g_vol_pop_btn_y = 0; g_vol_chime_bw = 0; g_vol_chime_bh = 0;
     g_gaming_btn_bh = 0; g_gaming_mode_bh = 0;
-    g_fw_btn_bh = 0; g_dns_btn_bh = 0; g_lto_btn_bh = 0;
+    g_fw_btn_bh = 0; g_dns_btn_bh = 0; g_vpn_btn_bh = 0; g_vpn_auto_bh = 0; g_lto_btn_bh = 0;
 
     console_fill_rect(ix, iy, iw, ih, COL_SET_BG);
 
@@ -6728,6 +6734,102 @@ static void settings_render(window_t *w) {
                              lbl, db_fg, db_bg);
                 g_dns_btn_bx = dbx; g_dns_btn_by = SCY;
                 g_dns_btn_bw = dbw; g_dns_btn_bh = SET_ROW_H;
+            }
+            cy += SET_ROW_H;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: VPN (WireGuard) ── */
+    {
+        __attribute__((weak)) bool gui_vpn_connected(void);
+        __attribute__((weak)) bool gui_vpn_has_config(void);
+        __attribute__((weak)) bool gui_vpn_autoconnect_enabled(void);
+
+        bool vpn_on     = gui_vpn_connected        && gui_vpn_connected();
+        bool has_cfg    = gui_vpn_has_config       && gui_vpn_has_config();
+        bool auto_on    = gui_vpn_autoconnect_enabled && gui_vpn_autoconnect_enabled();
+
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)),
+                         "VPN (WireGuard)", COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+        SADVBOT;
+
+        /* Status row */
+        SADVBOT;
+        if (SVIS) {
+            uint32_t bg = COL_SET_BG;
+            console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                         "Status:", COL_SET_KEY_FG, bg);
+            const char *vstatus = vpn_on  ? "Connected"    :
+                                  has_cfg ? "Disconnected" : "No config";
+            uint32_t vfg = vpn_on  ? 0x0060d880u :
+                           has_cfg ? 0x00e88060u  : COL_SET_HINT;
+            gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                         vstatus, vfg, bg);
+        }
+        cy += SET_ROW_H;
+
+        /* Connect / Disconnect button (only if a config file exists) */
+        if (has_cfg) {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = 0x000f151fu;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "WireGuard:", COL_SET_KEY_FG, bg);
+                const char *lbl   = vpn_on ? " Disconnect " : " Connect ";
+                uint64_t    llen  = (uint64_t)gui_strlen(lbl);
+                uint64_t    vbw   = llen * fw;
+                uint32_t    vb_bg = vpn_on ? 0x00381018u : 0x00103820u;
+                uint32_t    vb_fg = vpn_on ? 0x00e05050u : 0x0050e880u;
+                console_fill_rect(val_x, SCY, vbw, SET_ROW_H, vb_bg);
+                gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             lbl, vb_fg, vb_bg);
+                g_vpn_btn_bx = val_x; g_vpn_btn_by = SCY;
+                g_vpn_btn_bw = vbw;   g_vpn_btn_bh = SET_ROW_H;
+            }
+            cy += SET_ROW_H;
+        }
+
+        /* Auto-connect on boot toggle */
+        {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Auto-connect:", COL_SET_KEY_FG, bg);
+                const char *albl   = auto_on ? " ON  " : " OFF ";
+                uint64_t    alen   = (uint64_t)gui_strlen(albl);
+                uint64_t    ab_w   = alen * fw;
+                uint32_t    ab_bg  = auto_on ? 0x00103820u : 0x00381018u;
+                uint32_t    ab_fg  = auto_on ? 0x0050e880u : 0x00e05050u;
+                console_fill_rect(val_x, SCY, ab_w, SET_ROW_H, ab_bg);
+                gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             albl, ab_fg, ab_bg);
+                g_vpn_auto_bx = val_x; g_vpn_auto_by = SCY;
+                g_vpn_auto_bw = ab_w;  g_vpn_auto_bh = SET_ROW_H;
+            }
+            cy += SET_ROW_H;
+        }
+
+        /* Hint when no config is present */
+        if (!has_cfg) {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Place wg0.conf in /fifi-data/ to connect",
+                             COL_SET_HINT, bg);
             }
             cy += SET_ROW_H;
         }
@@ -11284,6 +11386,34 @@ void gui_on_tick(void) {
                         __attribute__((weak)) void gui_set_dns(int mode);
                         g_dns_mode = (g_dns_mode + 1) % 3;
                         if (gui_set_dns) gui_set_dns(g_dns_mode);
+                        settings_render(w);
+                    }
+                    /* VPN connect / disconnect button */
+                    if (g_vpn_btn_bh > 0 &&
+                        (uint64_t)my >= g_vpn_btn_by &&
+                        (uint64_t)my <  g_vpn_btn_by + g_vpn_btn_bh &&
+                        (uint64_t)mx >= g_vpn_btn_bx &&
+                        (uint64_t)mx <  g_vpn_btn_bx + g_vpn_btn_bw) {
+                        __attribute__((weak)) bool gui_vpn_connected(void);
+                        __attribute__((weak)) void gui_vpn_connect(void);
+                        __attribute__((weak)) void gui_vpn_disconnect(void);
+                        if (gui_vpn_connected && gui_vpn_connected()) {
+                            if (gui_vpn_disconnect) gui_vpn_disconnect();
+                        } else {
+                            if (gui_vpn_connect) gui_vpn_connect();
+                        }
+                        settings_render(w);
+                    }
+                    /* VPN auto-connect toggle */
+                    if (g_vpn_auto_bh > 0 &&
+                        (uint64_t)my >= g_vpn_auto_by &&
+                        (uint64_t)my <  g_vpn_auto_by + g_vpn_auto_bh &&
+                        (uint64_t)mx >= g_vpn_auto_bx &&
+                        (uint64_t)mx <  g_vpn_auto_bx + g_vpn_auto_bw) {
+                        __attribute__((weak)) bool gui_vpn_autoconnect_enabled(void);
+                        __attribute__((weak)) void gui_vpn_set_autoconnect(bool on);
+                        bool cur = gui_vpn_autoconnect_enabled && gui_vpn_autoconnect_enabled();
+                        if (gui_vpn_set_autoconnect) gui_vpn_set_autoconnect(!cur);
                         settings_render(w);
                     }
                     /* Lock timeout cycle button */

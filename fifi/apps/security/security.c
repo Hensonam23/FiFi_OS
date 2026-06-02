@@ -361,6 +361,113 @@ static void scan_next_port(void) {
     if (g_scan_idx >= SCAN_PORTS) g_scan_state = SCAN_DONE;
 }
 
+/* ── Network scanner (nmap -sn on local subnet) ─────────────────────────── */
+static char g_local_subnet[32] = "";
+
+static void detect_subnet(void) {
+    /* Read /proc/net/route and find the connected (non-gateway) local route */
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) {
+        snprintf(g_local_subnet, sizeof(g_local_subnet), "10.0.2.0/24");
+        return;
+    }
+    char line[200];
+    fgets(line, sizeof(line), f); /* skip header */
+    uint32_t best_dst = 0, best_mask = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char iface[16];
+        uint32_t dst, gw, mask;
+        unsigned int flg;
+        if (sscanf(line, "%15s %x %x %x %*d %*d %*d %x", iface, &dst, &gw, &flg, &mask) == 5) {
+            /* Flags 0x0001 = UP, 0x0002 = GATEWAY — connected routes have UP but not GATEWAY */
+            if ((flg & 0x0003u) == 0x0001u && mask != 0u && dst != 0u) {
+                best_dst = dst; best_mask = mask;
+            }
+        }
+    }
+    fclose(f);
+    if (best_dst && best_mask) {
+        uint32_t net = best_dst & best_mask;
+        /* Count prefix from set bits (mask is LE in /proc/net/route) */
+        int prefix = 0;
+        uint32_t m = best_mask;
+        while (m) { prefix += (int)(m & 1u); m >>= 1; }
+        /* Extract octets (LE byte order) */
+        uint8_t b0 = (uint8_t)((net >>  0) & 0xFFu);
+        uint8_t b1 = (uint8_t)((net >>  8) & 0xFFu);
+        uint8_t b2 = (uint8_t)((net >> 16) & 0xFFu);
+        uint8_t b3 = (uint8_t)((net >> 24) & 0xFFu);
+        snprintf(g_local_subnet, sizeof(g_local_subnet),
+                 "%u.%u.%u.%u/%d", b0, b1, b2, b3, prefix);
+    } else {
+        snprintf(g_local_subnet, sizeof(g_local_subnet), "10.0.2.0/24");
+    }
+}
+
+/* ── Password strength tester ────────────────────────────────────────────── */
+static bool g_pw_mode       = false;
+static char g_pw_buf[128]   = "";
+static int  g_pw_len        = 0;
+static char g_pw_result[128] = "";
+static uint32_t g_pw_color  = 0x00b0c8e0u;
+
+static int pw_strength(const char *pw, int len) {
+    if (len == 0) return 0;
+    int score = 0;
+    if (len >= 8)  score++;
+    if (len >= 12) score++;
+    if (len >= 16) score++;
+    bool has_upper = false, has_lower = false, has_digit = false, has_special = false;
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)pw[i];
+        if (c >= 'A' && c <= 'Z')               has_upper   = true;
+        else if (c >= 'a' && c <= 'z')           has_lower   = true;
+        else if (c >= '0' && c <= '9')           has_digit   = true;
+        else if (c >= 0x21u && c <= 0x7Eu)       has_special = true;
+    }
+    if (has_upper)   score++;
+    if (has_lower)   score++;
+    if (has_digit)   score++;
+    if (has_special) score++;
+    return score; /* 0..7 */
+}
+
+static void evaluate_password(void) {
+    if (g_pw_len == 0) {
+        snprintf(g_pw_result, sizeof(g_pw_result), "No password entered");
+        g_pw_color = 0x00506070u;
+        return;
+    }
+    int score = pw_strength(g_pw_buf, g_pw_len);
+    const char *label = (score <= 2) ? "Weak" :
+                        (score <= 4) ? "Fair" :
+                        (score <= 6) ? "Strong" : "Very Strong";
+    g_pw_color = (score <= 2) ? 0x00cc3333u :
+                 (score <= 4) ? 0x00c0a020u :
+                 (score <= 6) ? 0x0030b060u : 0x0050e880u;
+    /* Build feedback string */
+    char fb[64] = "";
+    if (g_pw_len < 8)  { strncat(fb, "too short, ", sizeof(fb)-strlen(fb)-1); }
+    if (g_pw_len < 12) { /* hint below 12 */ }
+    bool has_upper = false, has_lower = false, has_digit = false, has_special = false;
+    for (int i = 0; i < g_pw_len; i++) {
+        unsigned char c = (unsigned char)g_pw_buf[i];
+        if (c >= 'A' && c <= 'Z') has_upper = true;
+        else if (c >= 'a' && c <= 'z') has_lower = true;
+        else if (c >= '0' && c <= '9') has_digit = true;
+        else if (c >= 0x21u && c <= 0x7Eu) has_special = true;
+    }
+    if (!has_upper)   { strncat(fb, "add uppercase, ", sizeof(fb)-strlen(fb)-1); }
+    if (!has_lower)   { strncat(fb, "add lowercase, ", sizeof(fb)-strlen(fb)-1); }
+    if (!has_digit)   { strncat(fb, "add numbers, ",  sizeof(fb)-strlen(fb)-1); }
+    if (!has_special) { strncat(fb, "add symbols, ",  sizeof(fb)-strlen(fb)-1); }
+    /* Remove trailing ", " */
+    int fl = (int)strlen(fb);
+    if (fl >= 2 && fb[fl-2] == ',' && fb[fl-1] == ' ') fb[fl-2] = '\0';
+    snprintf(g_pw_result, sizeof(g_pw_result), "%s (%d/7)%s%s",
+             label, score, fb[0] ? " -- " : "", fb);
+}
+
 /* ── Section: Active connections (/proc/net/tcp) ─────────────────────────── */
 #define MAX_CONN 24
 typedef struct { char local[24]; char remote[24]; char state[16]; } ConnEntry;
@@ -645,6 +752,39 @@ static void render(uint32_t *fb) {
         if (g_tool_fd >= 0) vy += ROW_H;
     }
 
+    /* ── Password Strength Tester ─── */
+    SECTION("Password Strength Tester");
+    if (g_pw_mode) {
+        /* Build masked display string */
+        char stars[130];
+        int sl = g_pw_len < 128 ? g_pw_len : 128;
+        for (int i = 0; i < sl; i++) stars[i] = '*';
+        stars[sl] = '|'; stars[sl+1] = '\0'; /* cursor */
+        char pw_line[160];
+        snprintf(pw_line, sizeof(pw_line), "Enter password: %s", stars);
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, pw_line, PAD, vy + (ROW_H - g_glyph_h)/2, C_YELLOW);
+        vy += ROW_H;
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Enter=check  Esc=cancel  (input hidden)",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    } else if (g_pw_result[0]) {
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, g_pw_result, PAD, vy + (ROW_H - g_glyph_h)/2, g_pw_color);
+        vy += ROW_H;
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Press P to check another password",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    } else {
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Press P to check a password (typed locally, never sent)",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    }
+    vy += 4;
+
 #undef SECTION
 #undef STATUS_ROW
 
@@ -652,7 +792,7 @@ static void render(uint32_t *fb) {
     int foot_y = wh - g_glyph_h - 6;
     fill(fb, 0, foot_y - 2, ww, g_glyph_h + 8, 0x000c1420u);
     hline(fb, foot_y - 2, C_BORDER);
-    draw_str(fb, "I=ip  D=DoH  V=VPN  N=nmap  T=dump  S=scan  R  PgUp/Dn  Q",
+    draw_str(fb, "D=DoH  V=VPN  N=nmap  A=net-scan  T=dump  S=scan  P=password  R  Q",
              PAD, foot_y, C_GREY);
     {
         char ts[32];
@@ -816,47 +956,69 @@ int main(void) {
                     case IPC_INPUT_KEY: {
                         if (iplen >= 1) {
                             uint8_t key = payload[0];
-                            if (key == 'q' || key == 'Q' || key == 0x1B) {
+                            if (g_pw_mode) {
+                                /* Password input: intercept all keys until Enter or Esc */
+                                if (key == 0x1Bu) {                        /* Esc: cancel */
+                                    g_pw_mode = false; g_pw_len = 0;
+                                } else if (key == 0x0Du || key == '\n') { /* Enter: check */
+                                    g_pw_buf[g_pw_len] = '\0';
+                                    evaluate_password();
+                                    g_pw_mode = false;
+                                } else if ((key == 0x08u || key == 0x7Fu) && g_pw_len > 0) {
+                                    g_pw_len--;                            /* Backspace */
+                                } else if (key >= 0x20u && key < 0x7Fu && g_pw_len < 127) {
+                                    g_pw_buf[g_pw_len++] = (char)key;     /* Printable */
+                                }
+                            } else if (key == 'q' || key == 'Q' || key == 0x1Bu) {
                                 running = false;
                             } else if (key == 's' || key == 'S') {
                                 g_scan_state = SCAN_RUNNING;
                                 g_scan_idx = 0;
                                 memset(g_scan_open, 0, sizeof(g_scan_open));
-                                render(fb); send_frame(sock, fb);
                             } else if (key == 'r' || key == 'R') {
-                                do_refresh(); render(fb); send_frame(sock, fb);
+                                do_refresh();
                             } else if (key == 'd' || key == 'D') {
-                                toggle_doh(); render(fb); send_frame(sock, fb);
+                                toggle_doh();
                             } else if (key == 'v' || key == 'V') {
-                                toggle_vpn(); render(fb); send_frame(sock, fb);
+                                toggle_vpn();
                             } else if (key == 'i' || key == 'I') {
-                                char *ip_args[] = {
-                                    "/bin/ip", "addr", NULL
-                                };
+                                char *ip_args[] = { "/bin/ip", "addr", NULL };
                                 run_tool("/bin/ip", ip_args, "ip addr");
-                                render(fb); send_frame(sock, fb);
                             } else if (key == 'n' || key == 'N') {
-                                /* -sT: TCP connect scan, no raw socket needed */
                                 char *nmap_args[] = {
                                     "/usr/bin/nmap", "-sT",
                                     "-p", "21,22,23,25,53,80,443,3306,5432,8080,8443",
                                     "--max-rtt-timeout", "100ms", "-T4", "127.0.0.1", NULL
                                 };
                                 run_tool("/usr/bin/nmap", nmap_args, "nmap -sT 127.0.0.1");
-                                render(fb); send_frame(sock, fb);
+                            } else if (key == 'a' || key == 'A') {
+                                /* Network scanner: find all live hosts on local subnet */
+                                detect_subnet();
+                                char tool_label[48];
+                                snprintf(tool_label, sizeof(tool_label),
+                                         "nmap -sn %s", g_local_subnet);
+                                char *nscan_args[] = {
+                                    "/usr/bin/nmap", "-sn",
+                                    "--max-rtt-timeout", "200ms", "-T4",
+                                    g_local_subnet, NULL
+                                };
+                                run_tool("/usr/bin/nmap", nscan_args, tool_label);
                             } else if (key == 't' || key == 'T') {
                                 char *td_args[] = {
-                                    "/usr/bin/tcpdump", "-c", "10", "-nn",
+                                    "/usr/bin/tcpdump", "-c", "20", "-nn",
                                     "-i", "any", "-q", NULL
                                 };
-                                run_tool("/usr/bin/tcpdump", td_args, "tcpdump -c 10 any");
-                                render(fb); send_frame(sock, fb);
+                                run_tool("/usr/bin/tcpdump", td_args, "tcpdump -c 20 any");
+                            } else if (key == 'p' || key == 'P') {
+                                g_pw_mode = true;
+                                g_pw_len  = 0;
+                                g_pw_result[0] = '\0';
                             } else if (key == 0x87u) { /* PgUp */
                                 g_scroll -= 5; if (g_scroll < 0) g_scroll = 0;
-                                render(fb); send_frame(sock, fb);
                             } else if (key == 0x88u) { /* PgDn */
-                                g_scroll += 5; render(fb); send_frame(sock, fb);
+                                g_scroll += 5;
                             }
+                            render(fb); send_frame(sock, fb);
                         }
                         break;
                     }
