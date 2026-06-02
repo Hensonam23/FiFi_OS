@@ -615,6 +615,7 @@ void input_poll(void) {
         int32_t abs_x1 = -1, abs_y1 = -1; /* slot 1 — dragging finger in 2-finger mode */
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
+        int8_t scroll = 0;  /* wheel: virtio-tablet reports EV_ABS + EV_REL on one node */
         int cur_slot = 0;   /* MT Type B: track active slot */
 
         /* Debounce: count down after finger lift; reset origin when it expires */
@@ -785,6 +786,11 @@ void input_poll(void) {
                     }
                 }
                 had_event = true;
+            } else if (ev.type == EV_REL) {
+                /* The virtio-tablet (and some touchscreens/tablets) carry the scroll
+                 * wheel as REL_WHEEL on the same node as their absolute axes. */
+                if (ev.code == REL_WHEEL) scroll += (int8_t)ev.value;
+                had_event = true;
             } else if (ev.type == EV_SYN) {
                 had_event = true;
             }
@@ -793,6 +799,7 @@ void input_poll(void) {
         if (had_event) {
             bool prev = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
+            if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
             if (dev->is_touchpad) {
                 /* 2-finger mode (doubletap): slot 0 = click/anchor finger, slot 1 = drag finger.
                  * On transition 0→1 reset EMA so the new finger position is an anchor, not a delta.

@@ -76,6 +76,8 @@ FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA + PipeWire audio
 
 Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap, numpad), screen lock, Super+D show desktop toggle, a firewall toggle in Settings, a Security Center with privacy controls, and context menus on the desktop and file browser. Toast notifications appear for all system actions. UI polish: context menus scale with font size, settings panel scrolls and clips correctly, right-click ring buffer fixed.
 
+The window manager was reworked so overlapping app windows layer cleanly with no title bar or outline showing through from the window behind. The terminal now behaves like any other window in the stack: it comes to the front when you click it and apps cover it when you raise them. You can open multiple terminals from the start menu, and any window can be resized by dragging its edges or corners.
+
 ---
 
 ## Roadmap
@@ -153,6 +155,11 @@ Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap, nump
 - [x] Toast notifications: short overlay appears for volume changes, lock, show desktop, window snap, and other actions
 - [x] Settings panel scroll and clip: long settings lists scroll correctly and content does not bleed outside the window
 - [x] Right-click menu ring buffer fixed: opening menus mid-render no longer corrupts input state
+- [x] Window layering: overlapping app windows stack cleanly, no title bar or outline bleeds through from the window behind
+- [x] Terminal in the stack: the terminal is a normal window now, comes to the front when clicked and is covered when another window is raised
+- [x] Multiple terminals: open extra terminal windows from the start menu, each one independent and resizable
+- [x] Window resize: drag any edge or corner to resize; terminal windows resize cleanly with no leftover artifacts or stacked prompts
+- [x] Mouse wheel: scroll routes to whichever window is on top at the cursor
 - [ ] DNS over HTTPS: system-wide encrypted DNS with no plain-text leaks
 - [ ] VPN integration: WireGuard built in, one-click connect from Settings
 - [ ] Tor mode: route all traffic through Tor from a Settings toggle

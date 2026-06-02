@@ -57,6 +57,15 @@ bool ipc_hit_test(int32_t mx, int32_t my);
 bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_try_close_at(int32_t mx, int32_t my);
 void gui_draw_popups(void);
+void gui_overdraw_top(void);
+uint32_t gui_next_z(void);
+uint32_t gui_topmost_z_at(int32_t mx, int32_t my);
+uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my);
+uint32_t ipc_topmost_z(void);
+uint32_t ipc_topmost_z_at(int32_t mx, int32_t my);
+uint32_t ipc_topmost_z_in_rect(uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
+bool gui_builtin_covers(int32_t rx, int32_t ry, uint32_t rw, uint32_t rh, uint32_t ipc_z);
+void gui_term_scroll_page(int dir);
 void ipc_blit_all(void);
 void ipc_draw_overlays(void);
 void ipc_draw_resize_handles(void);
@@ -96,6 +105,7 @@ void  pty_poll_output(void);
 void  pty_write_input(uint8_t c);
 int   pty_master_fd(void);
 void  pty_set_winsize(uint16_t cols, uint16_t rows);
+void  pty_set_initial_winsize(uint16_t cols, uint16_t rows);
 
 /* Input query functions */
 bool  keyboard_gui_capture_active(void);
@@ -313,6 +323,7 @@ static void *render_thread_fn(void *arg)
             ipc_draw_resize_handles();
             ipc_draw_drag_overlay();
             ipc_notify_draw();
+            gui_overdraw_top();           /* render built-in windows (Settings/Files/Viewer) above IPC */
             gui_draw_popups();
 
             clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -416,27 +427,30 @@ int main(void) {
     mouse_init();
     input_init();
 
-    pty_init();
-
     gui_init();  /* loads resolution-appropriate font before terminal size is computed */
     mouse_cursor_update();
 
+    /* Compute the terminal grid size, THEN spawn the shell at exactly that size.
+     * Spawning first and resizing afterward sent a SIGWINCH that made the shell
+     * reprint its prompt — the "double / # line" on first open. */
     {
         uint32_t fw = console_font_width();
         uint32_t fh = console_font_height();
+        uint16_t cols = 80, rows = 24;
         if (fw > 0 && fh > 0) {
             uint64_t desk_h = g_lmfb.height > 52u ? g_lmfb.height - 52u : g_lmfb.height;
             uint64_t win_w  = g_lmfb.width * 88u / 100u;
             uint64_t win_h  = desk_h * 90u / 100u;
             uint64_t inner_w = win_w > 10u ? win_w - 10u : 1u;
             uint64_t inner_h = win_h > 33u ? win_h - 33u : 1u;
-            uint16_t cols = (uint16_t)(inner_w / fw);
-            uint16_t rows = (uint16_t)(inner_h / fh);
+            cols = (uint16_t)(inner_w / fw);
+            rows = (uint16_t)(inner_h / fh);
             if (cols < 20) cols = 20;
             if (rows < 5)  rows = 5;
-            pty_set_winsize(cols, rows);
-            fprintf(stderr, "[compositor] terminal %ux%u chars\n", cols, rows);
         }
+        pty_set_initial_winsize(cols, rows);
+        pty_init();
+        fprintf(stderr, "[compositor] terminal %ux%u chars\n", cols, rows);
     }
 
     ipc_init();
@@ -531,12 +545,25 @@ int main(void) {
             bool resizing = ipc_resize_update(mcx, mcy, mlb);
             bool dragging = !resizing && ipc_drag_update(mcx, mcy, mlb);
 
-            if (mlb && !dragging && !resizing) {
-                if (!ipc_try_close_at(mcx, mcy)) {
-                    if (!ipc_resize_begin(mcx, mcy)) {
-                        if (!ipc_hit_test(mcx, mcy))
-                            ipc_clear_focus();
-                    }
+            if (mlb && !pb_l && !dragging && !resizing) {
+                /* Single cross-system topmost decision: whichever layer has the higher
+                 * raise_z at the cursor owns the click. The terminal is INCLUDED here so
+                 * input matches what is visually on top (gui_overdraw_top now paints the
+                 * terminal over IPC when its raise_z is highest). When the terminal is on
+                 * top it owns the click; when an IPC app is on top (it covers the terminal)
+                 * the IPC app owns it. Use the taskbar to bring a terminal-covered app back. */
+                uint32_t gui_z = gui_topmost_z_at(mcx, mcy);
+                uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
+                if (ipc_z > gui_z) {
+                    /* IPC window is on top here → route to the IPC layer. */
+                    if (!ipc_try_close_at(mcx, mcy))
+                        if (!ipc_resize_begin(mcx, mcy))
+                            ipc_hit_test(mcx, mcy);
+                } else {
+                    /* A built-in window / terminal / empty desktop is on top here.
+                     * gui_on_tick() does the actual built-in raise/drag/button work this
+                     * same frame; we only drop IPC keyboard focus. */
+                    ipc_clear_focus();
                 }
             }
             if (ipc_keyboard_active() && !dragging && !resizing)
@@ -608,6 +635,8 @@ int main(void) {
                     if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
                     if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
                     if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
+                    if ((uint8_t)c == 0x87u) { gui_term_scroll_page(+1); continue; }
+                    if ((uint8_t)c == 0x88u) { gui_term_scroll_page(-1); continue; }
                     pty_write_input((uint8_t)c);
                 }
             } else {

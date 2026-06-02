@@ -60,6 +60,14 @@ static void pty_sigchld(int sig) {
         g_pty_child = -1;
 }
 
+/* Initial PTY grid, set before pty_init() so the shell spawns at the right size and
+ * never receives a startup SIGWINCH (which made it reprint its prompt). */
+static uint16_t g_pty_init_cols = 111, g_pty_init_rows = 38;
+void pty_set_initial_winsize(uint16_t cols, uint16_t rows) {
+    if (cols) g_pty_init_cols = cols;
+    if (rows) g_pty_init_rows = rows;
+}
+
 void pty_init(void) {
     signal(SIGCHLD, pty_sigchld);
     signal(SIGPIPE, SIG_IGN);
@@ -74,8 +82,8 @@ void pty_init(void) {
         close(g_pty_master); g_pty_master = -1; return;
     }
 
-    /* Initial PTY size: conservative estimate for 1024x768 terminal window */
-    struct winsize ws = { .ws_row = 38, .ws_col = 111 };
+    /* Spawn at the real terminal grid size (set by pty_set_initial_winsize). */
+    struct winsize ws = { .ws_row = g_pty_init_rows, .ws_col = g_pty_init_cols };
     ioctl(g_pty_master, TIOCSWINSZ, &ws);
 
     char *slave_name = ptsname(g_pty_master);
@@ -109,9 +117,10 @@ void pty_init(void) {
         setenv("TERM",  "linux",      1);
         setenv("HOME",  "/root",      1);
         setenv("PATH",  "/bin:/sbin:/usr/bin:/usr/sbin", 1);
-        setenv("USER",  "root",       1);
+        setenv("USER",  "fifi",       1);
         setenv("SHELL", "/bin/sh",    1);
-        setenv("PS1",   "\\w # ",     1);
+        /* Familiar Linux-style prompt: fifi@FiFiOS:<cwd>$  (e.g. fifi@FiFiOS:~$). */
+        setenv("PS1",   "fifi@FiFiOS:\\w$ ", 1);
 
         /* Try ush first (FiFi shell), then busybox sh, then sh */
         execl("/bin/ush", "-ush", NULL);

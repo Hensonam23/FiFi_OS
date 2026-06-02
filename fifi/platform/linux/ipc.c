@@ -89,11 +89,12 @@ typedef struct {
 static int          g_srv_fd      = -1;
 static ipc_client_t g_clients[IPC_MAX_APPS];
 static int          g_focused_idx = -1;  /* which client has keyboard focus */
-static uint32_t     g_next_z      = 1;   /* monotonically increasing z counter */
+/* gui_next_z defined in gui.c -- shared counter so IPC and built-in windows compare correctly */
+extern uint32_t gui_next_z(void);
 static bool         g_ipc_needs_redraw = false;  /* set when a window closes; cleared by gui_on_tick */
 /* Cascading spawn position: new windows offset by 28px from each other */
-static uint32_t     g_cascade_x   = 60;
-static uint32_t     g_cascade_y   = 60;
+static uint32_t     g_cascade_x   = 0;
+static uint32_t     g_cascade_y   = 0;
 
 /* ── Toast notification state ────────────────────────────────────────────── */
 #define NOTIFY_DURATION_S 3
@@ -106,7 +107,7 @@ static char g_clipboard[CLIP_MAX] = {0};
 
 /* Raise a window to the top of the z-stack */
 static void ipc_raise(int i) {
-    g_clients[i].z_order = g_next_z++;
+    g_clients[i].z_order = gui_next_z();
 }
 
 /* ── Window drag state ────────────────────────────────────────────────────── */
@@ -122,9 +123,11 @@ static int32_t g_drag_oy  = 0;
 static int   g_snap_preview = 0;  /* 0=none, 1=left, 2=right, 3=max */
 /* Resize state */
 static int   g_resize_idx = -1;
-static int32_t g_resize_mx0 = 0, g_resize_my0 = 0;  /* cursor at resize start */
-static uint32_t g_resize_w0 = 0, g_resize_h0 = 0;   /* window dims at resize start */
+static int32_t g_resize_mx0 = 0, g_resize_my0 = 0;
+static uint32_t g_resize_w0 = 0, g_resize_h0 = 0;
+static uint32_t g_resize_x0 = 0, g_resize_y0 = 0;  /* window pos at resize start */
 static bool  g_resize_do_w = false, g_resize_do_h = false;
+static bool  g_resize_do_left = false, g_resize_do_top = false;
 /* File drag-and-drop state */
 #define IPC_DRAG_FILE_MAX 1024
 static bool  g_file_drag      = false;
@@ -241,7 +244,7 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         if (req_h > 1080) req_h = 1080;
 
         /* Assign initial z-order */
-        c->z_order = g_next_z++;
+        c->z_order = gui_next_z();
 
         /* Center the window using actual framebuffer dimensions */
         uint32_t fb_w = (uint32_t)console_fb_width();
@@ -250,14 +253,19 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         if (fb_h == 0) fb_h = 1080;
         c->win_w   = req_w; c->frame_w = req_w;
         c->win_h   = req_h; c->frame_h = req_h;
-        /* Cascade spawn: offset each new window so they don't all stack */
-        uint32_t tb_h = 32u;
+        /* Centered base, with a cascade offset so each new IPC window steps down-right
+         * instead of piling on the exact same spot. */
+        uint32_t tb_h = 28u;
+        uint32_t cx0 = (fb_w > req_w) ? (fb_w - req_w) / 2u : 0;
+        uint32_t cy0 = (fb_h > tb_h + req_h) ? tb_h + (fb_h - tb_h - req_h) / 2u : tb_h;
+        c->win_x = cx0 + g_cascade_x;
+        c->win_y = cy0 + g_cascade_y;
         uint32_t max_x = fb_w > req_w ? fb_w - req_w : 0;
         uint32_t max_y = (fb_h > tb_h + req_h) ? fb_h - tb_h - req_h : 0;
-        c->win_x   = (max_x > 0) ? (g_cascade_x % (max_x + 1)) : 0;
-        c->win_y   = (max_y > 0) ? (g_cascade_y % (max_y + 1)) : 0;
-        g_cascade_x = (g_cascade_x + 28 > fb_w / 2) ? 60 : g_cascade_x + 28;
-        g_cascade_y = (g_cascade_y + 28 > fb_h / 3) ? 60 : g_cascade_y + 28;
+        if (c->win_x + req_w > fb_w) c->win_x = max_x;
+        if (c->win_y + req_h + tb_h > fb_h) c->win_y = max_y;
+        g_cascade_x = (g_cascade_x + 28u > 168u) ? 0u : g_cascade_x + 28u;
+        g_cascade_y = (g_cascade_y + 28u > 168u) ? 0u : g_cascade_y + 28u;
         c->snapped = false;
         c->disp_buf = NULL;
 
@@ -298,10 +306,14 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
                 c->frame_w = fw;
                 c->frame_h = fh;
                 if (!c->snapped) {
-                    /* App sent corrected size — window now matches, clear disp_buf */
-                    console_fill_rect(c->win_x, c->win_y, c->win_w, c->win_h, 0u);
+                    /* App sent corrected size — window now matches, drop the scaled disp_buf.
+                     * The window may have SHRUNK or moved (top/left resize), so the area it
+                     * vacated must be repainted with whatever is behind it. Request a GUI
+                     * full-redraw instead of filling the old rect black (the old code left a
+                     * black box wherever the desktop/another window should now show). */
                     c->win_w = fw; c->win_h = fh;
                     free(c->disp_buf); c->disp_buf = NULL;
+                    g_ipc_needs_redraw = true;
                 } else {
                     /* Snapped: reallocate disp_buf at snap dimensions */
                     free(c->disp_buf);
@@ -572,33 +584,27 @@ void ipc_poll(void) {
 }
 
 /* Close-button hit box for client c: top-right corner of drag strip */
+/* Button hit boxes mirror the chrome layout in ipc_draw_overlays: each button is
+ * 24px wide, packed from the right edge (close, then maximize, then minimize), and
+ * spans the full 24px title-bar height — identical to built-in windows. */
+#define IPC_BTN_W   24u
+#define IPC_TITLE_H 24u
 static inline bool close_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
-    if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ * 2) return false;
-    uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
-    uint32_t bx = c->win_x + c->win_w - sz - 3;
-    uint32_t by = c->win_y + 3;
-    return (uint32_t)mx >= bx && (uint32_t)mx < bx + sz &&
-           (uint32_t)my >= by && (uint32_t)my < by + sz;
+    uint32_t bx = c->win_x + c->win_w - IPC_BTN_W;
+    return (uint32_t)mx >= bx && (uint32_t)mx < bx + IPC_BTN_W &&
+           (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + IPC_TITLE_H;
 }
-
-/* Minimize-button hit box: second from right */
-static inline bool min_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
-    if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ * 2 + 8) return false;
-    uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
-    uint32_t bx = c->win_x + c->win_w - sz * 2 - 7;
-    uint32_t by = c->win_y + 3;
-    return (uint32_t)mx >= bx && (uint32_t)mx < bx + sz &&
-           (uint32_t)my >= by && (uint32_t)my < by + sz;
-}
-
-/* Maximize-button hit box: third from right */
 static inline bool max_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
-    if (c->win_w < (uint32_t)IPC_CLOSE_BTN_SZ * 3 + 16) return false;
-    uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
-    uint32_t bx = c->win_x + c->win_w - sz * 3 - 11;
-    uint32_t by = c->win_y + 3;
-    return (uint32_t)mx >= bx && (uint32_t)mx < bx + sz &&
-           (uint32_t)my >= by && (uint32_t)my < by + sz;
+    if (c->win_w < IPC_BTN_W * 3u + 16u) return false;
+    uint32_t bx = c->win_x + c->win_w - IPC_BTN_W * 2u;
+    return (uint32_t)mx >= bx && (uint32_t)mx < bx + IPC_BTN_W &&
+           (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + IPC_TITLE_H;
+}
+static inline bool min_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
+    if (c->win_w < IPC_BTN_W * 3u + 16u) return false;
+    uint32_t bx = c->win_x + c->win_w - IPC_BTN_W * 3u;
+    return (uint32_t)mx >= bx && (uint32_t)mx < bx + IPC_BTN_W &&
+           (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + IPC_TITLE_H;
 }
 
 /* Kill a client and clear its screen region */
@@ -619,27 +625,37 @@ static void ipc_kill_client(int i) {
 
 /* Check if click lands on any window's close, minimize, or maximize button. */
 bool ipc_try_close_at(int32_t mx, int32_t my) {
+    /* Only check buttons on the topmost window at (mx,my) so windows behind
+     * others cannot intercept clicks via invisible buttons. */
+    int best_i = -1;
+    uint32_t best_z = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
-        if (close_btn_hit(c, mx, my)) {
-            ipc_kill_client(i);
-            return true;
+        if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
+            (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
+            if (c->z_order > best_z) { best_z = c->z_order; best_i = i; }
         }
-        if (min_btn_hit(c, mx, my)) {
-            c->minimized = true;
-            if (g_focused_idx == i) g_focused_idx = -1;
-            g_ipc_needs_redraw = true;
-            fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
-            return true;
-        }
-        if (max_btn_hit(c, mx, my)) {
-            if (c->snapped)
-                ipc_unsnap(i);          /* already maximized — restore */
-            else
-                ipc_apply_snap(i, 3);   /* maximize */
-            return true;
-        }
+    }
+    if (best_i < 0) return false;
+    ipc_client_t *c = &g_clients[best_i];
+    if (close_btn_hit(c, mx, my)) {
+        ipc_kill_client(best_i);
+        return true;
+    }
+    if (min_btn_hit(c, mx, my)) {
+        c->minimized = true;
+        if (g_focused_idx == best_i) g_focused_idx = -1;
+        g_ipc_needs_redraw = true;
+        fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
+        return true;
+    }
+    if (max_btn_hit(c, mx, my)) {
+        if (c->snapped)
+            ipc_unsnap(best_i);
+        else
+            ipc_apply_snap(best_i, 3);
+        return true;
     }
     return false;
 }
@@ -651,6 +667,73 @@ bool ipc_needs_redraw(void) {
     bool v = g_ipc_needs_redraw;
     g_ipc_needs_redraw = false;
     return v;
+}
+
+/* Draw one IPC window's chrome (title bar, buttons, title text, 1px border).
+ * Drawn IDENTICALLY to built-in windows (kernel/src/gui.c win_draw_chrome) so IPC
+ * apps look exactly like Terminal/Files/Settings: same title-bar colours, same button
+ * positions (24px from the right), same x / + / _ glyphs.
+ * Called from ipc_blit_all() right after each window's body so the whole window
+ * (body + chrome) is painted as a unit in z-order — a higher window then fully
+ * overpaints any lower window. */
+static void ipc_draw_chrome(ipc_client_t *c) {
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) return;
+
+    bool focused = (g_focused_idx == (int)(c - g_clients));
+
+    const uint32_t TITLE_H  = 24u;
+    const uint32_t BTN_W    = 24u;
+    const uint32_t C_ACTIVE = 0xFF3060c0u, C_INACT = 0xFF243a5cu;
+    const uint32_t C_TOPHI_A= 0xFF223a62u, C_TOPHI_I=0xFF1e2e44u;
+    const uint32_t C_SEP     = 0xFF10192au;
+    const uint32_t C_TITLEFG = 0xFFe8eeffu;
+    const uint32_t C_CLOSE   = 0xFF993333u;
+    const uint32_t C_BTNBG   = 0xFF304860u;
+    const uint32_t C_BTNFG   = 0xFFa8c0e8u;
+    uint32_t title_bg = focused ? C_ACTIVE : C_INACT;
+
+    uint32_t cls_x = c->win_x + c->win_w - BTN_W;
+    uint32_t max_x = cls_x - BTN_W;
+    uint32_t min_x = max_x - BTN_W;
+    uint32_t gy    = (uint32_t)c->win_y + (TITLE_H > fh ? (uint32_t)((TITLE_H - fh) / 2u) : 0u);
+
+    /* Title bar fill + top highlight + bottom separator */
+    console_fill_rect(c->win_x, c->win_y, c->win_w, TITLE_H, title_bg);
+    console_fill_rect(c->win_x, c->win_y, c->win_w, 1u, focused ? C_TOPHI_A : C_TOPHI_I);
+    console_fill_rect(c->win_x, c->win_y + TITLE_H - 1u, c->win_w, 1u, C_SEP);
+
+    /* Title text: centered if it fits before the buttons, else left-aligned + clipped. */
+    if (fw > 0 && fh > 0) {
+        size_t tlen = 0; while (tlen < sizeof(c->title) && c->title[tlen]) tlen++;
+        uint64_t avail = (min_x > c->win_x + 8u) ? (uint64_t)min_x - 4u - (c->win_x + 8u) : 0u;
+        uint64_t max_ch = fw > 0u ? avail / fw : 0u;
+        uint64_t tx;
+        if ((uint64_t)tlen <= max_ch)
+            tx = c->win_x + (c->win_w - (uint64_t)tlen * fw) / 2u;   /* centered */
+        else
+            tx = c->win_x + 8u;                                       /* left, will clip */
+        for (size_t j = 0; j < tlen && tx + fw <= (uint64_t)min_x - 4u; j++, tx += fw)
+            console_render_glyph_fg(tx, gy, (unsigned char)c->title[j], C_TITLEFG);
+    }
+
+    /* Buttons: minimize (_), maximize (+ / -), close (x) — same layout as built-ins */
+    if (c->win_w >= BTN_W * 3u + 16u) {
+        console_fill_rect(min_x, c->win_y, BTN_W, TITLE_H, C_BTNBG);
+        console_render_glyph(min_x + (BTN_W - fw) / 2u, gy, '_', C_BTNFG, C_BTNBG);
+        console_fill_rect(max_x, c->win_y, BTN_W, TITLE_H, C_BTNBG);
+        console_render_glyph(max_x + (BTN_W - fw) / 2u, gy, c->snapped ? '-' : '+', C_BTNFG, C_BTNBG);
+    }
+    console_fill_rect(cls_x, c->win_y, BTN_W, TITLE_H, C_CLOSE);
+    console_render_glyph(cls_x + (BTN_W - fw) / 2u, gy, 'x', C_TITLEFG, C_CLOSE);
+
+    /* 1px window border */
+    uint32_t br_col = focused ? C_ACTIVE : C_INACT;
+    console_fill_rect(c->win_x,                 c->win_y,                 c->win_w, 1u, br_col);
+    console_fill_rect(c->win_x,                 c->win_y + c->win_h - 1u, c->win_w, 1u, br_col);
+    console_fill_rect(c->win_x,                 c->win_y,                 1u, c->win_h, br_col);
+    console_fill_rect(c->win_x + c->win_w - 1u, c->win_y,                 1u, c->win_h, br_col);
 }
 
 void ipc_blit_all(void) {
@@ -672,109 +755,26 @@ void ipc_blit_all(void) {
         }
         order[b + 1] = key;
     }
+    /* Paint each window as a whole (body THEN its own chrome) in ascending z-order.
+     * Because chrome is drawn right after the body, a higher-z window painted later in
+     * this loop fully overpaints every lower window — body AND chrome. Drawing all bodies
+     * first and all chrome in a second pass (the old design) let a lower window's title
+     * bar and border bleed over a higher window's body where they overlapped. */
     for (int j = 0; j < n; j++) {
         ipc_client_t *c = &g_clients[order[j]];
         if (c->disp_buf)
             console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
         else
             console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
+        ipc_draw_chrome(c);
     }
 }
 
-/* Draw title bars and close buttons on top of all active IPC windows.
+/* Draw transient overlays that must sit above ALL windows: currently just the snap
+ * preview while dragging. Per-window chrome is drawn by ipc_draw_chrome() inside
+ * ipc_blit_all() so each window is painted (body + chrome) as a unit in z-order.
  * Called every tick from main.c after ipc_blit_all(). */
 void ipc_draw_overlays(void) {
-    uint64_t fw = console_font_width();
-    uint64_t fh = console_font_height();
-
-    /* Draw overlays in z_order so the topmost window's title bar renders last (on top) */
-    int order2[IPC_MAX_APPS];
-    int n2 = 0;
-    for (int i = 0; i < IPC_MAX_APPS; i++) {
-        ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
-        order2[n2++] = i;
-    }
-    for (int a = 1; a < n2; a++) {
-        int key = order2[a]; int b = a - 1;
-        while (b >= 0 && g_clients[order2[b]].z_order > g_clients[key].z_order) { order2[b+1]=order2[b]; b--; }
-        order2[b+1] = key;
-    }
-
-    for (int ji = 0; ji < n2; ji++) {
-        int i = order2[ji];
-        ipc_client_t *c = &g_clients[i];
-        if (c->win_w < (uint32_t)(IPC_CLOSE_BTN_SZ + 6)) continue;
-
-        bool focused = (g_focused_idx == i);
-
-        /* ── Title bar strip (top IPC_DRAG_STRIP pixels of the window) ─── */
-        uint32_t tb_col = focused ? 0xFF1e3a6eu : 0xFF18283eu;
-        console_fill_rect(c->win_x, c->win_y, c->win_w, (uint32_t)IPC_DRAG_STRIP, tb_col);
-
-        /* Accent bottom edge on the title bar */
-        uint32_t edge_col = focused ? 0xFF3878d8u : 0xFF243448u;
-        console_fill_rect(c->win_x, c->win_y + IPC_DRAG_STRIP - 2,
-                          c->win_w, 2u, edge_col);
-
-        /* Title text (left-aligned, vertically centered in title bar) */
-        if (fw > 0 && fh > 0) {
-            uint64_t ty = (uint64_t)c->win_y + ((uint64_t)IPC_DRAG_STRIP - fh) / 2;
-            uint64_t tx = (uint64_t)c->win_x + 8u;
-            uint64_t max_tx = (uint64_t)c->win_x + c->win_w
-                            - (uint64_t)IPC_CLOSE_BTN_SZ * 3u - 18u;
-            for (size_t j = 0; j < sizeof(c->title) && c->title[j] && tx + fw <= max_tx;
-                 j++, tx += fw)
-                console_render_glyph(tx, ty,
-                                     (unsigned char)c->title[j],
-                                     0xFFDDE8F8u, tb_col);
-        }
-
-        /* ── Maximize button (green, third from right) ──────────────────── */
-        uint32_t sz = (uint32_t)IPC_CLOSE_BTN_SZ;
-        uint32_t by = c->win_y + 3;
-        if (c->win_w >= sz * 3 + 16) {
-            uint32_t max_bx = c->win_x + c->win_w - sz * 3 - 11;
-            uint32_t max_col = c->snapped ? 0xFF209040u : 0xFF208030u;
-            console_fill_rect(max_bx, by, sz, sz, max_col);
-            /* Draw square indicator */
-            console_fill_rect(max_bx + 3, by + 3, sz - 6, sz - 6, 0x00000000u);
-            console_fill_rect(max_bx + 3, by + 3, sz - 6, 2, 0xFFFFFFFFu);
-            console_fill_rect(max_bx + 3, by + 3, 2, sz - 6, 0xFFFFFFFFu);
-        }
-
-        /* ── Minimize button (yellow, second from right) ─────────────────── */
-        uint32_t min_bx = c->win_x + c->win_w - sz * 2 - 7;
-        console_fill_rect(min_bx, by, sz, sz, 0xFFB09020u);
-        /* Draw underscore (_) indicator */
-        uint32_t mid_y = by + sz - 5;
-        console_fill_rect(min_bx + 3, mid_y, sz - 6, 2, 0xFFFFFFFFu);
-
-        /* ── Close button (red, rightmost) ──────────────────────────────── */
-        uint32_t bx = c->win_x + c->win_w - sz - 3;
-        console_fill_rect(bx, by, sz, sz, 0xFFCC2222u);
-
-        uint32_t pad   = 3;
-        uint32_t inner = sz - pad * 2;
-        for (uint32_t k = 0; k < inner; k++) {
-            uint32_t px1 = bx + pad + k;
-            uint32_t py1 = by + pad + k;
-            uint32_t px2 = bx + pad + (inner - 1 - k);
-            uint32_t py2 = by + pad + k;
-            if (px1 < bx + sz && py1 < by + sz)
-                console_fill_rect(px1, py1, 2, 2, 0xFFFFFFFFu);
-            if (px2 < bx + sz && py2 < by + sz)
-                console_fill_rect(px2, py2, 2, 2, 0xFFFFFFFFu);
-        }
-
-        /* ── 1px border around the whole window ─────────────────────────── */
-        uint32_t br_col = focused ? 0xFF3878d8u : 0xFF243448u;
-        console_fill_rect(c->win_x,              c->win_y,              c->win_w, 1u, br_col);
-        console_fill_rect(c->win_x,              c->win_y + c->win_h - 1u, c->win_w, 1u, br_col);
-        console_fill_rect(c->win_x,              c->win_y,              1u, c->win_h, br_col);
-        console_fill_rect(c->win_x + c->win_w - 1u, c->win_y,          1u, c->win_h, br_col);
-    }
-
     /* ── Snap preview overlay while dragging ─────────────────────────────── */
     if (g_snap_preview && g_drag_idx >= 0) {
         uint32_t fb_w  = (uint32_t)console_fb_width();
@@ -887,6 +887,52 @@ bool ipc_keyboard_active(void) {
            g_clients[g_focused_idx].fd >= 0;
 }
 
+/* Returns the highest z_order across ALL active IPC windows. */
+uint32_t ipc_topmost_z(void) {
+    uint32_t best = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
+        if (c->z_order > best) best = c->z_order;
+    }
+    return best;
+}
+
+/* Returns the highest z_order of any IPC window that overlaps rect (rx,ry,rw,rh). */
+uint32_t ipc_topmost_z_in_rect(uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh) {
+    uint32_t best = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
+        /* AABB overlap test */
+        if (c->win_x >= rx + rw || rx >= c->win_x + c->win_w) continue;
+        if (c->win_y >= ry + rh || ry >= c->win_y + c->win_h) continue;
+        if (c->z_order > best) best = c->z_order;
+    }
+    return best;
+}
+
+/* Returns the z_order of the focused IPC client, or 0 if none focused. */
+uint32_t ipc_focused_global_z(void) {
+    if (g_focused_idx < 0 || !g_clients[g_focused_idx].active ||
+        g_clients[g_focused_idx].fd < 0) return 0;
+    return g_clients[g_focused_idx].z_order;
+}
+
+/* Returns the highest z_order of any IPC window covering (mx,my), or 0 if none. */
+uint32_t ipc_topmost_z_at(int32_t mx, int32_t my) {
+    uint32_t best = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized) continue;
+        if ((uint32_t)mx >= c->win_x && (uint32_t)mx < c->win_x + c->win_w &&
+            (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + c->win_h) {
+            if (c->z_order > best) best = c->z_order;
+        }
+    }
+    return best;
+}
+
 /* Send a key event to the focused app */
 void ipc_send_focused_key(uint8_t key) {
     if (!ipc_keyboard_active()) return;
@@ -910,7 +956,8 @@ void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns) {
     ipc_send(c, IPC_INPUT_MOUSE, buf, sizeof(buf));
 }
 
-/* Returns true if mx,my is in the resize zone of window i (right, bottom, or corner) */
+/* Returns true if mx,my is in any of the 8 resize zones of window c.
+ * do_w/do_h = right/bottom edge; do_left/do_top = left/top edge. */
 static bool resize_hit(const ipc_client_t *c, int32_t mx, int32_t my,
                        bool *do_w, bool *do_h) {
     int32_t rx = mx - (int32_t)c->win_x;
@@ -919,16 +966,17 @@ static bool resize_hit(const ipc_client_t *c, int32_t mx, int32_t my,
         return false;
     bool near_right  = (uint32_t)rx >= c->win_w  - IPC_RESIZE_MARGIN;
     bool near_bottom = (uint32_t)ry >= c->win_h  - IPC_RESIZE_MARGIN;
-    if (!near_right && !near_bottom) return false;
-    *do_w = near_right;
-    *do_h = near_bottom;
+    bool near_left   = (uint32_t)rx <  IPC_RESIZE_MARGIN;
+    bool near_top    = (uint32_t)ry <  IPC_RESIZE_MARGIN;
+    if (!near_right && !near_bottom && !near_left && !near_top) return false;
+    *do_w = near_right || near_left;
+    *do_h = near_bottom || near_top;
     return true;
 }
 
-/* Begin resize of window i at mouse position mx, my */
+/* Begin resize of window at mouse position mx, my -- supports all 8 edges/corners */
 bool ipc_resize_begin(int32_t mx, int32_t my) {
     if (g_drag_idx >= 0 || g_resize_idx >= 0) return false;
-    /* Find topmost window with a resize handle under cursor */
     int best_i = -1;
     uint32_t best_z = 0;
     bool bdo_w = false, bdo_h = false;
@@ -941,13 +989,20 @@ bool ipc_resize_begin(int32_t mx, int32_t my) {
         }
     }
     if (best_i < 0) return false;
-    g_resize_idx = best_i;
-    g_resize_mx0 = mx;
-    g_resize_my0 = my;
-    g_resize_w0  = g_clients[best_i].win_w;
-    g_resize_h0  = g_clients[best_i].win_h;
-    g_resize_do_w = bdo_w;
-    g_resize_do_h = bdo_h;
+    ipc_client_t *bc = &g_clients[best_i];
+    int32_t rx = mx - (int32_t)bc->win_x;
+    int32_t ry = my - (int32_t)bc->win_y;
+    g_resize_idx   = best_i;
+    g_resize_mx0   = mx;
+    g_resize_my0   = my;
+    g_resize_w0    = bc->win_w;
+    g_resize_h0    = bc->win_h;
+    g_resize_x0    = bc->win_x;
+    g_resize_y0    = bc->win_y;
+    g_resize_do_w    = bdo_w;
+    g_resize_do_h    = bdo_h;
+    g_resize_do_left = (uint32_t)rx < IPC_RESIZE_MARGIN;
+    g_resize_do_top  = (uint32_t)ry < IPC_RESIZE_MARGIN;
     g_focused_idx = best_i;
     ipc_raise(best_i);
     return true;
@@ -972,14 +1027,27 @@ bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn) {
     int32_t dx = mx - g_resize_mx0;
     int32_t dy = my - g_resize_my0;
     uint32_t new_w = c->win_w, new_h = c->win_h;
-    if (g_resize_do_w) {
+    uint32_t new_x = c->win_x, new_y = c->win_y;
+    if (g_resize_do_w && !g_resize_do_left) {
         int32_t w = (int32_t)g_resize_w0 + dx;
         new_w = w < IPC_MIN_WIN_W ? IPC_MIN_WIN_W : (uint32_t)w;
     }
-    if (g_resize_do_h) {
+    if (g_resize_do_w && g_resize_do_left) {
+        int32_t w = (int32_t)g_resize_w0 - dx;
+        new_w = w < IPC_MIN_WIN_W ? IPC_MIN_WIN_W : (uint32_t)w;
+        new_x = (uint32_t)((int32_t)g_resize_x0 + (int32_t)g_resize_w0 - (int32_t)new_w);
+    }
+    if (g_resize_do_h && !g_resize_do_top) {
         int32_t h = (int32_t)g_resize_h0 + dy;
         new_h = h < IPC_MIN_WIN_H ? IPC_MIN_WIN_H : (uint32_t)h;
     }
+    if (g_resize_do_h && g_resize_do_top) {
+        int32_t h = (int32_t)g_resize_h0 - dy;
+        new_h = h < IPC_MIN_WIN_H ? IPC_MIN_WIN_H : (uint32_t)h;
+        new_y = (uint32_t)((int32_t)g_resize_y0 + (int32_t)g_resize_h0 - (int32_t)new_h);
+    }
+    if (new_x != c->win_x) c->win_x = new_x;
+    if (new_y != c->win_y) c->win_y = new_y;
     if (new_w != c->win_w || new_h != c->win_h) {
         c->win_w = new_w;
         c->win_h = new_h;

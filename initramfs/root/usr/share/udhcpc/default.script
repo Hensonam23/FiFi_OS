@@ -5,12 +5,16 @@ case "$1" in
         ip addr flush dev "$interface" 2>/dev/null
         ip addr add "$ip/$mask" dev "$interface" 2>/dev/null
         [ -n "$router" ] && ip route replace default via "$router" dev "$interface" 2>/dev/null
-        # Write resolv.conf so DNS works (ntpd hostname lookups, etc.)
-        mkdir -p /etc
-        {
-            for ns in $dns; do echo "nameserver $ns"; done
-            [ -n "$domain" ] && echo "search $domain"
-        } > /etc/resolv.conf
+        # Write resolv.conf -- but on renew, preserve 127.0.0.1 if DoH is active
+        if [ "$1" = "renew" ] && [ -f /fifi-data/doh-enabled ]; then
+            : # dnscrypt-proxy owns resolv.conf, leave it alone
+        else
+            mkdir -p /etc
+            {
+                for ns in $dns; do echo "nameserver $ns"; done
+                [ -n "$domain" ] && echo "search $domain"
+            } > /etc/resolv.conf
+        fi
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null

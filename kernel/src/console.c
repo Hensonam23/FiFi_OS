@@ -680,6 +680,41 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
     }
 }
 
+/* Transparent-background glyph: writes ONLY the lit (foreground) pixels, leaving the
+ * existing background untouched. Used for title-bar text so the glyph cell's background
+ * never paints past the title bar, and it's cheaper (skips background writes). */
+void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg) {
+    if (!con.initialized) return;
+    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
+    if (px + g_fw > con.w || py + g_fh > con.h) return;
+    const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
+    uint32_t bpr = (g_fw + 7u) / 8u;
+    uint32_t *dst_base = g_back ? g_back : NULL;
+    if (dst_base) {
+        g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        if ((uint32_t)(py + g_fh) > g_dirty_y1) g_dirty_y1 = (uint32_t)(py + g_fh);
+    }
+    for (uint32_t y = 0; y < g_fh; y++) {
+        const uint8_t *scan = glyph + y * bpr;
+        if (dst_base) {
+            uint32_t *row = dst_base + (py + y) * con.pitch32 + px;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u) : ((b >> (x & 7u)) & 1u);
+                if (bit) row[x] = fg;
+            }
+        } else {
+            volatile uint32_t *row = con.pix + (py + y) * con.pitch32 + px;
+            for (uint32_t x = 0; x < g_fw; x++) {
+                uint8_t b = scan[x >> 3];
+                uint32_t bit = g_fmsb ? ((b >> (7u - (x & 7u))) & 1u) : ((b >> (x & 7u)) & 1u);
+                if (bit) row[x] = fg;
+            }
+        }
+    }
+}
+
 uint64_t console_fb_width(void)           { return con.w; }
 uint64_t console_fb_height(void)          { return con.h; }
 uint64_t console_viewport_x(void)         { return con.x_off; }

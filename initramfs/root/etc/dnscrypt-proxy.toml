@@ -1,0 +1,34 @@
+## FiFi OS -- dnscrypt-proxy configuration
+## DNS-over-HTTPS: all queries encrypted to Cloudflare/Quad9.
+## Start with: dnscrypt-proxy -config /etc/dnscrypt-proxy.toml
+
+listen_addresses    = ['127.0.0.1:53']
+max_clients         = 250
+ipv4_servers        = true
+ipv6_servers        = false
+dnscrypt_servers    = false
+doh_servers         = true
+require_dnssec      = false
+require_nolog       = true
+require_nofilter    = false
+log_file            = '/fifi-data/doh.log'
+log_level           = 2
+cache               = true
+cache_size          = 512
+cache_min_ttl       = 600
+cache_max_ttl       = 86400
+
+## Fallback: used while the resolver list is being fetched/verified.
+## These are plain DNS -- only used as temporary bootstrap, not for user queries.
+fallback_resolvers  = ['1.1.1.1:53', '9.9.9.9:53']
+ignore_system_dns   = false
+netprobe_timeout    = 30
+netprobe_address    = '1.1.1.1:53'
+
+[sources]
+  [sources.public-resolvers]
+    urls         = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md',
+                    'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md']
+    minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+    cache_file   = '/fifi-data/dnscrypt-resolvers.md'
+    refresh_delay = 72

@@ -61,6 +61,7 @@ initrd/rootfs/*.elf
 # QEMU serial log (read by the assistant for live debugging)
 serial.log
 serial-linux.log
+qemu-stdout.log
 
 # linux-desktop: kernel source (huge, cloned separately by setup-linux.sh)
 linux/src/
@@ -74,3 +75,7 @@ fifi/apps/hello/hello-fifi-app
 fifi/apps/filebrowser/fifi-filebrowser
 fifi/apps/settings/fifi-settings
 fifi/apps/gamepad/fifi-gamepad
+
+# Python bytecode cache
+__pycache__/
+*.pyc

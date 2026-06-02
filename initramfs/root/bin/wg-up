@@ -1,0 +1,46 @@
+#!/bin/sh
+# WireGuard bring-up -- busybox sh compatible
+CONFIG="/fifi-data/wg0.conf"
+IFACE="wg0"
+
+if [ ! -f "$CONFIG" ]; then
+    echo "vpn: error: no config at $CONFIG" > /fifi-data/vpn.log
+    exit 1
+fi
+
+# Remove existing interface if any
+ip link del $IFACE 2>/dev/null || true
+
+# Create WireGuard interface
+if ! ip link add $IFACE type wireguard 2>/tmp/wg-err; then
+    echo "vpn: error: $(cat /tmp/wg-err)" > /fifi-data/vpn.log
+    exit 1
+fi
+
+# Load config (keys, peers, endpoint)
+if ! wg setconf $IFACE "$CONFIG" 2>/tmp/wg-err; then
+    echo "vpn: error: $(cat /tmp/wg-err)" > /fifi-data/vpn.log
+    ip link del $IFACE 2>/dev/null
+    exit 1
+fi
+
+# Set interface address from config
+addr=$(grep -i "^Address" "$CONFIG" | head -1 | sed 's/.*=[ ]*//' | tr -d ' \t')
+if [ -n "$addr" ]; then
+    ip addr add "$addr" dev $IFACE 2>/dev/null || true
+fi
+
+# Bring interface up
+ip link set $IFACE up
+
+# Add routes for AllowedIPs (handles comma-separated lists and multiple lines)
+grep -i "^AllowedIPs" "$CONFIG" | sed 's/[Aa]llowed[Ii][Pp][Ss][ ]*=[ ]*//' | tr ',' '\n' | while read cidr; do
+    cidr=$(echo "$cidr" | tr -d ' \t')
+    [ -n "$cidr" ] || continue
+    # Skip 0.0.0.0/0 default route -- let user decide
+    [ "$cidr" = "0.0.0.0/0" ] && continue
+    ip route add "$cidr" dev $IFACE 2>/dev/null || true
+done
+
+endpoint=$(grep -i "^Endpoint" "$CONFIG" | head -1 | sed 's/.*=[ ]*//' | tr -d ' \t')
+echo "vpn: connected endpoint=$endpoint" > /fifi-data/vpn.log

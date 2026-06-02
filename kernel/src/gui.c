@@ -17,8 +17,11 @@
 #include "rtc.h"
 #include "hda.h"
 /* ── Layout ──────────────────────────────────────────────────────────── */
-#define STATUS_H        20u
-#define TASKBAR_H       32u
+/* Status bar and taskbar heights track the active font so text never clips against
+ * the bottom edge. console_font_height() is the current UI font (24px at 1080p, more
+ * at higher DPI). +6 / +10 give a few px of breathing room above and below the glyphs. */
+#define STATUS_H        (console_font_height() + 6u)
+#define TASKBAR_H       (console_font_height() + 10u)
 #define TITLE_H         24u
 #define BTN_W           TITLE_H
 #define BORDER          1u
@@ -28,7 +31,7 @@
 #define TASKBTN_X       84u
 #define TASKBTN_W       120u
 #define TASKBTN_GAP     4u
-#define RESIZE_MARGIN   6u
+#define RESIZE_MARGIN   8u
 #define MIN_WIN_W       300u
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
@@ -134,7 +137,7 @@ typedef struct {
 } gui_theme_t;
 
 /* Default theme: FiFi blue accent, gradient wallpaper */
-static gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, false, true, true, true, 0 };
+static gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, true, true, true, true, 0 };
 
 /* Wallpaper image (WALLPAPER_IMAGE mode) — loaded by gui_set_wallpaper_image() */
 static uint32_t *g_wall_img   = NULL;
@@ -333,6 +336,7 @@ typedef struct {
     text_state_t text;
     anim_phase_t anim_phase;
     int          anim_step;   /* 1..ANIM_TICKS; 0 unused (use ANIM_NONE) */
+    uint32_t     raise_z;     /* compared with g_term_raise_z: higher = on top of terminal */
 } window_t;
 
 #define MAX_WINS 4
@@ -342,7 +346,6 @@ static window_t g_wins[MAX_WINS];
 static int g_z[MAX_WINS];  /* g_z[0]=bottom, g_z[MAX_WINS-1]=top */
 
 static void z_raise(int slot) {
-    /* Find slot in g_z, remove it, shift others down, place at top */
     int pos = -1;
     for (int i = 0; i < MAX_WINS; i++) {
         if (g_z[i] == slot) { pos = i; break; }
@@ -402,7 +405,79 @@ static uint64_t     g_resize_wh0 = 0;
 static bool g_launcher_open = false;
 
 /* ── Settings scroll ─────────────────────────────────────────────────── */
-static int g_settings_scroll = 0;  /* pixel offset from top */
+static int      g_settings_scroll    = 0;  /* pixel offset from top */
+static uint32_t g_gui_raise_z        = 2;  /* global raise counter shared with ipc.c */
+
+/* Unified z-order model: EVERY window (terminal=slot0, files=1, settings=2, viewer=3,
+ * and every IPC client) carries a raise_z drawn from g_gui_raise_z. The window with the
+ * highest raise_z at a point is the topmost window there. There is no special-case for
+ * the terminal: it participates in z-order exactly like any other window. */
+#define g_term_raise_z (g_wins[0].raise_z)
+
+/* Returns the next global raise value -- called by ipc.c so all windows share one counter */
+uint32_t gui_next_z(void) { return g_gui_raise_z++; }
+
+/* Highest raise_z of any visible built-in window (INCLUDING the terminal, slot 0) that
+ * covers the point (mx,my). Returns 0 if no built-in window is at that point. This is the
+ * built-in side of the single cross-system "who is topmost here" comparison. */
+uint32_t gui_topmost_z_at(int32_t mx, int32_t my) {
+    uint32_t best = 0;
+    for (int i = 0; i < MAX_WINS; i++) {
+        window_t *w = &g_wins[i];
+        if (!w->active || w->state == WIN_HIDDEN || w->anim_phase == ANIM_CLOSE) continue;
+        if (mx < (int32_t)w->x || mx >= (int32_t)(w->x + w->w)) continue;
+        if (my < (int32_t)w->y || my >= (int32_t)(w->y + w->h)) continue;
+        if (w->raise_z > best) best = w->raise_z;
+    }
+    return best;
+}
+
+/* Like gui_topmost_z_at but ignores the full-screen terminal (slot WIN_TERM).
+ * The terminal is always background (gui_overdraw_top never paints it on top), so it
+ * must never win the click-routing topmost decision against an IPC window above it.
+ * Used by the compositor to decide whether a click belongs to the IPC layer. */
+uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my) {
+    uint32_t best = 0;
+    for (int i = 0; i < MAX_WINS; i++) {
+        window_t *w = &g_wins[i];
+        if (!w->active || w->state == WIN_HIDDEN || w->anim_phase == ANIM_CLOSE) continue;
+        if (w->type == WIN_TERM) continue;
+        if (mx < (int32_t)w->x || mx >= (int32_t)(w->x + w->w)) continue;
+        if (my < (int32_t)w->y || my >= (int32_t)(w->y + w->h)) continue;
+        if (w->raise_z > best) best = w->raise_z;
+    }
+    return best;
+}
+
+/* True iff built-in window `slot` is the single GLOBALLY topmost window — its raise_z
+ * beats every other built-in window AND every IPC window. Hover effects (highlight rows,
+ * chrome button hover, resize-edge cursor) must only fire for the topmost window, so a
+ * window behind another never repaints itself when the cursor passes over it. */
+static bool gui_is_topmost(int slot) {
+    extern uint32_t ipc_topmost_z(void);
+    if (slot < 0 || slot >= MAX_WINS) return false;
+    window_t *w = &g_wins[slot];
+    if (!w->active || w->state == WIN_HIDDEN || w->anim_phase == ANIM_CLOSE) return false;
+    uint32_t my_z = w->raise_z;
+    if (ipc_topmost_z() > my_z) return false;
+    for (int i = 0; i < MAX_WINS; i++) {
+        if (i == slot) continue;
+        window_t *o = &g_wins[i];
+        if (!o->active || o->state == WIN_HIDDEN || o->anim_phase == ANIM_CLOSE) continue;
+        if (o->raise_z > my_z) return false;
+    }
+    return true;
+}
+
+/* Raise window to top of z-stack AND bump its raise_z from the shared counter.
+ * Works uniformly for every window including the terminal (slot 0). */
+static void raise_win(int slot) {
+    g_wins[slot].raise_z = g_gui_raise_z++;
+    z_raise(slot);
+}
+
+static int g_settings_total_h   = 0;  /* total content height, set by settings_render */
+static bool g_sb_drag_settings  = false;
 
 /* ── Terminal scrollback ─────────────────────────────────────────────── */
 static int g_term_scroll = 0;  /* lines scrolled back (0 = live view) */
@@ -576,6 +651,27 @@ static void gui_draw_str(uint64_t px, uint64_t py, const char *s,
     for (size_t i = 0; s[i]; i++)
         console_render_glyph(px + (uint64_t)i * fw, py,
                              (unsigned char)s[i], fg, bg);
+}
+
+/* Transparent-background string (only letter pixels drawn). For title-bar text so the
+ * glyph cell background never paints beyond the title bar. */
+static void gui_draw_str_fg(uint64_t px, uint64_t py, const char *s, uint32_t fg) {
+    uint64_t fw = console_font_width();
+    for (size_t i = 0; s[i]; i++)
+        console_render_glyph_fg(px + (uint64_t)i * fw, py, (unsigned char)s[i], fg);
+}
+static void gui_draw_str_clip_fg(uint64_t px, uint64_t py, const char *s,
+                                 uint32_t fg, uint64_t max_chars) {
+    uint64_t fw = console_font_width();
+    size_t len = gui_strlen(s);
+    if (len <= max_chars) {
+        gui_draw_str_fg(px, py, s, fg);
+    } else if (max_chars >= 3) {
+        for (size_t i = 0; i < max_chars - 3; i++)
+            console_render_glyph_fg(px + (uint64_t)i * fw, py, (unsigned char)s[i], fg);
+        for (size_t i = 0; i < 3; i++)
+            console_render_glyph_fg(px + (uint64_t)(max_chars-3+i) * fw, py, '.', COL_FB_MUTED);
+    }
 }
 
 /* Draw str at integer scale (each glyph pixel = scale×scale block) */
@@ -1205,8 +1301,21 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     uint64_t fh = console_font_height();
 
     int slot = (int)(w - g_wins);
-    bool active = (g_z[MAX_WINS - 1] == slot);
-    uint32_t title_bg = active ? COL_BORDER : 0x00182840u;
+    /* Active (focused) = this window is the single GLOBALLY topmost window, comparing
+     * raise_z across every built-in window AND every IPC window. Exactly one window is
+     * active at a time; if an IPC window is globally on top, no built-in shows active. */
+    extern uint32_t ipc_topmost_z(void);
+    uint32_t my_z = g_wins[slot].raise_z;
+    uint32_t global_top = ipc_topmost_z();
+    for (int _j = 0; _j < MAX_WINS; _j++) {
+        window_t *_ow = &g_wins[_j];
+        if (!_ow->active || _ow->state == WIN_HIDDEN || _ow->anim_phase == ANIM_CLOSE) continue;
+        if (_ow->raise_z > global_top) global_top = _ow->raise_z;
+    }
+    bool active = (my_z >= global_top);
+    /* Inactive title bar is a clearly-dimmed blue (not near-black) so a deselected
+     * window still reads as a window. Active uses the bright accent border colour. */
+    uint32_t title_bg = active ? COL_BORDER : 0x00243a5cu;
 
     /* Compute button positions (needed for both full and partial paths) */
     w->btn_cls_x = w->x + w->w - BTN_W;
@@ -1288,14 +1397,14 @@ static void win_draw_chrome(window_t *w, bool fill_content) {
     if (tlen <= max_ch) {
         tpx = w->x + (w->w - tlen * fw) / 2u;
         if (w->w < tlen * fw) tpx = w->x + 4u;
-        gui_draw_str_clip(tpx, tpy, disp_title, COL_TITLE_FG, title_bg, max_ch);
+        gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
     } else {
         tpx = w->x + 4u;
         if (max_ch > 3u) {
-            gui_draw_str_clip(tpx, tpy, disp_title, COL_TITLE_FG, title_bg, max_ch - 3u);
-            gui_draw_str(tpx + (max_ch - 3u) * fw, tpy, "...", 0x00506878u, title_bg);
+            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch - 3u);
+            gui_draw_str_fg(tpx + (max_ch - 3u) * fw, tpy, "...", 0x00506878u);
         } else {
-            gui_draw_str_clip(tpx, tpy, disp_title, COL_TITLE_FG, title_bg, max_ch);
+            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
         }
     }
 
@@ -1410,7 +1519,7 @@ static void term_render_scrollback(window_t *w) {
         if (thumb_h > sb_h) thumb_h = sb_h;
         int max_scroll = total_sb - max_rows;
         if (max_scroll < 1) max_scroll = 1;
-        uint64_t thumb_y = cy + (uint64_t)g_term_scroll * (sb_h - thumb_h) / (uint64_t)max_scroll;
+        uint64_t thumb_y = cy + (uint64_t)(max_scroll - g_term_scroll) * (sb_h - thumb_h) / (uint64_t)max_scroll;
         if (thumb_y + thumb_h > cy + sb_h) thumb_y = cy + sb_h - thumb_h;
         console_fill_rect(sb_x + 1u, thumb_y, 2u, thumb_h, 0x00304860u);
     }
@@ -5832,7 +5941,9 @@ static void settings_render(window_t *w) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t cx = ix + SET_PAD;
-    uint64_t val_x = ix + SET_PAD + 18u * fw;  /* value column */
+    /* Value column -- clamp so it never overflows the window's right edge */
+    uint64_t val_x = ix + SET_PAD + 18u * fw;
+    if (iw > 4u && val_x >= ix + iw - 4u) val_x = ix + iw > 4u ? ix + iw - 4u : ix;
     /* One-shot debug: print dimensions on first render so logs reveal any layout issue */
     static bool s_dbg_logged = false;
     if (!s_dbg_logged) {
@@ -5972,6 +6083,7 @@ static void settings_render(window_t *w) {
     uint64_t h_sc      = (uint64_t)(SET_SEC_H + 4u) + (uint64_t)nsc * SET_ROW_H;
     uint64_t h_privacy = (uint64_t)(SET_SEC_H + 4u) + SET_ROW_H + 5u;
     uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_privacy + h_sc + (uint64_t)SET_PAD;
+    g_settings_total_h = (int)total_h;
     /* Clamp scroll */
     if ((int64_t)total_h > (int64_t)ih) {
         int max_scroll = (int)(total_h - ih);
@@ -6187,6 +6299,14 @@ static void settings_render(window_t *w) {
                          "Accent:", COL_SET_KEY_FG, COL_SET_BG);
             g_theme_accent_by = (uint64_t)(cy + (int64_t)((SET_ROW_H + 8u - sw_sz) / 2u));
         }
+        /* Recompute sw_sz to fit all 8 swatches within available width */
+        {
+            uint64_t avail = (val_x < ix + iw) ? (ix + iw - val_x) : 0u;
+            uint64_t per = avail / 8u;
+            if (per > 4u && per - 4u < sw_sz) sw_sz = per - 4u;
+            if (sw_sz < 4u) sw_sz = 4u;
+            g_theme_swatch_sz = sw_sz;
+        }
         uint64_t sw_x = val_x;
         for (int ai = 0; ai < ACCENT_PRESET_COUNT; ai++) {
             if (ai == 8) {
@@ -6199,6 +6319,8 @@ static void settings_render(window_t *w) {
                 sw_x = val_x;
             }
             g_theme_accent_bx[ai] = sw_x;
+            /* Skip drawing if swatch would overflow window */
+            if (sw_x + sw_sz > ix + iw) { sw_x += sw_sz + sw_gap; continue; }
             uint64_t swy = (ai < 8) ? g_theme_accent_by : g_theme_accent_by2;
             if (swy > 0u) {
                 bool active = (g_accent_presets[ai] == g_theme.accent);
@@ -7240,6 +7362,7 @@ static void tick_redraw(void) {
             window_t *_tw = &g_wins[_ti];
             if (!_tw->active || _tw->state == WIN_HIDDEN ||
                 _tw->type != WIN_SETTINGS || _tw->anim_phase != ANIM_NONE) continue;
+            win_draw_chrome(_tw, false);
             settings_render(_tw);
             break;
         }
@@ -7260,31 +7383,7 @@ static void full_redraw(void) {
     draw_desktop_bg();
     draw_status_bar();
     bool suppress_term = false;
-    /* Shadow pass: two-layer soft drop shadow */
-    for (int zi = 0; zi < MAX_WINS; zi++) {
-        int i = g_z[zi];
-        window_t *w = &g_wins[i];
-        if (!w->active || w->state == WIN_HIDDEN) continue;
-        if (w->anim_phase == ANIM_CLOSE && w->anim_step > ANIM_TICKS) continue;
-        /* Compute animated dimensions */
-        uint64_t aw = w->w, ah = w->h, ax = w->x, ay = w->y;
-        if (w->anim_phase != ANIM_NONE) {
-            int _sidx = (w->anim_step >= 1 && w->anim_step <= ANIM_TICKS) ? w->anim_step - 1 : ANIM_TICKS - 1;
-            int _sc = (w->anim_phase == ANIM_OPEN) ? g_anim_open_scale[_sidx] : g_anim_close_scale[_sidx];
-            aw = w->w * (uint64_t)_sc / 100u;
-            ah = w->h * (uint64_t)_sc / 100u;
-            if (aw < 4) aw = 4;
-            if (ah < 4) ah = 4;
-            ax = w->x + (w->w - aw) / 2u;
-            ay = w->y + (w->h - ah) / 2u;
-        }
-        uint64_t sx3 = ax + 3u, sy3 = ay + 3u;
-        if (sx3 + aw <= fb_w && sy3 + ah <= desk_bot())
-            console_fill_rect(sx3, sy3, aw, ah, 0x00080c1au);
-        uint64_t sx6 = ax + 6u, sy6 = ay + 6u;
-        if (sx6 + aw <= fb_w && sy6 + ah <= desk_bot())
-            console_fill_rect(sx6, sy6, aw, ah, 0x00020408u);
-    }
+    /* (Window drop shadows removed by design — flat windows, no shadow.) */
     /* Snap-to-half preview: draw before windows so the dragged window appears on top */
     if (g_snap_preview && g_dragging) {
         uint64_t px = (g_snap_preview == 2) ? fb_w / 2u : 0u;
@@ -7334,7 +7433,7 @@ static void full_redraw(void) {
         int i = g_z[zi];
         window_t *w = &g_wins[i];
         if (!w->active || w->state == WIN_HIDDEN) continue;
-        if (w->anim_phase != ANIM_NONE) continue;  /* skip animating windows */
+        if (w->anim_phase != ANIM_NONE) continue;
         if (w->w >= 8u && w->h >= 8u) win_round_corners(w);
     }
     /* Resize edge hint overlay */
@@ -7432,8 +7531,10 @@ static void win_show(window_t *w, int slot) {
             w->w = fb_w * 60u / 100u;
             w->h = avail * 85u / 100u;
         }
-        uint64_t ox = (uint64_t)slot * 32u;
-        uint64_t oy = (uint64_t)slot * 32u;
+        /* Centered, with a small per-slot cascade so multiple windows don't pile up at
+         * the exact same spot (each stays individually grabbable). */
+        uint64_t ox = (uint64_t)slot * 28u;
+        uint64_t oy = (uint64_t)slot * 28u;
         w->x = (fb_w - w->w) / 2u + ox;
         w->y = desk_top() + (avail - w->h) / 2u + oy;
         if (w->x + w->w > fb_w) w->x = fb_w > w->w ? fb_w - w->w : 0;
@@ -7441,6 +7542,8 @@ static void win_show(window_t *w, int slot) {
     }
 
     w->state      = WIN_NORMAL;
+    w->raise_z    = g_gui_raise_z++;   /* gets fresh high z so it starts above all other windows */
+    z_raise((int)(w - g_wins));
     if (g_theme.animations) {
         w->anim_phase = ANIM_OPEN;
         w->anim_step  = 1;
@@ -7508,25 +7611,23 @@ static resize_dir_t hit_resize(window_t *w, int32_t mx, int32_t my) {
     if (mx < wx || mx > we || my < wy || my > wb)
         return RES_NONE;
 
-    /* Title bar is the drag/chrome zone — never a resize target.
-     * +4 buffer below title bar prevents the close-button column from
-     * flickering between chrome and resize cursors at the boundary. */
-    if (my <= wy + (int32_t)TITLE_H + 4)
-        return RES_NONE;
+    /* Corner regions are a cm×cm square at each corner and take priority — this makes
+     * the TOP corners grabbable throughout the title-bar row, like a normal WM. */
+    bool L = (mx <= wx + cm), R = (mx >= we - cm);
+    bool T = (my <= wy + cm), B = (my >= wb - cm);
+    if (T && L) return RES_NW;
+    if (T && R) return RES_NE;
+    if (B && L) return RES_SW;
+    if (B && R) return RES_SE;
 
-    if (mx <= wx + cm && my <= wy + cm) return RES_NW;
-    if (mx >= we - cm && my <= wy + cm) return RES_NE;
-    if (mx <= wx + cm && my >= wb - cm) return RES_SW;
-    if (mx >= we - cm && my >= wb - cm) return RES_SE;
+    /* Edges: a thin m-px strip on each side. The top edge strip sits just above the
+     * title-bar drag area; left/right strips resize even within the title-bar row. */
+    if (my <= wy + m)  return RES_N;
+    if (my >= wb - m)  return RES_S;
+    if (mx <= wx + m)  return RES_W;
+    if (mx >= we - m)  return RES_E;
 
-    if (mx > wx + m && mx < we - m && my > wy + m && my < wb - m)
-        return RES_NONE;
-
-    if (my < wy + m) return RES_N;
-    if (my > wb - m) return RES_S;
-    if (mx < wx + m) return RES_W;
-    if (mx > we - m) return RES_E;
-
+    /* Everything else (title-bar middle + content interior) is not a resize target. */
     return RES_NONE;
 }
 
@@ -7552,7 +7653,14 @@ static void win_do_resize(window_t *w, int32_t mx, int32_t my) {
     }
 
     uint64_t fb_w = console_fb_width();
-    int64_t  mw   = (int64_t)MIN_WIN_W;
+    /* Per-window type minimum: Settings needs enough width for its content columns */
+    uint64_t _fw = console_font_width(), _fh = console_font_height();
+    /* Settings minimum: enough for 8 accent swatches + label column + padding */
+    uint64_t _settings_min = 2u*(uint64_t)BORDER + 2u*12u + 18u*_fw + 8u*(_fh + 14u);
+    if (_settings_min < (uint64_t)MIN_WIN_W) _settings_min = (uint64_t)MIN_WIN_W;
+    int64_t  mw  = (w->type == WIN_SETTINGS)
+                   ? (int64_t)_settings_min
+                   : (int64_t)MIN_WIN_W;
     int64_t  mh   = (int64_t)MIN_WIN_H;
     int64_t  dtop = (int64_t)desk_top();
     int64_t  dbot = (int64_t)desk_bot();
@@ -7867,7 +7975,8 @@ void gui_on_tick(void) {
             /* Stop at first window whose bounds contain the cursor */
             if ((uint64_t)mx >= w->x && (uint64_t)mx < w->x + w->w &&
                 (uint64_t)my >= w->y && (uint64_t)my < w->y + w->h) {
-                if (w->type == WIN_FILES) fb_on_motion(w, mx, my);
+                /* Only the globally-topmost window reacts to hover. */
+                if (w->type == WIN_FILES && gui_is_topmost(si)) fb_on_motion(w, mx, my);
                 break;
             }
         }
@@ -7882,7 +7991,7 @@ void gui_on_tick(void) {
             /* Stop at first window whose bounds contain cursor */
             if ((uint64_t)mx >= w->x && (uint64_t)mx < w->x + w->w &&
                 (uint64_t)my >= w->y && (uint64_t)my < w->y + w->h) {
-                if (w->type == WIN_TEXT &&
+                if (w->type == WIN_TEXT && gui_is_topmost(si) &&
                     !w->text.edit_mode && !w->text.data && w->text.size == 0
                     && !w->text.path[0] && g_recent_count > 0) {
                     uint64_t fh2 = console_font_height();
@@ -7921,7 +8030,7 @@ void gui_on_tick(void) {
         int new_chrome_win = -1;
         int new_chrome_btn = 0;
 
-        if (top_vis >= 0) {
+        if (top_vis >= 0 && gui_is_topmost(top_vis)) {
             window_t *w = &g_wins[top_vis];
             int32_t wy = (int32_t)w->y;
             int32_t wx = (int32_t)w->x;
@@ -7961,7 +8070,7 @@ void gui_on_tick(void) {
     if (!g_dragging && !g_resizing && !g_launcher_open) {
         int          new_rw = -1;
         resize_dir_t new_rd = RES_NONE;
-        if (top_vis >= 0) {
+        if (top_vis >= 0 && gui_is_topmost(top_vis)) {
             resize_dir_t rd = hit_resize(&g_wins[top_vis], mx, my);
             if (rd != RES_NONE) { new_rw = top_vis; new_rd = rd; }
         }
@@ -8181,13 +8290,26 @@ void gui_on_tick(void) {
                     if (slot < MAX_WINS && (slot < 3 || g_wins[3].active)) {
                         window_t *fw = &g_wins[slot];
                         if (fw->state == WIN_HIDDEN) {
-                            z_raise(slot);
+                            raise_win(slot);
                             win_show(fw, slot);
-                        } else if (g_z[MAX_WINS - 1] == slot) {
-                            win_hide(fw, slot);
                         } else {
-                            z_raise(slot);
-                            full_redraw();
+                            /* Toggle behaviour: if this window is the GLOBALLY topmost
+                             * window, hide it; otherwise bring it to the front. "Globally
+                             * topmost" compares raise_z across every built-in AND IPC window. */
+                            extern uint32_t ipc_topmost_z(void);
+                            uint32_t my_z = g_wins[slot].raise_z;
+                            uint32_t top = ipc_topmost_z();
+                            for (int _j = 0; _j < MAX_WINS; _j++) {
+                                window_t *_ow = &g_wins[_j];
+                                if (!_ow->active || _ow->state == WIN_HIDDEN || _ow->anim_phase == ANIM_CLOSE) continue;
+                                if (_ow->raise_z > top) top = _ow->raise_z;
+                            }
+                            if (my_z >= top) {
+                                win_hide(fw, slot);
+                            } else {
+                                raise_win(slot);
+                                full_redraw();
+                            }
                         }
                     }
                     continue;
@@ -8239,7 +8361,7 @@ void gui_on_tick(void) {
                         g_launcher_open = false; g_launcher_hover = -1;
                         if (_li < MAX_WINS) {
                             window_t *_lw = &g_wins[_li];
-                            z_raise(_li);
+                            raise_win(_li);
                             if (_lw->state == WIN_HIDDEN) win_show(_lw, _li); else full_redraw();
                         } else if (_li >= 4 && _li < (int)LAUNCHER_ITEMS) {
                             static const char *_ap[] = {
@@ -8276,7 +8398,7 @@ void gui_on_tick(void) {
                         g_ctx_open = false; g_ctx_hover = -1;
                         if (_ci < MAX_WINS) {
                             window_t *_cw = &g_wins[_ci];
-                            z_raise(_ci);
+                            raise_win(_ci);
                             if (_cw->state == WIN_HIDDEN) win_show(_cw, _ci); else full_redraw();
                         } else if (_ci >= 5 && _ci <= 9) {
                             static const char *_cc[] = {
@@ -8360,29 +8482,26 @@ void gui_on_tick(void) {
                         if (g_wins[si].active && g_wins[si].state != WIN_HIDDEN)
                             vis[vc++] = si;
                     }
-                    if (vc >= 2) { z_raise(vis[vc - 2]); full_redraw(); }
+                    if (vc >= 2) { raise_win(vis[vc - 2]); full_redraw(); }
                     continue;
                 }
                 if (!focused) continue;
                 /* ── Terminal scrollback keyboard controls ── */
                 if (focused->type == WIN_TERM) {
-                    bool is_shift = kbd_shift_down();
                     int tot_tsb = console_tsb_count_lines();
-                    if ((uint8_t)ch == KEY_PGUP && is_shift) {
-                        /* Shift+PgUp: scroll back one page */
-                        uint64_t fw2 = focused->w > 2u * PAD ? focused->w - 2u * PAD : 1u;
+                    if ((uint8_t)ch == KEY_PGUP) {
+                        /* PgUp: scroll back one page */
                         uint64_t fh2 = focused->h > TITLE_H + BORDER + 2u * PAD
                                        ? focused->h - TITLE_H - BORDER - 2u * PAD : 1u;
                         int page = (int)(fh2 / console_font_height());
                         if (page < 1) page = 1;
-                        (void)fw2;
                         g_term_scroll += page;
                         if (g_term_scroll > tot_tsb) g_term_scroll = tot_tsb;
                         console_set_suppress_draw(g_term_scroll > 0);
                         full_redraw();
                         continue;
-                    } else if ((uint8_t)ch == KEY_PGDN && is_shift) {
-                        /* Shift+PgDn: scroll forward one page */
+                    } else if ((uint8_t)ch == KEY_PGDN) {
+                        /* PgDn: scroll forward one page */
                         uint64_t fh3 = focused->h > TITLE_H + BORDER + 2u * PAD
                                        ? focused->h - TITLE_H - BORDER - 2u * PAD : 1u;
                         int page = (int)(fh3 / console_font_height());
@@ -9251,7 +9370,7 @@ void gui_on_tick(void) {
                                     g_wins[1].fb.sel_row = _fi2; break;
                                 }
                             }
-                            z_raise(1);
+                            raise_win(1);
                             full_redraw();
                             focused = NULL; closed = true; break;
                         } else if (ch == 14) { /* Ctrl+N: find next (edit mode) */
@@ -9700,7 +9819,7 @@ void gui_on_tick(void) {
                                     }
                                 }
                             }
-                            z_raise(1);
+                            raise_win(1);
                             full_redraw();
                             focused = NULL; closed = true; break;
                         } else if (ch == 27 || ch == 'q' || ch == 23) { /* ESC, q, Ctrl+W */
@@ -9753,7 +9872,22 @@ void gui_on_tick(void) {
 
     /* ── Mouse scroll wheel ── */
     {
-        int8_t scroll = mouse_consume_scroll();
+        /* Route the wheel to whatever is visually on top at the cursor. Compare the IPC
+         * topmost-at-cursor against the topmost built-in at the cursor INCLUDING the
+         * terminal (slot 0): if an IPC app is on top, leave the event unconsumed so the
+         * compositor routes it to that app; otherwise (terminal or another built-in is on
+         * top) consume it here. */
+        extern uint32_t ipc_topmost_z_at(int32_t mx, int32_t my);
+        uint32_t _ipc_z = ipc_topmost_z_at(mx, my);
+        uint32_t _gui_z = 0;
+        for (int _i = 0; _i < MAX_WINS; _i++) {
+            window_t *_w = &g_wins[_i];
+            if (!_w->active || _w->state == WIN_HIDDEN || _w->anim_phase == ANIM_CLOSE) continue;
+            if (mx < (int32_t)_w->x || mx >= (int32_t)(_w->x + _w->w)) continue;
+            if (my < (int32_t)_w->y || my >= (int32_t)(_w->y + _w->h)) continue;
+            if (_w->raise_z > _gui_z) _gui_z = _w->raise_z;
+        }
+        int8_t scroll = (_ipc_z > 0 && _ipc_z > _gui_z) ? 0 : mouse_consume_scroll();
         if (scroll) {
             /* Close fb context menu on scroll */
             if (g_fb_ctx_open) { g_fb_ctx_open = false; full_redraw(); }
@@ -9782,6 +9916,7 @@ void gui_on_tick(void) {
                 } else if (w->type == WIN_SETTINGS) {
                     g_settings_scroll -= (int)scroll * 40;
                     if (g_settings_scroll < 0) g_settings_scroll = 0;
+                    win_draw_chrome(w, false);
                     settings_render(w);
                 }
                 break;
@@ -9832,12 +9967,12 @@ void gui_on_tick(void) {
                 if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
                     window_t *w = &g_wins[s];
                     if (w->state == WIN_HIDDEN) {
-                        z_raise(s);
+                        raise_win(s);
                         win_show(w, s);
                     } else if (g_z[MAX_WINS - 1] == s) {
                         win_hide(w, s);
                     } else {
-                        z_raise(s);
+                        raise_win(s);
                         full_redraw();
                     }
                     break;
@@ -10095,7 +10230,7 @@ void gui_on_tick(void) {
             if (item >= 0 && item < 4) {
                 /* Built-in windows: show/raise */
                 window_t *w = &g_wins[item];
-                z_raise(item);
+                raise_win(item);
                 if (w->state == WIN_HIDDEN)
                     win_show(w, item);
                 else
@@ -10232,7 +10367,7 @@ void gui_on_tick(void) {
             }
             if (item >= 0 && item < 4) {
                 window_t *w = &g_wins[item];
-                z_raise(item);
+                raise_win(item);
                 if (w->state == WIN_HIDDEN) win_show(w, item);
                 else full_redraw();
             } else if (item >= 5 && item <= 9) {
@@ -10284,7 +10419,7 @@ void gui_on_tick(void) {
             g_term_sb_drag = false;
         } else if (g_term_sb_drag_range > 0) {
             int64_t dy = (int64_t)my - (int64_t)g_term_sb_drag_y0;
-            int ns = g_term_sb_drag_s0 + (int)(dy * (int64_t)g_term_sb_drag_max
+            int ns = g_term_sb_drag_s0 - (int)(dy * (int64_t)g_term_sb_drag_max
                                                / (int64_t)g_term_sb_drag_range);
             if (ns < 0) ns = 0;
             if (ns > g_term_sb_drag_max) ns = g_term_sb_drag_max;
@@ -10304,6 +10439,7 @@ void gui_on_tick(void) {
         if (btn_released) {
             g_sb_drag = false;
             g_sb_drag_win = -1;
+            g_sb_drag_settings = false;
         } else if (g_sb_drag_range > 0) {
             if (g_sb_drag_horiz) {
                 int64_t dx = (int64_t)mx - (int64_t)g_sb_drag_x0;
@@ -10321,7 +10457,13 @@ void gui_on_tick(void) {
                                               / (int64_t)g_sb_drag_range);
                 if (ns < 0) ns = 0;
                 if (ns > g_sb_drag_max) ns = g_sb_drag_max;
-                if (g_sb_drag_text) {
+                if (g_sb_drag_settings) {
+                    if (ns != g_settings_scroll) {
+                        g_settings_scroll = ns;
+                        win_draw_chrome(w, false);
+                        settings_render(w);
+                    }
+                } else if (g_sb_drag_text) {
                     if (ns != w->text.scroll) {
                         w->text.scroll = ns;
                         text_render(w);
@@ -10396,14 +10538,7 @@ void gui_on_tick(void) {
                         win_draw_chrome(ow, true);
                         win_render_content(ow);
                     }
-                    /* Drop shadow */
-                    uint64_t sx3 = w->x + 3u, sy3 = w->y + 3u;
-                    if (sx3 + w->w <= fb_w2 && sy3 + w->h <= desk_bot())
-                        console_fill_rect(sx3, sy3, w->w, w->h, 0x00080c1au);
-                    uint64_t sx6 = w->x + 6u, sy6 = w->y + 6u;
-                    if (sx6 + w->w <= fb_w2 && sy6 + w->h <= desk_bot())
-                        console_fill_rect(sx6, sy6, w->w, w->h, 0x00020408u);
-                    /* Blit shadow buffer */
+                    /* Blit the captured window pixels at the new position (no drop shadow) */
                     console_paste_rect(g_drag_shadow, w->x, w->y, w->w, w->h);
                     /* Re-draw title bar so active/focus ring is fresh */
                     win_draw_chrome(w, false);
@@ -10495,6 +10630,7 @@ void gui_on_tick(void) {
     /* ── Per-window hit tests (z-order top-to-bottom) ── */
     if (btn_pressed) {
         bool hit_any = false;
+        extern uint32_t ipc_topmost_z_at(int32_t mx, int32_t my);
         for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
             int si = g_z[zi];
             window_t *w = &g_wins[si];
@@ -10516,11 +10652,17 @@ void gui_on_tick(void) {
                 in_win = true; in_tb = false;
             }
 
+            /* Skip this built-in window if an IPC window is on top at this position */
+            if (ipc_topmost_z_at(mx, my) > w->raise_z) {
+                hit_any = true;  /* something was here, don't fall through to terminal raise */
+                break;           /* IPC window owns this click -- compositor handles it */
+            }
+
             hit_any = true;
 
             /* Raise window to top on any click */
             bool was_top = (g_z[MAX_WINS - 1] == si);
-            z_raise(si);
+            raise_win(si);
             if (!was_top) full_redraw();
 
             if (in_tb && mx >= clx && mx < clx + (int32_t)BTN_W) {
@@ -10615,7 +10757,7 @@ void gui_on_tick(void) {
                             if (thumb_h_t > sb_h_t) thumb_h_t = sb_h_t;
                             int max_sc_t = total_sb_t - max_rows_t;
                             if (max_sc_t < 1) max_sc_t = 1;
-                            uint64_t thumb_y_t = tcy + (uint64_t)g_term_scroll *
+                            uint64_t thumb_y_t = tcy + (uint64_t)(max_sc_t - g_term_scroll) *
                                                  (sb_h_t - thumb_h_t) / (uint64_t)max_sc_t;
                             if (thumb_y_t + thumb_h_t > tcy + sb_h_t)
                                 thumb_y_t = tcy + sb_h_t - thumb_h_t;
@@ -10628,7 +10770,7 @@ void gui_on_tick(void) {
                                 g_term_sb_drag_max    = max_sc_t;
                             } else {
                                 /* Track click: jump */
-                                int ns = (int)(((uint64_t)my - tcy) * (uint64_t)total_sb_t / sb_h_t);
+                                int ns = max_sc_t - (int)(((uint64_t)my - tcy) * (uint64_t)max_sc_t / sb_h_t);
                                 if (ns < 0) ns = 0;
                                 if (ns > max_sc_t) ns = max_sc_t;
                                 g_term_scroll = ns;
@@ -10961,6 +11103,36 @@ void gui_on_tick(void) {
                         }
                     }
                 } else if (w->type == WIN_SETTINGS && in_win && !in_tb) {
+                    /* Scrollbar click/drag */
+                    {
+                        uint64_t _ix = w->x + BORDER, _iy = w->y + TITLE_H;
+                        uint64_t _iw = w->w - 2u * BORDER, _ih = w->h - TITLE_H - BORDER;
+                        uint64_t _sb_x = _ix + _iw - 6u;
+                        int _tot = g_settings_total_h;
+                        if (_tot > (int)_ih && (uint64_t)mx >= _sb_x && (uint64_t)mx < _sb_x + 6u &&
+                            (uint64_t)my >= _iy && (uint64_t)my < _iy + _ih) {
+                            int _max_sc = _tot - (int)_ih;
+                            uint64_t _th = _ih * _ih / (uint64_t)_tot;
+                            if (_th < 8u) _th = 8u;
+                            uint64_t _ty = _iy + (uint64_t)((int64_t)_ih * (int64_t)g_settings_scroll / (int64_t)_tot);
+                            if ((uint64_t)my >= _ty && (uint64_t)my < _ty + _th) {
+                                g_sb_drag = true; g_sb_drag_win = si;
+                                g_sb_drag_y0 = my; g_sb_drag_s0 = g_settings_scroll;
+                                g_sb_drag_range = _ih > _th ? _ih - _th : 1u;
+                                g_sb_drag_max = _max_sc;
+                                g_sb_drag_text = false; g_sb_drag_horiz = false;
+                                g_sb_drag_settings = true;
+                            } else {
+                                int _ns = (int)((uint64_t)(_tot) * ((uint64_t)my - _iy) / _ih) - (int)(_ih / 2);
+                                if (_ns < 0) _ns = 0;
+                                if (_ns > _max_sc) _ns = _max_sc;
+                                g_settings_scroll = _ns;
+                                win_draw_chrome(w, false); settings_render(w);
+                            }
+                            mouse_consume_click(&(int32_t){0}, &(int32_t){0});
+                            goto settings_click_done;
+                        }
+                    }
                     /* Font selector prev/next buttons */
                     if (g_font_btn_bh > 0 &&
                         (uint64_t)my >= g_font_btn_by &&
@@ -11127,6 +11299,7 @@ void gui_on_tick(void) {
                             compositor_set_lock_timeout(lto_secs[g_lto_idx]);
                         settings_render(w);
                     }
+                    settings_click_done:;
                 }
             }
             break;
@@ -11299,7 +11472,7 @@ void gui_on_tick(void) {
 void gui_open_in_viewer(const char *path) {
     text_open(&g_wins[3], path);
     win_show(&g_wins[3], 3);
-    z_raise(3);
+    raise_win(3);
 }
 
 /* Load an image file and set it as the desktop wallpaper. */
@@ -11402,4 +11575,106 @@ void gui_snap_focused(int zone) {
         w->half_snapped = true;
     }
     full_redraw();
+}
+
+/* Scroll the built-in terminal by one page. dir > 0 = scroll back, dir < 0 = forward. */
+void gui_term_scroll_page(int dir) {
+    if (!g_wins[0].active || g_wins[0].state == WIN_HIDDEN) return;
+    uint64_t fh = g_wins[0].h > TITLE_H + BORDER + 2u * PAD
+                  ? g_wins[0].h - TITLE_H - BORDER - 2u * PAD : 1u;
+    int page = (int)(fh / console_font_height());
+    if (page < 1) page = 1;
+    int tot = console_tsb_count_lines();
+    if (dir > 0) {
+        g_term_scroll += page;
+        if (g_term_scroll > tot) g_term_scroll = tot;
+    } else {
+        g_term_scroll -= page;
+        if (g_term_scroll < 0) g_term_scroll = 0;
+    }
+    console_set_suppress_draw(g_term_scroll > 0);
+    full_redraw();
+}
+
+/* Re-composite built-in windows that sit ABOVE the IPC windows they overlap.
+ *
+ * IPC windows are blitted from their own framebuffers every frame (ipc_blit_all), so any
+ * built-in window that should appear on top of an IPC window must be re-drawn AFTER that
+ * blit. This runs last in the compositor frame, after all IPC drawing.
+ *
+ * EVERY built-in window is treated identically, including the terminal (slot 0): each is
+ * re-rendered iff its raise_z is greater than the highest IPC z over its own rectangle.
+ * Windows are drawn in ascending raise_z order so the topmost one lands last. */
+void gui_overdraw_top(void) {
+    extern uint32_t ipc_topmost_z_in_rect(uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
+    extern int ipc_window_count(void);
+
+    /* No IPC windows → full_redraw already painted built-ins correctly; nothing to layer. */
+    if (ipc_window_count() == 0) return;
+
+    /* Visible windows sorted ascending by raise_z (lowest first, topmost last). */
+    int order[MAX_WINS], n = 0;
+    for (int i = 0; i < MAX_WINS; i++) {
+        window_t *w = &g_wins[i];
+        if (!w->active || w->state == WIN_HIDDEN || w->anim_phase == ANIM_CLOSE) continue;
+        order[n++] = i;
+    }
+    for (int a = 1; a < n; a++) {
+        int key = order[a], b = a - 1;
+        while (b >= 0 && g_wins[order[b]].raise_z > g_wins[key].raise_z) {
+            order[b + 1] = order[b]; b--;
+        }
+        order[b + 1] = key;
+    }
+
+    for (int j = 0; j < n; j++) {
+        window_t *w = &g_wins[order[j]];
+        /* Re-draw a built-in window over the IPC layer ONLY where it is genuinely on top,
+         * i.e. its raise_z beats every IPC window covering its rectangle. The terminal
+         * (slot 0) is a normal participant here: when the user raises it (clicks it or
+         * picks it from the taskbar) its raise_z goes above the IPC apps and it covers
+         * them; when an IPC app is on top, the terminal's raise_z is lower and it is left
+         * behind. Click and scroll routing use the terminal-inclusive topmost so input
+         * matches what is visually on top. */
+        uint32_t ipc_z = ipc_topmost_z_in_rect((uint32_t)w->x, (uint32_t)w->y,
+                                               (uint32_t)w->w, (uint32_t)w->h);
+        if (w->raise_z <= ipc_z) continue;
+        /* fill_content=true draws the FULL chrome (title bar + border + focus ring). */
+        switch (w->type) {
+        case WIN_TERM:
+            win_draw_chrome(w, true);
+            win_render_content(w);   /* term_set_viewport → console re-renders text over IPC */
+            break;
+        case WIN_FILES:
+            fb_render(w);
+            break;
+        case WIN_SETTINGS:
+            win_draw_chrome(w, true);
+            settings_render(w);
+            break;
+        case WIN_TEXT:
+            win_draw_chrome(w, true);
+            text_render(w);
+            break;
+        default: break;
+        }
+    }
+}
+
+/* Returns true if any visible built-in window (INCLUDING the terminal) with raise_z > ipc_z
+ * overlaps the rect (rx,ry,rw,rh). Used by ipc_draw_overlays to skip drawing IPC chrome in
+ * areas where a higher-z built-in window is on top. */
+bool gui_builtin_covers(int32_t rx, int32_t ry, uint32_t rw, uint32_t rh, uint32_t ipc_z) {
+    for (int i = 0; i < MAX_WINS; i++) {
+        window_t *w = &g_wins[i];
+        if (!w->active || w->state == WIN_HIDDEN || w->anim_phase == ANIM_CLOSE) continue;
+        if (w->raise_z <= ipc_z) continue;  /* this built-in is behind the IPC window */
+        /* AABB overlap test */
+        if ((int32_t)w->x >= rx + (int32_t)rw) continue;
+        if (rx >= (int32_t)(w->x + w->w))       continue;
+        if ((int32_t)w->y >= ry + (int32_t)rh)  continue;
+        if (ry >= (int32_t)(w->y + w->h))        continue;
+        return true;
+    }
+    return false;
 }

@@ -301,6 +301,23 @@ static void render(uint32_t *fb) {
         }
     }
 
+    /* Scrollbar on right edge */
+    {
+        int sb_x = WIN_W - 6;
+        int sb_y = TITLE_H + HDR_H;
+        int sb_h = WIN_H - TITLE_H - HDR_H - FOOT_H;
+        int vr = visible_rows();
+        if (g_nlines > vr) {
+            fb_fill(fb, sb_x, sb_y, 6, sb_h, C_LNUM_BG);
+            int thumb_h = sb_h * vr / g_nlines;
+            if (thumb_h < 8) thumb_h = 8;
+            int max_s = g_nlines - vr;
+            int thumb_y = sb_y + (sb_h - thumb_h) * g_scroll / (max_s > 0 ? max_s : 1);
+            if (thumb_y + thumb_h > sb_y + sb_h) thumb_y = sb_y + sb_h - thumb_h;
+            fb_fill(fb, sb_x + 1, thumb_y + 1, 4, thumb_h - 2, C_GREY);
+        }
+    }
+
     /* Footer status bar */
     int foot_y = WIN_H - FOOT_H;
     fb_fill(fb, 0, foot_y, WIN_W, FOOT_H, C_FOOT_BG);
@@ -755,7 +772,7 @@ int main(int argc, char **argv) {
                             if (in_plen >= 10) {
                                 int8_t scroll = (int8_t)in_pld[9];
                                 if (scroll != 0) {
-                                    g_scroll += scroll;
+                                    g_scroll -= scroll;
                                     if (g_scroll < 0) g_scroll = 0;
                                     if (g_scroll > g_nlines - 1) g_scroll = g_nlines - 1;
                                     dirty = true;

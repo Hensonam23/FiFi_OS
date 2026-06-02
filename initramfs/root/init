@@ -16,7 +16,7 @@ mount -t tmpfs    none /dev/shm
 echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
 
 # ── Hostname ──────────────────────────────────────────────────────────────────
-echo "fifios" > /proc/sys/kernel/hostname 2>/dev/null || true
+echo "FiFiOS" > /proc/sys/kernel/hostname 2>/dev/null || true
 
 # ── PATH ──────────────────────────────────────────────────────────────────────
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -70,6 +70,20 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
                     echo "ntp ok" >> /fifi-data/network.log
                 else
                     echo "ntp failed (ok)" >> /fifi-data/network.log
+                fi
+                # Start DoH if enabled (dnscrypt-proxy listens on 127.0.0.1:53)
+                if [ -f /fifi-data/doh-enabled ] && [ -x /usr/bin/dnscrypt-proxy ]; then
+                    /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml \
+                        >>/fifi-data/doh.log 2>&1 &
+                    echo $! > /fifi-data/doh.pid
+                    sleep 1
+                    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+                    echo "doh: started pid=$(cat /fifi-data/doh.pid)" >> /fifi-data/network.log
+                fi
+                # Auto-connect WireGuard VPN if requested
+                if [ -f /fifi-data/vpn-autoconnect ] && [ -f /fifi-data/wg0.conf ]; then
+                    /bin/sh /bin/wg-up >>/fifi-data/vpn.log 2>&1
+                    echo "vpn: autoconnect attempted" >> /fifi-data/network.log
                 fi
                 exit 0
             fi

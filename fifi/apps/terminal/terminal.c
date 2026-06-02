@@ -282,9 +282,21 @@ static void render(void) {
         fb_fill(px, py + cell_h - 2, cell_w, 2, g_fg);
     }
 
-    /* Scrollback indicator: thin blue bar below title */
-    if (g_scroll_offset > 0)
-        fb_fill(0, TITLE_H, g_win_w, 3, 0xFF2060a0u);
+    /* Scrollbar on right edge */
+    {
+        int sb_x = g_win_w - 14;
+        int sb_y = TITLE_H + 4;
+        int sb_h = g_win_h - TITLE_H - 8;
+        fb_fill(sb_x, sb_y, 14, sb_h, 0xFF1e3048u);
+        int sb_total = (g_sb_count > 0) ? g_sb_count : 1;
+        int total_lines = g_rows + sb_total;
+        int thumb_h = sb_h * g_rows / total_lines;
+        if (thumb_h < 8) thumb_h = 8;
+        int thumb_y = sb_y + (sb_h - thumb_h) * (sb_total - g_scroll_offset) / sb_total;
+        if (thumb_y < sb_y) thumb_y = sb_y;
+        if (thumb_y + thumb_h > sb_y + sb_h) thumb_y = sb_y + sb_h - thumb_h;
+        fb_fill(sb_x + 2, thumb_y, 10, thumb_h, 0xFFd0d8e0u);
+    }
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -343,21 +355,22 @@ static int pty_spawn(void) {
         ioctl(slave, TIOCSCTTY, 0);
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         if (slave > 2) close(slave);
-        setenv("TERM", "xterm", 1);
-        setenv("PS1", "$ ", 1);
-        char *argv[] = { "/bin/sh", NULL };
-        execv("/bin/sh", argv);
+        /* Match the built-in terminal (platform/linux/pty.c) so both shells look identical:
+         * same TERM, environment, "\w # " prompt, and ush-then-sh login shell. */
+        setenv("TERM",  "linux", 1);
+        setenv("HOME",  "/root", 1);
+        setenv("PATH",  "/bin:/sbin:/usr/bin:/usr/sbin", 1);
+        setenv("USER",  "fifi",  1);
+        setenv("SHELL", "/bin/sh", 1);
+        /* Familiar Linux-style prompt, identical to the built-in terminal. */
+        setenv("PS1",   "fifi@FiFiOS:\\w$ ", 1);
+        execl("/bin/ush", "-ush", NULL);
+        execl("/bin/sh",  "-sh",  NULL);
+        execl("/bin/busybox", "sh", NULL);
         _exit(1);
     }
     fcntl(g_pty_master, F_SETFL, O_NONBLOCK);
     return 0;
-}
-
-static void pty_update_size(void) {
-    if (g_pty_master < 0) return;
-    struct winsize ws = { .ws_row = (uint16_t)g_rows, .ws_col = (uint16_t)g_cols };
-    ioctl(g_pty_master, TIOCSWINSZ, &ws);
-    if (g_child_pid > 0) kill(g_child_pid, SIGWINCH);
 }
 
 /* ── Key translation ─────────────────────────────────────────────────────── */
@@ -403,15 +416,31 @@ static void resize_to(int new_w, int new_h) {
     /* Clamp cursor to new grid */
     if (g_cx >= new_cols) g_cx = new_cols - 1;
     if (g_cy >= new_rows) g_cy = new_rows - 1;
+    int old_cols = g_cols, old_rows = g_rows;
     g_cols = new_cols; g_rows = new_rows;
     g_win_w = new_w;  g_win_h = new_h;
+
+    /* Initialise cells newly exposed by a grow to the current bg. They were never written
+     * (static zero-init → bg=0), so render() would otherwise paint them as pure-black
+     * boxes. New rows are cleared fully; previously-existing rows get their new trailing
+     * columns cleared. (Shrink: c0 >= g_cols, loops are no-ops.) */
+    for (int r = 0; r < g_rows; r++) {
+        int c0 = (r < old_rows) ? old_cols : 0;
+        for (int c = c0; c < g_cols; c++)
+            g_cells[r][c] = (Cell){ ' ', g_fg, g_bg };
+    }
 
     /* Reallocate framebuffer */
     free(g_fb);
     g_fb = malloc((size_t)g_win_w * g_win_h * 4);
     if (!g_fb) { g_fb = NULL; return; }
 
-    pty_update_size();
+    /* Deliberately do NOT push the new size to the pty on resize. The built-in terminal
+     * does the same — it sets the pty winsize once at spawn (pty_set_initial_winsize) and
+     * never again — because busybox sh reprints its prompt on every SIGWINCH, so each
+     * resize would stack another prompt line. The shell keeps its spawn-time grid; only the
+     * visible grid reflows. (A full-screen TUI launched after a resize would see the old
+     * size, same limitation as the built-in terminal.) */
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
@@ -522,6 +551,14 @@ int main(void) {
                                     key_to_pty(key);
                                 }
                             }
+                        } else if (in_type == IPC_INPUT_MOUSE && in_plen >= 10) {
+                            int8_t wheel = (int8_t)(in_pld ? in_pld[9] : 0);
+                            if (wheel != 0) {
+                                g_scroll_offset += wheel * 3;
+                                if (g_scroll_offset < 0) g_scroll_offset = 0;
+                                if (g_scroll_offset > g_sb_count) g_scroll_offset = g_sb_count;
+                                g_dirty = true;
+                            }
                         } else if (in_type == IPC_CLIP_DATA && in_plen > 0 && g_pty_master >= 0) {
                             if (in_pld) write(g_pty_master, in_pld, in_plen);
                         } else if (in_type == IPC_WIN_RESIZE && in_plen >= 4) {
@@ -548,7 +585,6 @@ int main(void) {
             ssize_t nr2;
             while ((nr2 = read(g_pty_master, buf, sizeof(buf))) > 0) {
                 for (ssize_t i = 0; i < nr2; i++) term_putc(buf[i]);
-                g_scroll_offset = 0;
                 g_dirty = true;
             }
         }

@@ -352,6 +352,119 @@ else
     echo "[initramfs] WARNING: Xwayland not found — X11 app support disabled"
 fi
 
+# ── WireGuard tools (wg) ─────────────────────────────────────────────────────
+echo "[initramfs] bundling WireGuard tools..."
+WG_BIN=""
+for candidate in /usr/bin/wg /usr/local/bin/wg; do
+    [ -x "$candidate" ] && WG_BIN="$candidate" && break
+done
+if [ -n "$WG_BIN" ]; then
+    cp "$WG_BIN" "$STAGE/usr/bin/wg"
+    chmod +x "$STAGE/usr/bin/wg"
+    WG_LIBS=$(ldd "$WG_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $WG_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] WireGuard tools bundled"
+else
+    echo "[initramfs] NOTE: wg not found -- install wireguard-tools for VPN support"
+fi
+
+# Make wg-up executable
+[ -f "$STAGE/bin/wg-up" ] && chmod +x "$STAGE/bin/wg-up"
+
+# ── nmap ─────────────────────────────────────────────────────────────────────
+echo "[initramfs] bundling nmap..."
+NMAP_BIN=""
+for candidate in /usr/bin/nmap /usr/local/bin/nmap; do
+    [ -x "$candidate" ] && NMAP_BIN="$candidate" && break
+done
+if [ -n "$NMAP_BIN" ]; then
+    cp "$NMAP_BIN" "$STAGE/usr/bin/nmap"
+    chmod +x "$STAGE/usr/bin/nmap"
+    NMAP_LIBS=$(ldd "$NMAP_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $NMAP_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    if [ -d /usr/share/nmap ]; then
+        mkdir -p "$STAGE/usr/share/nmap"
+        for f in nmap-services nmap-protocols nmap-rpc; do
+            [ -f "/usr/share/nmap/$f" ] && cp "/usr/share/nmap/$f" "$STAGE/usr/share/nmap/"
+        done
+    fi
+    echo "[initramfs] nmap bundled ($(du -sh "$NMAP_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: nmap not found -- install nmap for network scanning"
+fi
+
+# ── tcpdump ───────────────────────────────────────────────────────────────────
+echo "[initramfs] bundling tcpdump..."
+TCPDUMP_BIN=""
+for candidate in /usr/bin/tcpdump /usr/sbin/tcpdump; do
+    [ -x "$candidate" ] && TCPDUMP_BIN="$candidate" && break
+done
+if [ -n "$TCPDUMP_BIN" ]; then
+    cp "$TCPDUMP_BIN" "$STAGE/usr/bin/tcpdump"
+    chmod +x "$STAGE/usr/bin/tcpdump"
+    TD_LIBS=$(ldd "$TCPDUMP_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $TD_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] tcpdump bundled ($(du -sh "$TCPDUMP_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: tcpdump not found -- install tcpdump for packet capture"
+fi
+
+# ── dnscrypt-proxy ────────────────────────────────────────────────────────────
+echo "[initramfs] bundling dnscrypt-proxy..."
+DCRYPT_BIN=""
+for candidate in /usr/bin/dnscrypt-proxy /usr/local/bin/dnscrypt-proxy; do
+    [ -x "$candidate" ] && DCRYPT_BIN="$candidate" && break
+done
+if [ -n "$DCRYPT_BIN" ]; then
+    cp "$DCRYPT_BIN" "$STAGE/usr/bin/dnscrypt-proxy"
+    chmod +x "$STAGE/usr/bin/dnscrypt-proxy"
+    DCRYPT_LIBS=$(ldd "$DCRYPT_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $DCRYPT_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] dnscrypt-proxy bundled ($(du -sh "$DCRYPT_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: dnscrypt-proxy not found -- install dnscrypt-proxy for DoH support"
+fi
+
+# ── CA certificates (required for TLS in Go binaries like dnscrypt-proxy) ────
+echo "[initramfs] bundling CA certificates..."
+if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    mkdir -p "$STAGE/etc/ssl/certs"
+    cp /etc/ssl/certs/ca-certificates.crt "$STAGE/etc/ssl/certs/"
+    echo "[initramfs] CA certificates bundled ($(du -sh /etc/ssl/certs/ca-certificates.crt | cut -f1))"
+else
+    echo "[initramfs] WARNING: /etc/ssl/certs/ca-certificates.crt not found -- TLS will fail"
+fi
+
+# /lib64 and /lib symlinks -- all Arch binaries expect ELF interpreter at /lib64/ld-linux-x86-64.so.2
+# On Arch: /lib64 -> usr/lib and /usr/lib64 -> lib (both point at /usr/lib)
+# We copy ld.so into $STAGE/usr/lib64/; create /lib64 -> usr/lib64 so binaries find it.
+ln -sf usr/lib64 "$STAGE/lib64" 2>/dev/null || true
+ln -sf usr/lib   "$STAGE/lib"   2>/dev/null || true
+
 # /etc/ld.so.conf.d so the dynamic linker finds /usr/lib
 mkdir -p "$STAGE/etc/ld.so.conf.d"
 echo "/usr/lib" > "$STAGE/etc/ld.so.conf.d/fifi.conf"
