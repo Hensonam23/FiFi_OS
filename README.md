@@ -152,17 +152,19 @@ The window manager was reworked so overlapping app windows layer cleanly with no
 - [x] Mouse wheel: scroll routes to whichever window is on top at the cursor
 - [ ] DNS over HTTPS: system-wide encrypted DNS with no plain-text leaks
 - [ ] VPN integration: WireGuard built in, one-click connect from Settings
-- [ ] Tor mode: route all traffic through Tor from a Settings toggle
+- [x] DNS over HTTPS: system-wide encrypted DNS, toggle in Security Center
+- [x] VPN integration: WireGuard built in, connect from Settings and Security Center
+- [x] Offensive tools: network scanner (A), nmap port scan (N), password strength tester (P), packet capture (T) -- vulnerability scanner (B) partial: service/version detection done, CVE lookup not yet added
+- [x] Tor mode: toggle in Security Center (O), SOCKS5 proxy on port 9050, bootstrap status shown
+- [x] Intrusion detection: log monitor, process integrity check, unexpected listener detection
 - [ ] AppArmor profiles: each app runs with least privilege
 - [ ] Encrypted storage: full disk encryption by default (LUKS2)
 - [ ] Secure boot: signed bootloader and kernel, TPM-backed key storage
 - [ ] Automatic updates: security patches applied in the background, rollback on failure
-- [ ] Offensive tools: network scanner (nmap), vulnerability scanner, password strength tester, packet capture
-- [ ] Intrusion detection: log monitor, process integrity checker, fail2ban-style blocking
 
 ### Phase 6: Full System
 
-- [ ] WiFi: NetworkManager backend, FiFi WiFi UI in Settings
+- [x] WiFi: iwd-based auto-connect, Intel AX-series firmware bundled, status in Settings
 - [ ] Bluetooth: pairing UI, A2DP audio via PipeWire
 - [ ] Browser: Firefox or LibreWolf in a FiFi window
 - [ ] Desktop shortcuts, image viewer

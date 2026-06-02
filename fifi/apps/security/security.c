@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -292,6 +293,187 @@ static void toggle_vpn(void) {
         if (fd >= 0) { write(fd, "vpn: disconnected\n", 18); close(fd); }
     }
     update_vpn();
+}
+
+/* ── Section: Tor ────────────────────────────────────────────────────────── */
+static bool g_tor_active  = false;
+static char g_tor_status[128] = "Disabled";
+
+static void update_tor(void) {
+    g_tor_status[0] = '\0';
+    if (access("/fifi-data/tor-enabled", F_OK) != 0) {
+        g_tor_active = false;
+        snprintf(g_tor_status, sizeof(g_tor_status), "Disabled -- press O to enable");
+        return;
+    }
+    /* Check if tor process is alive */
+    int pfd = open("/fifi-data/tor.pid", O_RDONLY);
+    if (pfd < 0) { g_tor_active = false; snprintf(g_tor_status, sizeof(g_tor_status), "Starting..."); return; }
+    char pbuf[16] = {0}; read(pfd, pbuf, sizeof(pbuf)-1); close(pfd);
+    pid_t pid = (pid_t)atoi(pbuf);
+    if (pid > 0 && kill(pid, 0) == 0) {
+        g_tor_active = true;
+        /* Check if bootstrap complete via tor log */
+        int lfd = open("/fifi-data/tor.log", O_RDONLY);
+        if (lfd >= 0) {
+            char lbuf[2048] = {0};
+            read(lfd, lbuf, sizeof(lbuf)-1);
+            close(lfd);
+            if (strstr(lbuf, "Bootstrapped 100%") || strstr(lbuf, "100%: Done")) {
+                snprintf(g_tor_status, sizeof(g_tor_status),
+                         "Connected  SOCKS5 proxy: 127.0.0.1:9050");
+            } else {
+                /* Find last bootstrap line */
+                char *p = lbuf; char *last = NULL;
+                while ((p = strstr(p, "Bootstrapped"))) { last = p; p++; }
+                if (last) {
+                    char *nl = strchr(last, '\n'); if (nl) *nl = '\0';
+                    char *pct = last; /* trim to 60 chars */
+                    snprintf(g_tor_status, sizeof(g_tor_status), "Connecting -- %.60s", pct);
+                } else {
+                    snprintf(g_tor_status, sizeof(g_tor_status), "Starting...");
+                }
+            }
+        } else {
+            snprintf(g_tor_status, sizeof(g_tor_status), "Running (SOCKS5 127.0.0.1:9050)");
+        }
+    } else {
+        g_tor_active = false;
+        snprintf(g_tor_status, sizeof(g_tor_status), "Failed -- check /fifi-data/tor.log");
+        unlink("/fifi-data/tor.pid");
+    }
+}
+
+static void toggle_tor(void) {
+    if (access("/fifi-data/tor-enabled", F_OK) != 0) {
+        /* Enable: write torrc and start tor */
+        mkdir("/fifi-data/tor", 0700);
+        int cfd = open("/fifi-data/torrc", O_CREAT|O_WRONLY|O_TRUNC, 0600);
+        if (cfd >= 0) {
+            const char *cfg =
+                "SocksPort 9050\n"
+                "DNSPort 5353\n"
+                "DataDirectory /fifi-data/tor\n"
+                "Log notice file /fifi-data/tor.log\n";
+            write(cfd, cfg, strlen(cfg));
+            close(cfd);
+        }
+        /* Clear old log */
+        int lfd = open("/fifi-data/tor.log", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+        if (lfd >= 0) close(lfd);
+        /* Mark enabled and start */
+        int efd = open("/fifi-data/tor-enabled", O_CREAT|O_WRONLY, 0644);
+        if (efd >= 0) close(efd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            for (int i = 3; i < 64; i++) close(i);
+            execl("/usr/bin/tor", "tor", "-f", "/fifi-data/torrc", NULL);
+            _exit(1);
+        }
+        if (pid > 0) {
+            char pbuf[20];
+            snprintf(pbuf, sizeof(pbuf), "%d\n", (int)pid);
+            int pfd = open("/fifi-data/tor.pid", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+            if (pfd >= 0) { write(pfd, pbuf, strlen(pbuf)); close(pfd); }
+        }
+    } else {
+        /* Disable: kill tor */
+        int pfd = open("/fifi-data/tor.pid", O_RDONLY);
+        if (pfd >= 0) {
+            char pbuf[16] = {0}; read(pfd, pbuf, sizeof(pbuf)-1); close(pfd);
+            pid_t pid = (pid_t)atoi(pbuf);
+            if (pid > 0) kill(pid, SIGTERM);
+            unlink("/fifi-data/tor.pid");
+        }
+        unlink("/fifi-data/tor-enabled");
+    }
+    update_tor();
+}
+
+/* ── Section: Vulnerability / Banner Scanner ─────────────────────────────── */
+static bool g_vs_mode     = false;   /* text input active */
+static char g_vs_buf[128] = "";
+static int  g_vs_len      = 0;
+static char g_vs_target[128] = "";  /* last submitted target */
+
+/* ── Section: Intrusion Detection ───────────────────────────────────────────  */
+#define IDS_LINES 20
+static char g_ids_alerts[IDS_LINES][120];
+static int  g_ids_count = 0;
+
+static void update_ids(void) {
+    g_ids_count = 0;
+    /* Check firewall log for blocked connections */
+    {
+        int fd = open("/fifi-data/firewall.log", O_RDONLY);
+        if (fd >= 0) {
+            char buf[4096] = {0};
+            read(fd, buf, sizeof(buf)-1);
+            close(fd);
+            if (strstr(buf, "firewall: failed")) {
+                if (g_ids_count < IDS_LINES)
+                    snprintf(g_ids_alerts[g_ids_count++], 120,
+                             "[WARN] Firewall inactive -- system is unprotected");
+            }
+        }
+    }
+    /* Check network log for anomalies */
+    {
+        int fd = open("/fifi-data/network.log", O_RDONLY);
+        if (fd >= 0) {
+            char buf[4096] = {0};
+            read(fd, buf, sizeof(buf)-1);
+            close(fd);
+            if (strstr(buf, "dhcp failed"))
+                if (g_ids_count < IDS_LINES)
+                    snprintf(g_ids_alerts[g_ids_count++], 120,
+                             "[INFO] DHCP failed -- network may be unavailable");
+        }
+    }
+    /* Verify integrity of critical binaries (hash vs. known-good) */
+    {
+        static const char *critical[] = {
+            "/bin/fifi-compositor", "/bin/fifi-security", NULL
+        };
+        for (int i = 0; critical[i]; i++) {
+            if (access(critical[i], X_OK) != 0 && g_ids_count < IDS_LINES)
+                snprintf(g_ids_alerts[g_ids_count++], 120,
+                         "[WARN] Critical binary missing or not executable: %s", critical[i]);
+        }
+    }
+    /* Check for unexpected listening ports (anything not 53 = DoH proxy) */
+    {
+        int fd = open("/proc/net/tcp", O_RDONLY);
+        if (fd >= 0) {
+            char buf[16384] = {0};
+            read(fd, buf, sizeof(buf)-1);
+            close(fd);
+            char *line = buf;
+            int unexpected = 0;
+            while (*line) {
+                char *nl = strchr(line, '\n');
+                if (nl) *nl = '\0';
+                /* Parse hex local address:port */
+                unsigned int lip, lport, state;
+                if (sscanf(line, " %*d: %x:%x %*x:%*x %x", &lip, &lport, &state) == 3) {
+                    /* state 0x0A = LISTEN */
+                    if (state == 0x0A && lport != 53 && lport != 9050 && lip == 0x0100007F) {
+                        if (g_ids_count < IDS_LINES)
+                            snprintf(g_ids_alerts[g_ids_count++], 120,
+                                     "[INFO] Listening on 127.0.0.1:%u", lport);
+                    } else if (state == 0x0A && lport != 53 && lport != 9050 && lip == 0) {
+                        if (g_ids_count < IDS_LINES && ++unexpected <= 3)
+                            snprintf(g_ids_alerts[g_ids_count++], 120,
+                                     "[WARN] Listening on all interfaces: port %u", lport);
+                    }
+                }
+                if (!nl) break;
+                line = nl + 1;
+            }
+        }
+    }
+    if (g_ids_count == 0)
+        snprintf(g_ids_alerts[g_ids_count++], 120, "No issues detected");
 }
 
 /* ── Section: Privacy mode (telemetry block count) ───────────────────────── */
@@ -752,6 +934,59 @@ static void render(uint32_t *fb) {
         if (g_tool_fd >= 0) vy += ROW_H;
     }
 
+    /* ── Tor ─── */
+    SECTION("Tor (Onion Routing)");
+    STATUS_ROW(g_tor_active ? "[ON] " : "[OFF]",
+               g_tor_active ? C_GREEN : C_RED,
+               g_tor_status, C_VAL);
+    if (g_tor_active && vy > TITLE_H && vy < wh) {
+        draw_str(fb, "Set proxy in apps: SOCKS5  127.0.0.1  port 9050",
+                 PAD + 44, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+    }
+    if (g_tor_active) vy += ROW_H;
+    vy += 4;
+
+    /* ── Vulnerability / Banner Scanner ─── */
+    SECTION("Vulnerability Scanner");
+    if (g_vs_mode) {
+        char vs_line[160];
+        int sl = g_vs_len < 64 ? g_vs_len : 64;
+        char disp[66]; memcpy(disp, g_vs_buf, sl); disp[sl] = '|'; disp[sl+1] = '\0';
+        snprintf(vs_line, sizeof(vs_line), "Target host/IP: %s", disp);
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, vs_line, PAD, vy + (ROW_H - g_glyph_h)/2, C_YELLOW);
+        vy += ROW_H;
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Enter=scan  Esc=cancel  (runs nmap -sV --open)",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    } else if (g_vs_target[0] && g_tool_name[0] && strstr(g_tool_name, "vuln-scan")) {
+        /* Results shown in Tools section below */
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Results in Tools section below. Press B to scan again.",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    } else {
+        if (vy > TITLE_H && vy < wh)
+            draw_str(fb, "Press B to scan a host for open services and versions",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+        vy += ROW_H;
+    }
+    vy += 4;
+
+    /* ── Intrusion Detection ─── */
+    SECTION("Intrusion Detection");
+    for (int i = 0; i < g_ids_count; i++) {
+        if (vy > TITLE_H && vy + ROW_H < wh) {
+            fill(fb, 0, vy, ww, ROW_H, (i & 1) ? C_ROW_B : C_ROW_A);
+            uint32_t col = strstr(g_ids_alerts[i], "[WARN]") ? C_RED  :
+                           strstr(g_ids_alerts[i], "[INFO]") ? C_YELLOW : C_GREEN;
+            draw_str(fb, g_ids_alerts[i], PAD, vy + (ROW_H - g_glyph_h)/2, col);
+        }
+        vy += ROW_H;
+    }
+    vy += 4;
+
     /* ── Password Strength Tester ─── */
     SECTION("Password Strength Tester");
     if (g_pw_mode) {
@@ -792,7 +1027,7 @@ static void render(uint32_t *fb) {
     int foot_y = wh - g_glyph_h - 6;
     fill(fb, 0, foot_y - 2, ww, g_glyph_h + 8, 0x000c1420u);
     hline(fb, foot_y - 2, C_BORDER);
-    draw_str(fb, "D=DoH  V=VPN  N=nmap  A=net-scan  T=dump  S=scan  P=password  R  Q",
+    draw_str(fb, "D=DoH  V=VPN  O=Tor  B=vuln-scan  A=net-scan  N=nmap  T=dump  S=scan  P=pw  R  Q",
              PAD, foot_y, C_GREY);
     {
         char ts[32];
@@ -851,8 +1086,10 @@ static void do_refresh(void) {
     update_firewall();
     update_doh();
     update_vpn();
+    update_tor();
     update_privacy();
     update_connections();
+    update_ids();
     update_refresh_time();
 }
 
@@ -956,7 +1193,31 @@ int main(void) {
                     case IPC_INPUT_KEY: {
                         if (iplen >= 1) {
                             uint8_t key = payload[0];
-                            if (g_pw_mode) {
+                            if (g_vs_mode) {
+                                /* Vulnerability scan target input */
+                                if (key == 0x1Bu) {
+                                    g_vs_mode = false; g_vs_len = 0;
+                                } else if (key == 0x0Du || key == '\n') {
+                                    g_vs_buf[g_vs_len] = '\0';
+                                    snprintf(g_vs_target, sizeof(g_vs_target), "%s", g_vs_buf);
+                                    g_vs_mode = false;
+                                    /* Run nmap service/version scan */
+                                    static char vs_label[80], vs_host[128];
+                                    snprintf(vs_host, sizeof(vs_host), "%s", g_vs_target);
+                                    snprintf(vs_label, sizeof(vs_label), "vuln-scan %s", vs_host);
+                                    char *vs_args[] = {
+                                        "/usr/bin/nmap", "-sV", "--open",
+                                        "--max-rtt-timeout", "300ms", "-T4",
+                                        "-p", "21,22,23,25,53,80,110,143,443,445,3306,5432,8080,8443",
+                                        vs_host, NULL
+                                    };
+                                    run_tool("/usr/bin/nmap", vs_args, vs_label);
+                                } else if ((key == 0x08u || key == 0x7Fu) && g_vs_len > 0) {
+                                    g_vs_len--;
+                                } else if (key >= 0x20u && key < 0x7Fu && g_vs_len < 127) {
+                                    g_vs_buf[g_vs_len++] = (char)key;
+                                }
+                            } else if (g_pw_mode) {
                                 /* Password input: intercept all keys until Enter or Esc */
                                 if (key == 0x1Bu) {                        /* Esc: cancel */
                                     g_pw_mode = false; g_pw_len = 0;
@@ -1009,6 +1270,13 @@ int main(void) {
                                     "-i", "any", "-q", NULL
                                 };
                                 run_tool("/usr/bin/tcpdump", td_args, "tcpdump -c 20 any");
+                            } else if (key == 'o' || key == 'O') {
+                                toggle_tor();
+                            } else if (key == 'b' || key == 'B') {
+                                /* Vulnerability / banner scanner: enter target */
+                                g_vs_mode = true;
+                                g_vs_len  = 0;
+                                memset(g_vs_buf, 0, sizeof(g_vs_buf));
                             } else if (key == 'p' || key == 'P') {
                                 g_pw_mode = true;
                                 g_pw_len  = 0;

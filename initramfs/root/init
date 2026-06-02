@@ -39,6 +39,11 @@ sleep 3
 
 mkdir -p /fifi-data
 
+# ── Loopback interface ────────────────────────────────────────────────────────
+# Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
+ip link set lo up 2>/dev/null
+ip addr add 127.0.0.1/8 dev lo 2>/dev/null
+
 # Log input devices for debugging
 cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
 ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
@@ -85,12 +90,85 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
                     /bin/sh /bin/wg-up >>/fifi-data/vpn.log 2>&1
                     echo "vpn: autoconnect attempted" >> /fifi-data/network.log
                 fi
+                # Restart Tor if it was previously enabled
+                if [ -f /fifi-data/tor-enabled ] && [ -x /usr/bin/tor ]; then
+                    mkdir -p /fifi-data/tor
+                    /usr/bin/tor -f /fifi-data/torrc >>/fifi-data/tor.log 2>&1 &
+                    echo $! > /fifi-data/tor.pid
+                    echo "tor: started pid=$(cat /fifi-data/tor.pid)" >> /fifi-data/network.log
+                fi
                 exit 0
             fi
         done
         sleep 1
     done
     echo "no carrier after 30s" > /fifi-data/network.log
+) &
+
+# ── WiFi auto-connect via iwd ─────────────────────────────────────────────────
+# Runs in parallel with ethernet negotiation. Reads /fifi-data/wifi.conf:
+#   SSID=YourNetworkName
+#   PASSWORD=YourPassword
+(
+    if [ ! -f /fifi-data/wifi.conf ] || [ ! -x /usr/lib/iwd/iwd ]; then
+        exit 0
+    fi
+    # Parse wifi.conf
+    WIFI_SSID="" WIFI_PASS=""
+    while IFS='=' read -r k v; do
+        case "$k" in
+            SSID)     WIFI_SSID="$v" ;;
+            PASSWORD) WIFI_PASS="$v" ;;
+        esac
+    done < /fifi-data/wifi.conf
+    [ -z "$WIFI_SSID" ] && exit 0
+
+    # Wait for WiFi interface to appear (firmware load takes a moment)
+    WIFI_IF=""
+    for i in $(seq 1 10); do
+        for iface in $(ls /sys/class/net/ 2>/dev/null); do
+            [ -d "/sys/class/net/$iface/wireless" ] && WIFI_IF="$iface" && break 2
+        done
+        sleep 1
+    done
+    [ -z "$WIFI_IF" ] && echo "wifi: no wireless interface found" >> /fifi-data/network.log && exit 0
+    echo "wifi: found interface $WIFI_IF" >> /fifi-data/network.log
+
+    # Set up iwd network profile
+    mkdir -p /var/lib/iwd /etc/iwd
+    printf '[Security]\nPassphrase=%s\n' "$WIFI_PASS" > "/var/lib/iwd/${WIFI_SSID}.psk"
+    # iwd main.conf: use its built-in DHCP client
+    cat > /etc/iwd/main.conf << 'IWDCONF'
+[General]
+EnableNetworkConfiguration=true
+
+[Network]
+EnableIPv6=false
+NameResolvingService=none
+IWDCONF
+
+    # Start iwd (it will auto-connect to the saved profile)
+    /usr/lib/iwd/iwd > /fifi-data/wifi.log 2>&1 &
+    echo $! > /fifi-data/wifi.pid
+    echo "wifi: iwd started, connecting to $WIFI_SSID..." >> /fifi-data/network.log
+
+    # Wait up to 30s for an IP on the WiFi interface
+    for i in $(seq 1 30); do
+        sleep 1
+        WIFI_IP=$(ip -4 addr show "$WIFI_IF" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+        if [ -n "$WIFI_IP" ]; then
+            echo "wifi: connected to $WIFI_SSID ip=$WIFI_IP" >> /fifi-data/network.log
+            echo "$WIFI_SSID" > /fifi-data/wifi-ssid
+            echo "connected" > /fifi-data/wifi-status
+            # Set DNS if not already set by ethernet or DoH
+            if ! grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
+                echo "nameserver 8.8.8.8" > /etc/resolv.conf
+            fi
+            exit 0
+        fi
+    done
+    echo "wifi: timeout connecting to $WIFI_SSID" >> /fifi-data/network.log
+    echo "disconnected" > /fifi-data/wifi-status
 ) &
 
 # ── DEV DEBUG ONLY — stream logs to dev machine — REMOVE BEFORE DISTRIBUTION ─

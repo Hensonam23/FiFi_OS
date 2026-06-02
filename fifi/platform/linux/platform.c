@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -426,6 +427,63 @@ void gui_vpn_disconnect(void) {
         _exit(1);
     }
     if (pid > 0) { int st; waitpid(pid, &st, 0); }
+}
+
+/* ── WiFi status helpers ─────────────────────────────────────────────────── */
+
+bool gui_wifi_connected(void) {
+    /* Check if any wireless interface has an IP */
+    FILE *f = fopen("/proc/net/if_inet6", "r");
+    (void)f; if (f) fclose(f); /* just poke it */
+    /* Walk /sys/class/net/ for wireless interfaces */
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return false;
+    struct dirent *e;
+    bool found = false;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char wpath[128];
+        snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/wireless", e->d_name);
+        if (access(wpath, F_OK) != 0) continue;
+        /* Wireless interface exists — check if it has an operstate = up */
+        char opath[128]; snprintf(opath, sizeof(opath), "/sys/class/net/%s/operstate", e->d_name);
+        FILE *of = fopen(opath, "r"); if (!of) continue;
+        char state[16] = {0}; fgets(state, sizeof(state), of); fclose(of);
+        if (strncmp(state, "up", 2) == 0) { found = true; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+void gui_wifi_ssid(char *out, int outlen) {
+    out[0] = '\0';
+    /* iwd writes the connected SSID via /fifi-data/wifi-ssid */
+    FILE *f = fopen("/fifi-data/wifi-ssid", "r");
+    if (!f) {
+        /* Fallback: read SSID from wifi.conf */
+        f = fopen("/fifi-data/wifi.conf", "r");
+        if (!f) return;
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "SSID=", 5) == 0) {
+                char *p = line + 5; int len = (int)strlen(p);
+                while (len > 0 && (p[len-1]=='\n'||p[len-1]=='\r')) p[--len]='\0';
+                snprintf(out, (size_t)outlen, "%s", p);
+                break;
+            }
+        }
+        fclose(f);
+        return;
+    }
+    if (fgets(out, outlen, f)) {
+        int len = (int)strlen(out);
+        while (len > 0 && (out[len-1]=='\n'||out[len-1]=='\r')) out[--len]='\0';
+    }
+    fclose(f);
+}
+
+bool gui_wifi_has_config(void) {
+    return access("/fifi-data/wifi.conf", F_OK) == 0;
 }
 
 void gui_spawn_app_with_arg(const char *path, const char *arg) {

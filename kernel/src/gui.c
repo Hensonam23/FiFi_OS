@@ -6088,7 +6088,9 @@ static void settings_render(window_t *w) {
     uint64_t h_privacy = (uint64_t)(SET_SEC_H + 4u) + SET_ROW_H + 5u;
     /* VPN section: header + status + connect-button + auto-connect + hint/separator */
     uint64_t h_vpn     = (uint64_t)(SET_SEC_H + 4u) + 4u * SET_ROW_H + 5u;
-    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_vpn + h_privacy + h_sc + (uint64_t)SET_PAD;
+    /* WiFi section: header + status + optional hint row + separator */
+    uint64_t h_wifi    = (uint64_t)(SET_SEC_H + 4u) + 2u * SET_ROW_H + 5u;
+    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_vpn + h_wifi + h_privacy + h_sc + (uint64_t)SET_PAD;
     g_settings_total_h = (int)total_h;
     /* Clamp scroll */
     if ((int64_t)total_h > (int64_t)ih) {
@@ -6829,6 +6831,67 @@ static void settings_render(window_t *w) {
                 console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
                 gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
                              "Place wg0.conf in /fifi-data/ to connect",
+                             COL_SET_HINT, bg);
+            }
+            cy += SET_ROW_H;
+        }
+
+        if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
+        cy += 5u;
+    }
+    SADVBOT;
+
+    /* ── Section: WiFi ── */
+    {
+        __attribute__((weak)) bool gui_wifi_connected(void);
+        __attribute__((weak)) bool gui_wifi_has_config(void);
+        __attribute__((weak)) void gui_wifi_ssid(char *out, int outlen);
+
+        bool wifi_on      = gui_wifi_connected  && gui_wifi_connected();
+        bool wifi_cfg     = gui_wifi_has_config && gui_wifi_has_config();
+
+        if (SVIS) {
+            console_fill_rect(ix, SCY, iw, SET_SEC_H, COL_SET_SEC_BG);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_SEC_H - fh) / 2u)),
+                         "WiFi", COL_SET_SEC_FG, COL_SET_SEC_BG);
+        }
+        cy += SET_SEC_H + 4u;
+        SADVBOT;
+
+        /* Status row */
+        SADVBOT;
+        if (SVIS) {
+            uint32_t bg = COL_SET_BG;
+            console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                         "Status:", COL_SET_KEY_FG, bg);
+            char ssid[64] = {0};
+            const char *wstatus;
+            uint32_t wfg;
+            if (wifi_on && gui_wifi_ssid) {
+                gui_wifi_ssid(ssid, sizeof(ssid));
+                wstatus = ssid[0] ? ssid : "Connected";
+                wfg = 0x0060d880u;
+            } else if (wifi_cfg) {
+                wstatus = "Connecting...";
+                wfg = 0x00e88060u;
+            } else {
+                wstatus = "No config";
+                wfg = COL_SET_HINT;
+            }
+            gui_draw_str(val_x, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                         wstatus, wfg, bg);
+        }
+        cy += SET_ROW_H;
+
+        /* Setup hint when no config */
+        if (!wifi_cfg) {
+            SADVBOT;
+            if (SVIS) {
+                uint32_t bg = COL_SET_BG;
+                console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
+                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                             "Create /fifi-data/wifi.conf with SSID= and PASSWORD=",
                              COL_SET_HINT, bg);
             }
             cy += SET_ROW_H;

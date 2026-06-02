@@ -396,8 +396,21 @@ if [ -n "$NMAP_BIN" ]; then
     done
     if [ -d /usr/share/nmap ]; then
         mkdir -p "$STAGE/usr/share/nmap"
-        for f in nmap-services nmap-protocols nmap-rpc; do
+        # Core data files (needed for all scans)
+        for f in nmap-services nmap-protocols nmap-rpc nmap-service-probes nmap-mac-prefixes; do
             [ -f "/usr/share/nmap/$f" ] && cp "/usr/share/nmap/$f" "$STAGE/usr/share/nmap/"
+        done
+        # NSE engine and support library (needed for -sV version detection)
+        [ -f "/usr/share/nmap/nse_main.lua" ] && cp "/usr/share/nmap/nse_main.lua" "$STAGE/usr/share/nmap/"
+        [ -d "/usr/share/nmap/nselib" ] && cp -r "/usr/share/nmap/nselib" "$STAGE/usr/share/nmap/"
+        # Version detection scripts only (not the full 400+ script set)
+        mkdir -p "$STAGE/usr/share/nmap/scripts"
+        for s in /usr/share/nmap/scripts/banner.nse \
+                  /usr/share/nmap/scripts/fingerprint-strings.nse \
+                  /usr/share/nmap/scripts/ssl-cert.nse \
+                  /usr/share/nmap/scripts/http-title.nse \
+                  /usr/share/nmap/scripts/ssh-hostkey.nse; do
+            [ -f "$s" ] && cp "$s" "$STAGE/usr/share/nmap/scripts/"
         done
     fi
     echo "[initramfs] nmap bundled ($(du -sh "$NMAP_BIN" | cut -f1))"
@@ -426,6 +439,105 @@ if [ -n "$TCPDUMP_BIN" ]; then
 else
     echo "[initramfs] NOTE: tcpdump not found -- install tcpdump for packet capture"
 fi
+
+# ── tor ───────────────────────────────────────────────────────────────────────
+echo "[initramfs] bundling tor..."
+TOR_BIN=""
+for candidate in /usr/bin/tor /usr/sbin/tor; do
+    [ -x "$candidate" ] && TOR_BIN="$candidate" && break
+done
+if [ -n "$TOR_BIN" ]; then
+    cp "$TOR_BIN" "$STAGE/usr/bin/tor"
+    chmod +x "$STAGE/usr/bin/tor"
+    TOR_LIBS=$(ldd "$TOR_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $TOR_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] tor bundled ($(du -sh "$TOR_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: tor not found -- install tor for Tor routing support"
+fi
+
+# ── WiFi: iwd daemon + iw tool + Intel/Qualcomm firmware + regulatory DB ──────
+echo "[initramfs] bundling WiFi support..."
+
+# iwd daemon (handles WPA2/WPA3 auth + built-in DHCP)
+IWD_BIN="/usr/lib/iwd/iwd"
+IWCTL_BIN="/usr/bin/iwctl"
+if [ -x "$IWD_BIN" ]; then
+    mkdir -p "$STAGE/usr/lib/iwd"
+    cp "$IWD_BIN" "$STAGE/usr/lib/iwd/iwd"; chmod +x "$STAGE/usr/lib/iwd/iwd"
+    [ -x "$IWCTL_BIN" ] && cp "$IWCTL_BIN" "$STAGE/usr/bin/iwctl" && chmod +x "$STAGE/usr/bin/iwctl"
+    # iwd only needs libell
+    IWD_LIBS=$(ldd "$IWD_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $IWD_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] iwd bundled ($(du -sh "$IWD_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: iwd not found -- install iwd for WiFi support"
+fi
+
+# iw tool (WiFi interface control/scanning)
+IW_BIN="/usr/bin/iw"
+if [ -x "$IW_BIN" ]; then
+    cp "$IW_BIN" "$STAGE/usr/bin/iw"; chmod +x "$STAGE/usr/bin/iw"
+    IW_LIBS=$(ldd "$IW_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $IW_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+fi
+
+# Intel WiFi firmware (latest versions of AX200/AX201/AX210/AX211 families)
+# Stored as .ucode.zst — the kernel loads them natively (CONFIG_FW_LOADER_COMPRESS_ZSTD=y)
+FWDIR="/lib/firmware/intel/iwlwifi"
+FWSTAGE="$STAGE/lib/firmware/intel/iwlwifi"
+if [ -d "$FWDIR" ]; then
+    mkdir -p "$FWSTAGE"
+    # Bundle latest 2 versions of each key family covering all modern Intel AX cards
+    for family in cc ty so QuZ Qu; do
+        find "$FWDIR" -name "iwlwifi-${family}*.ucode.zst" 2>/dev/null | sort -V | tail -2 | \
+            xargs -r cp -t "$FWSTAGE/" 2>/dev/null || true
+        # Also bundle .pnvm files if present (required for some AX211 configs)
+        find "$FWDIR" -name "iwlwifi-${family}*.pnvm.zst" 2>/dev/null | sort -V | tail -1 | \
+            xargs -r cp -t "$FWSTAGE/" 2>/dev/null || true
+    done
+    # Create symlinks at /lib/firmware/ so iwlwifi can find them
+    find "$FWSTAGE" -name "*.ucode.zst" -o -name "*.pnvm.zst" 2>/dev/null | while read f; do
+        bn=$(basename "$f")
+        [ -e "$STAGE/lib/firmware/$bn" ] || ln -sf "intel/iwlwifi/$bn" "$STAGE/lib/firmware/$bn"
+    done
+    echo "[initramfs] Intel WiFi firmware bundled ($(du -sh "$FWSTAGE" | cut -f1))"
+else
+    echo "[initramfs] NOTE: Intel WiFi firmware not found -- install linux-firmware-intel"
+fi
+
+# Regulatory domain database (required for legal WiFi channel use)
+for regdb in /usr/lib/firmware/regulatory.db /lib/firmware/regulatory.db; do
+    if [ -f "$regdb" ]; then
+        mkdir -p "$STAGE/lib/firmware"
+        cp "$regdb" "$STAGE/lib/firmware/regulatory.db"
+        sig="${regdb}.p7s"
+        [ -f "$sig" ] && cp "$sig" "$STAGE/lib/firmware/regulatory.db.p7s"
+        echo "[initramfs] regulatory.db bundled"
+        break
+    fi
+done
+
+# Create iwd runtime dirs
+mkdir -p "$STAGE/var/lib/iwd" "$STAGE/etc/iwd"
 
 # ── dnscrypt-proxy ────────────────────────────────────────────────────────────
 echo "[initramfs] bundling dnscrypt-proxy..."
