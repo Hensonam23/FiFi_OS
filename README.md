@@ -175,9 +175,12 @@ USB flashing signs the EFI binaries with your Secure Boot key and exports the ce
 ### Phase 6: Full System
 
 - [ ] Bluetooth: pairing UI, A2DP audio via PipeWire
-- [ ] Browser: Firefox or LibreWolf in a FiFi window
+- [ ] Browser: Firefox or LibreWolf in a FiFi window (user chooses at install time)
+- [ ] LibreOffice: installed by default during installation
 - [ ] Desktop shortcuts, image viewer
-- [ ] In-OS installer: partitions disk, formats ext4, copies image, one click
+- [ ] In-OS installer: disk selection, browser choice, downloads LibreOffice, one click to install
+- [ ] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
+- [ ] Desktop themes: optional theme system with selectable styles
 - [ ] Built-in AI assistant: local model (Ollama/llama.cpp), no internet required, completely offline
 
 ### v1.0

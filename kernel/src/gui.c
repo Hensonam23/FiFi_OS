@@ -224,7 +224,7 @@ int g_redraw_src = 0;
 const char * const g_launcher_items[LAUNCHER_ITEMS] = {
     "Terminal", "Files", "Settings", "Viewer",
     "File Browser", "Sys Info", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
-    "Security", "WiFi", "Steam", "Proton Config",
+    "Security", "WiFi", "Browser", "Install FiFi OS", "Steam", "Proton Config",
     "---",          /* separator -- not clickable */
     "Sleep",
     "Restart",
@@ -848,6 +848,8 @@ void gui_on_tick(void) {
                                 "/bin/fifi-imageviewer",
                                 "/bin/fifi-security",
                                 "/bin/fifi-wifi",
+                                "/bin/fifi-browser",
+                                "/bin/fifi-installer",
                                 "/usr/bin/steam",
                                 "/bin/fifi-proton",
                             };
@@ -2744,6 +2746,8 @@ void gui_on_tick(void) {
                     "/bin/fifi-imageviewer",
                     "/bin/fifi-security",
                     "/bin/fifi-wifi",
+                    "/bin/fifi-browser",
+                    "/bin/fifi-installer",
                     "/usr/bin/steam",
                     "/bin/fifi-proton",
                 };

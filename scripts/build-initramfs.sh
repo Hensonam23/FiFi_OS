@@ -139,6 +139,18 @@ echo "[initramfs] building fifi-wifi..."
     echo "[initramfs] included fifi-wifi"
 } || echo "[initramfs] WARNING: fifi-wifi build failed"
 
+echo "[initramfs] building fifi-browser..."
+(cd "$REPO_ROOT/fifi/apps/browser" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/browser/fifi-browser" "$STAGE/bin/"
+    echo "[initramfs] included fifi-browser"
+} || echo "[initramfs] WARNING: fifi-browser build failed"
+
+echo "[initramfs] building fifi-installer..."
+(cd "$REPO_ROOT/fifi/apps/installer" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/installer/fifi-installer" "$STAGE/bin/"
+    echo "[initramfs] included fifi-installer"
+} || echo "[initramfs] WARNING: fifi-installer build failed"
+
 # ── nftables firewall ─────────────────────────────────────────────────────────
 echo "[initramfs] bundling nftables..."
 NFT_BIN=""
@@ -625,6 +637,22 @@ if [ -n "$DCRYPT_BIN" ]; then
     echo "[initramfs] dnscrypt-proxy bundled ($(du -sh "$DCRYPT_BIN" | cut -f1))"
 else
     echo "[initramfs] NOTE: dnscrypt-proxy not found -- install dnscrypt-proxy for DoH support"
+fi
+
+# ── curl (for HTTPS downloads: browser AppImage, LibreOffice, etc.) ──────────
+echo "[initramfs] bundling curl..."
+CURL_BIN="$(which curl 2>/dev/null)"
+if [ -x "$CURL_BIN" ]; then
+    cp "$CURL_BIN" "$STAGE/bin/curl"
+    # Copy all shared library dependencies
+    ldd "$CURL_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+    echo "[initramfs] curl bundled ($(du -sh "$CURL_BIN" | cut -f1))"
+else
+    echo "[initramfs] WARNING: curl not found -- browser/LibreOffice downloads will fail"
 fi
 
 # ── CA certificates (required for TLS in Go binaries like dnscrypt-proxy) ────
