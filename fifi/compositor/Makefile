@@ -5,7 +5,8 @@ BUILD   := ../../build-linux
 # Shadow headers must come FIRST to override kernel headers
 INCLUDES := \
     -I../platform/linux/include \
-    -I../../kernel/include
+    -I../../kernel/include \
+    -I../../kernel/src
 
 CFLAGS := \
     -std=c11 -O2 -march=x86-64 -pipe -Wall -Wextra \
@@ -25,6 +26,14 @@ SRCS := \
     ../platform/linux/ipc.c \
     ../platform/linux/wayland.c \
     ../../kernel/src/gui.c \
+    ../../kernel/src/gui_text_util.c \
+    ../../kernel/src/gui_window.c \
+    ../../kernel/src/gui_taskbar.c \
+    ../../kernel/src/gui_widgets.c \
+    ../../kernel/src/gui_settings.c \
+    ../../kernel/src/gui_files.c \
+    ../../kernel/src/gui_text.c \
+    ../../kernel/src/gui_render.c \
     ../../kernel/src/console.c
 
 OBJS := $(patsubst %.c,$(BUILD)/comp/%.o,$(notdir $(SRCS)))
@@ -67,6 +76,30 @@ $(BUILD)/comp/wayland.o: ../platform/linux/wayland.c | $(BUILD)/comp
 
 # Kernel source files (compiled with Linux stubs)
 $(BUILD)/comp/gui.o: ../../kernel/src/gui.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_text_util.o: ../../kernel/src/gui_text_util.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_window.o: ../../kernel/src/gui_window.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_taskbar.o: ../../kernel/src/gui_taskbar.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_widgets.o: ../../kernel/src/gui_widgets.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_settings.o: ../../kernel/src/gui_settings.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_files.o: ../../kernel/src/gui_files.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_text.o: ../../kernel/src/gui_text.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/gui_render.o: ../../kernel/src/gui_render.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/console.o: ../../kernel/src/console.c | $(BUILD)/comp

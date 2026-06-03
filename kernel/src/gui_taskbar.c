@@ -1,0 +1,340 @@
+#include "gui_internal.h"
+
+/* ── Taskbar ─────────────────────────────────────────────────────────── */
+
+uint64_t logo_eff_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t w  = (uint64_t)gui_strlen("FiFi OS") * fw + 16u;
+    return (w > LOGO_W) ? w : LOGO_W;
+}
+
+uint64_t taskbtn_start_x(void) {
+    return LOGO_X + logo_eff_w() + 8u;
+}
+
+uint64_t taskbtn_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t w  = 16u * fw;   /* fits "Security Center" (15 chars) + margin */
+    return w > (uint64_t)TASKBTN_W ? w : (uint64_t)TASKBTN_W;
+}
+
+void taskbar_draw_btn(int slot, const char *label) {
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t tbw  = taskbtn_w();
+    uint64_t bx   = taskbtn_start_x() + (uint64_t)slot * (tbw + TASKBTN_GAP);
+    bool     vis  = (slot < MAX_WINS && g_wins[slot].active &&
+                     (g_wins[slot].state != WIN_HIDDEN ||
+                      g_wins[slot].anim_phase == ANIM_CLOSE));
+    bool     hov  = (g_taskbtn_hover == slot);
+    /* Focused = topmost visible window */
+    bool focused = (vis && g_z[MAX_WINS - 1] == slot);
+    uint32_t bg   = focused ? 0x003878d8u :
+                    vis     ? COL_TASKBTN_A :
+                    hov     ? 0x00283848u : COL_TASKBTN;
+
+    console_fill_rect(bx, ty + 3u, tbw, TASKBAR_H - 6u, bg);
+    /* Active indicator bar at bottom */
+    if (vis)
+        console_fill_rect(bx, ty + TASKBAR_H - 5u, tbw, 3u,
+                          focused ? 0x0060a0f0u : COL_BORDER);
+    uint64_t llen     = (uint64_t)gui_strlen(label);
+    uint64_t max_ch   = tbw / fw;
+    uint64_t disp_len = llen < max_ch ? llen : max_ch;
+    uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
+    uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
+    gui_draw_str_clip(lpx, lpy, label, COL_TASKBTN_FG, bg, max_ch);
+}
+
+/* Draw a small system-tray area on the right side of the taskbar:
+ *   [HH:MM] [mem bar] */
+void taskbar_draw_tray(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint64_t ty   = fb_h - TASKBAR_H;
+    uint32_t bg   = COL_TASKBAR;
+
+    /* ── Clock ── */
+    uint8_t rh = 0, rm = 0, rs = 0;
+    rtc_get_time(&rh, &rm, &rs);
+    {
+        int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset;
+        adj = ((adj % 24) + 24) % 24;
+        rh = (uint8_t)adj;
+    }
+
+    /* Build clock string: HH:MM:SS (24h) or H:MM:SS AM/PM (12h) */
+    char clk[14]; /* max "12:59:59 PM\0" = 12 chars */
+    int clk_chars;
+    if (g_theme.clock_12h) {
+        const char *ampm = (rh < 12u) ? "AM" : "PM";
+        uint8_t h12 = rh % 12u; if (h12 == 0u) h12 = 12u;
+        clk[0] = (char)('0' + h12 / 10u); clk[1] = (char)('0' + h12 % 10u); clk[2] = ':';
+        gui_itoa_pad2(rm, clk + 3); clk[5] = ':';
+        gui_itoa_pad2(rs, clk + 6); clk[8] = ' ';
+        clk[9] = ampm[0]; clk[10] = ampm[1]; clk[11] = '\0';
+        clk_chars = 11;
+    } else {
+        gui_itoa_pad2(rh, clk + 0); clk[2] = ':';
+        gui_itoa_pad2(rm, clk + 3); clk[5] = ':';
+        gui_itoa_pad2(rs, clk + 6); clk[8] = '\0';
+        clk_chars = 8;
+    }
+
+    uint64_t clk_w  = (uint64_t)clk_chars * fw;
+    uint64_t clk_x  = fb_w > clk_w + 8u ? fb_w - clk_w - 8u : 0u;
+    uint64_t clk_y  = ty + (TASKBAR_H - fh) / 2u;
+    console_fill_rect(clk_x > 4u ? clk_x - 4u : 0u, ty + 2u, clk_w + 8u, TASKBAR_H - 4u, bg);
+    gui_draw_str(clk_x, clk_y, clk, 0x00a0c8e8u, bg);
+
+    /* ── Memory bar (16px wide, 8px tall) ── */
+    uint64_t total_p = pmm_get_total_pages();
+    uint64_t free_p  = pmm_get_free_pages();
+    uint64_t bar_full_w = 32u;
+    uint64_t fill = total_p > 0u ? (total_p - free_p) * bar_full_w / total_p : 0u;
+
+    uint64_t bx = clk_x > bar_full_w + 12u ? clk_x - bar_full_w - 12u : 0u;
+    uint64_t by = ty + (TASKBAR_H - 8u) / 2u;
+    console_fill_rect(bx, by, bar_full_w, 8u, 0x00101828u);
+    if (fill > 0u) console_fill_rect(bx, by, fill, 8u, g_theme.accent);
+    console_fill_rect(bx, by, bar_full_w, 1u, 0x00202838u);
+    console_fill_rect(bx, by + 7u, bar_full_w, 1u, 0x00202838u);
+    console_fill_rect(bx, by, 1u, 8u, 0x00202838u);
+    console_fill_rect(bx + bar_full_w - 1u, by, 1u, 8u, 0x00202838u);
+
+    /* ── Gamepad indicator (shown when gamepad connected) ── */
+    uint64_t tray_right = bx > 4u ? bx - 4u : 0u;
+    {
+        extern bool input_gamepad_connected(void);
+        if (input_gamepad_connected()) {
+            static const char *gp_lbl = "GP";
+            uint64_t gpl = 2u;
+            uint64_t gpw = gpl * fw + 8u;
+            uint64_t gpx = tray_right > gpw ? tray_right - gpw : 0u;
+            console_fill_rect(gpx, ty + 3u, gpw, TASKBAR_H - 6u, 0x00102820u);
+            gui_draw_str(gpx + 4u, ty + (TASKBAR_H - fh) / 2u, gp_lbl, 0x0050e880u, 0x00102820u);
+            tray_right = gpx > 4u ? gpx - 4u : 0u;
+        }
+    }
+
+    /* ── Network indicator ── */
+    {
+        bool has_nic = net_nic_present();
+        bool has_ip  = (net_ip != 0);
+        const char *net_lbl = has_ip ? "LAN" : (has_nic ? "NIC" : "---");
+        uint32_t net_bg  = has_ip  ? 0x00102820u : (has_nic ? 0x00201010u : 0x00141414u);
+        uint32_t net_fg  = has_ip  ? 0x0050e880u : (has_nic ? 0x00e07050u : COL_TASKBAR);
+        uint64_t nw      = 3u * fw + 8u;
+        uint64_t nx      = tray_right > nw ? tray_right - nw : 0u;
+        console_fill_rect(nx, ty + 3u, nw, TASKBAR_H - 6u, net_bg);
+        if (has_nic || has_ip)
+            gui_draw_str(nx + 4u, ty + (TASKBAR_H - fh) / 2u, net_lbl, net_fg, net_bg);
+        tray_right = nx > 4u ? nx - 4u : 0u;
+    }
+
+    /* ── FPS counter (shown in gaming mode, left of network indicator) ── */
+    uint64_t fps_right_edge = tray_right;
+    {
+        extern uint32_t compositor_fps(void);
+        extern bool gaming_mode_active(void);
+        if (gaming_mode_active()) {
+            uint32_t fps = compositor_fps();
+            uint32_t fps_for_color = fps;
+            char ftxt[8]; int fi = 0;
+            if (fps >= 1000) { ftxt[fi++]='9'; ftxt[fi++]='9'; ftxt[fi++]='9'; }
+            else if (fps >= 100) { ftxt[fi++]=(char)('0'+fps/100); fps%=100; ftxt[fi++]=(char)('0'+fps/10); ftxt[fi++]=(char)('0'+fps%10); }
+            else if (fps >= 10)  { ftxt[fi++]=(char)('0'+fps/10);  ftxt[fi++]=(char)('0'+fps%10); }
+            else                 { ftxt[fi++]=(char)('0'+fps); }
+            ftxt[fi++]='f'; ftxt[fi++]='p'; ftxt[fi++]='s'; ftxt[fi]='\0';
+            uint64_t fw2 = (uint64_t)fi * fw + 8u;
+            uint64_t fx  = fps_right_edge > fw2 ? fps_right_edge - fw2 : 0u;
+            uint32_t fbg = 0x00101828u;
+            uint32_t ffg = fps_for_color >= 60u ? 0x0050e880u : fps_for_color >= 30u ? 0x00e8c040u : 0x00e86040u;
+            console_fill_rect(fx, ty + 3u, fw2, TASKBAR_H - 6u, fbg);
+            gui_draw_str(fx + 4u, ty + (TASKBAR_H - fh) / 2u, ftxt, ffg, fbg);
+            fps_right_edge = fx > 4u ? fx - 4u : 0u;
+        }
+    }
+
+    /* ── Volume tray icon (left of memory bar / FPS counter) ── */
+    {
+        int vol = hda_is_ready() ? hda_get_volume() : -1;
+        char vtxt[6]; int vi = 0;
+        if (vol < 0) {
+            vtxt[vi++] = '-'; vtxt[vi++] = '-'; vtxt[vi++] = '%';
+        } else if (vol >= 100) {
+            vtxt[vi++] = '1'; vtxt[vi++] = '0'; vtxt[vi++] = '0'; vtxt[vi++] = '%';
+        } else {
+            if (vol >= 10) vtxt[vi++] = (char)('0' + vol / 10);
+            vtxt[vi++] = (char)('0' + vol % 10);
+            vtxt[vi++] = '%';
+        }
+        vtxt[vi] = '\0';
+        uint64_t vw  = (uint64_t)vi * fw + 8u;
+        uint64_t vx  = fps_right_edge > vw + 4u ? fps_right_edge - vw - 4u : 0u;
+        uint64_t vy  = ty + (TASKBAR_H - fh) / 2u;
+        uint32_t vbg = g_vol_popup_open ? g_theme.accent : 0x00141e2au;
+        console_fill_rect(vx, ty + 3u, vw, TASKBAR_H - 6u, vbg);
+        uint32_t vfg = g_vol_popup_open ? 0x00ffffffu : 0x0090b8d8u;
+        gui_draw_str(vx + 4u, vy, vtxt, vfg, vbg);
+        g_vol_tray_x = vx;
+        g_vol_tray_w = vw;
+    }
+}
+
+void taskbar_draw(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint64_t ty   = fb_h - TASKBAR_H;
+
+    console_fill_rect(0, ty, fb_w, TASKBAR_H, COL_TASKBAR);
+    console_fill_rect(0, ty, fb_w, 2u, g_theme.accent);
+
+    uint32_t logo_bg = g_launcher_open ? COL_TASKBTN_A : COL_LOGO;
+    uint64_t lw = logo_eff_w();
+    console_fill_rect(LOGO_X, ty + 4u, lw, TASKBAR_H - 8u, logo_bg);
+    const char *logo = "FiFi OS";
+    uint64_t llen = (uint64_t)gui_strlen(logo);
+    uint64_t lpx  = LOGO_X + (lw - llen * fw) / 2u;
+    uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
+    gui_draw_str(lpx, lpy, logo, COL_TASKBTN_FG, logo_bg);
+
+    taskbar_draw_btn(0, "Terminal");
+    taskbar_draw_btn(1, "Files");
+    taskbar_draw_btn(2, "Settings");
+    if (g_wins[3].active) {
+        const char *tv_label = (g_wins[3].text.path[0]) ? g_wins[3].text.title_buf : "Viewer";
+        taskbar_draw_btn(3, tv_label);
+    }
+
+    /* ── IPC app window buttons (slots MAX_WINS .. MAX_WINS+7) ─────────────── */
+    __attribute__((weak)) int  ipc_window_count(void);
+    __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
+    if (ipc_window_count && ipc_window_info) {
+        int nipc = ipc_window_count();
+        for (int wi = 0; wi < nipc && wi < 8; wi++) {
+            char ipc_title[20] = "App";
+            bool ipc_focused = false;
+            ipc_window_info(wi, ipc_title, (int)sizeof(ipc_title), &ipc_focused);
+            int islot = MAX_WINS + wi;
+            uint64_t ibtw = taskbtn_w();
+            uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (ibtw + TASKBTN_GAP);
+            uint64_t bg = ipc_focused ? 0x003878d8u : COL_TASKBTN_A;
+            console_fill_rect(bx, ty + 3u, ibtw, TASKBAR_H - 6u, bg);
+            if (ipc_focused)
+                console_fill_rect(bx, ty + TASKBAR_H - 5u, ibtw, 3u, 0x0060a0f0u);
+            uint64_t max_ch = ibtw / fw;
+            uint64_t tlen = (uint64_t)gui_strlen(ipc_title);
+            if (tlen > max_ch) tlen = max_ch;
+            uint64_t lpx2 = bx + (ibtw > tlen * fw ? (ibtw - tlen * fw) / 2u : 0u);
+            uint64_t lpy2 = ty + (TASKBAR_H - fh) / 2u;
+            gui_draw_str_clip(lpx2, lpy2, ipc_title, COL_TASKBTN_FG, bg, max_ch);
+        }
+    }
+
+    taskbar_draw_tray();
+}
+
+/* ── Volume tray popup ───────────────────────────────────────────────── */
+#define VOL_POP_W 170u
+
+void vol_popup_draw(void) {
+    uint64_t fb_w = console_fb_width();
+    uint64_t fb_h = console_fb_height();
+    uint64_t fw   = console_font_width();
+    uint64_t fh   = console_font_height();
+    uint64_t ty   = fb_h - TASKBAR_H;
+
+    /* Height: top-pad + title + gap + btn-row + bot-pad */
+    uint64_t btn_h  = fh + 4u;
+    uint64_t pop_h  = 6u + fh + 6u + btn_h + 8u;
+    g_vol_pop_h = pop_h;
+
+    /* Right-align popup to tray icon right edge */
+    uint64_t pop_right = (g_vol_tray_w > 0u) ? (g_vol_tray_x + g_vol_tray_w) : (fb_w - 4u);
+    uint64_t px = (pop_right > VOL_POP_W) ? (pop_right - VOL_POP_W) : 0u;
+    if (px + VOL_POP_W > fb_w) px = fb_w - VOL_POP_W;
+    uint64_t py = (ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u;
+    g_vol_pop_x = px;
+    g_vol_pop_y = py;
+
+    /* Background + accent border */
+    uint32_t pbg = 0x00101828u;
+    uint32_t pbo = g_theme.accent;
+    console_fill_rect(px, py, VOL_POP_W, pop_h, pbg);
+    console_fill_rect(px, py, VOL_POP_W, 1u, pbo);
+    console_fill_rect(px, py + pop_h - 1u, VOL_POP_W, 1u, pbo);
+    console_fill_rect(px, py, 1u, pop_h, pbo);
+    console_fill_rect(px + VOL_POP_W - 1u, py, 1u, pop_h, pbo);
+
+    /* Title: "Volume: XX%" */
+    int vol = hda_get_volume();
+    char title[16]; int ti = 0;
+    const char *tlbl = "Volume: ";
+    for (int k = 0; tlbl[k]; k++) title[ti++] = tlbl[k];
+    if (vol >= 100) { title[ti++] = '1'; title[ti++] = '0'; title[ti++] = '0'; }
+    else            { if (vol >= 10) title[ti++] = (char)('0' + vol / 10); title[ti++] = (char)('0' + vol % 10); }
+    title[ti++] = '%'; title[ti] = '\0';
+    uint64_t tlen = (uint64_t)ti;
+    uint64_t ttx  = px + (VOL_POP_W > tlen * fw ? (VOL_POP_W - tlen * fw) / 2u : 2u);
+    uint64_t tty  = py + 6u;
+    gui_draw_str(ttx, tty, title, 0x00c0d8f0u, pbg);
+
+    /* Control row: [−] slider [+] */
+    uint64_t row_y  = tty + fh + 6u;
+    uint64_t pad    = 6u;
+    uint64_t btn_w  = 20u;
+    uint64_t slid_x = px + pad + btn_w + 4u;
+    uint64_t slid_w = VOL_POP_W > 2u * pad + 2u * btn_w + 8u
+                    ? VOL_POP_W - 2u * pad - 2u * btn_w - 8u : 4u;
+    uint64_t slid_h = 8u;
+    uint64_t slid_y = row_y + (btn_h - slid_h) / 2u;
+    uint64_t mb_x   = px + pad;
+    uint64_t pb_x   = px + VOL_POP_W - pad - btn_w;
+
+    g_vol_pop_minus_x = mb_x;
+    g_vol_pop_plus_x  = pb_x;
+    g_vol_pop_btn_y   = row_y;
+    g_vol_pop_btn_w   = btn_w;
+    g_vol_pop_btn_h   = btn_h;
+    g_vol_pop_slid_x  = slid_x;
+    g_vol_pop_slid_w  = slid_w;
+
+    /* [−] button */
+    uint32_t bbg = 0x00182030u;
+    console_fill_rect(mb_x, row_y, btn_w, btn_h, bbg);
+    console_fill_rect(mb_x, row_y, btn_w, 1u, pbo);
+    console_fill_rect(mb_x, row_y + btn_h - 1u, btn_w, 1u, pbo);
+    console_fill_rect(mb_x, row_y, 1u, btn_h, pbo);
+    console_fill_rect(mb_x + btn_w - 1u, row_y, 1u, btn_h, pbo);
+    gui_draw_str(mb_x + (btn_w - fw) / 2u, row_y + (btn_h - fh) / 2u, "-", 0x00e0f0ffu, bbg);
+
+    /* [+] button */
+    console_fill_rect(pb_x, row_y, btn_w, btn_h, bbg);
+    console_fill_rect(pb_x, row_y, btn_w, 1u, pbo);
+    console_fill_rect(pb_x, row_y + btn_h - 1u, btn_w, 1u, pbo);
+    console_fill_rect(pb_x, row_y, 1u, btn_h, pbo);
+    console_fill_rect(pb_x + btn_w - 1u, row_y, 1u, btn_h, pbo);
+    gui_draw_str(pb_x + (btn_w - fw) / 2u, row_y + (btn_h - fh) / 2u, "+", 0x00e0f0ffu, bbg);
+
+    /* Slider track */
+    console_fill_rect(slid_x, slid_y, slid_w, slid_h, 0x00080c14u);
+    console_fill_rect(slid_x, slid_y, slid_w, 1u, 0x00202838u);
+    console_fill_rect(slid_x, slid_y + slid_h - 1u, slid_w, 1u, 0x00202838u);
+    console_fill_rect(slid_x, slid_y, 1u, slid_h, 0x00202838u);
+    console_fill_rect(slid_x + slid_w - 1u, slid_y, 1u, slid_h, 0x00202838u);
+
+    /* Slider fill */
+    if (vol > 0 && slid_w > 2u) {
+        uint64_t fill = (uint64_t)(vol) * (slid_w - 2u) / 100u;
+        if (fill > slid_w - 2u) fill = slid_w - 2u;
+        if (fill > 0u)
+            console_fill_rect(slid_x + 1u, slid_y + 1u, fill, slid_h - 2u, g_theme.accent);
+    }
+}
