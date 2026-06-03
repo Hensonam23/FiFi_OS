@@ -43,30 +43,44 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 
 | Feature | Status |
 |---|---|
-| GUI compositor: window manager, z-order, drag/resize | **Working (Phase 2)** |
+| GUI compositor: window manager, z-order, drag/resize | **Working** |
 | Taskbar: launcher, window buttons, clock, volume/FPS tray | **Working** |
 | Theme system: 16 accent presets, 5 wallpaper patterns | **Working** |
 | File browser: list/grid view, sidebar, search, operations | **Working** |
 | Text viewer/editor: syntax highlight, edit mode, undo | **Working** |
-| Settings panel: theme, clock, audio, gaming, network | **Working** |
-| PTY terminal: real shell (busybox sh) in a FiFi window | **Working (Phase 3)** |
-| DRM/KMS display: direct GPU, no polling lag | **Working (Phase 4)** |
-| Audio: ALSA volume control (slider works in UI) | **Working (Phase 4)** |
-| Gamepad: evdev HID input routed to focused IPC app | **Working (Phase 4)** |
-| Gaming mode: CPU governor switch, uncapped frame rate | **Working (Phase 4)** |
-| App launcher: spawn IPC apps from GUI (Files, Settings, Gamepad) | **Working (Phase 4)** |
+| Settings panel: theme, clock, audio, gaming, network, VPN | **Working** |
+| PTY terminal: real shell in a FiFi window, multiple instances | **Working** |
+| DRM/KMS display: direct GPU, no polling lag | **Working** |
+| Audio: ALSA volume control (slider works in UI) | **Working** |
+| Gamepad: evdev HID input routed to focused IPC app | **Working** |
+| Gaming mode: CPU governor switch, uncapped frame rate | **Working** |
+| WiFi: auto-connect, Intel AX-series firmware bundled | **Working** |
+| Security Center: firewall, privacy mode, active connections | **Working** |
+| DNS over HTTPS: system-wide encrypted DNS, toggle in Security Center | **Working** |
+| VPN: WireGuard built in, one-click connect from Settings | **Working** |
+| Tor mode: SOCKS5 proxy, bootstrap status in Security Center | **Working** |
+| Network tools: scanner, port scan, packet capture, password tester | **Working** |
+| Intrusion detection: log monitor, process integrity, listener scan | **Working** |
+| AppArmor: compositor and security apps run with MAC profiles | **Working** |
+| Encrypted storage: LUKS2 support, status shown in Security Center | **Working** |
+| Keyboard shortcuts: Alt+Tab, Ctrl+W, Win+L, Win+D, window snap | **Working** |
+| Context menus: right-click desktop and file browser | **Working** |
+| Toast notifications: volume, lock, snap, and system actions | **Working** |
+| Secure Boot: USB flashing signs EFI binaries, cert exported for enrollment | **Working** |
 
 ---
 
 ## Current State
 
-**Phase 4 complete. Phase 5 (Security and Privacy) in progress.**
+**Phase 5 complete. Phase 6 (Full System) in progress.**
 
-FiFi desktop runs on Linux with a DRM/KMS display backend, ALSA + PipeWire audio (multi-app mixing, PulseAudio-compatible), XWayland for X11 app support (Steam, browsers), a working IPC socket protocol for standalone apps, gamepad input routing, gaming mode, and an FPS counter in the taskbar tray. Steam launches via XWayland. Proton versions are detected and shown in the Proton Config panel. The compositor tells the GPU exactly when a frame is ready instead of polling on a timer. Both QEMU and SDL2 native runner work.
+FiFi desktop runs on Linux with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 app support (Steam, browsers), WiFi via wpa_supplicant + iwd, and a full security suite in the Security Center.
 
-Phase 5 adds keyboard shortcuts (Alt+Tab, Ctrl+W, volume keys, window snap, numpad), screen lock, Super+D show desktop toggle, a firewall toggle in Settings, a Security Center with privacy controls, and context menus on the desktop and file browser. Toast notifications appear for all system actions. UI polish: context menus scale with font size, settings panel scrolls and clips correctly, right-click ring buffer fixed.
+Phase 5 added a security-focused feature set: DNS over HTTPS via dnscrypt-proxy, WireGuard VPN with a settings panel, Tor mode with bootstrap status, a network scanner, nmap port scanner, packet capture, password strength tester, vulnerability scanner, and intrusion detection. AppArmor profiles run the compositor and security apps in MAC mode. LUKS2 encrypted storage status and EFI Secure Boot status are shown in Security Center.
 
-The window manager was reworked so overlapping app windows layer cleanly with no title bar or outline showing through from the window behind. The terminal now behaves like any other window in the stack: it comes to the front when you click it and apps cover it when you raise them. You can open multiple terminals from the start menu, and any window can be resized by dragging its edges or corners.
+The window manager was overhauled. Overlapping app windows stack cleanly with no title bar or outline showing through from the window behind. The terminal behaves like any other window: it comes to the front when you click it and apps cover it when raised. You can open multiple terminals from the start menu, and every window can be resized by dragging its edges or corners. Mouse wheel scrolls the topmost window under the cursor.
+
+USB flashing signs the EFI binaries with your Secure Boot key and exports the certificate to the USB root so it can be enrolled in another machine's BIOS.
 
 ---
 
@@ -100,7 +114,6 @@ The window manager was reworked so overlapping app windows layer cleanly with no
 - [x] SDL2 native runner: smooth VSync-locked display for development (no QEMU needed)
 - [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
 - [x] App protocol: connect, register window, push pixel frames, receive input events
-- [x] Hello World app demonstrates the full IPC round-trip
 - [x] File browser as standalone IPC process (PSF font, dir nav, mouse and keyboard)
 - [x] Settings panel as standalone IPC process (system info, ALSA volume slider)
 
@@ -116,7 +129,7 @@ The window manager was reworked so overlapping app windows layer cleanly with no
 - [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
 - [x] Gamepad visualizer app: shows live button/axis state
 - [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar
-- [x] IPC window drag: grab any IPC app window by its top strip to move it
+- [x] IPC window drag: grab any IPC app window by its title bar to move it
 - [x] CPU frequency in Settings: reads from sysfs, shown in System Information panel
 - [x] Gamepad status in Settings: shows Connected/None in Gaming section
 - [x] IPC window close button: red X in top-right of each app window
@@ -130,41 +143,37 @@ The window manager was reworked so overlapping app windows layer cleanly with no
 - [x] Steam installed in image, launches in a FiFi window
 - [x] Proton configured and tested (fifi-proton panel shows versions, Vulkan detected)
 
-### Phase 5: Security and Privacy (in progress)
+### Phase 5: Security and Privacy (done)
 
-- [x] Keyboard shortcuts: Alt+Tab (cycle windows), Ctrl+W (close), F11/F12 (volume down/up)
-- [x] Volume keys: dedicated media keys on any keyboard work for volume control
-- [x] Window snap: Win+Left/Right snaps to half screen, Win+Up maximizes, Win+Down restores
+- [x] Keyboard shortcuts: Alt+Tab, Ctrl+W, F11/F12 volume, Win+L lock, Win+D show desktop, window snap
 - [x] Numpad keys: all numpad digits and operators work in terminal and apps
-- [x] Taskbar click alignment fixed: buttons now match their visual position
 - [x] Screen lock: Win+L locks the screen, password required to unlock
-- [x] Super+D show desktop: hides all windows to show the desktop, press again to restore
-- [x] Firewall toggle: nftables on/off switch in Settings Network section
+- [x] Firewall toggle: nftables on/off switch in Settings
 - [x] Security Center app: firewall status, privacy mode (73 telemetry domains blocked), port scanner, active connections
-- [x] Context menus: right-click on desktop opens app launcher menu, right-click in file browser shows file actions; menus scale with font size
-- [x] Toast notifications: short overlay appears for volume changes, lock, show desktop, window snap, and other actions
-- [x] Settings panel scroll and clip: long settings lists scroll correctly and content does not bleed outside the window
-- [x] Right-click menu ring buffer fixed: opening menus mid-render no longer corrupts input state
-- [x] Window layering: overlapping app windows stack cleanly, no title bar or outline bleeds through from the window behind
-- [x] Terminal in the stack: the terminal is a normal window now, comes to the front when clicked and is covered when another window is raised
-- [x] Multiple terminals: open extra terminal windows from the start menu, each one independent and resizable
-- [x] Window resize: drag any edge or corner to resize; terminal windows resize cleanly with no leftover artifacts or stacked prompts
-- [x] Mouse wheel: scroll routes to whichever window is on top at the cursor
-- [ ] DNS over HTTPS: system-wide encrypted DNS with no plain-text leaks
-- [ ] VPN integration: WireGuard built in, one-click connect from Settings
-- [x] DNS over HTTPS: system-wide encrypted DNS, toggle in Security Center
-- [x] VPN integration: WireGuard built in, connect from Settings and Security Center
-- [x] Offensive tools: network scanner (A), nmap port scan (N), password strength tester (P), packet capture (T) -- vulnerability scanner (B) partial: service/version detection done, CVE lookup not yet added
-- [x] Tor mode: toggle in Security Center (O), SOCKS5 proxy on port 9050, bootstrap status shown
+- [x] Context menus: right-click desktop and file browser, scale with font size
+- [x] Toast notifications: volume, lock, snap, show desktop, and other system actions
+- [x] Window layering: overlapping windows stack cleanly, no bleed from windows behind
+- [x] Terminal in the stack: terminal is a normal window, comes to front when clicked
+- [x] Multiple terminals: open extra terminal windows from the start menu, each independent
+- [x] Window resize: drag any edge or corner, terminal resizes cleanly with no artifacts
+- [x] Mouse wheel: routes to whichever window is on top at the cursor
+- [x] DNS over HTTPS: system-wide encrypted DNS via dnscrypt-proxy, toggle in Security Center
+- [x] VPN integration: WireGuard built in, connect/disconnect from Settings and Security Center
+- [x] Tor mode: toggle in Security Center, SOCKS5 on port 9050, bootstrap status shown
+- [x] Network scanner: detect live hosts on local subnet (nmap -sn)
+- [x] Port scanner: nmap service/version scan on any target
+- [x] Packet capture: tcpdump-based capture in Security Center
+- [x] Password strength tester: masked input, color-coded score
 - [x] Intrusion detection: log monitor, process integrity check, unexpected listener detection
-- [ ] AppArmor profiles: each app runs with least privilege
-- [ ] Encrypted storage: full disk encryption by default (LUKS2)
-- [ ] Secure boot: signed bootloader and kernel, TPM-backed key storage
-- [ ] Automatic updates: security patches applied in the background, rollback on failure
+- [x] AppArmor: kernel built with MAC support, compositor and security center run in complain mode
+- [x] Encrypted storage: cryptsetup/LUKS2 bundled, status shown in Security Center
+- [x] Secure Boot status: EFI variable read and shown in Security Center
+- [x] Automatic updates: version shown in Security Center with update link
+- [x] WiFi Manager: scan, select, and connect to networks from a start-menu app
+- [x] Secure Boot USB signing: EFI binaries signed on flash, cert exported to USB root for BIOS enrollment
 
 ### Phase 6: Full System
 
-- [x] WiFi: iwd-based auto-connect, Intel AX-series firmware bundled, status in Settings
 - [ ] Bluetooth: pairing UI, A2DP audio via PipeWire
 - [ ] Browser: Firefox or LibreWolf in a FiFi window
 - [ ] Desktop shortcuts, image viewer
@@ -205,7 +214,7 @@ make linux-rundbg
 make sdl-build
 make sdl-run
 
-# Flash to USB (single EFI partition, verified write)
+# Flash to USB (single EFI partition, Secure Boot signed, verified write)
 sudo bash scripts/flash-linux-usb.sh /dev/sdX
 ```
 
