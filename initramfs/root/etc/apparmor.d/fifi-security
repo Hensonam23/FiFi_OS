@@ -1,0 +1,20 @@
+# AppArmor profile for FiFi Security Center — complain mode
+#include <tunables/global>
+
+/bin/fifi-security flags=(complain) {
+  #include <abstractions/base>
+  network,
+  /fifi-data/**      rw,
+  /proc/net/**       r,
+  /proc/**           r,
+  /sys/class/net/**  r,
+  /tmp/**            rw,
+  /etc/**            r,
+  /usr/bin/nmap      Px,
+  /usr/bin/tcpdump   Px,
+  /usr/bin/tor       Px,
+  /usr/bin/dnscrypt-proxy Px,
+  /bin/ip            Px,
+  /usr/lib/iwd/iwd   Px,
+  /var/lib/iwd/**    rw,
+}

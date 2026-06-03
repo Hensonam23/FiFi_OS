@@ -93,6 +93,21 @@ ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
                 # Restart Tor if it was previously enabled
                 if [ -f /fifi-data/tor-enabled ] && [ -x /usr/bin/tor ]; then
                     mkdir -p /fifi-data/tor
+                    # Rewrite torrc with current settings (includes FascistFirewall for port 443)
+                    cat > /fifi-data/torrc << 'TORRC'
+SocksPort 9050
+DNSPort 5353
+DataDirectory /fifi-data/tor
+Log notice file /fifi-data/tor.log
+FascistFirewall 1
+ReachableAddresses *:80,*:443
+CircuitBuildTimeout 120
+LearnCircuitBuildTimeout 0
+FetchUselessDescriptors 0
+DirReqStatistics 0
+StrictNodes 0
+NumEntryGuards 6
+TORRC
                     /usr/bin/tor -f /fifi-data/torrc >>/fifi-data/tor.log 2>&1 &
                     echo $! > /fifi-data/tor.pid
                     echo "tor: started pid=$(cat /fifi-data/tor.pid)" >> /fifi-data/network.log
@@ -191,6 +206,19 @@ IWDCONF
 # Telnet shell on port 2323 for interactive remote access (same — REMOVE BEFORE DISTRIBUTION)
 busybox telnetd -l /bin/sh -p 2323 2>/dev/null &
 # ── END DEV DEBUG ─────────────────────────────────────────────────────────────
+
+# ── AppArmor — load profiles in complain mode ────────────────────────────────
+if [ -x /usr/bin/apparmor_parser ] && [ -d /etc/apparmor.d ]; then
+    # Mount securityfs so AppArmor can load profiles
+    mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+    # Load all profiles in complain mode (logs violations, doesn't block)
+    for profile in /etc/apparmor.d/fifi-*; do
+        [ -f "$profile" ] && /usr/bin/apparmor_parser -C "$profile" 2>>/fifi-data/apparmor.log || true
+    done
+    echo "apparmor: profiles loaded (complain mode)" > /fifi-data/apparmor-status
+else
+    echo "apparmor: not available (kernel support required)" > /fifi-data/apparmor-status
+fi
 
 # ── Phase 5: Firewall — apply nftables default-deny inbound rules ─────────────
 mkdir -p /fifi-data

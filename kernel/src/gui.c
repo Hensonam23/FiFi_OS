@@ -36,7 +36,7 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  16u
+#define LAUNCHER_ITEMS  21u
 #define LAUNCHER_W      110u
 #define CTX_ITEM_H      26u
 #define CTX_ITEMS       13u  /* 4 built-in + sep + 5 IPC apps + sep + 2 desktop actions */
@@ -985,7 +985,11 @@ static void taskbar_draw(void) {
 static const char * const g_launcher_items[LAUNCHER_ITEMS] = {
     "Terminal", "Files", "Settings", "Viewer",
     "File Browser", "Sys Info", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
-    "Security", "Steam", "Proton Config",
+    "Security", "WiFi", "Steam", "Proton Config",
+    "---",          /* separator — not clickable */
+    "Sleep",
+    "Restart",
+    "Shutdown",
 };
 
 static uint64_t launcher_item_h(void) {
@@ -1019,14 +1023,26 @@ static void launcher_draw(void) {
 
     for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
         uint64_t ry = ly + (uint64_t)i * lih;
-        bool hov = (g_launcher_hover == i);
+        const char *label = g_launcher_items[i];
+        bool is_sep   = (label[0] == '-' && label[1] == '-');
+        bool is_sleep = (i == (int)LAUNCHER_ITEMS - 3);
+        bool is_power = (i >= (int)LAUNCHER_ITEMS - 2); /* Restart, Shutdown */
+        bool hov = (!is_sep && g_launcher_hover == i);
         uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
         console_fill_rect(lx, ry, lw, lih, bg);
-        uint64_t slen   = (uint64_t)gui_strlen(g_launcher_items[i]);
-        uint64_t text_w = slen * fw;
-        uint64_t spx    = (lw > text_w) ? lx + (lw - text_w) / 2u : lx + 4u;
-        uint64_t spy    = ry + (lih > fh ? (lih - fh) / 2u : 0u);
-        gui_draw_str(spx, spy, g_launcher_items[i], COL_LAUNCH_FG, bg);
+        if (is_sep) {
+            /* Draw as a grey dividing line */
+            console_fill_rect(lx + 8u, ry + lih/2u, lw - 16u, 1u, 0x00304050u);
+        } else {
+            uint64_t slen   = (uint64_t)gui_strlen(label);
+            uint64_t text_w = slen * fw;
+            uint64_t spx    = (lw > text_w) ? lx + (lw - text_w) / 2u : lx + 4u;
+            uint64_t spy    = ry + (lih > fh ? (lih - fh) / 2u : 0u);
+            uint32_t fg = is_power  ? 0x00e05050u :   /* red for Restart/Shutdown */
+                          is_sleep  ? 0x005090d0u :   /* blue for Sleep */
+                                      COL_LAUNCH_FG;
+            gui_draw_str(spx, spy, label, fg, bg);
+        }
     }
     console_fill_rect(lx, ly, lw, 1u, COL_LAUNCH_HL);
     console_fill_rect(lx, ly + LAUNCHER_ITEMS * lih, lw, 1u, COL_LAUNCH_HL);
@@ -6829,9 +6845,10 @@ static void settings_render(window_t *w) {
             if (SVIS) {
                 uint32_t bg = COL_SET_BG;
                 console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
-                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
-                             "Place wg0.conf in /fifi-data/ to connect",
-                             COL_SET_HINT, bg);
+                uint64_t max_ch_vpn = fw > 0u ? (uint64_t)(ix + iw - cx) / fw : 40u;
+                gui_draw_str_clip(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                                  "Place wg0.conf in /fifi-data/ to connect",
+                                  COL_SET_HINT, bg, max_ch_vpn);
             }
             cy += SET_ROW_H;
         }
@@ -6890,9 +6907,10 @@ static void settings_render(window_t *w) {
             if (SVIS) {
                 uint32_t bg = COL_SET_BG;
                 console_fill_rect(ix, SCY, iw, SET_ROW_H, bg);
-                gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
-                             "Create /fifi-data/wifi.conf with SSID= and PASSWORD=",
-                             COL_SET_HINT, bg);
+                uint64_t max_ch = fw > 0u ? (uint64_t)(ix + iw - cx) / fw : 40u;
+                gui_draw_str_clip(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u)),
+                                  "Add /fifi-data/wifi.conf: SSID= and PASSWORD=",
+                                  COL_SET_HINT, bg, max_ch);
             }
             cy += SET_ROW_H;
         }
@@ -8319,6 +8337,11 @@ void gui_on_tick(void) {
             (uint64_t)my >= ly &&
             (uint64_t)my < ly + LAUNCHER_ITEMS * lih) {
             new_hover = (int)((uint64_t)my - ly) / (int)lih;
+            /* Don't hover-highlight separator */
+            if (new_hover >= 0 && new_hover < (int)LAUNCHER_ITEMS) {
+                const char *lbl = g_launcher_items[new_hover];
+                if (lbl[0] == '-' && lbl[1] == '-') new_hover = -1;
+            }
         }
         if (new_hover != g_launcher_hover) {
             g_launcher_hover = new_hover;
@@ -8529,6 +8552,19 @@ void gui_on_tick(void) {
                             raise_win(_li);
                             if (_lw->state == WIN_HIDDEN) win_show(_lw, _li); else full_redraw();
                         } else if (_li >= 4 && _li < (int)LAUNCHER_ITEMS) {
+                            const char *_lbl = g_launcher_items[_li];
+                            if (_lbl[0] == '-' && _lbl[1] == '-') { full_redraw(); continue; }
+                            __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
+                            if (strcmp(_lbl, "Sleep") == 0) {
+                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","echo mem>/sys/power/state");
+                                continue;
+                            }
+                            if (strcmp(_lbl, "Restart") == 0) {
+                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","reboot"); continue;
+                            }
+                            if (strcmp(_lbl, "Shutdown") == 0) {
+                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","poweroff"); continue;
+                            }
                             static const char *_ap[] = {
                                 "/bin/fifi-filebrowser",
                                 "/bin/fifi-settings",
@@ -8540,11 +8576,13 @@ void gui_on_tick(void) {
                                 "/bin/fifi-calc",
                                 "/bin/fifi-imageviewer",
                                 "/bin/fifi-security",
+                                "/bin/fifi-wifi",
                                 "/usr/bin/steam",
                                 "/bin/fifi-proton",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
-                            if (gui_spawn_app) gui_spawn_app(_ap[_li - 4]);
+                            int _ai = _li - 4;
+                            if (gui_spawn_app && _ai >= 0 && _ai < 13) gui_spawn_app(_ap[_ai]);
                             full_redraw();
                         }
                         continue;
@@ -10401,6 +10439,24 @@ void gui_on_tick(void) {
                 else
                     full_redraw();
             } else if (item >= 4 && item < (int)LAUNCHER_ITEMS) {
+                const char *lbl = g_launcher_items[item];
+                /* Skip separator */
+                if (lbl[0] == '-' && lbl[1] == '-') { full_redraw(); goto launcher_click_done; }
+                /* Power actions */
+                __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
+                if (strcmp(lbl, "Sleep") == 0) {
+                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c",
+                        "echo mem > /sys/power/state");
+                    goto launcher_click_done;
+                }
+                if (strcmp(lbl, "Restart") == 0) {
+                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c", "reboot");
+                    goto launcher_click_done;
+                }
+                if (strcmp(lbl, "Shutdown") == 0) {
+                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c", "poweroff");
+                    goto launcher_click_done;
+                }
                 /* IPC standalone apps — spawn via platform fork/exec */
                 static const char *app_paths[] = {
                     "/bin/fifi-filebrowser",
@@ -10413,13 +10469,17 @@ void gui_on_tick(void) {
                     "/bin/fifi-calc",
                     "/bin/fifi-imageviewer",
                     "/bin/fifi-security",
+                    "/bin/fifi-wifi",
                     "/usr/bin/steam",
                     "/bin/fifi-proton",
                 };
+                int app_count = (int)(sizeof(app_paths) / sizeof(app_paths[0]));
+                int app_idx   = item - 4;
                 __attribute__((weak)) void gui_spawn_app(const char *path);
-                if (gui_spawn_app)
-                    gui_spawn_app(app_paths[item - 4]);
+                if (gui_spawn_app && app_idx >= 0 && app_idx < app_count)
+                    gui_spawn_app(app_paths[app_idx]);
                 full_redraw();
+            launcher_click_done:;
             } else {
                 full_redraw();
             }

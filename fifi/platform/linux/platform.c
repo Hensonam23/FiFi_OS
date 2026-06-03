@@ -296,18 +296,21 @@ void net_init(void) {
 }
 
 void net_poll(void) {
-    /* Re-read IP every ~120 frames (~2s at 60fps). time() is unreliable in
-     * the initramfs environment (clock may not advance), so use a counter. */
+    /* Re-read IP every ~30 frames (~0.5s at 60fps) for fast updates. */
     static int frame = 0;
-    if (++frame < 120) return;
+    if (++frame < 30) return;
     frame = 0;
 
     if (!g_net_present) return;
 
-    /* Find first non-loopback interface */
+    /* Pick the best interface: prefer wireless (WiFi) over wired when both have IPs.
+     * Walk all non-loopback interfaces; remember wired and wireless separately. */
     FILE *f = fopen("/proc/net/dev", "r");
     if (!f) return;
-    char line[256], iface[32] = {0};
+    char line[256];
+    char wired[32] = {0}, wireless[32] = {0};
+    fgets(line, sizeof(line), f); /* header 1 */
+    fgets(line, sizeof(line), f); /* header 2 */
     while (fgets(line, sizeof(line), f)) {
         char *colon = strchr(line, ':');
         if (!colon) continue;
@@ -316,10 +319,31 @@ void net_poll(void) {
             if (*p != ' ' && *p != '\t') name[ni++] = *p;
         name[ni] = '\0';
         if (strcmp(name, "lo") == 0) continue;
-        snprintf(iface, sizeof(iface), "%s", name);
-        break;
+        /* Check if this is a wireless interface */
+        char wpath[96]; snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/wireless", name);
+        if (access(wpath, F_OK) == 0) {
+            if (!wireless[0]) snprintf(wireless, sizeof(wireless), "%s", name);
+        } else {
+            if (!wired[0]) snprintf(wired, sizeof(wired), "%s", name);
+        }
     }
     fclose(f);
+
+    /* Use wireless if it has an IP, otherwise fall back to wired */
+    char iface[32] = {0};
+    if (wireless[0]) {
+        /* Quick check if wireless has an IP already */
+        int sk2 = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sk2 >= 0) {
+            struct ifreq ifr2; memset(&ifr2, 0, sizeof(ifr2));
+            strncpy(ifr2.ifr_name, wireless, IFNAMSIZ - 1);
+            if (ioctl(sk2, SIOCGIFADDR, &ifr2) == 0)
+                snprintf(iface, sizeof(iface), "%s", wireless);
+            close(sk2);
+        }
+    }
+    if (!iface[0] && wired[0]) snprintf(iface, sizeof(iface), "%s", wired);
+    if (!iface[0] && wireless[0]) snprintf(iface, sizeof(iface), "%s", wireless);
     if (!iface[0]) return;
 
     int sk = socket(AF_INET, SOCK_DGRAM, 0);

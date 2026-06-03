@@ -351,7 +351,8 @@ static void *render_thread_fn(void *arg)
             gui_on_tick();
         }
 
-        /* Refresh network IP display every ~2 s (rate-limited inside net_poll). */
+        /* Refresh network IP display (rate-limited inside net_poll).
+         * gui_on_tick() will pick up the new value and redraw the sysinfo widget. */
         {
             extern void net_poll(void);
             net_poll();

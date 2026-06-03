@@ -1,0 +1,34 @@
+# AppArmor profile for FiFi compositor — complain mode logs violations without blocking
+# Switch to "enforce" in a future release once profiles are tuned.
+#include <tunables/global>
+
+/bin/fifi-compositor flags=(complain) {
+  #include <abstractions/base>
+
+  # Framebuffer and input devices
+  /dev/dri/**        rw,
+  /dev/input/**      rw,
+  /dev/fb*           rw,
+
+  # Font and data files
+  /fifi-data/**      rw,
+  /tmp/**            rw,
+  /var/run/**        rw,
+
+  # Proc and sys for system info
+  /proc/**           r,
+  /sys/**            r,
+
+  # IPC socket
+  /tmp/fifi-compositor.sock rw,
+  /tmp/wayland-*     rw,
+
+  # Spawn child apps
+  /bin/fifi-*        Px,
+  /usr/bin/steam     Px,
+  /usr/bin/Xwayland  Px,
+  /usr/bin/pipewire  Px,
+
+  # Network (for network status reading)
+  network,
+}

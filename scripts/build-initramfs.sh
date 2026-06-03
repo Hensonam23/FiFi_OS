@@ -133,6 +133,12 @@ echo "[initramfs] building fifi-security..."
     echo "[initramfs] included fifi-security"
 } || echo "[initramfs] WARNING: fifi-security build failed"
 
+echo "[initramfs] building fifi-wifi..."
+(cd "$REPO_ROOT/fifi/apps/wifi" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/wifi/fifi-wifi" "$STAGE/bin/"
+    echo "[initramfs] included fifi-wifi"
+} || echo "[initramfs] WARNING: fifi-wifi build failed"
+
 # ── nftables firewall ─────────────────────────────────────────────────────────
 echo "[initramfs] bundling nftables..."
 NFT_BIN=""
@@ -506,16 +512,23 @@ FWDIR="/lib/firmware/intel/iwlwifi"
 FWSTAGE="$STAGE/lib/firmware/intel/iwlwifi"
 if [ -d "$FWDIR" ]; then
     mkdir -p "$FWSTAGE"
-    # Bundle latest 2 versions of each key family covering all modern Intel AX cards
-    for family in cc ty so QuZ Qu; do
-        find "$FWDIR" -name "iwlwifi-${family}*.ucode.zst" 2>/dev/null | sort -V | tail -2 | \
-            xargs -r cp -t "$FWSTAGE/" 2>/dev/null || true
-        # Also bundle .pnvm files if present (required for some AX211 configs)
-        find "$FWDIR" -name "iwlwifi-${family}*.pnvm.zst" 2>/dev/null | sort -V | tail -1 | \
-            xargs -r cp -t "$FWSTAGE/" 2>/dev/null || true
+    # Decompress and bundle the latest version of each sub-variant.
+    # The FiFi kernel does not have CONFIG_FW_LOADER_COMPRESS so it needs raw .ucode files.
+    # zstd -d decompresses each .zst to a plain .ucode which the kernel can load directly.
+    find "$FWDIR" -name "iwlwifi-*.ucode.zst" 2>/dev/null | \
+        sed 's/-[0-9]*\.ucode\.zst$//' | sort -u | while read prefix; do
+            latest=$(find "$FWDIR" -name "$(basename "$prefix")-*.ucode.zst" 2>/dev/null | sort -V | tail -1)
+            [ -z "$latest" ] && continue
+            outname=$(basename "$latest" .zst)  # strip .zst → plain .ucode name
+            zstd -d -q "$latest" -o "$FWSTAGE/$outname" 2>/dev/null || true
+        done
+    # pnvm files (required for AX211 160MHz mode) — decompress these too
+    find "$FWDIR" -name "*.pnvm.zst" 2>/dev/null | while read pnvm; do
+        outname=$(basename "$pnvm" .zst)
+        zstd -d -q "$pnvm" -o "$FWSTAGE/$outname" 2>/dev/null || true
     done
-    # Create symlinks at /lib/firmware/ so iwlwifi can find them
-    find "$FWSTAGE" -name "*.ucode.zst" -o -name "*.pnvm.zst" 2>/dev/null | while read f; do
+    # Create symlinks at /lib/firmware/ pointing to the decompressed files
+    find "$FWSTAGE" -name "*.ucode" -o -name "*.pnvm" 2>/dev/null | while read f; do
         bn=$(basename "$f")
         [ -e "$STAGE/lib/firmware/$bn" ] || ln -sf "intel/iwlwifi/$bn" "$STAGE/lib/firmware/$bn"
     done
@@ -537,7 +550,60 @@ for regdb in /usr/lib/firmware/regulatory.db /lib/firmware/regulatory.db; do
 done
 
 # Create iwd runtime dirs
-mkdir -p "$STAGE/var/lib/iwd" "$STAGE/etc/iwd"
+mkdir -p "$STAGE/var/lib/iwd" "$STAGE/etc/iwd" "$STAGE/var/run/wpa_supplicant"
+
+# ── wpa_supplicant (WiFi auth — WPA2/WPA3, no D-Bus needed) ──────────────────
+WPA_BIN="/usr/bin/wpa_supplicant"
+if [ -x "$WPA_BIN" ]; then
+    cp "$WPA_BIN" "$STAGE/usr/bin/wpa_supplicant"
+    chmod +x "$STAGE/usr/bin/wpa_supplicant"
+    WPA_LIBS=$(ldd "$WPA_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $WPA_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] wpa_supplicant bundled ($(du -sh "$WPA_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: wpa_supplicant not found -- WiFi connect may not work"
+fi
+
+# ── AppArmor tools (mandatory access control) ────────────────────────────────
+AA_PARSER="/usr/bin/apparmor_parser"
+if [ -x "$AA_PARSER" ]; then
+    cp "$AA_PARSER" "$STAGE/usr/bin/apparmor_parser"
+    chmod +x "$STAGE/usr/bin/apparmor_parser"
+    AA_LIBS=$(ldd "$AA_PARSER" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $AA_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    # Include aa-status for checking profile load state
+    [ -x /usr/bin/aa-status ] && cp /usr/bin/aa-status "$STAGE/usr/bin/aa-status" || true
+    echo "[initramfs] apparmor_parser bundled"
+fi
+# AppArmor profiles are in initramfs/root/etc/apparmor.d/ (already staged via rootfs copy)
+
+# ── cryptsetup (LUKS2 encrypted storage support) ─────────────────────────────
+CRYPT_BIN="/usr/bin/cryptsetup"
+if [ -x "$CRYPT_BIN" ]; then
+    cp "$CRYPT_BIN" "$STAGE/usr/bin/cryptsetup"
+    chmod +x "$STAGE/usr/bin/cryptsetup"
+    CRYPT_LIBS=$(ldd "$CRYPT_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    for lib in $CRYPT_LIBS; do
+        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$real")"
+        [ -f "$dest" ] || cp "$real" "$dest"
+        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+    done
+    echo "[initramfs] cryptsetup bundled ($(du -sh "$CRYPT_BIN" | cut -f1))"
+fi
 
 # ── dnscrypt-proxy ────────────────────────────────────────────────────────────
 echo "[initramfs] bundling dnscrypt-proxy..."

@@ -118,6 +118,7 @@ static uint32_t g_gui_head = 0;
 static uint32_t g_gui_used = 0;
 
 static bool g_shift = false;
+static bool g_caps  = false;
 static bool g_ctrl  = false;
 static bool g_alt   = false;
 static bool g_super = false;
@@ -548,6 +549,8 @@ void input_poll(void) {
                 g_alt = pressed;
             else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA)
                 g_super = pressed;
+            else if (ev.code == KEY_CAPSLOCK && pressed)
+                g_caps = !g_caps;   /* toggle on each key-down */
 
             if (!pressed) continue;
 
@@ -560,7 +563,11 @@ void input_poll(void) {
                 continue;
             }
 
-            uint8_t c = evkey_to_fifi((uint16_t)ev.code, g_shift, g_ctrl);
+            /* Caps Lock inverts shift for letter keys (a-z range, codes 16-50) */
+            bool effective_shift = g_shift;
+            if (g_caps && ev.code >= 16 && ev.code <= 50)
+                effective_shift = !g_shift;
+            uint8_t c = evkey_to_fifi((uint16_t)ev.code, effective_shift, g_ctrl);
             if (c) kb_push_internal(c);
         }
     }

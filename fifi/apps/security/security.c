@@ -95,6 +95,19 @@ static int draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
     for (; *s; s++, x += g_char_w + 1) draw_char(fb, (unsigned char)*s, x, y, fg);
     return x - sx;
 }
+static void draw_str_clip(uint32_t *fb, const char *s, int x, int y, uint32_t fg, int max_w) {
+    int cw = g_char_w + 1;
+    int max_ch = max_w / cw;
+    int len = (int)strlen(s);
+    if (len <= max_ch) { draw_str(fb, s, x, y, fg); return; }
+    if (max_ch > 3) {
+        for (int i = 0; i < max_ch - 3 && s[i]; i++, x += cw)
+            draw_char(fb, (unsigned char)s[i], x, y, fg);
+        draw_char(fb, '.', x, y, C_GREY); x += cw;
+        draw_char(fb, '.', x, y, C_GREY); x += cw;
+        draw_char(fb, '.', x, y, C_GREY);
+    }
+}
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int r = y; r < y+h; r++) {
         if (r < 0 || r >= g_win_h) continue;
@@ -354,7 +367,19 @@ static void toggle_tor(void) {
                 "SocksPort 9050\n"
                 "DNSPort 5353\n"
                 "DataDirectory /fifi-data/tor\n"
-                "Log notice file /fifi-data/tor.log\n";
+                "Log notice file /fifi-data/tor.log\n"
+                /* Use ports 80 and 443 as fallbacks if standard Tor ports are blocked */
+                "FascistFirewall 1\n"
+                "ReachableAddresses *:80,*:443\n"
+                /* Longer timeouts for slow directory fetches */
+                "CircuitBuildTimeout 120\n"
+                "LearnCircuitBuildTimeout 0\n"
+                /* Reduce directory traffic so bootstrap is faster */
+                "FetchUselessDescriptors 0\n"
+                "DirReqStatistics 0\n"
+                /* Allow more directory servers to source the authority keys */
+                "StrictNodes 0\n"
+                "NumEntryGuards 6\n";
             write(cfd, cfg, strlen(cfg));
             close(cfd);
         }
@@ -1020,20 +1045,117 @@ static void render(uint32_t *fb) {
     }
     vy += 4;
 
+    /* ── AppArmor ─── */
+    SECTION("AppArmor (App Sandboxing)");
+    {
+        char aa_status[128] = "Unknown";
+        int aafd = open("/fifi-data/apparmor-status", O_RDONLY);
+        if (aafd >= 0) {
+            ssize_t n = read(aafd, aa_status, sizeof(aa_status)-1); close(aafd);
+            if (n > 0) { aa_status[n] = '\0'; char *nl=strchr(aa_status,'\n'); if(nl)*nl='\0'; }
+        }
+        bool aa_on = strstr(aa_status, "loaded") != NULL;
+        if (vy > TITLE_H && vy < wh) {
+            draw_str(fb, aa_on ? "[ON] " : "[OFF]",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, aa_on ? C_GREEN : C_GREY);
+            draw_str(fb, aa_status, PAD + 44, vy + (ROW_H - g_glyph_h)/2, aa_on ? C_VAL : C_GREY);
+        }
+        vy += ROW_H + 4;
+    }
+
+    /* ── Encrypted Storage ─── */
+    SECTION("Encrypted Storage (LUKS2)");
+    {
+        /* Check if cryptsetup is available and if any LUKS devices exist */
+        bool luks_found = (access("/sys/class/block", F_OK) == 0);
+        char luks_msg[96] = "Not active";
+        /* Quick check: if /proc/crypto mentions aes and there's a dm-crypt device */
+        FILE *crypt_f = fopen("/proc/devices", "r");
+        if (crypt_f) {
+            char cline[128];
+            while (fgets(cline, sizeof(cline), crypt_f)) {
+                if (strstr(cline, "device-mapper")) { luks_found = true; break; }
+            }
+            fclose(crypt_f);
+        }
+        if (access("/usr/bin/cryptsetup", X_OK) == 0)
+            snprintf(luks_msg, sizeof(luks_msg),
+                     "cryptsetup ready -- use installer to encrypt storage");
+        else
+            snprintf(luks_msg, sizeof(luks_msg),
+                     "Not available on this boot");
+        if (vy > TITLE_H && vy < wh) {
+            draw_str(fb, "[--]", PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY);
+            draw_str_clip(fb, luks_msg, PAD + 44, vy + (ROW_H - g_glyph_h)/2, C_GREY,
+                          ww - PAD*2 - 44);
+        }
+        vy += ROW_H + 4;
+    }
+
+    /* ── Secure Boot ─── */
+    SECTION("Secure Boot");
+    {
+        char sb_msg[64] = "Unknown";
+        bool sb_on = false;
+        /* Read SecureBoot EFI variable (byte 4 of the var is the enabled flag) */
+        int sbfd = open("/sys/firmware/efi/efivars/"
+                        "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", O_RDONLY);
+        if (sbfd >= 0) {
+            uint8_t varbuf[5] = {0};
+            if (read(sbfd, varbuf, 5) == 5) {
+                sb_on = (varbuf[4] == 1);
+                snprintf(sb_msg, sizeof(sb_msg), sb_on ? "Enabled" : "Disabled");
+            }
+            close(sbfd);
+        } else if (access("/sys/firmware/efi", F_OK) != 0) {
+            snprintf(sb_msg, sizeof(sb_msg), "Not EFI boot");
+        } else {
+            snprintf(sb_msg, sizeof(sb_msg), "Cannot read status");
+        }
+        if (vy > TITLE_H && vy < wh) {
+            draw_str(fb, sb_on ? "[ON] " : "[--] ",
+                     PAD, vy + (ROW_H - g_glyph_h)/2, sb_on ? C_GREEN : C_GREY);
+            draw_str(fb, sb_msg, PAD + 44, vy + (ROW_H - g_glyph_h)/2,
+                     sb_on ? C_GREEN : C_GREY);
+        }
+        vy += ROW_H + 4;
+    }
+
+    /* ── System Version / Updates ─── */
+    SECTION("System Version");
+    {
+        char ver[64] = "FiFi OS linux-desktop alpha";
+        int vfd = open("/etc/fifi-version", O_RDONLY);
+        if (vfd >= 0) {
+            ssize_t vn = read(vfd, ver, sizeof(ver)-1); close(vfd);
+            if (vn > 0) { ver[vn]='\0'; char *nl=strchr(ver,'\n'); if(nl)*nl='\0'; }
+        }
+        if (vy > TITLE_H && vy < wh) {
+            draw_str_clip(fb, ver, PAD, vy + (ROW_H - g_glyph_h)/2, C_VAL,
+                          ww - 2*PAD);
+        }
+        vy += ROW_H;
+        if (vy > TITLE_H && vy < wh)
+            draw_str_clip(fb, "Updates: flash a new USB from https://github.com/Hensonam23/FiFi_OS",
+                          PAD, vy + (ROW_H - g_glyph_h)/2, C_GREY, ww - 2*PAD);
+        vy += ROW_H + 4;
+    }
+
 #undef SECTION
 #undef STATUS_ROW
 
-    /* ── Help footer (fixed at bottom) ── */
+    /* ── Help footer (fixed at bottom) — key bindings only, no timestamp ── */
     int foot_y = wh - g_glyph_h - 6;
     fill(fb, 0, foot_y - 2, ww, g_glyph_h + 8, 0x000c1420u);
     hline(fb, foot_y - 2, C_BORDER);
-    draw_str(fb, "D=DoH  V=VPN  O=Tor  B=vuln-scan  A=net-scan  N=nmap  T=dump  S=scan  P=pw  R  Q",
-             PAD, foot_y, C_GREY);
-    {
-        char ts[32];
-        snprintf(ts, sizeof(ts), "R:%s", g_refresh_time);
-        int tw = (int)strlen(ts) * (g_char_w + 1);
-        draw_str(fb, ts, ww - PAD - tw, foot_y, C_GREY);
+    /* Clip the footer text to the window width so it never overflows */
+    int max_footer_ch = (ww - 2 * PAD) / (g_char_w + 1);
+    if (max_footer_ch > 0) {
+        char footer[128];
+        snprintf(footer, sizeof(footer),
+                 "D=DoH  V=VPN  O=Tor  B=vuln  A=scan  N=nmap  T=dump  S=ports  P=pw  R  Q");
+        footer[max_footer_ch < 127 ? max_footer_ch : 127] = '\0';
+        draw_str(fb, footer, PAD, foot_y, C_GREY);
     }
 
     /* Track total content height (sum of all section heights, independent of scroll) */
