@@ -882,6 +882,7 @@ static void taskbar_draw_tray(void) {
         extern bool gaming_mode_active(void);
         if (gaming_mode_active()) {
             uint32_t fps = compositor_fps();
+            uint32_t fps_for_color = fps;
             char ftxt[8]; int fi = 0;
             if (fps >= 1000) { ftxt[fi++]='9'; ftxt[fi++]='9'; ftxt[fi++]='9'; }
             else if (fps >= 100) { ftxt[fi++]=(char)('0'+fps/100); fps%=100; ftxt[fi++]=(char)('0'+fps/10); ftxt[fi++]=(char)('0'+fps%10); }
@@ -891,7 +892,7 @@ static void taskbar_draw_tray(void) {
             uint64_t fw2 = (uint64_t)fi * fw + 8u;
             uint64_t fx  = fps_right_edge > fw2 ? fps_right_edge - fw2 : 0u;
             uint32_t fbg = 0x00101828u;
-            uint32_t ffg = fps >= 60u ? 0x0050e880u : fps >= 30u ? 0x00e8c040u : 0x00e86040u;
+            uint32_t ffg = fps_for_color >= 60u ? 0x0050e880u : fps_for_color >= 30u ? 0x00e8c040u : 0x00e86040u;
             console_fill_rect(fx, ty + 3u, fw2, TASKBAR_H - 6u, fbg);
             gui_draw_str(fx + 4u, ty + (TASKBAR_H - fh) / 2u, ftxt, ffg, fbg);
             fps_right_edge = fx > 4u ? fx - 4u : 0u;
@@ -1088,7 +1089,7 @@ static void vol_popup_draw(void) {
     const char *tlbl = "Volume: ";
     for (int k = 0; tlbl[k]; k++) title[ti++] = tlbl[k];
     if (vol >= 100) { title[ti++] = '1'; title[ti++] = '0'; title[ti++] = '0'; }
-    else            { title[ti++] = (char)('0' + vol / 10); title[ti++] = (char)('0' + vol % 10); }
+    else            { if (vol >= 10) title[ti++] = (char)('0' + vol / 10); title[ti++] = (char)('0' + vol % 10); }
     title[ti++] = '%'; title[ti] = '\0';
     uint64_t tlen = (uint64_t)ti;
     uint64_t ttx  = px + (VOL_POP_W > tlen * fw ? (VOL_POP_W - tlen * fw) / 2u : 2u);
@@ -8295,7 +8296,7 @@ void gui_on_tick(void) {
                 case RES_N: case RES_S:
                     want = CURSOR_RESIZE_V; break;
                 case RES_NE: case RES_SW:
-                    want = CURSOR_RESIZE_H; break;
+                    want = CURSOR_RESIZE_V; break;
                 case RES_NW: case RES_SE:
                     want = CURSOR_RESIZE_H; break;
                 default: break;
@@ -8582,7 +8583,7 @@ void gui_on_tick(void) {
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             int _ai = _li - 4;
-                            if (gui_spawn_app && _ai >= 0 && _ai < 13) gui_spawn_app(_ap[_ai]);
+                            if (gui_spawn_app && _ai >= 0 && _ai < (int)(sizeof(_ap)/sizeof(_ap[0]))) gui_spawn_app(_ap[_ai]);
                             full_redraw();
                         }
                         continue;
@@ -10099,8 +10100,8 @@ void gui_on_tick(void) {
                 int si = g_z[zi];
                 window_t *w = &g_wins[si];
                 if (!w->active || w->state == WIN_HIDDEN) continue;
-                if ((uint64_t)mx < w->x || (uint64_t)mx >= w->x + w->w ||
-                    (uint64_t)my < w->y || (uint64_t)my >= w->y + w->h) continue;
+                if (mx < (int32_t)w->x || mx >= (int32_t)(w->x + w->w) ||
+                    my < (int32_t)w->y || my >= (int32_t)(w->y + w->h)) continue;
                 if (w->type == WIN_TERM) {
                     int tot_sb = console_tsb_count_lines();
                     g_term_scroll += (int)scroll * 3;
@@ -11619,7 +11620,9 @@ void gui_on_tick(void) {
             static uint64_t s_lock_sec = (uint64_t)-1;
             uint64_t hz = pit_get_hz(); if (!hz) hz = 100;
             uint64_t now_sec = pit_ticks() / hz;
-            if (now_sec != s_lock_sec) {
+            __attribute__((weak)) bool compositor_lock_pin_dirty(void);
+            bool _pin_dirty = compositor_lock_pin_dirty ? compositor_lock_pin_dirty() : false;
+            if (now_sec != s_lock_sec || _pin_dirty) {
                 s_lock_sec = now_sec;
                 uint64_t scw = console_fb_width();
                 uint64_t sch = console_fb_height();
@@ -11685,13 +11688,51 @@ void gui_on_tick(void) {
                     gui_draw_str(dx, dy, datebuf, 0x00486080u, 0x00060810u);
                 }
 
-                /* Unlock hint near bottom */
+                uint64_t hinty = sch * 3u / 4u;
+
+#ifdef __linux__
+                /* PIN entry: show dots + feedback when a PIN file is configured */
+                __attribute__((weak)) int  compositor_lock_pin_len(void);
+                __attribute__((weak)) bool compositor_lock_bad_pin(void);
+                int _plen = compositor_lock_pin_len ? compositor_lock_pin_len() : 0;
+                bool _bad = compositor_lock_bad_pin ? compositor_lock_bad_pin() : false;
+                bool _has_pin = (vfs_filesize("lock-pin") >= 0);
+
+                if (_has_pin) {
+                    uint64_t pin_y = hinty - cfh * 3u;
+                    /* Row of dots for typed chars */
+                    const char *plbl = "PIN: ";
+                    uint64_t plbl_w = gui_strlen(plbl) * cfw;
+                    uint64_t dots_total = 16u * cfw;
+                    uint64_t pin_x = (scw > plbl_w + dots_total) ? (scw - plbl_w - dots_total) / 2u : 0u;
+                    gui_draw_str(pin_x, pin_y, plbl, 0x00607080u, 0x00060810u);
+                    for (int _pi = 0; _pi < 16; _pi++) {
+                        const char *dot = _pi < _plen ? "*" : "_";
+                        uint32_t col = _pi < _plen ? 0x0090c4e8u : 0x00203040u;
+                        gui_draw_str(pin_x + plbl_w + (uint64_t)_pi * cfw, pin_y, dot, col, 0x00060810u);
+                    }
+                    if (_bad) {
+                        const char *bad_msg = "Incorrect PIN";
+                        uint64_t blen = gui_strlen(bad_msg);
+                        uint64_t bx = (scw > blen * cfw) ? (scw - blen * cfw) / 2u : 0u;
+                        gui_draw_str(bx, pin_y + cfh + 4u, bad_msg, 0x00e84040u, 0x00060810u);
+                    }
+                    const char *hint = "Type PIN and press Enter";
+                    uint64_t hintlen = gui_strlen(hint);
+                    uint64_t hintx = (scw > hintlen * cfw) ? (scw - hintlen * cfw) / 2u : 0u;
+                    gui_draw_str(hintx, hinty, hint, 0x00304050u, 0x00060810u);
+                } else {
+                    const char *hint = "Press any key to unlock";
+                    uint64_t hintlen = gui_strlen(hint);
+                    uint64_t hintx = (scw > hintlen * cfw) ? (scw - hintlen * cfw) / 2u : 0u;
+                    gui_draw_str(hintx, hinty, hint, 0x00304050u, 0x00060810u);
+                }
+#else
                 const char *hint = "Press any key to unlock";
                 uint64_t hintlen = gui_strlen(hint);
                 uint64_t hintx = (scw > hintlen * cfw) ? (scw - hintlen * cfw) / 2u : 0u;
-                uint64_t hinty = sch * 3u / 4u;
                 gui_draw_str(hintx, hinty, hint, 0x00304050u, 0x00060810u);
-
+#endif
                 console_mark_dirty_rows(0, (uint32_t)sch);
             }
         }

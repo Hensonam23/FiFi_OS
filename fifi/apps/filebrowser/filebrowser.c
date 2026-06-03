@@ -599,10 +599,7 @@ int main(void) {
                                         }
                                         /* Prepare drag */
                                         snprintf(g_drag_path, sizeof(g_drag_path),
-                                                 "%s/%s", g_path,
-                                                 g_entries[g_scroll + (my - list_top) / ITEM_H < g_nentries
-                                                           ? g_scroll + (my - list_top) / ITEM_H
-                                                           : g_selected].name);
+                                                 "%s/%s", g_path, g_entries[idx].name);
                                         g_drag_pending = true;
                                         g_drag_smx = mx; g_drag_smy = my;
                                     }

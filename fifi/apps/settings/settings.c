@@ -176,7 +176,7 @@ static void alsa_init(void) {
         if (range > 0)
             g_vol = (int)((ev.value.integer.value[0] - g_vmin) * 100 / range);
     }
-    if (g_vol == 0) g_vol = 70;  /* default if silent */
+    if (g_ctl < 0 && g_vol == 0) g_vol = 70;  /* default when ALSA unavailable */
 }
 
 static void alsa_set_vol(int v) {
@@ -260,7 +260,7 @@ static void render(uint32_t *fb) {
         uint32_t bg = (i & 1) ? C_ROW_B : C_ROW_A;
         fill(fb, 0, y, g_win_w, ROW_H, bg);
         int ty2 = y + (ROW_H - g_glyph_h)/2;
-        int kw = 11 * 9;  /* 11 chars for longest key ("CPU Freq") + margin */
+        int kw = 10 * 9;  /* 10 chars for longest key ("CPU Freq") + margin */
         draw_str(fb, g_info[i].key, PAD, ty2, C_KEY);
         int val_max = g_win_w - (PAD + kw) - PAD;
         draw_str_clip(fb, g_info[i].val, PAD + kw, ty2, C_VAL, val_max);

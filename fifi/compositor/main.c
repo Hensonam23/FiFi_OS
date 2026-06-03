@@ -24,6 +24,7 @@
 /* Linux platform functions */
 void input_init(void);
 void input_poll(void);
+void input_rescan(void);
 void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h);
 void mouse_init(void);
 void mouse_cursor_update(void);
@@ -60,7 +61,6 @@ void gui_draw_popups(void);
 void gui_overdraw_top(void);
 uint32_t gui_next_z(void);
 uint32_t gui_topmost_z_at(int32_t mx, int32_t my);
-uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my);
 uint32_t ipc_topmost_z(void);
 uint32_t ipc_topmost_z_at(int32_t mx, int32_t my);
 uint32_t ipc_topmost_z_in_rect(uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
@@ -132,17 +132,29 @@ static int      g_lock_timeout_s = 0;
 static struct timespec g_last_input;
 #define BLANK_TIMEOUT_S 300
 
+/* ── Lock screen PIN state ───────────────────────────────────────────────── */
+static char g_lock_buf[64];
+static int  g_lock_buf_len  = 0;
+static bool g_lock_bad      = false;  /* last PIN attempt was wrong */
+static bool g_lock_pin_dirty = false; /* PIN input changed, overlay needs redraw */
+
+int  compositor_lock_pin_len(void)   { return g_lock_buf_len; }
+bool compositor_lock_bad_pin(void)   { bool v = g_lock_bad; return v; }
+bool compositor_lock_pin_dirty(void) { bool v = g_lock_pin_dirty; g_lock_pin_dirty = false; return v; }
+
 bool gaming_mode_active(void)        { return g_gaming_mode; }
 uint32_t compositor_fps(void)        { return g_fps_current; }
 bool compositor_locked(void)         { return g_locked; }
-void compositor_lock(void)           { g_locked = true; g_blanked = false; }
-void compositor_unlock(void)         { g_locked = false; }
+void compositor_lock(void)           { g_locked = true; g_blanked = false; g_lock_buf_len = 0; g_lock_bad = false; }
+void compositor_unlock(void)         { g_locked = false; g_lock_buf_len = 0; g_lock_bad = false; }
 void compositor_set_lock_timeout(int s) { g_lock_timeout_s = s; }
 void gaming_mode_set(bool on)        {
     g_gaming_mode = on;
     fprintf(stderr, "[compositor] gaming mode %s\n", on ? "ON" : "OFF");
     const char *gov = on ? "performance" : "schedutil";
-    for (int cpu = 0; cpu < 8; cpu++) {
+    int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
+    if (ncpus < 1) ncpus = 8;
+    for (int cpu = 0; cpu < ncpus; cpu++) {
         char path[80];
         snprintf(path, sizeof(path),
                  "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
@@ -524,6 +536,9 @@ int main(void) {
         }
 
         /* ── evdev: read input events into rings ───────────────────────── */
+        /* Rescan for newly plugged devices every ~5 seconds */
+        static int _rescan_ticks = 0;
+        if (++_rescan_ticks >= 300) { _rescan_ticks = 0; input_rescan(); }
         int32_t px, py; bool pb_l, pb_r;
         mouse_get_state(&px, &py, &pb_l, &pb_r);
         input_poll();
@@ -578,24 +593,50 @@ int main(void) {
         /* ── Activity tracking ──────────────────────────────────────────── */
         if (had_input)
             clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-        if (g_blanked && had_input) {
+        if (g_blanked && had_input)
             g_blanked = false;
-            clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-        }
 
         /* ── Keyboard routing ───────────────────────────────────────────── */
         {
             __attribute__((weak)) void gui_show_desktop(void);
-            /* When locked: any key unlocks, nothing else reaches the GUI */
+            /* When locked: if /fifi-data/lock-pin exists, collect a PIN and
+             * validate on Enter. If no PIN file, any key unlocks (no-auth mode). */
             if (g_locked) {
-                bool any = false;
+                bool has_pin = (access("/fifi-data/lock-pin", F_OK) == 0);
                 int lc;
                 while ((lc = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                    any = true;
+                    uint8_t uc = (uint8_t)lc;
+                    if (!has_pin) {
+                        /* No PIN configured — any key unlocks */
+                        compositor_unlock();
+                        break;
+                    } else if (uc == '\r' || uc == '\n') {
+                        g_lock_buf[g_lock_buf_len] = '\0';
+                        FILE *pf = fopen("/fifi-data/lock-pin", "r");
+                        if (pf) {
+                            char pin[64] = {0};
+                            bool ok = false;
+                            if (fgets(pin, sizeof(pin), pf)) {
+                                int pl = (int)strlen(pin);
+                                while (pl > 0 && (pin[pl-1] == '\n' || pin[pl-1] == '\r'))
+                                    pin[--pl] = '\0';
+                                ok = (strcmp(g_lock_buf, pin) == 0);
+                            }
+                            fclose(pf);
+                            if (ok) { compositor_unlock(); break; }
+                            else    { g_lock_bad = true; g_lock_buf_len = 0; }
+                        }
+                    } else if (uc == 0x08u || uc == 0x7fu) {
+                        if (g_lock_buf_len > 0) g_lock_buf_len--;
+                        g_lock_bad = false;
+                    } else if (uc >= 0x20u && uc < 0x7fu && g_lock_buf_len < 63) {
+                        g_lock_buf[g_lock_buf_len++] = (char)uc;
+                        g_lock_bad = false;
+                    }
+                    g_lock_pin_dirty = true;
                 }
                 keyboard_clear_state();
-                if (any) compositor_unlock();
                 goto keyboard_done;
             }
             if (ipc_keyboard_active()) {

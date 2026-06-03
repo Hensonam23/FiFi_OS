@@ -323,11 +323,16 @@ static void btn_click(int row, int col) {
 }
 
 /* ── IPC message reader ───────────────────────────────────────────────────── */
+static void write_all(int fd, const void *buf, size_t n) {
+    const uint8_t *p = (const uint8_t *)buf;
+    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
+}
+
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
     uint8_t hdr[8];
     memcpy(hdr, &type, 4); memcpy(hdr + 4, &len, 4);
-    write(fd, hdr, 8);
-    if (len && data) write(fd, data, len);
+    write_all(fd, hdr, 8);
+    if (len && data) write_all(fd, data, len);
 }
 
 static void send_frame(int sock, uint32_t *fb) {
@@ -428,7 +433,7 @@ int main(void) {
             uint8_t tbuf[4096];
             ssize_t n = read(sock, tbuf, sizeof(tbuf));
             if (n <= 0) break;
-            if (n > 0) {
+            {
                 int pos = 0;
                 while (pos < (int)n) {
                     if (!msg_feed(&ms, tbuf, (int)n, &pos)) continue;

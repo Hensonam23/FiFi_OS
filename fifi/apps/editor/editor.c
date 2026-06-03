@@ -265,13 +265,6 @@ static void render(uint32_t *fb) {
         if (draw_n > vc) draw_n = vc;
         if (draw_n < 0) draw_n = 0;
 
-        /* Find highlight */
-        bool hl = false;
-        if (g_find_len > 0 && !g_find_mode) {
-            const char *p = strstr(line + draw_from, g_find_buf);
-            if (p) { hl = true; (void)hl; }
-        }
-
         int tx = LNUM_W + PAD_X;
         for (int ci = 0; ci < draw_n; ci++) {
             unsigned char ch = (unsigned char)line[draw_from + ci];
@@ -333,9 +326,6 @@ static void render(uint32_t *fb) {
         fb_str(fb, g_status, 4, fy, g_status_col, C_FOOT_BG);
     } else {
         char foot[160];
-        const char *name = strrchr(g_filepath, '/');
-        name = name ? name + 1 : g_filepath;
-        if (!*name) name = "[new]";
         snprintf(foot, sizeof(foot),
                  "  Ln %d/%d  Col %d  |  Ctrl+S:save  Ctrl+Z:undo  Ctrl+F:find  Ctrl+Q:quit",
                  g_cy + 1, g_nlines, g_cx + 1);
@@ -415,8 +405,12 @@ static void join_with_next(int row) {
     line_ensure(row); line_ensure(row + 1);
     int lena = line_len(row), lenb = line_len(row + 1);
     if (lena + lenb >= LINE_CAP) return;
-    char *l = g_lines[row];
-    strcat(l, g_lines[row + 1]);
+    char *joined = malloc((size_t)(lena + lenb + 1));
+    if (!joined) return;
+    memcpy(joined, g_lines[row], (size_t)lena);
+    memcpy(joined + lena, g_lines[row + 1], (size_t)(lenb + 1));
+    free(g_lines[row]);
+    g_lines[row] = joined;
     free(g_lines[row + 1]);
     memmove(&g_lines[row + 1], &g_lines[row + 2],
             (size_t)(g_nlines - row - 2) * sizeof(char *));
@@ -494,7 +488,7 @@ static bool handle_key(uint8_t key, int sock, uint32_t *fb) {
         }
         return true;
     }
-    if (key == 0x11 || key == 'Q' - 64) { /* Ctrl+Q */
+    if (key == 0x11) { /* Ctrl+Q */
         return false; /* signal quit */
     }
     if (key == 0x06) { /* Ctrl+F: find */

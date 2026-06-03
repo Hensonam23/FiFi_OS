@@ -200,7 +200,6 @@ static void net_read_config(const char *iface) {
 }
 
 void gui_set_dns(int mode) {
-    extern uint32_t net_dns;
     /* DoH manages resolv.conf when active — don't override it */
     if (access("/fifi-data/doh-enabled", F_OK) == 0) return;
     if (mode != 0) {
@@ -456,9 +455,6 @@ void gui_vpn_disconnect(void) {
 /* ── WiFi status helpers ─────────────────────────────────────────────────── */
 
 bool gui_wifi_connected(void) {
-    /* Check if any wireless interface has an IP */
-    FILE *f = fopen("/proc/net/if_inet6", "r");
-    (void)f; if (f) fclose(f); /* just poke it */
     /* Walk /sys/class/net/ for wireless interfaces */
     DIR *d = opendir("/sys/class/net");
     if (!d) return false;
@@ -589,8 +585,7 @@ bool platform_load_image(const char *path, uint32_t **out_px,
     int fd = open(path, O_RDONLY);
     if (fd < 0) return false;
     struct stat st;
-    fstat(fd, &st);
-    if (st.st_size <= 0 || st.st_size > 128 * 1024 * 1024) { close(fd); return false; }
+    if (fstat(fd, &st) != 0 || st.st_size <= 0 || st.st_size > 128 * 1024 * 1024) { close(fd); return false; }
     size_t fsz = (size_t)st.st_size;
     uint8_t *buf = malloc(fsz);
     if (!buf) { close(fd); return false; }
@@ -672,7 +667,8 @@ const char *platform_kernel_str(void) {
             size_t n = strlen(s_buf);
             if (n > 0 && s_buf[n-1] == '\n') s_buf[n-1] = '\0';
             /* Strip git hash suffix: "-gXXXXXXXX" at the end */
-            for (size_t i = 2; i < strlen(s_buf); i++) {
+            size_t slen = strlen(s_buf);
+            for (size_t i = 2; i < slen; i++) {
                 if (s_buf[i-1] == '-' && s_buf[i] == 'g') {
                     /* Verify it looks like a hex hash */
                     size_t j = i + 1;
@@ -684,6 +680,6 @@ const char *platform_kernel_str(void) {
         }
         fclose(f);
     }
-    if (!s_buf[0]) { s_buf[0]='L'; s_buf[1]='i'; s_buf[2]='n'; s_buf[3]='u'; s_buf[4]='x'; s_buf[5]='\0'; }
+    if (!s_buf[0]) { strcpy(s_buf, "Linux"); }
     return s_buf;
 }

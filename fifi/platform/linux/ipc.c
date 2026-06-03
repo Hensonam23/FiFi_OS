@@ -236,12 +236,16 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         uint16_t req_w, req_h;
         memcpy(&req_w, pld,     2);
         memcpy(&req_h, pld + 2, 2);
-        const char *title = pld_len > 4 ? (const char *)(pld + 4) : "App";
-        snprintf(c->title, sizeof(c->title), "%s", title);
+        if (pld_len > 4)
+            snprintf(c->title, sizeof(c->title), "%.*s", (int)(pld_len - 4), pld + 4);
+        else
+            snprintf(c->title, sizeof(c->title), "App");
 
-        /* Clamp window size to 1920×1080 if larger */
+        /* Clamp window size and reject overflow-prone dimensions */
         if (req_w > 1920) req_w = 1920;
         if (req_h > 1080) req_h = 1080;
+        if (req_w == 0 || req_h == 0) break;
+        if ((uint64_t)req_w * req_h > (64u * 1024u * 1024u / 4u)) break;
 
         /* Assign initial z-order */
         c->z_order = gui_next_z();
@@ -267,7 +271,6 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         g_cascade_x = (g_cascade_x + 28u > 168u) ? 0u : g_cascade_x + 28u;
         g_cascade_y = (g_cascade_y + 28u > 168u) ? 0u : g_cascade_y + 28u;
         c->snapped = false;
-        c->disp_buf = NULL;
 
         fprintf(stderr, "[ipc] app '%s' connected, window %ux%u at (%u,%u)\n",
                 c->title, c->win_w, c->win_h, c->win_x, c->win_y);
@@ -294,8 +297,12 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         memcpy(&fy, pld + 4,  4);
         memcpy(&fw, pld + 8,  4);
         memcpy(&fh, pld + 12, 4);
-        uint32_t expected = 16 + fw * fh * 4;
-        if (pld_len < expected || fw == 0 || fh == 0) break;
+        /* Overflow-safe size check: reject unreasonable dimensions */
+        if (fw == 0 || fh == 0 || fw > 8192 || fh > 8192) break;
+        uint64_t pixel_bytes = (uint64_t)fw * fh * 4u;
+        if (pixel_bytes > (64u * 1024u * 1024u)) break;   /* max 64 MB frame */
+        uint32_t expected = 16u + (uint32_t)pixel_bytes;
+        if (pld_len < expected) break;
 
         /* Allow apps to dynamically resize their frame (full-frame update only) */
         if (fx == 0 && fy == 0 && (fw != c->frame_w || fh != c->frame_h)) {
@@ -554,10 +561,21 @@ void ipc_init(void) {
 void ipc_poll(void) {
     if (g_srv_fd < 0) return;
 
-    /* Accept new connections */
+    /* Accept new connections — only allow same-UID processes */
     for (;;) {
         int fd = accept4(g_srv_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (fd < 0) break;
+
+        struct ucred cr;
+        socklen_t cr_len = sizeof(cr);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &cr_len) != 0 ||
+            cr.uid != getuid()) {
+            fprintf(stderr, "[ipc] rejected connection from uid %d (expected %d)\n",
+                    cr.uid, (int)getuid());
+            close(fd);
+            continue;
+        }
+
         bool accepted = false;
         for (int i = 0; i < IPC_MAX_APPS; i++) {
             if (!g_clients[i].active) {
@@ -1220,16 +1238,6 @@ void ipc_snap_focused(int zone) {
     else           ipc_apply_snap(idx, zone);
 }
 
-/* Keep old API for any callers */
-void ipc_send_key(uint32_t focused_win_id, uint8_t key) {
-    for (int i = 0; i < IPC_MAX_APPS; i++) {
-        if (g_clients[i].active && g_clients[i].win_id == focused_win_id) {
-            ipc_send(&g_clients[i], IPC_INPUT_KEY, &key, 1);
-            return;
-        }
-    }
-}
-
 /* Broadcast gamepad state to the focused app (called from main loop) */
 void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
                       int16_t rx, int16_t ry, int16_t lt, int16_t rt) {
@@ -1349,7 +1357,7 @@ void ipc_window_focus_slot(int slot) {
             if (!c->minimized && g_focused_idx == i) {
                 /* Already focused → minimize */
                 c->minimized = true;
-                if (g_focused_idx == i) g_focused_idx = -1;
+                g_focused_idx = -1;
                 g_ipc_needs_redraw = true;
                 fprintf(stderr, "[ipc] minimized '%s'\n", c->title);
             } else {

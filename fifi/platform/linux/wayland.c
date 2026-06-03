@@ -217,6 +217,7 @@ typedef struct {
 struct wl_client {
     int       fd;
     bool      active;
+    bool      send_overflow;   /* true if a push overflowed — discard message */
     uint8_t   recv[WL_RECV_BUF];
     int       recv_used;
     uint8_t   send[WL_SEND_BUF];
@@ -246,7 +247,7 @@ static char        g_sock_path[128] = {0};
 
 /* Append a 32-bit word to the send buffer */
 static void wl_push_u32(wl_client_t *c, uint32_t v) {
-    if (c->send_used + 4 > WL_SEND_BUF) return;
+    if (c->send_used + 4 > WL_SEND_BUF) { c->send_overflow = true; return; }
     memcpy(c->send + c->send_used, &v, 4);
     c->send_used += 4;
 }
@@ -256,14 +257,14 @@ static void wl_push_str(wl_client_t *c, const char *s) {
     uint32_t slen = s ? (uint32_t)strlen(s) + 1 : 0;
     uint32_t pad  = (4 - (slen % 4)) % 4;
     wl_push_u32(c, slen);
-    if (c->send_used + (int)(slen + pad) > WL_SEND_BUF) return;
+    if (c->send_used + (int)(slen + pad) > WL_SEND_BUF) { c->send_overflow = true; return; }
     if (slen) { memcpy(c->send + c->send_used, s, slen); c->send_used += slen; }
     for (uint32_t i = 0; i < pad; i++) c->send[c->send_used++] = 0;
 }
 
 /* Append raw bytes (must be 4-aligned in length) */
 static void wl_push_bytes(wl_client_t *c, const void *data, uint32_t len) {
-    if (c->send_used + (int)len > WL_SEND_BUF) return;
+    if (c->send_used + (int)len > WL_SEND_BUF) { c->send_overflow = true; return; }
     memcpy(c->send + c->send_used, data, len);
     c->send_used += len;
 }
@@ -271,13 +272,21 @@ static void wl_push_bytes(wl_client_t *c, const void *data, uint32_t len) {
 /* Begin a message header, return offset of size field so we can fill it later */
 static int wl_begin_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode) {
     int off = c->send_used;
+    c->send_overflow = false;   /* reset per-message overflow flag */
     wl_push_u32(c, obj_id);
     wl_push_u32(c, (uint32_t)opcode | 0u);  /* size placeholder, filled by wl_end_msg */
     return off;
 }
 
-/* Fill in the message size field (in bytes, including header) */
+/* Fill in the message size field — rolls back the message if an overflow occurred */
 static void wl_end_msg(wl_client_t *c, int hdr_off) {
+    if (c->send_overflow) {
+        /* Discard the partial message rather than sending corrupt data */
+        fprintf(stderr, "[wayland] send buffer overflow — dropping message\n");
+        c->send_used = hdr_off;
+        c->send_overflow = false;
+        return;
+    }
     uint16_t total = (uint16_t)(c->send_used - hdr_off);
     uint16_t op;
     memcpy(&op, c->send + hdr_off + 4, 2);
@@ -1087,10 +1096,18 @@ void wayland_set_display_size(int w, int h) {
 /* Return the listening socket fd for inclusion in poll() */
 int wayland_server_fd(void) { return g_wl_fd; }
 
-/* Initialize: create Unix socket at $XDG_RUNTIME_DIR/wayland-0 */
+/* Initialize: create Unix socket at $XDG_RUNTIME_DIR/wayland-0.
+ * Falls back to a user-private directory under /tmp rather than the
+ * shared /tmp root, to prevent other users from squatting the well-known path. */
 bool wayland_init(void) {
     const char *xdg = getenv("XDG_RUNTIME_DIR");
-    if (!xdg || !xdg[0]) xdg = "/tmp";
+    static char fallback_dir[64];
+    if (!xdg || !xdg[0]) {
+        snprintf(fallback_dir, sizeof(fallback_dir), "/tmp/fifi-runtime-%d", (int)getuid());
+        if (mkdir(fallback_dir, 0700) == 0 || errno == EEXIST)
+            chmod(fallback_dir, 0700);
+        xdg = fallback_dir;
+    }
     snprintf(g_sock_path, sizeof(g_sock_path), "%s/wayland-0", xdg);
 
     unlink(g_sock_path);  /* remove stale socket */

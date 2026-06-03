@@ -253,13 +253,12 @@ static char  g_scan_buf[65536];
 static int   g_scan_buf_len = 0;
 
 static void start_scan(void) {
-    /* Refresh interface detection on each scan attempt */
+    if (g_scan_pid > 0) return;
     find_wifi_if();
     if (!g_wif[0]) {
         snprintf(g_status, sizeof(g_status), "No WiFi interface found -- is driver loaded?");
         return;
     }
-    if (g_scan_pid > 0) return;
 
     /* Kill any running wpa_supplicant first — it blocks the interface for iw scan */
     pid_t kill_pid = fork();
@@ -351,15 +350,17 @@ static void do_connect(const char *ssid, const char *password) {
     /* Write wpa_supplicant config — key_mgmt=WPA-PSK SAE covers both WPA2 and WPA3 */
     FILE *wc = fopen("/fifi-data/wpa.conf", "w");
     if (!wc) { snprintf(g_status, sizeof(g_status), "Error: cannot write config"); return; }
-    fprintf(wc,
-            "ctrl_interface=/var/run/wpa_supplicant\n"
-            "update_config=1\n"
-            "network={\n"
-            "    ssid=\"%s\"\n"
-            "    psk=\"%s\"\n"
-            "    key_mgmt=WPA-PSK SAE\n"
-            "    ieee80211w=1\n"
-            "}\n", ssid, password);
+    fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n");
+    /* Write SSID as hex to avoid quoting issues with special chars */
+    fprintf(wc, "    ssid=");
+    for (int i = 0; ssid[i]; i++) fprintf(wc, "%02x", (unsigned char)ssid[i]);
+    fprintf(wc, "\n");
+    fprintf(wc, "    psk=\"");
+    for (int i = 0; password[i]; i++) {
+        if (password[i] == '"' || password[i] == '\\') fputc('\\', wc);
+        fputc(password[i], wc);
+    }
+    fprintf(wc, "\"\n    key_mgmt=WPA-PSK SAE\n    ieee80211w=1\n}\n");
     fclose(wc);
 
     /* Launch wpa_supplicant — it handles auth in background */
@@ -382,11 +383,22 @@ static void do_connect(const char *ssid, const char *password) {
               "-q", "-n", "-t", "15", NULL);
         _exit(1);
     }
-    /* Don't waitpid — runs in background, UI stays responsive */
+    /* SIGCHLD=SIG_IGN so the kernel auto-reaps the dhcp child */
+    signal(SIGCHLD, SIG_IGN);
 
     /* Save credentials for boot auto-connect via init script */
     FILE *sc = fopen("/fifi-data/wifi.conf", "w");
-    if (sc) { fprintf(sc, "SSID=%s\nPASSWORD=%s\n", ssid, password); fclose(sc); }
+    if (sc) {
+        /* Sanitize: strip any newlines from SSID/password to keep key=value format valid */
+        char safe_ssid[128] = {0}, safe_pw[128] = {0};
+        int si = 0, pi = 0;
+        for (int i = 0; ssid[i] && si < 127; i++)
+            if (ssid[i] != '\n' && ssid[i] != '\r') safe_ssid[si++] = ssid[i];
+        for (int i = 0; password[i] && pi < 127; i++)
+            if (password[i] != '\n' && password[i] != '\r') safe_pw[pi++] = password[i];
+        fprintf(sc, "SSID=%s\nPASSWORD=%s\n", safe_ssid, safe_pw);
+        fclose(sc);
+    }
 
     g_state = ST_CONNECTING;
     snprintf(g_status, sizeof(g_status), "Connecting to %s...  (associating, ~10-20s)", ssid);
@@ -394,12 +406,6 @@ static void do_connect(const char *ssid, const char *password) {
 
 static void check_connection(void) {
     if (g_state != ST_CONNECTING && g_state != ST_CONNECTED) return;
-    /* Check if the interface has an IP now */
-    FILE *f = fopen("/proc/net/fib_trie", "r");
-    if (!f) return;
-    /* Simpler: just check /proc/net/if_inet6 or look for iwd state */
-    fclose(f);
-
     /* Check via ip addr output — look for the WiFi interface having an IP */
     char cmd[128]; snprintf(cmd, sizeof(cmd), "/bin/ip -4 addr show %s 2>/dev/null", g_wif);
     FILE *p = popen(cmd, "r");
@@ -414,10 +420,8 @@ static void check_connection(void) {
                  g_sel < g_net_count ? g_nets[g_sel].ssid : "");
         snprintf(g_status, sizeof(g_status), "Connected to %s  (%s)", g_connected_ssid, ip);
         g_state = ST_CONNECTED;
-        /* Save SSID for reboot */
         FILE *sf = fopen("/fifi-data/wifi-ssid", "w");
         if (sf) { fputs(g_connected_ssid, sf); fclose(sf); }
-        fopen("/fifi-data/wifi-status", "w");
         FILE *wsf = fopen("/fifi-data/wifi-status", "w");
         if (wsf) { fputs("connected", wsf); fclose(wsf); }
     }
@@ -612,7 +616,6 @@ int main(void) {
       if (pl > 0 && pl < 64) { uint8_t r[64]; read(sock, r, pl); } }
 
     signal(SIGPIPE, SIG_IGN);
-    snprintf(g_status, sizeof(g_status), "Scanning...");
     render(fb); send_frame(sock, fb);
     start_scan(); /* auto-scan on open */
     render(fb); send_frame(sock, fb);

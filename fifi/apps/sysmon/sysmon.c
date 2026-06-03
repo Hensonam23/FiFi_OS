@@ -364,11 +364,16 @@ sys_section:
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
+static void write_all(int fd, const void *buf, size_t n) {
+    const uint8_t *p = (const uint8_t *)buf;
+    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
+}
+
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
     uint8_t hdr[8];
     memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    write(fd, hdr, 8);
-    if (len && data) write(fd, data, len);
+    write_all(fd, hdr, 8);
+    if (len && data) write_all(fd, data, len);
 }
 
 static void send_frame(int fd, uint32_t *px) {
@@ -498,9 +503,9 @@ int main(void) {
         /* Update every second using monotonic clock (time() unreliable in initramfs) */
         struct timespec now_ts;
         clock_gettime(CLOCK_MONOTONIC, &now_ts);
-        long elapsed_ms2 = (long)(now_ts.tv_sec - last_tick.tv_sec) * 1000L
-                         + (long)(now_ts.tv_nsec - last_tick.tv_nsec) / 1000000L;
-        if (elapsed_ms2 >= 1000L) {
+        long elapsed_ms = (long)(now_ts.tv_sec - last_tick.tv_sec) * 1000L
+                        + (long)(now_ts.tv_nsec - last_tick.tv_nsec) / 1000000L;
+        if (elapsed_ms >= 1000L) {
             last_tick = now_ts;
             update_cpu();
             update_mem();

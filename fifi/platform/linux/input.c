@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 
 /* Include mouse.h BEFORE linux/input.h — mouse.h has no KEY_* conflicts */
 #include "mouse.h"
@@ -50,7 +51,7 @@
 #define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
 /* ── Evdev device fds ─────────────────────────────────────────────────────── */
-#define MAX_EVDEV 8
+#define MAX_EVDEV 32
 static int g_kbd_fds[MAX_EVDEV];
 static int g_kbd_cnt = 0;
 static int g_ptr_fds[MAX_EVDEV];   /* relative mice */
@@ -202,11 +203,7 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_KPASTERISK: return '*';
     }
 
-    /* Ctrl+letter → control code */
     if (ctrl) {
-        const char *letters = "aqwertyuiopasdfghjklzxcvbnm";
-        /* Map printable key code to letter, then to ctrl code */
-        /* (just handle the common ctrl combos explicitly) */
         switch (code) {
             case KEY_C: return 3;   /* ETX */
             case KEY_D: return 4;   /* EOT */
@@ -226,7 +223,7 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
             case KEY_V: return 22;
             case KEY_X: return 24;
             case KEY_Y: return 25;
-            default: (void)letters; break;
+            default: break;
         }
     }
 
@@ -275,7 +272,7 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
     case 79: return '1'; case 80: return '2'; case 81: return '3';
     case 82: return '0'; case 83: return '.';
     case 74: return '-'; case 78: return '+';
-    case 55: return '*'; case 98: return '/';
+    case 98: return '/';
     case 96: return '\r';  /* KP_ENTER */
     default: break;
     }
@@ -531,6 +528,69 @@ void input_init(void) {
     if (g_ptr_cnt == 0 && g_abs_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
 }
 
+/* Rescan /dev/input for newly plugged devices not already open.
+ * Safe to call repeatedly; skips devices already in the fd lists. */
+void input_rescan(void) {
+    DIR *d = opendir("/dev/input");
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "event", 5) != 0) continue;
+        char path[80];
+        snprintf(path, sizeof(path), "/dev/input/%.60s", de->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        /* Skip if already tracked */
+        bool known = false;
+        for (int i = 0; i < g_kbd_cnt && !known; i++) known = (g_kbd_fds[i] == fd);
+        for (int i = 0; i < g_ptr_cnt && !known; i++) known = (g_ptr_fds[i] == fd);
+        for (int i = 0; i < g_abs_cnt && !known; i++) known = (g_abs_devs[i].fd == fd);
+        /* Check by inode instead of fd (fd values differ on re-open) */
+        if (!known) {
+            struct stat sa, sb;
+            if (fstat(fd, &sa) == 0) {
+                for (int i = 0; i < g_kbd_cnt && !known; i++)
+                    if (fstat(g_kbd_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
+                for (int i = 0; i < g_ptr_cnt && !known; i++)
+                    if (fstat(g_ptr_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
+                for (int i = 0; i < g_abs_cnt && !known; i++)
+                    if (fstat(g_abs_devs[i].fd, &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
+            }
+        }
+        if (known) { close(fd); continue; }
+        /* New device — try to register it by re-running the same classification logic */
+        bool has_key = evdev_has_bit(fd, 0, EV_KEY);
+        bool has_rel = evdev_has_bit(fd, 0, EV_REL);
+        (void)has_rel;
+        bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
+        if (has_key && evdev_has_bit(fd, EV_KEY, KEY_A) && g_kbd_cnt < MAX_EVDEV) {
+            g_kbd_fds[g_kbd_cnt++] = fd;
+            fprintf(stderr, "[input] rescan: new keyboard %s\n", path);
+            continue;
+        }
+        bool has_legacy_abs = has_abs && evdev_has_bit(fd, EV_ABS, ABS_X) && evdev_has_bit(fd, EV_ABS, ABS_Y);
+        bool has_rel_xy = has_rel && evdev_has_bit(fd, EV_REL, REL_X) && evdev_has_bit(fd, EV_REL, REL_Y);
+        if (has_rel_xy && g_ptr_cnt < MAX_EVDEV) {
+            g_ptr_fds[g_ptr_cnt++] = fd;
+            fprintf(stderr, "[input] rescan: new mouse %s\n", path);
+            continue;
+        }
+        if (has_legacy_abs && g_abs_cnt < MAX_EVDEV) {
+            struct input_absinfo ai;
+            abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
+            memset(dev, 0, sizeof(*dev));
+            dev->fd    = fd;
+            dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
+            dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
+            dev->prev_x = -1; dev->prev_y = -1;
+            fprintf(stderr, "[input] rescan: new abs device %s\n", path);
+            continue;
+        }
+        close(fd);
+    }
+    closedir(d);
+}
+
 /* ── Poll — call each frame ─────────────────────────────────────────────── */
 
 void input_poll(void) {
@@ -563,9 +623,10 @@ void input_poll(void) {
                 continue;
             }
 
-            /* Caps Lock inverts shift for letter keys (a-z range, codes 16-50) */
             bool effective_shift = g_shift;
-            if (g_caps && ev.code >= 16 && ev.code <= 50)
+            if (g_caps && ((ev.code >= 16 && ev.code <= 25) ||
+                           (ev.code >= 30 && ev.code <= 38) ||
+                           (ev.code >= 44 && ev.code <= 50)))
                 effective_shift = !g_shift;
             uint8_t c = evkey_to_fifi((uint16_t)ev.code, effective_shift, g_ctrl);
             if (c) kb_push_internal(c);
@@ -915,7 +976,6 @@ void input_poll(void) {
     for (int gi = 0; gi < g_gp_cnt; gi++) {
         gamepad_t *gp = &g_gamepads[gi];
         struct input_event ev;
-        bool prev_changed = gp->changed;
         gp->changed = false;
         while (read(gp->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type == EV_KEY) {
@@ -962,7 +1022,6 @@ void input_poll(void) {
                 }
             }
         }
-        (void)prev_changed;
     }
 }
 
