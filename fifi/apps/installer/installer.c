@@ -1,26 +1,33 @@
-/* FiFi OS Installer — IPC app that guides installation to disk.
+/* fifi-installer — FiFi OS disk installer IPC app.
+ *
+ * Multi-step wizard: Welcome -> Disk -> Browser -> Software -> Confirm -> Progress -> Done
+ * Built on the same draw system as fifi-browser for visual consistency.
  *
  * Sections:
  *   1. Includes, constants, types
- *   2. Shared draw helpers
- *   3. Step 0: Welcome
- *   4. Step 1: Disk selection
- *   5. Step 2: Browser choice
- *   6. Step 3: Software selection
- *   7. Step 4: Confirm
- *   8. Step 5: Progress (runs install script)
- *   9. Step 6: Done / Error
- *  10. IPC message loop and main
+ *   2. PSF2 font loading
+ *   3. Pixel-level draw primitives
+ *   4. Text rendering
+ *   5. UI components
+ *   6. Disk scanning
+ *   7. View: Welcome
+ *   8. View: Disk selection
+ *   9. View: Browser choice
+ *  10. View: Software selection
+ *  11. View: Confirm
+ *  12. View: Progress
+ *  13. View: Done / Error
+ *  14. Input dispatch
+ *  15. IPC transport and main
  */
 
-/* ── 1. Includes, constants, types ────────────────────────────────────── */
+/* ── 1. Includes, constants, types ─────────────────────────────────────────── */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -31,861 +38,968 @@
 #include <signal.h>
 #include <poll.h>
 #include <errno.h>
+#include <sys/reboot.h>
 
-#define WIN_W 700
-#define WIN_H 520
+#define WIN_W 820
+#define WIN_H 600
 
-/* IPC message types */
+/* IPC protocol — must match fifi/platform/linux/ipc.c */
 #define IPC_APP_CONNECT  0x01u
 #define IPC_APP_FRAME    0x02u
-#define IPC_APP_CLOSE    0x05u
+#define IPC_APP_CLOSE    0x04u
 #define IPC_WIN_CREATED  0x10u
-#define IPC_INPUT_KEY    0x20u
-#define IPC_INPUT_MOUSE  0x21u
-#define IPC_INVALIDATE   0x30u
-#define FIFI_SOCK "/tmp/fifi-compositor.sock"
+#define IPC_INPUT_KEY    0x11u
+#define IPC_INPUT_MOUSE  0x12u
+#define IPC_WIN_RESIZE   0x1Bu
+#define IPC_INVALIDATE   0x15u
+#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
 
-/* Steps */
-#define STEP_WELCOME  0
-#define STEP_DISK     1
-#define STEP_BROWSER  2
-#define STEP_SOFTWARE 3
-#define STEP_CONFIRM  4
-#define STEP_PROGRESS 5
-#define STEP_DONE     6
+/* Views */
+#define VIEW_WELCOME  0
+#define VIEW_DISK     1
+#define VIEW_BROWSER  2
+#define VIEW_SOFTWARE 3
+#define VIEW_CONFIRM  4
+#define VIEW_PROGRESS 5
+#define VIEW_DONE     6
 
-#define MAX_DISKS 8
-#define MAX_LOG   64
-
-/* Disk info */
-typedef struct {
-    char name[32];    /* e.g. "sda" */
-    char model[64];   /* e.g. "Samsung SSD 870" */
-    uint64_t bytes;   /* total size in bytes */
-    char size_str[16];/* e.g. "250 GB" */
-} disk_t;
-
-/* Browser choice */
+/* Browser choices */
 #define BROWSER_LIBREWOLF 0
 #define BROWSER_FIREFOX   1
 
 /* Software flags */
 #define SW_LIBREOFFICE (1u << 0)
 
-/* App state */
-static int      g_step          = STEP_WELCOME;
-static disk_t   g_disks[MAX_DISKS];
-static int      g_ndisks        = 0;
-static int      g_sel_disk      = -1;
-static int      g_browser       = BROWSER_LIBREWOLF;
-static uint32_t g_software      = SW_LIBREOFFICE;
-static int      g_hover         = -1;
-static bool     g_dirty         = true;
-static bool     g_done_ok       = false;
-static char     g_error_msg[256];
+/* Compositor chrome height */
+#define CHROME_H 24
 
-/* Progress */
-static char     g_log[MAX_LOG][128];
-static int      g_log_count     = 0;
-static int      g_log_scroll    = 0;
-static pid_t    g_install_pid   = -1;
-static int      g_install_pipe  = -1;
-static int      g_progress_pct  = 0;
+/* Colour palette — matches browser app */
+#define C_BG          0x000b1017u
+#define C_HEADER_BG   0x000e1a26u
+#define C_ACCENT      0x003060c0u
+#define C_CARD_NORMAL 0x00101b28u
+#define C_CARD_SEL    0x00132236u
+#define C_CARD_HOV    0x000f1923u
+#define C_BORDER      0x001e2e42u
+#define C_BORDER_SEL  0x002a52a8u
+#define C_TEXT_H      0x00dce8f8u
+#define C_TEXT_B      0x00a0b8ccu
+#define C_TEXT_SUB    0x006888a4u
+#define C_TEXT_ACC    0x006aaddcu
+#define C_TEXT_DIM    0x00384f60u
+#define C_BTN_BG      0x002a58b8u
+#define C_BTN_HOV     0x003468ccu
+#define C_SEP         0x00162130u
+#define C_OK          0x0040c070u
+#define C_ERR         0x00d05040u
+#define C_WARN        0x00e09030u
+#define C_PROG_TRACK  0x000c1820u
+#define C_PROG_FILL   0x002858b0u
 
-/* Glyph font */
-static uint8_t *g_glyph         = NULL;
-static int      g_glyph_h       = 16;
+#define MAX_DISKS 64
+#define MAX_LOG   48
 
-/* IPC globals */
-static uint32_t *g_fb            = NULL;
-static int       g_win_w         = WIN_W;
-static int       g_win_h         = WIN_H;
+typedef struct {
+    char name[32];
+    char model[64];
+    uint64_t bytes;
+    char size_str[16];
+    bool is_part;     /* true = partition, false = whole disk */
+    char parent[16];  /* parent disk name for partitions, e.g. "sda" */
+} disk_t;
 
-/* ── 2. Shared draw helpers ───────────────────────────────────────────── */
+typedef struct {
+    int       view;
+    int       hover;
+    bool      dirty;
+    /* disk */
+    disk_t    disks[MAX_DISKS];
+    int       ndisks;
+    int       sel_disk;
+    int       disk_scroll;
+    /* browser */
+    int       browser;
+    /* software */
+    uint32_t  software;
+    /* install process */
+    pid_t     install_pid;
+    int       install_pipe;
+    int       progress;
+    char      log[MAX_LOG][128];
+    int       log_count;
+    bool      done_ok;
+    char      error[192];
+    /* fb */
+    uint32_t *fb;
+    int       win_w, win_h;
+    uint8_t  *glyph;
+    uint32_t  glyph_charsize;
+} app_t;
 
-static void put_pixel(uint32_t *fb, int x, int y, uint32_t col) {
-    if (x < 0 || y < 0 || x >= g_win_w || y >= g_win_h) return;
-    fb[y * g_win_w + x] = col;
+static int g_fw = 9;
+static int g_fh = 16;
+static int g_bpl = 1;
+
+/* ── 2. PSF2 font loading ───────────────────────────────────────────────────── */
+
+static uint32_t psf2_u32(const uint8_t *b, int off) {
+    return (uint32_t)b[off] | ((uint32_t)b[off+1]<<8) |
+           ((uint32_t)b[off+2]<<16) | ((uint32_t)b[off+3]<<24);
 }
 
-static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    for (int row = y; row < y + h; row++)
-        for (int col2 = x; col2 < x + w; col2++)
-            put_pixel(fb, col2, row, col);
+static bool load_font(app_t *a, const char *path) {
+    int fd = open(path, O_RDONLY); if (fd < 0) return false;
+    int total = (int)lseek(fd, 0, SEEK_END); lseek(fd, 0, SEEK_SET);
+    if (total < 32) { close(fd); return false; }
+    uint8_t *buf = malloc((size_t)total);
+    if (!buf) { close(fd); return false; }
+    if (read(fd, buf, (size_t)total) < total) { free(buf); close(fd); return false; }
+    close(fd);
+    if (buf[0]!=0x72||buf[1]!=0xb5||buf[2]!=0x4a||buf[3]!=0x86)
+        { free(buf); return false; }
+    uint32_t hs = psf2_u32(buf,8), cs = psf2_u32(buf,20);
+    uint32_t ht = psf2_u32(buf,24), wd = psf2_u32(buf,28);
+    if (!ht||!wd||!cs) { free(buf); return false; }
+    uint8_t *gl = malloc((size_t)(total-(int)hs));
+    if (!gl) { free(buf); return false; }
+    memcpy(gl, buf+hs, (size_t)(total-(int)hs));
+    free(buf);
+    free(a->glyph); a->glyph = gl; a->glyph_charsize = cs;
+    g_fh = (int)ht; g_fw = (int)wd+1;
+    g_bpl = (int)(cs/ht); if (g_bpl<1) g_bpl=1;
+    return true;
 }
 
-static void draw_char(uint32_t *fb, int x, int y, unsigned char c,
-                      uint32_t fg, uint32_t bg) {
-    if (!g_glyph) return;
-    const uint8_t *bits = g_glyph + c * g_glyph_h;
-    for (int row = 0; row < g_glyph_h; row++) {
-        uint8_t b = bits[row];
-        for (int col = 0; col < 8; col++) {
-            uint32_t px = (b & (0x80u >> col)) ? fg : bg;
-            put_pixel(fb, x + col, y + row, px);
+/* ── 3. Pixel-level draw primitives ────────────────────────────────────────── */
+
+static void px(app_t *a, int x, int y, uint32_t c) {
+    if ((unsigned)x<(unsigned)a->win_w && (unsigned)y<(unsigned)a->win_h)
+        a->fb[y*a->win_w+x] = c;
+}
+static void fill(app_t *a, int x, int y, int w, int h, uint32_t c) {
+    int x1=x<0?0:x, y1=y<0?0:y;
+    int x2=x+w>a->win_w?a->win_w:x+w, y2=y+h>a->win_h?a->win_h:y+h;
+    for (int r=y1;r<y2;r++) for (int col=x1;col<x2;col++) a->fb[r*a->win_w+col]=c;
+}
+static void hline(app_t *a, int x, int y, int w, uint32_t c) { fill(a,x,y,w,1,c); }
+static void rect_border(app_t *a, int x, int y, int w, int h, uint32_t c) {
+    hline(a,x,y,w,c); hline(a,x,y+h-1,w,c);
+    fill(a,x,y,1,h,c); fill(a,x+w-1,y,1,h,c);
+}
+static void disc(app_t *a, int cx, int cy, int r, uint32_t c) {
+    for (int dy=-r;dy<=r;dy++) for (int dx=-r;dx<=r;dx++)
+        if (dx*dx+dy*dy<=r*r) px(a,cx+dx,cy+dy,c);
+}
+static void ring(app_t *a, int cx, int cy, int r, uint32_t c) {
+    for (int dy=-r;dy<=r;dy++) for (int dx=-r;dx<=r;dx++) {
+        int d2=dx*dx+dy*dy;
+        if (d2<=r*r && d2>=(r-1)*(r-1)) px(a,cx+dx,cy+dy,c);
+    }
+}
+static void progress_bar(app_t *a, int x, int y, int w, int h, int pct) {
+    fill(a,x,y,w,h,C_PROG_TRACK);
+    int f=(w-2)*pct/100; if (f>0) fill(a,x+1,y+1,f,h-2,C_PROG_FILL);
+    rect_border(a,x,y,w,h,C_SEP);
+}
+
+/* ── 4. Text rendering ──────────────────────────────────────────────────────── */
+
+static int slen(const char *s) { int n=0; while(s[n]) n++; return n; }
+
+static void draw_glyph(app_t *a, int x, int y, unsigned char c, uint32_t fg) {
+    if (!a->glyph) return;
+    const uint8_t *b = a->glyph + (uint32_t)c * a->glyph_charsize;
+    for (int r=0;r<g_fh;r++) {
+        uint8_t byte = b[r*g_bpl];
+        for (int col=0;col<8;col++) if (byte&(0x80u>>col)) px(a,x+col,y+r,fg);
+        if (g_bpl>1&&g_fw>9) { uint8_t b2=b[r*g_bpl+1];
+            for (int col=8;col<g_fw-1;col++) if (b2&(0x80u>>(col-8))) px(a,x+col,y+r,fg); }
+    }
+}
+
+/* Transparent text — only lit pixels drawn, background shows through */
+static void text(app_t *a, const char *s, int x, int y, uint32_t fg, int max_w) {
+    int mc = max_w>0 ? max_w/g_fw : 9999, len=slen(s);
+    bool tr = len>mc; int draw=tr?mc-3:len;
+    for (int i=0;i<draw;i++) draw_glyph(a,x+i*g_fw,y,(unsigned char)s[i],fg);
+    if (tr) { for (int i=0;i<3;i++) draw_glyph(a,x+(draw+i)*g_fw,y,'.',C_TEXT_DIM); }
+}
+
+static void text_right(app_t *a, const char *s, int rx, int y, uint32_t fg) {
+    text(a,s,rx-slen(s)*g_fw,y,fg,0);
+}
+
+/* Word-wrap into multiple lines */
+static int text_wrap(app_t *a, const char *s, int x, int y,
+                     int max_w, int line_gap, uint32_t fg) {
+    int mc=max_w/g_fw; if (mc<4) { text(a,s,x,y,fg,max_w); return 1; }
+    int len=slen(s), off=0, lines=0;
+    while (off<len) {
+        int end=off+mc;
+        if (end>=len) end=len;
+        else { int sp=-1; for (int i=end;i>off;i--) if (s[i]==' '){sp=i;break;} if (sp>off) end=sp; }
+        for (int i=off;i<end;i++) draw_glyph(a,x+(i-off)*g_fw,y,(unsigned char)s[i],fg);
+        y+=g_fh+line_gap; lines++;
+        off=(end<len&&s[end]==' ')?end+1:end;
+    }
+    return lines;
+}
+
+/* ── 5. UI components ───────────────────────────────────────────────────────── */
+
+static void radio(app_t *a, int cx, int cy, bool sel) {
+    disc(a,cx,cy,8,sel?C_CARD_SEL:C_CARD_NORMAL);
+    ring(a,cx,cy,8,sel?C_BORDER_SEL:C_BORDER);
+    if (sel) disc(a,cx,cy,4,C_ACCENT);
+}
+
+static void checkbox(app_t *a, int cx, int cy, bool chk) {
+    int sz=16, x=cx-sz/2, y=cy-sz/2;
+    fill(a,x,y,sz,sz,chk?C_CARD_SEL:C_CARD_NORMAL);
+    rect_border(a,x,y,sz,sz,chk?C_BORDER_SEL:C_BORDER);
+    if (chk) {
+        for (int i=2;i<sz-2;i++) {
+            int j=(i<sz/2)?(i-2+2):(sz-i-1+2);
+            px(a,x+i,y+j,C_OK); px(a,x+i,y+j+1,C_OK);
         }
     }
 }
 
-static int str_len(const char *s) {
-    int n = 0; while (s[n]) n++; return n;
+static void btn_primary(app_t *a, int x, int y, int w, int h,
+                         const char *label, bool hov) {
+    uint32_t bg = hov ? C_BTN_HOV : C_BTN_BG;
+    fill(a,x,y,w,h,bg);
+    hline(a,x+1,y,w-2,0x00406898u);
+    hline(a,x+1,y+h-1,w-2,0x00152540u);
+    int lw=slen(label)*g_fw;
+    text(a,label,x+(w-lw)/2,y+(h-g_fh)/2,0x00eef4ffu,0);
 }
 
-static void draw_str(uint32_t *fb, const char *s, int x, int y,
-                     uint32_t fg, uint32_t bg) {
-    for (int i = 0; s[i]; i++)
-        draw_char(fb, x + i * 9, y, (unsigned char)s[i], fg, bg);
+static void btn_ghost(app_t *a, int x, int y, int w, int h,
+                       const char *label, bool hov) {
+    uint32_t bg=hov?0x00152030u:C_BG;
+    fill(a,x,y,w,h,bg);
+    rect_border(a,x,y,w,h,C_BORDER);
+    int lw=slen(label)*g_fw;
+    text(a,label,x+(w-lw)/2,y+(h-g_fh)/2,C_TEXT_SUB,0);
 }
 
-/* Draw string clipped to max_w pixels */
-static void draw_str_clip(uint32_t *fb, const char *s, int x, int y,
-                          int max_w, uint32_t fg, uint32_t bg) {
-    int max_chars = max_w / 9;
-    int len = str_len(s);
-    if (len <= max_chars) {
-        draw_str(fb, s, x, y, fg, bg);
-    } else if (max_chars >= 3) {
-        for (int i = 0; i < max_chars - 3; i++)
-            draw_char(fb, x + i * 9, y, (unsigned char)s[i], fg, bg);
-        for (int i = 0; i < 3; i++)
-            draw_char(fb, x + (max_chars - 3 + i) * 9, y, '.', 0x00506070u, bg);
-    }
+/* Step header — flat dark band below compositor chrome */
+static void draw_header(app_t *a, const char *step) {
+    fill(a,0,CHROME_H,a->win_w,28,C_HEADER_BG);
+    fill(a,0,CHROME_H,3,28,C_ACCENT);
+    text(a,step,12,CHROME_H+6,C_TEXT_ACC,a->win_w-80);
+    hline(a,0,CHROME_H+27,a->win_w,C_SEP);
 }
 
-/* Draw a filled rounded button */
-static void draw_btn(uint32_t *fb, int x, int y, int w, int h,
-                     const char *label, bool hovered, bool primary) {
-    uint32_t bg = primary ? (hovered ? 0x003d78d8u : 0x003060c0u)
-                          : (hovered ? 0x00304050u : 0x00222e3cu);
-    uint32_t fg = 0x00e8eeffu;
-    fill(fb, x, y, w, h, bg);
-    /* Border */
-    for (int i = x; i < x + w; i++) { put_pixel(fb, i, y, 0x004070a0u); put_pixel(fb, i, y+h-1, 0x004070a0u); }
-    for (int i = y; i < y + h; i++) { put_pixel(fb, x, i, 0x004070a0u); put_pixel(fb, x+w-1, i, 0x004070a0u); }
-    int lw = str_len(label) * 9;
-    int tx = x + (w - lw) / 2;
-    int ty = y + (h - g_glyph_h) / 2;
-    draw_str(fb, label, tx, ty, fg, bg);
+/* Selectable card for disk or option */
+static void draw_card(app_t *a, int x, int y, int w, int h,
+                       bool sel, bool hov,
+                       const char *title, const char *sub, const char *detail,
+                       bool use_radio) {
+    uint32_t bg  = sel?C_CARD_SEL:(hov?C_CARD_HOV:C_CARD_NORMAL);
+    uint32_t brd = sel?C_BORDER_SEL:C_BORDER;
+    fill(a,x,y,w,h,bg);
+    rect_border(a,x,y,w,h,brd);
+    if (sel) fill(a,x,y+1,3,h-2,C_ACCENT);
+    int tx=x+44, ty=y+10;
+    if (use_radio) radio(a,x+22,y+h/2,sel);
+    else checkbox(a,x+22,y+h/2,sel);
+    text(a,title,tx,ty,sel?C_TEXT_H:C_TEXT_B,w-(tx-x)-12);
+    if (sub[0]) { ty+=g_fh+2; text(a,sub,tx,ty,C_TEXT_ACC,w-(tx-x)-12); }
+    if (detail[0]) { ty+=g_fh+4; hline(a,tx,ty,w-(tx-x)-12,0x001a2a3cu); ty+=5;
+        text_wrap(a,detail,tx,ty,w-(tx-x)-12,2,C_TEXT_SUB); }
 }
 
-/* Draw a horizontal progress bar */
-static void draw_progress(uint32_t *fb, int x, int y, int w, int h, int pct) {
-    fill(fb, x, y, w, h, 0x00101820u);
-    int filled = (w - 2) * pct / 100;
-    if (filled > 0) fill(fb, x + 1, y + 1, filled, h - 2, 0x003060c0u);
-    for (int i = x; i < x + w; i++) { put_pixel(fb, i, y, 0x00304050u); put_pixel(fb, i, y+h-1, 0x00304050u); }
-    for (int i = y; i < y + h; i++) { put_pixel(fb, x, i, 0x00304050u); put_pixel(fb, x+w-1, i, 0x00304050u); }
-}
-
-/* Draw a radio button: filled circle if selected */
-static void draw_radio(uint32_t *fb, int cx, int cy, int r, bool selected) {
-    uint32_t border = 0x004080c0u;
-    uint32_t inner  = selected ? 0x003060c0u : 0x00101820u;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            int d2 = dx*dx + dy*dy;
-            if (d2 <= (r-1)*(r-1)) put_pixel(fb, cx+dx, cy+dy, inner);
-            else if (d2 <= r*r)    put_pixel(fb, cx+dx, cy+dy, border);
-        }
-    }
-}
-
-/* Draw a checkbox */
-static void draw_checkbox(uint32_t *fb, int x, int y, int sz, bool checked) {
-    fill(fb, x, y, sz, sz, 0x00101820u);
-    for (int i = x; i < x + sz; i++) { put_pixel(fb, i, y, 0x004080c0u); put_pixel(fb, i, y+sz-1, 0x004080c0u); }
-    for (int i = y; i < y + sz; i++) { put_pixel(fb, x, i, 0x004080c0u); put_pixel(fb, x+sz-1, i, 0x004080c0u); }
-    if (checked) {
-        /* Checkmark */
-        for (int i = 2; i < sz - 2; i++) {
-            int j = (i < sz/2) ? (i - 2 + 2) : (sz - i - 1 + 2);
-            put_pixel(fb, x + i, y + j, 0x0050d890u);
-            put_pixel(fb, x + i, y + j + 1, 0x0050d890u);
-        }
-    }
-}
-
-/* Draw a divider line */
-static void draw_sep(uint32_t *fb, int y) {
-    for (int x = 20; x < g_win_w - 20; x++) put_pixel(fb, x, y, 0x00202838u);
-}
-
-/* Common header: title bar area and step indicator */
-static void draw_header(uint32_t *fb, const char *title) {
-    fill(fb, 0, 0, g_win_w, g_win_h, 0x000c1018u);
-    /* Title area */
-    fill(fb, 0, 0, g_win_w, 40, 0x00101828u);
-    draw_str(fb, title, 20, 12, 0x0090c4e8u, 0x00101828u);
-    draw_sep(fb, 39);
-    /* Step dots */
-    int steps[] = {STEP_DISK, STEP_BROWSER, STEP_SOFTWARE, STEP_CONFIRM, STEP_PROGRESS, STEP_DONE};
-    int n = 6;
-    int dot_x = g_win_w - 20 - n * 14;
-    int dot_y = 19;
-    for (int i = 0; i < n; i++) {
-        bool active = (g_step == steps[i]);
-        bool done   = (g_step > steps[i]);
-        uint32_t col = done ? 0x003060c0u : (active ? 0x0060a0e0u : 0x00283848u);
-        int cx = dot_x + i * 14 + 4;
-        for (int dy = -3; dy <= 3; dy++)
-            for (int dx = -3; dx <= 3; dx++)
-                if (dx*dx + dy*dy <= 9) put_pixel(fb, cx+dx, dot_y+dy, col);
-    }
-}
-
-/* ── 3. Step 0: Welcome ────────────────────────────────────────────────── */
-
-static void render_welcome(uint32_t *fb) {
-    draw_header(fb, "FiFi OS  Installer");
-    int y = 70;
-    draw_str(fb, "Welcome to FiFi OS", 30, y, 0x00c8dce8u, 0x000c1018u); y += 28;
-    draw_str(fb, "This will install FiFi OS to a disk on this machine.", 30, y, 0x00708898u, 0x000c1018u); y += 20;
-    draw_str(fb, "Your chosen disk will be erased. Back up anything important", 30, y, 0x00708898u, 0x000c1018u); y += 20;
-    draw_str(fb, "before continuing.", 30, y, 0x00708898u, 0x000c1018u); y += 36;
-    draw_str(fb, "What this installer does:", 30, y, 0x0090a8c0u, 0x000c1018u); y += 22;
-    const char *steps[] = {
-        "  1.  Choose a disk to install to",
-        "  2.  Choose your browser  (Firefox or LibreWolf)",
-        "  3.  Select additional software  (LibreOffice included by default)",
-        "  4.  Install FiFi OS and download selected software",
-        NULL
-    };
-    for (int i = 0; steps[i]; i++) {
-        draw_str(fb, steps[i], 30, y, 0x00607888u, 0x000c1018u);
-        y += 20;
-    }
-    y += 20;
-    draw_str(fb, "Requires an internet connection to download browser and LibreOffice.", 30, y, 0x00485868u, 0x000c1018u);
-    /* Next button */
-    draw_btn(fb, g_win_w - 130, g_win_h - 56, 110, 36, "Get Started", g_hover == 0, true);
-}
-
-static void click_welcome(int mx, int my) {
-    if (mx >= g_win_w - 130 && mx < g_win_w - 20 &&
-        my >= g_win_h - 56  && my < g_win_h - 20) {
-        g_step = STEP_DISK;
-        g_dirty = true;
-    }
-}
-
-/* ── 4. Step 1: Disk selection ────────────────────────────────────────── */
+/* ── 6. Disk scanning ───────────────────────────────────────────────────────── */
 
 static void fmt_size(char *buf, uint64_t bytes) {
-    if (bytes >= 1000000000000ULL)
-        snprintf(buf, 16, "%.1f TB", (double)bytes / 1e12);
-    else if (bytes >= 1000000000ULL)
-        snprintf(buf, 16, "%.0f GB", (double)bytes / 1e9);
-    else
-        snprintf(buf, 16, "%.0f MB", (double)bytes / 1e6);
+    if (bytes>=1000000000000ULL) snprintf(buf,16,"%.1f TB",(double)bytes/1e12);
+    else if (bytes>=1000000000ULL) snprintf(buf,16,"%.0f GB",(double)bytes/1e9);
+    else snprintf(buf,16,"%.0f MB",(double)bytes/1e6);
 }
 
-static void scan_disks(void) {
-    g_ndisks = 0;
-    DIR *d = opendir("/sys/block");
-    if (!d) return;
+static bool _skip_dev(const char *n) {
+    if (n[0]=='l'&&n[1]=='o') return true;
+    if (n[0]=='r'&&n[1]=='a') return true;
+    if (n[0]=='s'&&n[1]=='r') return true;
+    if (n[0]=='z'&&n[1]=='r') return true;
+    if (n[0]=='d'&&n[1]=='m') return true;
+    return false;
+}
+
+static uint64_t _read_size(const char *path) {
+    FILE *f=fopen(path,"r"); if (!f) return 0;
+    uint64_t sec=0; fscanf(f,"%llu",(unsigned long long*)&sec); fclose(f);
+    return sec*512ULL;
+}
+
+/* Add one entry to disk list — shared by whole-disk and partition paths */
+static void _add_entry(app_t *a, const char *name, bool is_part,
+                       const char *parent, uint64_t bytes) {
+    if (a->ndisks >= MAX_DISKS) return;
+    if (bytes < 100ULL*1024*1024) return;   /* skip < 100 MB (EFI/MSR/recovery too small) */
+    /* Skip the USB boot drive */
+    char usb_check[64]; snprintf(usb_check,sizeof(usb_check),"/dev/disk/by-label/FIFIOS");
+    char usb_real[256]; char dev_path[64]; snprintf(dev_path,sizeof(dev_path),"/dev/%s",name);
+    if (realpath(usb_check,usb_real) && strncmp(usb_real,dev_path,sizeof(dev_path)-1)==0) return;
+    disk_t *dk = &a->disks[a->ndisks];
+    memset(dk,0,sizeof(*dk));
+    strncpy(dk->name,name,sizeof(dk->name)-1);
+    dk->is_part = is_part;
+    dk->bytes   = bytes;
+    if (parent) strncpy(dk->parent,parent,sizeof(dk->parent)-1);
+    fmt_size(dk->size_str,bytes);
+    a->ndisks++;
+}
+
+static void scan_disks(app_t *a) {
+    a->ndisks = 0;
+
+    /* Walk every disk in /sys/block/ */
+    DIR *bd = opendir("/sys/block"); if (!bd) return;
     struct dirent *de;
-    while ((de = readdir(d)) != NULL && g_ndisks < MAX_DISKS) {
-        const char *name = de->d_name;
-        if (name[0] == '.') continue;
-        /* Skip loop, ram, sr, zram devices */
-        if (name[0] == 'l' && name[1] == 'o') continue;
-        if (name[0] == 'r' && name[1] == 'a') continue;
-        if (name[0] == 's' && name[1] == 'r') continue;
-        if (name[0] == 'z' && name[1] == 'r') continue;
-        disk_t *dk = &g_disks[g_ndisks];
-        snprintf(dk->name, sizeof(dk->name), "%s", name);
-        /* Read size */
-        char sz_path[80];
-        snprintf(sz_path, sizeof(sz_path), "/sys/block/%s/size", name);
-        FILE *f = fopen(sz_path, "r");
-        if (f) {
-            uint64_t sectors = 0;
-            if (fscanf(f, "%llu", (unsigned long long *)&sectors) == 1)
-                dk->bytes = sectors * 512ULL;
-            fclose(f);
+    while ((de=readdir(bd))!=NULL) {
+        const char *disk = de->d_name;
+        if (disk[0]=='.') continue;
+        if (_skip_dev(disk)) continue;
+
+        /* ── Whole disk ── */
+        char sz_path[128]; snprintf(sz_path,sizeof(sz_path),"/sys/block/%s/size",disk);
+        uint64_t disk_bytes = _read_size(sz_path);
+        if (disk_bytes >= 8ULL*1024*1024*1024)
+            _add_entry(a, disk, false, NULL, disk_bytes);
+
+        /* ── Partitions: /sys/block/DISK/PARTNAME/ subdirectories ── */
+        char part_dir[128]; snprintf(part_dir,sizeof(part_dir),"/sys/block/%s",disk);
+        DIR *pd = opendir(part_dir); if (!pd) continue;
+        struct dirent *pe;
+        while ((pe=readdir(pd))!=NULL && a->ndisks<MAX_DISKS) {
+            const char *pname = pe->d_name;
+            if (pname[0]=='.') continue;
+            /* Must start with the disk name (e.g. sda1 starts with sda) */
+            int dlen=slen(disk);
+            if (strncmp(pname,disk,dlen)!=0) continue;
+            /* Check it's actually a block device directory (has a "size" file) */
+            char ps[160]; snprintf(ps,sizeof(ps),"/sys/block/%s/%s/size",disk,pname);
+            uint64_t pb = _read_size(ps);
+            _add_entry(a, pname, true, disk, pb);
         }
-        if (dk->bytes < 4ULL * 1024 * 1024 * 1024) continue; /* skip <4GB */
-        /* Read model */
-        char mdl_path[80];
-        snprintf(mdl_path, sizeof(mdl_path), "/sys/block/%s/device/model", name);
-        f = fopen(mdl_path, "r");
-        if (f) {
-            if (fgets(dk->model, sizeof(dk->model), f)) {
-                int l = str_len(dk->model);
-                while (l > 0 && (dk->model[l-1] == '\n' || dk->model[l-1] == ' ')) dk->model[--l] = '\0';
-            }
-            fclose(f);
-        } else {
-            snprintf(dk->model, sizeof(dk->model), "Disk");
+        closedir(pd);
+    }
+    closedir(bd);
+
+    /* Fill model names for whole disks */
+    for (int i=0;i<a->ndisks;i++) {
+        if (a->disks[i].is_part) {
+            if (a->disks[i].parent[0])
+                snprintf(a->disks[i].model,sizeof(a->disks[i].model),
+                         "Partition on %s",a->disks[i].parent);
+            else
+                snprintf(a->disks[i].model,sizeof(a->disks[i].model),"Partition");
+            continue;
         }
-        fmt_size(dk->size_str, dk->bytes);
-        g_ndisks++;
+        char mp[128]; snprintf(mp,sizeof(mp),"/sys/block/%s/device/model",a->disks[i].name);
+        FILE *f=fopen(mp,"r");
+        if (f) { if (fgets(a->disks[i].model,sizeof(a->disks[i].model),f)) {
+            int l=slen(a->disks[i].model);
+            while(l>0&&(a->disks[i].model[l-1]=='\n'||a->disks[i].model[l-1]==' '))
+                a->disks[i].model[--l]='\0';
+        } fclose(f); }
+        if (!a->disks[i].model[0])
+            snprintf(a->disks[i].model,sizeof(a->disks[i].model),"Disk");
     }
-    closedir(d);
+
 }
 
-static void render_disk(uint32_t *fb) {
-    draw_header(fb, "FiFi OS Installer  |  Select Disk");
-    int y = 56;
-    draw_str(fb, "Choose a disk to install FiFi OS to.", 20, y, 0x00708898u, 0x000c1018u); y += 18;
-    draw_str(fb, "The entire disk will be erased.", 20, y, 0x00a06040u, 0x000c1018u); y += 28;
-    if (g_ndisks == 0) {
-        draw_str(fb, "No suitable disks found.", 20, y, 0x00a07060u, 0x000c1018u);
-    }
-    for (int i = 0; i < g_ndisks; i++) {
-        bool sel = (g_sel_disk == i);
-        bool hov = (g_hover == i);
-        uint32_t row_bg = sel ? 0x001c3050u : (hov ? 0x00182030u : 0x00101820u);
-        fill(fb, 20, y, g_win_w - 40, 48, row_bg);
-        /* Border */
-        uint32_t brd = sel ? 0x003060c0u : 0x00253040u;
-        for (int x = 20; x < g_win_w - 20; x++) { put_pixel(fb, x, y, brd); put_pixel(fb, x, y+47, brd); }
-        /* Radio + disk info */
-        draw_radio(fb, 38, y + 24, 8, sel);
-        char line1[80], line2[40];
-        snprintf(line1, sizeof(line1), "/dev/%s  —  %s", g_disks[i].name, g_disks[i].model);
-        snprintf(line2, sizeof(line2), "%s", g_disks[i].size_str);
-        draw_str_clip(fb, line1, 56, y + 10, g_win_w - 130, 0x00c0d0e0u, row_bg);
-        draw_str(fb, line2, 56, y + 26, 0x00607888u, row_bg);
-        y += 54;
-    }
-    /* Back + Next */
-    draw_btn(fb, 20, g_win_h - 56, 100, 36, "Back", g_hover == 100, false);
-    bool can_next = (g_sel_disk >= 0);
-    uint32_t next_bg = can_next ? (g_hover == 101 ? 0x003d78d8u : 0x003060c0u) : 0x00202838u;
-    uint32_t next_fg = can_next ? 0x00e8eeffu : 0x00404858u;
-    fill(fb, g_win_w - 130, g_win_h - 56, 110, 36, next_bg);
-    int lw = str_len("Next") * 9;
-    draw_str(fb, "Next", g_win_w - 130 + (110 - lw) / 2, g_win_h - 56 + (36 - g_glyph_h) / 2, next_fg, next_bg);
+/* ── 7. View: Welcome ──────────────────────────────────────────────────────── */
+
+#define CONTENT_Y (CHROME_H + 28 + 12)
+#define BTN_H 38
+
+static void render_welcome(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"FiFi OS  /  Install");
+    int y=CONTENT_Y, m=24, bw=a->win_w-2*m;
+
+    text(a,"Welcome to FiFi OS",m,y,C_TEXT_H,bw); y+=g_fh+10;
+    text_wrap(a,"This will install FiFi OS to a disk on this machine. Your chosen disk will be completely erased.",
+              m,y,bw,3,C_TEXT_SUB); y+=g_fh*2+3*3+12;
+
+    hline(a,m,y,bw,C_SEP); y+=12;
+    text(a,"What this installer does:",m,y,C_TEXT_B,bw); y+=g_fh+8;
+    const char *steps[]={"1.  Choose a disk to install to",
+        "2.  Choose your browser  (Firefox or LibreWolf)",
+        "3.  Select additional software  (LibreOffice by default)",
+        "4.  Install FiFi OS and download selected software",NULL};
+    for (int i=0;steps[i];i++) { text(a,steps[i],m+8,y,C_TEXT_SUB,bw-8); y+=g_fh+5; }
+    y+=8;
+    text(a,"Requires an internet connection to download browser and LibreOffice.",
+         m,y,C_TEXT_DIM,bw);
+
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_primary(a,a->win_w-216,a->win_h-BTN_H-12,196,BTN_H,"Get Started",a->hover==10);
 }
 
-static void click_disk(int mx, int my) {
-    /* Disk rows */
-    int y = 102;
-    for (int i = 0; i < g_ndisks; i++) {
-        if (mx >= 20 && mx < g_win_w - 20 && my >= y && my < y + 48) {
-            g_sel_disk = i; g_dirty = true;
+static void hover_welcome(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    if (mx>=a->win_w-216&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=10;
+    if (a->hover!=old) a->dirty=true;
+}
+static void click_welcome(app_t *a, int mx, int my) {
+    if (mx>=a->win_w-216&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) {
+        scan_disks(a); a->view=VIEW_DISK; a->dirty=true; }
+}
+
+/* ── 8. View: Disk selection ────────────────────────────────────────────────── */
+
+#define DISK_CARD_H 72
+#define DISK_CARD_X 20
+
+static void render_disk(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"Step 1 of 4  /  Choose a disk or partition");
+    int cw=a->win_w-40;
+    int y=CONTENT_Y;
+    int nlines=text_wrap(a,"Select a disk to fully install to, or a partition to install alongside an existing OS. The selection will be formatted.",
+         DISK_CARD_X,y,cw,3,C_TEXT_SUB);
+    y += nlines*(g_fh+3) + 10;
+
+    if (a->ndisks==0) {
+        fill(a,DISK_CARD_X,y,cw,60,C_CARD_NORMAL);
+        rect_border(a,DISK_CARD_X,y,cw,60,C_BORDER);
+        text(a,"No disks or partitions found  (min 20 GB required).",
+             DISK_CARD_X+12,y+22,C_TEXT_DIM,cw-24);
+    } else {
+        int visible=(a->win_h-BTN_H-16-y-4)/(DISK_CARD_H+6);
+        if (visible<1) visible=1;
+        for (int i=a->disk_scroll; i<a->ndisks && i<a->disk_scroll+visible; i++) {
+            int cy=y+(i-a->disk_scroll)*(DISK_CARD_H+6);
+            bool sel=(a->sel_disk==i), hov=(a->hover==i);
+            fill(a,DISK_CARD_X,cy,cw,DISK_CARD_H,sel?C_CARD_SEL:(hov?C_CARD_HOV:C_CARD_NORMAL));
+            rect_border(a,DISK_CARD_X,cy,cw,DISK_CARD_H,sel?C_BORDER_SEL:C_BORDER);
+            if (sel) fill(a,DISK_CARD_X,cy+1,3,DISK_CARD_H-2,C_ACCENT);
+            radio(a,DISK_CARD_X+22,cy+DISK_CARD_H/2,sel);
+            /* Device name + type label */
+            char line1[96];
+            if (a->disks[i].is_part)
+                snprintf(line1,sizeof(line1),"/dev/%s  [partition]",a->disks[i].name);
+            else
+                snprintf(line1,sizeof(line1),"/dev/%s  [disk]",a->disks[i].name);
+            text(a,line1,DISK_CARD_X+44,cy+12,sel?C_TEXT_H:C_TEXT_B,cw-56-60);
+            text(a,a->disks[i].model,DISK_CARD_X+44,cy+12+g_fh+4,C_TEXT_ACC,cw-56-60);
+            /* Size right-aligned */
+            text_right(a,a->disks[i].size_str,DISK_CARD_X+cw-8,cy+DISK_CARD_H/2-g_fh/2,C_TEXT_DIM);
         }
-        y += 54;
+        /* Scroll indicator */
+        int list_end = y + visible*(DISK_CARD_H+6);
+        if (a->disk_scroll > 0) {
+            text(a,"^ more  (scroll up)",DISK_CARD_X,y-g_fh-2,C_TEXT_DIM,cw);
+        }
+        if (a->disk_scroll + visible < a->ndisks) {
+            char more[32]; snprintf(more,sizeof(more),"v more  (%d not shown)",a->ndisks-a->disk_scroll-visible);
+            text(a,more,DISK_CARD_X,list_end+4,C_TEXT_DIM,cw);
+        }
     }
-    /* Back */
-    if (mx >= 20 && mx < 120 && my >= g_win_h - 56 && my < g_win_h - 20) {
-        g_step = STEP_WELCOME; g_dirty = true;
+
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_ghost(a,20,a->win_h-BTN_H-12,100,BTN_H,"Back",a->hover==100);
+    bool can_next=(a->sel_disk>=0);
+    if (can_next) btn_primary(a,a->win_w-196,a->win_h-BTN_H-12,176,BTN_H,"Next",a->hover==101);
+    else { fill(a,a->win_w-196,a->win_h-BTN_H-12,176,BTN_H,0x00182838u);
+           int lw=slen("Next")*g_fw;
+           text(a,"Next",a->win_w-196+(176-lw)/2,a->win_h-BTN_H-12+(BTN_H-g_fh)/2,C_TEXT_DIM,0); }
+}
+
+/* hover/click use same y as render_disk cards; keep in sync with render's nlines calc */
+#define DISK_LIST_Y (CONTENT_Y + 2*(g_fh+3) + 10)
+
+static void hover_disk(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    if (a->ndisks>0) {
+        int y=DISK_LIST_Y, visible=(a->win_h-BTN_H-16-y-4)/(DISK_CARD_H+6);
+        for (int i=a->disk_scroll;i<a->ndisks&&i<a->disk_scroll+visible;i++) {
+            int cy=y+(i-a->disk_scroll)*(DISK_CARD_H+6);
+            if (mx>=DISK_CARD_X&&mx<a->win_w-20&&my>=cy&&my<cy+DISK_CARD_H) a->hover=i;
+        }
     }
-    /* Next */
-    if (g_sel_disk >= 0 && mx >= g_win_w - 130 && mx < g_win_w - 20 &&
-        my >= g_win_h - 56 && my < g_win_h - 20) {
-        g_step = STEP_BROWSER; g_dirty = true;
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=100;
+    if (mx>=a->win_w-196&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=101;
+    if (a->hover!=old) a->dirty=true;
+}
+static void click_disk(app_t *a, int mx, int my) {
+    if (a->ndisks>0) {
+        int y=DISK_LIST_Y, visible=(a->win_h-BTN_H-16-y-4)/(DISK_CARD_H+6);
+        for (int i=a->disk_scroll;i<a->ndisks&&i<a->disk_scroll+visible;i++) {
+            int cy=y+(i-a->disk_scroll)*(DISK_CARD_H+6);
+            if (mx>=DISK_CARD_X&&mx<a->win_w-20&&my>=cy&&my<cy+DISK_CARD_H)
+                { a->sel_disk=i; a->dirty=true; }
+        }
     }
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_WELCOME; a->dirty=true; }
+    if (a->sel_disk>=0&&mx>=a->win_w-196&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_BROWSER; a->dirty=true; }
 }
 
-/* ── 5. Step 2: Browser choice ────────────────────────────────────────── */
+/* ── 9. View: Browser choice ────────────────────────────────────────────────── */
 
-static void render_browser(uint32_t *fb) {
-    draw_header(fb, "FiFi OS Installer  |  Choose Browser");
-    int y = 56;
-    draw_str(fb, "Which browser do you want installed?", 20, y, 0x00708898u, 0x000c1018u); y += 18;
-    draw_str(fb, "The browser will be downloaded during installation.", 20, y, 0x00485868u, 0x000c1018u); y += 36;
+#define OPT_CARD_H 96
+#define OPT_CARD_X 20
 
-    /* LibreWolf */
-    bool lw_sel = (g_browser == BROWSER_LIBREWOLF);
-    bool lw_hov = (g_hover == 0);
-    uint32_t lw_bg = lw_sel ? 0x001c3050u : (lw_hov ? 0x00182030u : 0x00101820u);
-    fill(fb, 20, y, g_win_w - 40, 80, lw_bg);
-    uint32_t lw_brd = lw_sel ? 0x003060c0u : 0x00253040u;
-    for (int x = 20; x < g_win_w - 20; x++) { put_pixel(fb, x, y, lw_brd); put_pixel(fb, x, y+79, lw_brd); }
-    draw_radio(fb, 40, y + 40, 9, lw_sel);
-    draw_str(fb, "LibreWolf", 58, y + 16, 0x00c8dce8u, lw_bg);
-    draw_str(fb, "Privacy-hardened Firefox fork. No telemetry, enhanced tracking", 58, y + 34, 0x00607888u, lw_bg);
-    draw_str(fb, "protection, and stricter security defaults.", 58, y + 52, 0x00607888u, lw_bg);
-    y += 86;
+static void render_browser(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"Step 2 of 4  /  Choose your browser");
+    int y=CONTENT_Y, cw=a->win_w-40;
+    text(a,"Your browser will be downloaded during installation.",OPT_CARD_X,y,C_TEXT_SUB,cw); y+=g_fh+10;
 
-    /* Firefox */
-    bool ff_sel = (g_browser == BROWSER_FIREFOX);
-    bool ff_hov = (g_hover == 1);
-    uint32_t ff_bg = ff_sel ? 0x001c3050u : (ff_hov ? 0x00182030u : 0x00101820u);
-    fill(fb, 20, y, g_win_w - 40, 80, ff_bg);
-    uint32_t ff_brd = ff_sel ? 0x003060c0u : 0x00253040u;
-    for (int x = 20; x < g_win_w - 20; x++) { put_pixel(fb, x, y, ff_brd); put_pixel(fb, x, y+79, ff_brd); }
-    draw_radio(fb, 40, y + 40, 9, ff_sel);
-    draw_str(fb, "Firefox", 58, y + 16, 0x00c8dce8u, ff_bg);
-    draw_str(fb, "Standard Firefox release. Familiar and widely supported.", 58, y + 34, 0x00607888u, ff_bg);
-    draw_str(fb, "Can add any extension from Mozilla Add-ons.", 58, y + 52, 0x00607888u, ff_bg);
-    y += 86;
+    draw_card(a,OPT_CARD_X,y,cw,OPT_CARD_H,a->browser==BROWSER_LIBREWOLF,a->hover==0,
+              "LibreWolf","Privacy-first Firefox fork",
+              "No telemetry, hardened defaults, enhanced tracking protection.",true);
+    y+=OPT_CARD_H+8;
+    draw_card(a,OPT_CARD_X,y,cw,OPT_CARD_H,a->browser==BROWSER_FIREFOX,a->hover==1,
+              "Firefox","Standard Mozilla Firefox",
+              "Familiar and widely supported. All extensions work.",true);
 
-    draw_btn(fb, 20, g_win_h - 56, 100, 36, "Back", g_hover == 100, false);
-    draw_btn(fb, g_win_w - 130, g_win_h - 56, 110, 36, "Next", g_hover == 101, true);
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_ghost(a,20,a->win_h-BTN_H-12,100,BTN_H,"Back",a->hover==100);
+    btn_primary(a,a->win_w-176,a->win_h-BTN_H-12,156,BTN_H,"Next",a->hover==101);
 }
 
-static void click_browser(int mx, int my) {
-    int y = 110;
-    /* LibreWolf row */
-    if (mx >= 20 && mx < g_win_w - 20 && my >= y && my < y + 80)
-        { g_browser = BROWSER_LIBREWOLF; g_dirty = true; }
-    y += 86;
-    /* Firefox row */
-    if (mx >= 20 && mx < g_win_w - 20 && my >= y && my < y + 80)
-        { g_browser = BROWSER_FIREFOX; g_dirty = true; }
-    if (mx >= 20 && mx < 120 && my >= g_win_h - 56 && my < g_win_h - 20)
-        { g_step = STEP_DISK; g_dirty = true; }
-    if (mx >= g_win_w - 130 && mx < g_win_w - 20 && my >= g_win_h - 56 && my < g_win_h - 20)
-        { g_step = STEP_SOFTWARE; g_dirty = true; }
+static void hover_browser(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    int y=CONTENT_Y+g_fh+10;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H) a->hover=0;
+    y+=OPT_CARD_H+8;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H) a->hover=1;
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=100;
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=101;
+    if (a->hover!=old) a->dirty=true;
+}
+static void click_browser(app_t *a, int mx, int my) {
+    int y=CONTENT_Y+g_fh+10;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H)
+        { a->browser=BROWSER_LIBREWOLF; a->dirty=true; }
+    y+=OPT_CARD_H+8;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H)
+        { a->browser=BROWSER_FIREFOX; a->dirty=true; }
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_DISK; a->dirty=true; }
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_SOFTWARE; a->dirty=true; }
 }
 
-/* ── 6. Step 3: Software selection ────────────────────────────────────── */
+/* ── 10. View: Software selection ───────────────────────────────────────────── */
 
-static void render_software(uint32_t *fb) {
-    draw_header(fb, "FiFi OS Installer  |  Software");
-    int y = 56;
-    draw_str(fb, "Select additional software to install.", 20, y, 0x00708898u, 0x000c1018u); y += 18;
-    draw_str(fb, "These will be downloaded during installation.", 20, y, 0x00485868u, 0x000c1018u); y += 36;
+static void render_software(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"Step 3 of 4  /  Additional software");
+    int y=CONTENT_Y, cw=a->win_w-40;
+    text(a,"Select software to install alongside FiFi OS.",OPT_CARD_X,y,C_TEXT_SUB,cw); y+=g_fh+10;
 
-    /* LibreOffice row */
-    bool lo_chk = !!(g_software & SW_LIBREOFFICE);
-    bool lo_hov = (g_hover == 0);
-    uint32_t lo_bg = lo_chk ? 0x001c3050u : (lo_hov ? 0x00182030u : 0x00101820u);
-    fill(fb, 20, y, g_win_w - 40, 72, lo_bg);
-    uint32_t lo_brd = lo_chk ? 0x003060c0u : 0x00253040u;
-    for (int x = 20; x < g_win_w - 20; x++) { put_pixel(fb, x, y, lo_brd); put_pixel(fb, x, y+71, lo_brd); }
-    draw_checkbox(fb, 32, y + 26, 18, lo_chk);
-    draw_str(fb, "LibreOffice  (Recommended)", 60, y + 14, 0x00c8dce8u, lo_bg);
-    draw_str(fb, "Full office suite: Writer, Calc, Impress, Draw. Compatible with", 60, y + 32, 0x00607888u, lo_bg);
-    draw_str(fb, "Microsoft Office formats.", 60, y + 50, 0x00607888u, lo_bg);
-    y += 78;
-    draw_str(fb, "More software can be added after installation.", 20, y, 0x00485868u, 0x000c1018u);
+    bool lo_chk=!!(a->software&SW_LIBREOFFICE);
+    draw_card(a,OPT_CARD_X,y,cw,OPT_CARD_H,lo_chk,a->hover==0,
+              "LibreOffice  (Recommended)","Full office suite",
+              "Writer, Calc, Impress, Draw. Compatible with Microsoft Office formats.",false);
+    y+=OPT_CARD_H+8;
+    text(a,"More software can be added after installation.",OPT_CARD_X,y,C_TEXT_DIM,cw);
 
-    draw_btn(fb, 20, g_win_h - 56, 100, 36, "Back", g_hover == 100, false);
-    draw_btn(fb, g_win_w - 130, g_win_h - 56, 110, 36, "Next", g_hover == 101, true);
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_ghost(a,20,a->win_h-BTN_H-12,100,BTN_H,"Back",a->hover==100);
+    btn_primary(a,a->win_w-176,a->win_h-BTN_H-12,156,BTN_H,"Next",a->hover==101);
 }
 
-static void click_software(int mx, int my) {
-    int y = 110;
-    if (mx >= 20 && mx < g_win_w - 20 && my >= y && my < y + 72)
-        { g_software ^= SW_LIBREOFFICE; g_dirty = true; }
-    if (mx >= 20 && mx < 120 && my >= g_win_h - 56 && my < g_win_h - 20)
-        { g_step = STEP_BROWSER; g_dirty = true; }
-    if (mx >= g_win_w - 130 && mx < g_win_w - 20 && my >= g_win_h - 56 && my < g_win_h - 20)
-        { g_step = STEP_CONFIRM; g_dirty = true; }
+static void hover_software(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    int y=CONTENT_Y+g_fh+10;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H) a->hover=0;
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=100;
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=101;
+    if (a->hover!=old) a->dirty=true;
+}
+static void click_software(app_t *a, int mx, int my) {
+    int y=CONTENT_Y+g_fh+10;
+    if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+OPT_CARD_H)
+        { a->software^=SW_LIBREOFFICE; a->dirty=true; }
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_BROWSER; a->dirty=true; }
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_CONFIRM; a->dirty=true; }
 }
 
-/* ── 7. Step 4: Confirm ───────────────────────────────────────────────── */
+/* ── 11. View: Confirm ──────────────────────────────────────────────────────── */
 
-static void render_confirm(uint32_t *fb) {
-    draw_header(fb, "FiFi OS Installer  |  Confirm");
-    int y = 56;
-    draw_str(fb, "Review your choices before installing.", 20, y, 0x00708898u, 0x000c1018u); y += 30;
+static void render_confirm(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"Step 4 of 4  /  Confirm");
+    int y=CONTENT_Y, m=20, cw=a->win_w-40;
+    text(a,"Review your choices before installing.",m,y,C_TEXT_SUB,cw); y+=g_fh+12;
 
     /* Summary box */
-    fill(fb, 20, y, g_win_w - 40, 160, 0x00101820u);
-    for (int x = 20; x < g_win_w - 20; x++) { put_pixel(fb, x, y, 0x00304050u); put_pixel(fb, x, y+159, 0x00304050u); }
-    int sy = y + 14;
-    draw_str(fb, "Disk:", 36, sy, 0x00607888u, 0x00101820u);
-    if (g_sel_disk >= 0) {
-        char dstr[80];
-        snprintf(dstr, sizeof(dstr), "/dev/%s  (%s  %s)",
-                 g_disks[g_sel_disk].name, g_disks[g_sel_disk].size_str,
-                 g_disks[g_sel_disk].model);
-        draw_str_clip(fb, dstr, 130, sy, g_win_w - 160, 0x00c0d0e0u, 0x00101820u);
+    fill(a,m,y,cw,120,C_CARD_NORMAL); rect_border(a,m,y,cw,120,C_BORDER);
+    int sy=y+14, lx=m+12, vx=m+140;
+    text(a,"Disk:",lx,sy,C_TEXT_SUB,0);
+    if (a->sel_disk>=0) {
+        char ds[80]; snprintf(ds,sizeof(ds),"/dev/%s  (%s  %s)",
+            a->disks[a->sel_disk].name,a->disks[a->sel_disk].size_str,a->disks[a->sel_disk].model);
+        text(a,ds,vx,sy,C_TEXT_B,cw-140-24);
+    } else text(a,"None selected",vx,sy,C_WARN,0);
+    sy+=g_fh+10;
+    text(a,"Browser:",lx,sy,C_TEXT_SUB,0);
+    text(a,a->browser==BROWSER_LIBREWOLF?"LibreWolf":"Firefox",vx,sy,C_TEXT_B,0);
+    sy+=g_fh+10;
+    text(a,"Software:",lx,sy,C_TEXT_SUB,0);
+    text(a,(a->software&SW_LIBREOFFICE)?"LibreOffice":"(none extra)",vx,sy,C_TEXT_B,0);
+    sy+=g_fh+10;
+    text(a,"Action:",lx,sy,C_TEXT_SUB,0);
+    if (a->sel_disk>=0) {
+        const char *verb = a->disks[a->sel_disk].is_part ? "Format" : "Erase";
+        char act[96]; snprintf(act,sizeof(act),"%s /dev/%s and install FiFi OS",
+            verb, a->disks[a->sel_disk].name);
+        text(a,act,vx,sy,C_ERR,cw-140-24);
     }
-    sy += 24;
-    draw_str(fb, "Browser:", 36, sy, 0x00607888u, 0x00101820u);
-    draw_str(fb, g_browser == BROWSER_LIBREWOLF ? "LibreWolf" : "Firefox",
-             130, sy, 0x00c0d0e0u, 0x00101820u);
-    sy += 24;
-    draw_str(fb, "Software:", 36, sy, 0x00607888u, 0x00101820u);
-    draw_str(fb, (g_software & SW_LIBREOFFICE) ? "LibreOffice" : "(none extra)",
-             130, sy, 0x00c0d0e0u, 0x00101820u);
-    sy += 24;
-    draw_str(fb, "Action:", 36, sy, 0x00607888u, 0x00101820u);
-    if (g_sel_disk >= 0) {
-        char act[80];
-        snprintf(act, sizeof(act), "Erase /dev/%s and install FiFi OS",
-                 g_disks[g_sel_disk].name);
-        draw_str_clip(fb, act, 130, sy, g_win_w - 160, 0x00e87060u, 0x00101820u);
-    }
-    y += 170;
-    draw_str(fb, "This cannot be undone. The selected disk will be permanently erased.", 20, y, 0x00a06848u, 0x000c1018u);
+    y+=136;
+    const char *warn = (a->sel_disk>=0&&a->disks[a->sel_disk].is_part)
+        ? "This cannot be undone. The selected partition will be permanently formatted."
+        : "This cannot be undone. The selected disk will be permanently erased.";
+    text_wrap(a,warn,m,y,cw,3,C_WARN);
 
-    draw_btn(fb, 20, g_win_h - 56, 100, 36, "Back", g_hover == 100, false);
-    draw_btn(fb, g_win_w - 150, g_win_h - 56, 130, 36, "Install Now", g_hover == 101, true);
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_ghost(a,20,a->win_h-BTN_H-12,100,BTN_H,"Back",a->hover==100);
+    bool can_install=(a->sel_disk>=0);
+    if (can_install)
+        btn_primary(a,a->win_w-196,a->win_h-BTN_H-12,176,BTN_H,"Install Now",a->hover==101);
+    else { fill(a,a->win_w-196,a->win_h-BTN_H-12,176,BTN_H,0x00182838u);
+           int lw=slen("Install Now")*g_fw;
+           text(a,"Install Now",a->win_w-196+(176-lw)/2,a->win_h-BTN_H-12+(BTN_H-g_fh)/2,C_TEXT_DIM,0); }
 }
 
-static void click_confirm(int mx, int my) {
-    if (mx >= 20 && mx < 120 && my >= g_win_h - 56 && my < g_win_h - 20)
-        { g_step = STEP_SOFTWARE; g_dirty = true; }
-    if (mx >= g_win_w - 150 && mx < g_win_w - 20 && my >= g_win_h - 56 && my < g_win_h - 20) {
-        g_step = STEP_PROGRESS;
-        g_log_count = 0; g_log_scroll = 0; g_progress_pct = 0;
-        g_dirty = true;
-        /* Launch the install script in background */
-        int pipefd[2];
-        if (pipe(pipefd) == 0) {
-            g_install_pipe = pipefd[0];
-            fcntl(g_install_pipe, F_SETFL, O_NONBLOCK);
-            g_install_pid = fork();
-            if (g_install_pid == 0) {
-                close(pipefd[0]);
-                dup2(pipefd[1], STDOUT_FILENO);
-                dup2(pipefd[1], STDERR_FILENO);
-                close(pipefd[1]);
-                char disk[32];
-                snprintf(disk, sizeof(disk), "/dev/%s",
-                         g_disks[g_sel_disk].name);
-                execl("/bin/fifi-install.sh", "fifi-install.sh",
-                      disk,
-                      g_browser == BROWSER_LIBREWOLF ? "librewolf" : "firefox",
-                      (g_software & SW_LIBREOFFICE) ? "libreoffice" : "none",
-                      NULL);
-                printf("ERROR: /bin/fifi-install.sh not found\n");
-                fflush(stdout);
-                _exit(1);
-            }
-            close(pipefd[1]);
-        }
+static void hover_confirm(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=100;
+    if (mx>=a->win_w-196&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=101;
+    if (a->hover!=old) a->dirty=true;
+}
+static void start_install(app_t *a) {
+    a->log_count=0; a->progress=0;
+    a->view=VIEW_PROGRESS; a->dirty=true;
+    int pfd[2]; pipe(pfd);
+    a->install_pipe=pfd[0]; fcntl(a->install_pipe,F_SETFL,O_NONBLOCK);
+    a->install_pid=fork();
+    if (a->install_pid==0) {
+        close(pfd[0]); dup2(pfd[1],STDOUT_FILENO); dup2(pfd[1],STDERR_FILENO); close(pfd[1]);
+        char disk[40]; snprintf(disk,sizeof(disk),"/dev/%s",a->disks[a->sel_disk].name);
+        execl("/bin/fifi-install.sh","fifi-install.sh",disk,
+              a->browser==BROWSER_LIBREWOLF?"librewolf":"firefox",
+              (a->software&SW_LIBREOFFICE)?"libreoffice":"none",NULL);
+        printf("ERROR: /bin/fifi-install.sh not found\n"); fflush(stdout); _exit(1);
     }
+    close(pfd[1]);
+}
+static void click_confirm(app_t *a, int mx, int my) {
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_SOFTWARE; a->dirty=true; }
+    if (a->sel_disk>=0&&mx>=a->win_w-196&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        start_install(a);
 }
 
-/* ── 8. Step 5: Progress ──────────────────────────────────────────────── */
+/* ── 12. View: Progress ─────────────────────────────────────────────────────── */
 
-static void log_append(const char *line) {
-    if (g_log_count < MAX_LOG) {
-        int n = str_len(line);
-        if (n > 127) n = 127;
-        for (int i = 0; i < n; i++) g_log[g_log_count][i] = line[i];
-        g_log[g_log_count][n] = '\0';
-        g_log_count++;
+static void log_append(app_t *a, const char *line) {
+    if (a->log_count<MAX_LOG) {
+        int n=slen(line); if (n>127) n=127;
+        for (int i=0;i<n;i++) a->log[a->log_count][i]=line[i];
+        a->log[a->log_count][n]='\0'; a->log_count++;
     } else {
-        /* Scroll: drop oldest */
-        for (int i = 0; i < MAX_LOG - 1; i++)
-            for (int j = 0; j < 128; j++) g_log[i][j] = g_log[i+1][j];
-        int n = str_len(line); if (n > 127) n = 127;
-        for (int i = 0; i < n; i++) g_log[MAX_LOG-1][i] = line[i];
-        g_log[MAX_LOG-1][n] = '\0';
+        for (int i=0;i<MAX_LOG-1;i++) memcpy(a->log[i],a->log[i+1],128);
+        int n=slen(line); if (n>127) n=127;
+        for (int i=0;i<n;i++) a->log[MAX_LOG-1][i]=line[i];
+        a->log[MAX_LOG-1][n]='\0';
     }
 }
 
-/* Poll install script output */
-static void poll_install(void) {
-    if (g_install_pipe < 0) return;
-    char buf[512];
-    ssize_t n = read(g_install_pipe, buf, sizeof(buf) - 1);
-    if (n > 0) {
-        buf[n] = '\0';
-        /* Split by newlines */
-        char *p = buf, *nl;
-        while ((nl = strchr(p, '\n')) != NULL) {
-            *nl = '\0';
-            if (p[0]) {
-                /* Parse progress lines: "PROGRESS:50" */
-                if (p[0] == 'P' && p[1] == 'R' && p[8] == ':') {
-                    g_progress_pct = atoi(p + 9);
-                    if (g_progress_pct > 100) g_progress_pct = 100;
-                } else {
-                    log_append(p);
-                }
-                g_dirty = true;
+static void poll_install(app_t *a) {
+    if (a->install_pipe<0) return;
+    char buf[512]; ssize_t n=read(a->install_pipe,buf,sizeof(buf)-1);
+    if (n>0) {
+        buf[n]='\0';
+        /* Parse PROGRESS:N lines */
+        for (int i=0;i<n-1;i++) {
+            if (buf[i]=='P'&&buf[i+1]=='R'&&i+8<n&&buf[i+8]==':') {
+                a->progress=atoi(buf+i+9); if (a->progress>100) a->progress=100;
             }
-            p = nl + 1;
         }
-        if (p[0]) { log_append(p); g_dirty = true; }
-    } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
-        /* Pipe closed — install finished */
-        close(g_install_pipe);
-        g_install_pipe = -1;
-        int status = 0;
-        if (g_install_pid > 0) {
-            waitpid(g_install_pid, &status, 0);
-            g_install_pid = -1;
+        /* Append non-progress lines to log */
+        char *p=buf, *nl;
+        while ((nl=strchr(p,'\n'))!=NULL) {
+            *nl='\0';
+            if (p[0]&&p[0]!='P') log_append(a,p);
+            p=nl+1;
         }
-        g_done_ok = (status == 0);
-        if (!g_done_ok) {
-            snprintf(g_error_msg, sizeof(g_error_msg),
-                     "Installation failed (exit code %d). Check log above.", WEXITSTATUS(status));
-        }
-        g_progress_pct = g_done_ok ? 100 : g_progress_pct;
-        g_step = STEP_DONE;
-        g_dirty = true;
+        if (p[0]&&p[0]!='P') log_append(a,p);
+        a->dirty=true;
+    } else if (n==0||(n<0&&errno!=EAGAIN)) {
+        close(a->install_pipe); a->install_pipe=-1;
+        int st=0;
+        if (a->install_pid>0) { waitpid(a->install_pid,&st,0); a->install_pid=-1; }
+        a->done_ok=(st==0);
+        /* Stay on progress view so the full log is visible — user clicks Done */
+        a->progress=a->done_ok?100:a->progress;
+        if (a->done_ok) log_append(a,"Done!  Click 'Reboot' to restart.");
+        else            log_append(a,"FAILED — see log above. Click 'Close' to exit.");
+        a->dirty=true;
     }
 }
 
-static void render_progress(uint32_t *fb) {
-    draw_header(fb, "FiFi OS Installer  |  Installing...");
-    int y = 50;
-    draw_str(fb, "Installation in progress. Do not power off.", 20, y, 0x00708898u, 0x000c1018u); y += 28;
-    draw_progress(fb, 20, y, g_win_w - 40, 18, g_progress_pct);
-    char pct_str[16]; snprintf(pct_str, sizeof(pct_str), "%d%%", g_progress_pct);
-    int pw = str_len(pct_str) * 9;
-    draw_str(fb, pct_str, g_win_w / 2 - pw / 2, y + 2, 0x00c0d0e0u, 0x00101820u);
-    y += 28;
-    draw_sep(fb, y); y += 8;
-    /* Log area */
-    int log_y = y;
-    int visible = (g_win_h - log_y - 20) / (g_glyph_h + 2);
-    int start = g_log_count > visible ? g_log_count - visible : 0;
-    for (int i = start; i < g_log_count; i++) {
-        uint32_t col = 0x00506878u;
-        if (g_log[i][0] == 'E' || g_log[i][0] == 'e') col = 0x00e07060u;
-        else if (g_log[i][0] == '[') col = 0x0070b8e0u;
-        draw_str_clip(fb, g_log[i], 20, log_y, g_win_w - 40, col, 0x000c1018u);
-        log_y += g_glyph_h + 2;
+static void render_progress(app_t *a) {
+    bool finished = (a->install_pipe < 0);
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a, finished ? (a->done_ok ? "Install complete — read log below" : "Install FAILED — read log below")
+                            : "Installing FiFi OS...");
+    int y=CONTENT_Y, m=20, cw=a->win_w-40;
+    if (!finished)
+        text(a,"Installation in progress. Do not power off.",m,y,C_TEXT_SUB,cw);
+    else if (a->done_ok)
+        text(a,"Done. Read the log, then click Reboot.",m,y,C_OK,cw);
+    else
+        text(a,"Failed. Read the log below, then click Close.",m,y,C_ERR,cw);
+    y+=g_fh+12;
+    progress_bar(a,m,y,cw,18,a->progress);
+    char pstr[8]; snprintf(pstr,sizeof(pstr),"%d%%",a->progress);
+    text_right(a,pstr,a->win_w-m,y+1,C_TEXT_ACC);
+    y+=26; hline(a,m,y,cw,C_SEP); y+=8;
+    int btn_reserve = finished ? BTN_H+20 : 0;
+    int log_y=y, visible=(a->win_h-log_y-btn_reserve-4)/(g_fh+2);
+    if (visible<1) visible=1;
+    int start=a->log_count>visible?a->log_count-visible:0;
+    for (int i=start;i<a->log_count;i++) {
+        uint32_t col=C_TEXT_SUB;
+        if (a->log[i][0]=='E'||a->log[i][0]=='e'||a->log[i][0]=='F') col=C_ERR;
+        else if (a->log[i][0]=='[') col=C_TEXT_ACC;
+        else if (a->log[i][0]=='D') col=C_OK;
+        text(a,a->log[i],m,log_y,col,cw);
+        log_y+=g_fh+2;
+    }
+    if (finished) {
+        hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+        if (a->done_ok)
+            btn_primary(a,a->win_w/2-70,a->win_h-BTN_H-12,140,BTN_H,"Reboot",a->hover==200);
+        else
+            btn_ghost(a,a->win_w/2-70,a->win_h-BTN_H-12,140,BTN_H,"Close",a->hover==200);
     }
 }
 
-/* ── 9. Step 6: Done ──────────────────────────────────────────────────── */
+/* ── 13. View: Done / Error ─────────────────────────────────────────────────── */
 
-static void render_done(uint32_t *fb) {
-    draw_header(fb, g_done_ok ? "FiFi OS Installer  |  Complete" : "FiFi OS Installer  |  Error");
-    int y = 80;
-    if (g_done_ok) {
-        draw_str(fb, "Installation complete!", 30, y, 0x0060e890u, 0x000c1018u); y += 28;
-        draw_str(fb, "FiFi OS has been installed to the selected disk.", 30, y, 0x00708898u, 0x000c1018u); y += 20;
-        draw_str(fb, "You can now remove the USB drive and reboot.", 30, y, 0x00708898u, 0x000c1018u); y += 36;
-        draw_str(fb, "Your installed system includes:", 30, y, 0x0090a8c0u, 0x000c1018u); y += 22;
-        draw_str(fb, g_browser == BROWSER_LIBREWOLF ? "  - LibreWolf browser" : "  - Firefox browser",
-                 30, y, 0x00607888u, 0x000c1018u); y += 20;
-        if (g_software & SW_LIBREOFFICE)
-            { draw_str(fb, "  - LibreOffice", 30, y, 0x00607888u, 0x000c1018u); y += 20; }
-        draw_btn(fb, g_win_w / 2 - 60, g_win_h - 56, 120, 36, "Reboot", g_hover == 0, true);
+static void render_done(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,a->done_ok?"Installation Complete":"Installation Failed");
+    int y=CONTENT_Y, m=20, cw=a->win_w-40;
+    if (a->done_ok) {
+        disc(a,m+20,y+20,16,0x00193a20u); ring(a,m+20,y+20,16,C_OK);
+        text(a,"FiFi OS installed successfully.",m+46,y+12,C_OK,cw-46); y+=44;
+        text_wrap(a,"Remove the USB drive and reboot. Your browser and LibreOffice will finish downloading on first boot.",
+                  m,y,cw,3,C_TEXT_SUB);
+        hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+        btn_primary(a,a->win_w/2-60,a->win_h-BTN_H-12,120,BTN_H,"Reboot",a->hover==0);
     } else {
-        draw_str(fb, "Installation failed.", 30, y, 0x00e07060u, 0x000c1018u); y += 24;
-        draw_str_clip(fb, g_error_msg, 30, y, g_win_w - 60, 0x00a07060u, 0x000c1018u); y += 28;
-        draw_btn(fb, g_win_w / 2 - 55, g_win_h - 56, 110, 36, "Close", g_hover == 0, false);
+        disc(a,m+20,y+20,16,0x003a1910u); ring(a,m+20,y+20,16,C_ERR);
+        text(a,"Installation did not complete.",m+46,y+12,C_ERR,cw-46); y+=44;
+        text_wrap(a,a->error,m,y,cw,3,C_TEXT_SUB);
+        hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+        btn_ghost(a,a->win_w/2-60,a->win_h-BTN_H-12,120,BTN_H,"Close",a->hover==0);
     }
 }
 
-static void click_done(int mx, int my) {
-    if (my >= g_win_h - 56 && my < g_win_h - 20 &&
-        mx >= g_win_w / 2 - 60 && mx < g_win_w / 2 + 60) {
-        if (g_done_ok) {
-            system("reboot");
+static void hover_done(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    if (mx>=a->win_w/2-60&&mx<a->win_w/2+60&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=0;
+    if (a->hover!=old) a->dirty=true;
+}
+
+/* ── 14. Input dispatch ─────────────────────────────────────────────────────── */
+
+static void render_app(app_t *a) {
+    switch (a->view) {
+    case VIEW_WELCOME:  render_welcome(a);  break;
+    case VIEW_DISK:     render_disk(a);     break;
+    case VIEW_BROWSER:  render_browser(a);  break;
+    case VIEW_SOFTWARE: render_software(a); break;
+    case VIEW_CONFIRM:  render_confirm(a);  break;
+    case VIEW_PROGRESS: render_progress(a); break;
+    case VIEW_DONE:     render_done(a);     break;
+    }
+}
+
+static void on_hover(app_t *a, int mx, int my) {
+    switch (a->view) {
+    case VIEW_WELCOME:  hover_welcome(a,mx,my);  break;
+    case VIEW_DISK:     hover_disk(a,mx,my);     break;
+    case VIEW_BROWSER:  hover_browser(a,mx,my);  break;
+    case VIEW_SOFTWARE: hover_software(a,mx,my); break;
+    case VIEW_CONFIRM:  hover_confirm(a,mx,my);  break;
+    case VIEW_DONE:     hover_done(a,mx,my);     break;
+    case VIEW_PROGRESS:
+        if (a->install_pipe < 0) {
+            int old=a->hover; a->hover=-1;
+            if (mx>=a->win_w/2-70&&mx<a->win_w/2+70&&
+                my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=200;
+            if (a->hover!=old) a->dirty=true;
         }
-        /* Close on error — compositor will handle IPC_APP_CLOSE */
-    }
-}
-
-/* ── 10. IPC message loop and main ────────────────────────────────────── */
-
-static void render(uint32_t *fb) {
-    switch (g_step) {
-    case STEP_WELCOME:  render_welcome(fb);  break;
-    case STEP_DISK:     render_disk(fb);     break;
-    case STEP_BROWSER:  render_browser(fb);  break;
-    case STEP_SOFTWARE: render_software(fb); break;
-    case STEP_CONFIRM:  render_confirm(fb);  break;
-    case STEP_PROGRESS: render_progress(fb); break;
-    case STEP_DONE:     render_done(fb);     break;
-    }
-}
-
-static void handle_click(int mx, int my) {
-    switch (g_step) {
-    case STEP_WELCOME:  click_welcome(mx, my);  break;
-    case STEP_DISK:     click_disk(mx, my);     break;
-    case STEP_BROWSER:  click_browser(mx, my);  break;
-    case STEP_SOFTWARE: click_software(mx, my); break;
-    case STEP_CONFIRM:  click_confirm(mx, my);  break;
-    case STEP_DONE:     click_done(mx, my);     break;
-    }
-}
-
-static void handle_hover(int mx, int my) {
-    int old = g_hover;
-    g_hover = -1;
-    switch (g_step) {
-    case STEP_WELCOME:
-        if (mx >= g_win_w-130 && mx < g_win_w-20 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 0;
         break;
-    case STEP_DISK: {
-        int y = 102;
-        for (int i = 0; i < g_ndisks; i++) {
-            if (mx >= 20 && mx < g_win_w-20 && my >= y && my < y+48) g_hover = i;
-            y += 54;
+    }
+}
+
+static void on_click(app_t *a, int mx, int my, int sock) {
+    switch (a->view) {
+    case VIEW_WELCOME:  click_welcome(a,mx,my);  break;
+    case VIEW_DISK:     click_disk(a,mx,my);     break;
+    case VIEW_BROWSER:  click_browser(a,mx,my);  break;
+    case VIEW_SOFTWARE: click_software(a,mx,my); break;
+    case VIEW_CONFIRM:  click_confirm(a,mx,my);  break;
+    case VIEW_DONE:
+        if (a->hover==0) {
+            if (a->done_ok) { sync(); reboot(RB_AUTOBOOT); }
+            uint8_t h[8]; uint32_t t=IPC_APP_CLOSE,l=0;
+            memcpy(h,&t,4); memcpy(h+4,&l,4); write(sock,h,8);
         }
-        if (mx >= 20 && mx < 120 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 100;
-        if (g_sel_disk >= 0 && mx >= g_win_w-130 && mx < g_win_w-20 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 101;
+        break;
+    case VIEW_PROGRESS:
+        if (a->install_pipe<0 && a->hover==200) {
+            if (a->done_ok) { sync(); reboot(RB_AUTOBOOT); }
+            else { uint8_t h[8]; uint32_t t=IPC_APP_CLOSE,l=0;
+                   memcpy(h,&t,4); memcpy(h+4,&l,4); write(sock,h,8); }
+        }
         break;
     }
-    case STEP_BROWSER:
-        if (mx >= 20 && mx < g_win_w-20 && my >= 110 && my < 190) g_hover = 0;
-        if (mx >= 20 && mx < g_win_w-20 && my >= 196 && my < 276) g_hover = 1;
-        if (mx >= 20 && mx < 120 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 100;
-        if (mx >= g_win_w-130 && mx < g_win_w-20 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 101;
-        break;
-    case STEP_SOFTWARE:
-        if (mx >= 20 && mx < g_win_w-20 && my >= 110 && my < 182) g_hover = 0;
-        if (mx >= 20 && mx < 120 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 100;
-        if (mx >= g_win_w-130 && mx < g_win_w-20 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 101;
-        break;
-    case STEP_CONFIRM:
-        if (mx >= 20 && mx < 120 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 100;
-        if (mx >= g_win_w-150 && mx < g_win_w-20 && my >= g_win_h-56 && my < g_win_h-20) g_hover = 101;
-        break;
-    case STEP_DONE:
-        if (my >= g_win_h-56 && my < g_win_h-20 && mx >= g_win_w/2-60 && mx < g_win_w/2+60) g_hover = 0;
-        break;
-    }
-    if (g_hover != old) g_dirty = true;
 }
+
+/* ── 15. IPC transport and main ────────────────────────────────────────────── */
 
 static void write_all(int fd, const void *buf, size_t n) {
-    const uint8_t *p = buf;
-    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
+    const uint8_t *p=buf;
+    while (n>0) { ssize_t w=write(fd,p,n); if (w<=0) break; p+=w; n-=(size_t)w; }
 }
 
-static void send_frame(int sock) {
-    uint32_t hdr[4] = {0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h};
-    uint32_t pld_sz = 16 + (uint32_t)(g_win_w * g_win_h * 4);
-    uint8_t *msg = malloc(pld_sz);
-    if (!msg) return;
-    uint8_t type_hdr[8];
-    uint32_t t = IPC_APP_FRAME, l = pld_sz;
-    memcpy(type_hdr, &t, 4); memcpy(type_hdr+4, &l, 4);
-    write_all(sock, type_hdr, 8);
-    memcpy(msg, hdr, 16);
-    memcpy(msg + 16, g_fb, (size_t)(g_win_w * g_win_h * 4));
-    write_all(sock, msg, pld_sz);
-    free(msg);
+static void send_frame(app_t *a, int sock) {
+    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=16+(uint32_t)(a->win_w*a->win_h*4);
+    memcpy(th,&t,4); memcpy(th+4,&l,4); write_all(sock,th,8);
+    uint32_t fh[4]={0,0,(uint32_t)a->win_w,(uint32_t)a->win_h};
+    write_all(sock,fh,16); write_all(sock,a->fb,(size_t)(a->win_w*a->win_h*4));
 }
 
 static void ipc_send(int sock, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    write_all(sock, hdr, 8);
-    if (len && data) write_all(sock, data, len);
+    uint8_t h[8]; memcpy(h,&type,4); memcpy(h+4,&len,4);
+    write_all(sock,h,8); if (len&&data) write_all(sock,data,len);
 }
 
 int main(void) {
-    /* Load font */
-    const char *font_paths[] = {
-        "/fonts/ter16b.psf", "/fonts/ter20b.psf", "/fonts/ter24b.psf",
-        "/fonts/default.psf", NULL
-    };
-    for (int i = 0; font_paths[i]; i++) {
-        int fd = open(font_paths[i], O_RDONLY);
-        if (fd < 0) continue;
-        uint8_t hdr[4]; read(fd, hdr, 4);
-        int total; lseek(fd, 0, SEEK_END); total = (int)lseek(fd, 0, SEEK_CUR);
-        lseek(fd, 0, SEEK_SET);
-        g_glyph = malloc((size_t)total); if (!g_glyph) { close(fd); continue; }
-        read(fd, g_glyph, (size_t)total); close(fd);
-        /* PSF2: header is 32 bytes, glyph height at offset 20 */
-        if (g_glyph[0]==0x72 && g_glyph[1]==0xb5 && g_glyph[2]==0x4a && g_glyph[3]==0x86) {
-            g_glyph_h = (int)((uint32_t)g_glyph[20] | ((uint32_t)g_glyph[21]<<8) |
-                              ((uint32_t)g_glyph[22]<<16) | ((uint32_t)g_glyph[23]<<24));
-            uint32_t hdr_sz = (uint32_t)g_glyph[8] | ((uint32_t)g_glyph[9]<<8) |
-                              ((uint32_t)g_glyph[10]<<16) | ((uint32_t)g_glyph[11]<<24);
-            memmove(g_glyph, g_glyph + hdr_sz, (size_t)(total - (int)hdr_sz));
-        } else { g_glyph_h = 16; }
-        break;
-    }
-    if (!g_glyph) { g_glyph = calloc(256 * 16, 1); g_glyph_h = 16; }
+    app_t a = {0};
+    a.win_w=WIN_W; a.win_h=WIN_H;
+    a.view=VIEW_WELCOME; a.dirty=true;
+    a.browser=BROWSER_LIBREWOLF; a.software=SW_LIBREOFFICE;
+    a.sel_disk=-1; a.install_pipe=-1; a.install_pid=-1;
 
-    /* Framebuffer */
-    g_fb = calloc((size_t)(g_win_w * g_win_h), 4);
-    if (!g_fb) return 1;
+    /* Load PSF2 font */
+    const char *fps[]={"/fifi-data/fonts/ter16b.psf","/fifi-data/fonts/ter20b.psf",
+                       "/fifi-data/fonts/ter24b.psf","/fifi-data/fonts/default.psf",NULL};
+    for (int i=0;fps[i];i++) if (load_font(&a,fps[i])) break;
+    if (!a.glyph) { a.glyph=calloc(256*16,1); a.glyph_charsize=16; g_fh=16; g_fw=9; g_bpl=1; }
 
-    /* Scan disks */
-    scan_disks();
+    a.fb=calloc((size_t)(a.win_w*a.win_h),4); if (!a.fb) return 1;
 
     /* Connect to compositor */
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock < 0) return 1;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock); return 1; }
+    int sock=socket(AF_UNIX,SOCK_STREAM,0); if (sock<0) return 1;
+    struct sockaddr_un addr={0}; addr.sun_family=AF_UNIX;
+    strncpy(addr.sun_path,FIFI_SOCK,sizeof(addr.sun_path)-1);
+    if (connect(sock,(struct sockaddr*)&addr,sizeof(addr))<0) { close(sock); return 1; }
+    uint8_t conn[68]={0}; uint16_t w=WIN_W,h=WIN_H;
+    memcpy(conn,&w,2); memcpy(conn+2,&h,2);
+    snprintf((char*)(conn+4),64,"FiFi OS  /  Install");
+    ipc_send(sock,IPC_APP_CONNECT,conn,sizeof(conn));
+    { uint8_t rh[8]; read(sock,rh,8); uint32_t pl; memcpy(&pl,rh+4,4);
+      if (pl&&pl<64) { uint8_t r[64]; read(sock,r,pl); } }
 
-    uint8_t conn[68] = {0};
-    uint16_t w = WIN_W, h = WIN_H;
-    memcpy(conn, &w, 2); memcpy(conn+2, &h, 2);
-    snprintf((char*)(conn+4), 64, "Install FiFi OS");
-    ipc_send(sock, IPC_APP_CONNECT, conn, sizeof(conn));
-    { uint8_t rhdr[8]; read(sock, rhdr, 8); uint32_t pl; memcpy(&pl, rhdr+4, 4);
-      if (pl && pl < 64) { uint8_t r[64]; read(sock, r, pl); } }
+    signal(SIGPIPE,SIG_IGN);
+    render_app(&a); send_frame(&a,sock); a.dirty=false;
+    /* Socket stays BLOCKING to prevent frame corruption */
 
-    signal(SIGPIPE, SIG_IGN);
-    fcntl(sock, F_SETFL, O_NONBLOCK);
-
-    /* Initial render */
-    render(g_fb);
-    send_frame(sock);
-    g_dirty = false;
-
-    uint8_t ibuf[8];
-    int igot = 0;
-    uint32_t itype = 0, iplen = 0;
-    uint8_t payload[256] = {0};
-    uint32_t ipgot = 0;
-    bool running = true;
-    bool lbtn_prev = false;
+    uint8_t ibuf[8]; int igot=0;
+    uint32_t itype=0, iplen=0;
+    uint8_t payload[256]={0}; uint32_t ipgot=0;
+    bool running=true, lbtn_prev=false;
 
     while (running) {
-        /* Poll: compositor socket + install pipe */
         struct pollfd pfds[2];
-        pfds[0].fd = sock; pfds[0].events = POLLIN;
-        pfds[1].fd = g_install_pipe; pfds[1].events = POLLIN;
-        int nfds = (g_install_pipe >= 0) ? 2 : 1;
-        poll(pfds, (nfds_t)nfds, g_step == STEP_PROGRESS ? 100 : 16);
+        pfds[0].fd=sock; pfds[0].events=POLLIN;
+        pfds[1].fd=a.install_pipe; pfds[1].events=POLLIN;
+        int nfds=(a.install_pipe>=0)?2:1;
+        poll(pfds,(nfds_t)nfds,a.view==VIEW_PROGRESS?100:16);
 
-        if (g_install_pipe >= 0 && (pfds[1].revents & POLLIN))
-            poll_install();
-        else if (g_step == STEP_PROGRESS && g_install_pipe >= 0)
-            poll_install();
+        if (a.view==VIEW_PROGRESS) poll_install(&a);
 
-        if (pfds[0].revents & POLLIN) {
-            uint8_t tbuf[4096];
-            ssize_t n = read(sock, tbuf, sizeof(tbuf));
-            if (n <= 0) break;
-            int pos = 0;
-            while (pos < (int)n) {
-                if (igot < 8) {
-                    ibuf[igot++] = tbuf[pos++];
-                    if (igot == 8) {
-                        memcpy(&itype, ibuf, 4); memcpy(&iplen, ibuf+4, 4);
-                        if (iplen == 0) ipgot = 0;
-                        else { if (iplen > sizeof(payload)) iplen = sizeof(payload); ipgot = 0; }
-                    }
-                } else if (iplen > 0 && ipgot < iplen) {
-                    uint32_t take = iplen - ipgot;
-                    if ((int)take > (int)n - pos) take = (uint32_t)((int)n - pos);
-                    for (uint32_t k = 0; k < take; k++) payload[ipgot++] = tbuf[pos++];
+        if (pfds[0].revents&POLLIN) {
+            uint8_t tbuf[4096]; ssize_t n=read(sock,tbuf,sizeof(tbuf));
+            if (n<=0) break;
+            int pos=0;
+            while (pos<(int)n) {
+                if (igot<8) {
+                    ibuf[igot++]=tbuf[pos++];
+                    if (igot==8) { memcpy(&itype,ibuf,4); memcpy(&iplen,ibuf+4,4);
+                        if (iplen>(uint32_t)sizeof(payload)) iplen=(uint32_t)sizeof(payload);
+                        ipgot=0; }
+                } else if (iplen>0&&ipgot<iplen) {
+                    uint32_t take=iplen-ipgot;
+                    if ((int)take>(int)n-pos) take=(uint32_t)((int)n-pos);
+                    for (uint32_t k=0;k<take;k++) payload[ipgot++]=tbuf[pos++];
                 } else {
-                    igot = 0;
+                    igot=0;
                     switch (itype) {
                     case IPC_INPUT_KEY:
-                        if (iplen >= 1) {
-                            uint8_t key = payload[0];
-                            if (key == 0x1Bu || key == 'q' || key == 'Q') running = false;
-                        }
+                        if (iplen>=1&&(payload[0]==0x1Bu||payload[0]=='q')) running=false;
                         break;
                     case IPC_INPUT_MOUSE:
-                        if (iplen >= 9) {
-                            int32_t rx, ry; uint8_t btns;
-                            memcpy(&rx, payload, 4); memcpy(&ry, payload+4, 4);
-                            btns = payload[8];
-                            bool lbtn = !!(btns & 1);
-                            handle_hover((int)rx, (int)ry);
-                            if (!lbtn && lbtn_prev)
-                                handle_click((int)rx, (int)ry);
-                            lbtn_prev = lbtn;
+                        if (iplen>=9) {
+                            int32_t rx,ry; uint8_t btns;
+                            memcpy(&rx,payload,4); memcpy(&ry,payload+4,4); btns=payload[8];
+                            int8_t scroll=0; if (iplen>=10) memcpy(&scroll,payload+9,1);
+                            bool lbtn=!!(btns&1);
+                            on_hover(&a,(int)rx,(int)ry);
+                            if (!lbtn&&lbtn_prev) on_click(&a,(int)rx,(int)ry,sock);
+                            lbtn_prev=lbtn;
+                            /* Scroll wheel on disk list */
+                            if (scroll && a.view==VIEW_DISK && a.ndisks>0) {
+                                int y=DISK_LIST_Y;
+                                int visible=(a.win_h-BTN_H-16-y-4)/(DISK_CARD_H+6);
+                                if (visible<1) visible=1;
+                                a.disk_scroll -= (int)scroll;
+                                if (a.disk_scroll<0) a.disk_scroll=0;
+                                if (a.disk_scroll>a.ndisks-visible) a.disk_scroll=a.ndisks-visible;
+                                if (a.disk_scroll<0) a.disk_scroll=0;
+                                a.dirty=true;
+                            }
                         }
                         break;
-                    case IPC_INVALIDATE: g_dirty = true; break;
-                    case IPC_APP_CLOSE:  running = false; break;
+                    case IPC_WIN_RESIZE:
+                        if (iplen>=4) {
+                            uint16_t nw,nh; memcpy(&nw,payload,2); memcpy(&nh,payload+2,2);
+                            if (nw>=400&&nh>=300) {
+                                uint32_t *nb=realloc(a.fb,(size_t)nw*nh*4);
+                                if (nb) { a.fb=nb; a.win_w=nw; a.win_h=nh; }
+                            }
+                        }
+                        a.dirty=true; break;
+                    case IPC_INVALIDATE: a.dirty=true; break;
+                    case IPC_APP_CLOSE:  running=false; break;
                     }
                 }
             }
         }
 
-        if (g_dirty) {
-            render(g_fb);
-            send_frame(sock);
-            g_dirty = false;
-        }
+        if (a.dirty) { render_app(&a); send_frame(&a,sock); a.dirty=false; }
     }
 
-    ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
-    close(sock);
-    free(g_fb); free(g_glyph);
+    ipc_send(sock,IPC_APP_CLOSE,NULL,0);
+    close(sock); free(a.fb); free(a.glyph);
     return 0;
 }

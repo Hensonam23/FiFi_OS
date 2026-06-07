@@ -1,0 +1,69 @@
+#!/bin/sh
+# update — apply a new FiFi OS kernel+initramfs from USB without reinstalling.
+# fifi-data (dev-tooling, node, source repo) is completely untouched.
+# Plug in the USB, type: update  then reboot.
+
+log()  { echo "[update] $*"; }
+fail() { echo "[update] ERROR: $*"; exit 1; }
+
+USB_MNT=/mnt/fifi-upd-src
+TGT_MNT=/mnt/fifi-upd-dst
+mkdir -p "$USB_MNT" "$TGT_MNT"
+
+cleanup() {
+    umount "$USB_MNT" 2>/dev/null || true
+    umount "$TGT_MNT" 2>/dev/null || true
+    rmdir  "$USB_MNT" "$TGT_MNT"  2>/dev/null || true
+}
+trap cleanup EXIT
+
+# All candidate FAT32 partitions across visible disks
+CANDIDATES=""
+for disk in /dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/sde \
+            /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1; do
+    [ -b "$disk" ] || continue
+    for part in "${disk}p1" "${disk}p2" "${disk}1" "${disk}2"; do
+        [ -b "$part" ] && CANDIDATES="$CANDIDATES $part"
+    done
+done
+
+# Find USB source: has .fifi-live-usb marker + boot/bzImage
+USB_DEV=""
+for dev in $CANDIDATES; do
+    mount -o ro "$dev" "$USB_MNT" 2>/dev/null || continue
+    if [ -f "$USB_MNT/.fifi-live-usb" ] && [ -f "$USB_MNT/boot/bzImage" ]; then
+        USB_DEV="$dev"
+        log "Source USB: $dev"
+        break
+    fi
+    umount "$USB_MNT" 2>/dev/null
+done
+[ -n "$USB_DEV" ] || fail "FiFi OS USB not found — make sure it is plugged in."
+
+# Find installed target: has boot/bzImage but no .fifi-live-usb marker
+TGT_DEV=""
+for dev in $CANDIDATES; do
+    [ "$dev" = "$USB_DEV" ] && continue
+    mount -o rw "$dev" "$TGT_MNT" 2>/dev/null || continue
+    if [ -f "$TGT_MNT/boot/bzImage" ] && [ ! -f "$TGT_MNT/.fifi-live-usb" ]; then
+        TGT_DEV="$dev"
+        log "Target (installed): $dev"
+        break
+    fi
+    umount "$TGT_MNT" 2>/dev/null
+done
+[ -n "$TGT_DEV" ] || fail "Installed FiFi OS not found — run the installer first."
+
+log "Updating kernel and initramfs..."
+cp "$USB_MNT/boot/bzImage"           "$TGT_MNT/boot/bzImage"           || fail "kernel copy failed"
+cp "$USB_MNT/boot/initramfs.cpio.gz" "$TGT_MNT/boot/initramfs.cpio.gz" || fail "initramfs copy failed"
+if [ -f "$USB_MNT/EFI/BOOT/BOOTX64.EFI" ]; then
+    cp "$USB_MNT/EFI/BOOT/BOOTX64.EFI" "$TGT_MNT/EFI/BOOT/BOOTX64.EFI"
+    log "  GRUB EFI updated"
+fi
+sync
+
+log "kernel updated"
+log "initramfs updated"
+log ""
+log "Done. Unplug USB and reboot."

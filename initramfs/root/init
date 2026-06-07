@@ -39,6 +39,46 @@ sleep 3
 
 mkdir -p /fifi-data
 
+# ── Persistent storage: mount FIFI-DATA partition if installed to disk ────────
+# The kernel cmdline may include fifi_data_uuid=<UUID> written by the installer.
+# If found, mount that ext4 partition as /fifi-data so settings and software
+# persist between reboots. Falls back to tmpfs-backed /fifi-data on live USB.
+FIFI_DATA_UUID=""
+for arg in $(cat /proc/cmdline 2>/dev/null); do
+    case "$arg" in fifi_data_uuid=*) FIFI_DATA_UUID="${arg#fifi_data_uuid=}" ;; esac
+done
+if [ -n "$FIFI_DATA_UUID" ]; then
+    DATA_DEV=""
+    # /dev/disk/by-uuid/ requires udev which we don't run — probe directly instead.
+    # Try standard symlink first (works if udev is somehow available)
+    [ -b "/dev/disk/by-uuid/$FIFI_DATA_UUID" ] && DATA_DEV="/dev/disk/by-uuid/$FIFI_DATA_UUID"
+    # Otherwise mount-probe every likely ext4 partition looking for the installed marker
+    if [ -z "$DATA_DEV" ]; then
+        _pm="/tmp/_fifi_probe" ; mkdir -p "$_pm"
+        for _d in /dev/nvme0n1p4 /dev/nvme0n1p3 /dev/nvme0n1p2 \
+                  /dev/nvme1n1p1 /dev/nvme2n1p1 \
+                  /dev/sda2 /dev/sda3 /dev/sda4 /dev/sda5 \
+                  /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2; do
+            [ -b "$_d" ] || continue
+            mount -t ext4 -o ro "$_d" "$_pm" 2>/dev/null || continue
+            # Accept this device if it has our installed marker
+            if [ -f "$_pm/installed" ]; then
+                DATA_DEV="$_d"
+                umount "$_pm" ; break
+            fi
+            umount "$_pm"
+        done
+        rmdir "$_pm" 2>/dev/null
+    fi
+    if [ -n "$DATA_DEV" ]; then
+        mount -t ext4 "$DATA_DEV" /fifi-data 2>/dev/null && \
+            echo "fifi-data: mounted $DATA_DEV" || \
+            echo "fifi-data: mount failed, using tmpfs"
+    else
+        echo "fifi-data: data partition not found (UUID=$FIFI_DATA_UUID), using tmpfs"
+    fi
+fi
+
 # ── Loopback interface ────────────────────────────────────────────────────────
 # Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
 ip link set lo up 2>/dev/null
@@ -253,6 +293,17 @@ if [ -x /usr/bin/Xwayland ]; then
             >/fifi-data/xwayland.log 2>&1
     ) &
 fi
+
+# ── Restore /usr/local/bin symlinks for fifi-data tools ─────────────────────
+mkdir -p /usr/local/bin
+[ -x /fifi-data/devtool ] && ln -sf /fifi-data/devtool /usr/local/bin/devtool
+[ -x /fifi-data/dev-tooling/bin/node ] && ln -sf /fifi-data/dev-tooling/bin/node /usr/local/bin/node
+export PATH="/usr/local/bin:/fifi-data/dev-tooling/bin:$PATH"
+
+# ── Sudoers: fifi user gets passwordless sudo so devtool can control the system
+[ -f /etc/sudoers ] || echo "root ALL=(ALL) ALL" > /etc/sudoers
+grep -q '^fifi ' /etc/sudoers 2>/dev/null || echo 'fifi ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+chmod 440 /etc/sudoers 2>/dev/null || true
 
 # ── Launch FiFi compositor ────────────────────────────────────────────────────
 # Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not

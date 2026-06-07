@@ -1,0 +1,19 @@
+#!/bin/sh
+# FiFi OS one-command developer setup.
+# Installs developer tooling and clones the FiFi OS source. Just type: setup
+
+/bin/fifi-dev-setup.sh "$@" || exit 1
+
+if [ ! -d /fifi-data/linux-desktop ]; then
+    echo "[setup] Cloning FiFi OS source to /fifi-data/linux-desktop..."
+    curl -fL https://github.com/Hensonam23/FiFi_OS/archive/refs/heads/linux-desktop.tar.gz \
+        | tar xz -C /fifi-data/ && \
+        mv /fifi-data/FiFi_OS-linux-desktop /fifi-data/linux-desktop
+    echo "[setup] Source ready."
+else
+    echo "[setup] Source already at /fifi-data/linux-desktop"
+fi
+
+echo ""
+echo "[setup] All done. Type: devtool"
+echo ""

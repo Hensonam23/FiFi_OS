@@ -97,8 +97,16 @@ static pid_t    g_child_pid  = -1;
 /* ESC sequence parser */
 static bool  g_esc         = false;
 static bool  g_esc_bracket  = false;
-static char  g_esc_buf[32];
+static bool  g_in_osc       = false;
+static char  g_esc_buf[64];
 static int   g_esc_len      = 0;
+
+/* UTF-8 decoder */
+static int      g_utf8_remain = 0;
+static uint32_t g_utf8_cp     = 0;
+
+/* Saved cursor */
+static int   g_saved_cx = 0, g_saved_cy = 0;
 
 static void cell_clear_region(int r0, int c0, int r1, int c1) {
     for (int r = r0; r <= r1 && r < g_rows; r++)
@@ -144,6 +152,24 @@ static void handle_esc_seq(void) {
     char cmd = g_esc_buf[g_esc_len - 1];
     g_esc_buf[g_esc_len - 1] = '\0';
 
+    /* DEC private sequences: ESC[?Nh / ESC[?Nl */
+    if (g_esc_buf[0] == '?') {
+        int n = atoi(g_esc_buf + 1);
+        if (cmd == 'h') {
+            if (n == 25)   g_cursor_vis = true;
+            if (n == 1049) { cell_clear_all(); g_cx = 0; g_cy = 0; }
+        } else if (cmd == 'l') {
+            if (n == 25)   g_cursor_vis = false;
+            if (n == 1049) { cell_clear_all(); g_cx = 0; g_cy = 0; }
+        }
+        g_esc = g_esc_bracket = false; g_esc_len = 0;
+        return;
+    }
+
+    /* Cursor save/restore */
+    if (cmd == 's') { g_saved_cx = g_cx; g_saved_cy = g_cy; g_esc = g_esc_bracket = false; g_esc_len = 0; return; }
+    if (cmd == 'u') { g_cx = g_saved_cx; g_cy = g_saved_cy; g_esc = g_esc_bracket = false; g_esc_len = 0; return; }
+
     if (cmd == 'm') {
         char *p = g_esc_buf;
         while (*p) {
@@ -186,8 +212,20 @@ static void handle_esc_seq(void) {
 }
 
 static void term_putc(uint8_t c) {
+    /* OSC: consume until BEL or ESC */
+    if (g_in_osc) {
+        if (c == 0x07) { g_in_osc = false; }
+        else if (c == 0x1B) { g_in_osc = false; g_esc = true; g_esc_bracket = false; g_esc_len = 0; }
+        return;
+    }
     if (g_esc) {
         if (!g_esc_bracket && c == '[') { g_esc_bracket = true; return; }
+        if (!g_esc_bracket && c == ']') { g_in_osc = true; g_esc = false; return; }
+        if (!g_esc_bracket && c == 'M') { /* reverse index */
+            g_esc = false;
+            if (g_cy > 0) { g_cy--; } else { memmove(&g_cells[1], &g_cells[0], sizeof(Cell)*MAX_COLS*(g_rows-1)); cell_clear_region(0,0,0,g_cols); }
+            return;
+        }
         if (g_esc_bracket) {
             if ((c >= 0x40 && c <= 0x7E) || g_esc_len >= (int)sizeof(g_esc_buf) - 1) {
                 g_esc_buf[g_esc_len++] = c;
@@ -209,6 +247,25 @@ static void term_putc(uint8_t c) {
         if (g_cx > 0) { g_cx--; g_cells[g_cy][g_cx] = (Cell){ ' ', g_fg, g_bg }; } return;
     }
     if (c < 0x20) return;
+
+    /* UTF-8 multi-byte handling */
+    if (c >= 0x80) {
+        if (c >= 0xC0) {
+            if      (c >= 0xF0) { g_utf8_remain = 3; g_utf8_cp = c & 0x07u; }
+            else if (c >= 0xE0) { g_utf8_remain = 2; g_utf8_cp = c & 0x0Fu; }
+            else                 { g_utf8_remain = 1; g_utf8_cp = c & 0x1Fu; }
+        } else if (g_utf8_remain > 0) {
+            g_utf8_cp = (g_utf8_cp << 6) | (c & 0x3Fu);
+            if (--g_utf8_remain == 0) {
+                /* Use glyph if in font range, else a space (preserves column count) */
+                uint8_t ch = (g_utf8_cp < (uint32_t)g_n_glyph) ? (uint8_t)g_utf8_cp : ' ';
+                g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
+                if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
+            }
+        } else { g_utf8_remain = 0; }
+        return;
+    }
+
     g_cells[g_cy][g_cx] = (Cell){ c, g_fg, g_bg };
     g_cx++;
     if (g_cx >= g_cols) { g_cx = 0; g_cy++; if (g_cy >= g_rows) { g_cy = g_rows - 1; scroll_up(); } }
@@ -359,7 +416,8 @@ static int pty_spawn(void) {
          * same TERM, environment, "\w # " prompt, and ush-then-sh login shell. */
         setenv("TERM",  "linux", 1);
         setenv("HOME",  "/root", 1);
-        setenv("PATH",  "/bin:/sbin:/usr/bin:/usr/sbin", 1);
+        if (!getenv("PATH") || getenv("PATH")[0] == '\0')
+            setenv("PATH", "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
         setenv("USER",  "fifi",  1);
         setenv("SHELL", "/bin/sh", 1);
         /* Familiar Linux-style prompt, identical to the built-in terminal. */

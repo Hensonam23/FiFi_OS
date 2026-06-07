@@ -120,6 +120,18 @@ else
     echo "[flash]   Then re-flash to enable Secure Boot booting"
 fi
 
+touch "$MNT/.fifi-live-usb"
+
+echo "[flash] Bundling Node.js v22 on USB (enables offline setup)..."
+NODE_URL=$(curl -sf "https://nodejs.org/dist/latest-v22.x/" | grep -oE "node-v[0-9.]+-linux-x64\.tar\.xz" | head -1)
+if [ -n "$NODE_URL" ]; then
+    curl -fL "https://nodejs.org/dist/latest-v22.x/$NODE_URL" -o "$MNT/$NODE_URL" 2>/dev/null && \
+        echo "[flash] Node.js bundled: $NODE_URL" || \
+        echo "[flash] WARNING: Node.js download failed -- setup will download at runtime"
+else
+    echo "[flash] WARNING: Could not find Node.js URL -- setup will download at runtime"
+fi
+
 echo "[flash] Syncing to device..."
 sync
 umount "$MNT"
@@ -133,6 +145,16 @@ mkdir -p /tmp/fifi-flash-verify
 mount "$PART" /tmp/fifi-flash-verify
 INITRD_ON_DEV=$(md5sum /tmp/fifi-flash-verify/boot/initramfs.cpio.gz | cut -d' ' -f1)
 BUILD_INITRD=$(md5sum "$INITRAMFS" | cut -d' ' -f1)
+# Write devtool API key to USB if available (survives flash for fifi-dev-setup.sh)
+DEVTOOL_JSON="${SUDO_HOME:-$HOME}/.devtool.json"
+[ -f "$DEVTOOL_JSON" ] || DEVTOOL_JSON="/home/aaron/.devtool.json"
+if [ -f "$DEVTOOL_JSON" ]; then
+    API_KEY=$(python3 -c "import json; print(json.load(open('$DEVTOOL_JSON')).get('primaryApiKey',''))" 2>/dev/null || true)
+    if [ -n "$API_KEY" ]; then
+        echo "$API_KEY" > /tmp/fifi-flash-verify/devtool-api-key.txt
+        echo "[flash] the assistant API key written to USB"
+    fi
+fi
 umount /tmp/fifi-flash-verify
 rmdir /tmp/fifi-flash-verify
 

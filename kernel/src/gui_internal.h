@@ -37,7 +37,7 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  23u
+#define LAUNCHER_ITEMS  22u
 #define LAUNCHER_W      110u
 #define CTX_ITEM_H      26u
 #define CTX_ITEMS       13u  /* 4 built-in + sep + 5 IPC apps + sep + 2 desktop actions */

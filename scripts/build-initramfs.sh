@@ -31,6 +31,14 @@ trap 'rm -rf "$STAGE"' EXIT
 
 cp -a "$ROOT_DIR/." "$STAGE/"
 
+# Embed the kernel in the initramfs so fifi-install.sh can always find it
+# without having to locate and mount the USB EFI partition
+mkdir -p "$STAGE/boot"
+if [ -f "$REPO_ROOT/build-linux/bzImage" ]; then
+    cp "$REPO_ROOT/build-linux/bzImage" "$STAGE/boot/bzImage"
+    echo "[initramfs] kernel embedded at /boot/bzImage ($(du -sh "$REPO_ROOT/build-linux/bzImage" | cut -f1))"
+fi
+
 # Create mount points git doesn't track (empty dirs)
 mkdir -p "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/tmp" "$STAGE/run"
 mkdir -p "$STAGE/root" "$STAGE/mnt" "$STAGE/etc"
@@ -41,9 +49,10 @@ cp "$BUSYBOX_BIN" "$STAGE/bin/busybox"
 chmod +x "$STAGE/bin/busybox"
 
 # Populate symlinks: sh, mount, ls, cat, echo, etc.
-for applet in sh ash mount umount ls cat echo cp mv rm mkdir mknod \
+for applet in sh ash bash mount umount ls cat echo cp mv rm mkdir mknod \
               ln chmod chown hostname dmesg free ps kill sleep \
-              modprobe insmod lsmod ifconfig ip udhcpc ntpd nc wget; do
+              modprobe insmod lsmod ifconfig ip udhcpc ntpd nc wget \
+              readlink realpath dirname basename; do
     ln -sf busybox "$STAGE/bin/$applet" 2>/dev/null || true
 done
 
@@ -150,6 +159,74 @@ echo "[initramfs] building fifi-installer..."
     cp "$REPO_ROOT/fifi/apps/installer/fifi-installer" "$STAGE/bin/"
     echo "[initramfs] included fifi-installer"
 } || echo "[initramfs] WARNING: fifi-installer build failed"
+
+# ── Disk installer tools (parted, mkfs.ext4, mkfs.fat, blkid, grub-install) ──
+echo "[initramfs] bundling disk installer tools..."
+cp "$STAGE/bin/fifi-install.sh" "$STAGE/bin/fifi-install.sh" 2>/dev/null || true  # already staged above
+install_tools_ok=true
+mkdir -p "$STAGE/usr/lib"
+for tool in parted mkfs.ext4 mkfs.fat blkid; do
+    bin="$(which $tool 2>/dev/null)"
+    if [ -x "$bin" ]; then
+        cp "$bin" "$STAGE/bin/$tool"
+        # Copy shared library dependencies
+        ldd "$bin" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+            [ -f "$lib" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$lib")"
+            [ -f "$dest" ] || cp "$lib" "$dest"
+        done
+    else
+        echo "[initramfs] WARNING: $tool not found -- disk installer will fail"
+        install_tools_ok=false
+    fi
+done
+# grub-install + modules
+GRUB_INSTALL="$(which grub-install 2>/dev/null)"
+if [ -x "$GRUB_INSTALL" ]; then
+    cp "$GRUB_INSTALL" "$STAGE/bin/grub-install"
+    # Copy grub x86_64-efi modules
+    for dir in /usr/lib/grub/x86_64-efi /usr/share/grub/x86_64-efi; do
+        if [ -d "$dir" ]; then
+            mkdir -p "$STAGE/usr/lib/grub/x86_64-efi"
+            cp -r "$dir/"* "$STAGE/usr/lib/grub/x86_64-efi/" 2>/dev/null || true
+            break
+        fi
+    done
+    ldd "$GRUB_INSTALL" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+    echo "[initramfs] disk installer tools bundled"
+else
+    echo "[initramfs] WARNING: grub-install not found -- disk installer will not work"
+fi
+# grub-mkimage — fallback if grub-install fails
+GRUB_MKIMAGE="$(which grub-mkimage 2>/dev/null)"
+if [ -x "$GRUB_MKIMAGE" ]; then
+    cp "$GRUB_MKIMAGE" "$STAGE/bin/grub-mkimage"
+    ldd "$GRUB_MKIMAGE" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+    echo "[initramfs] grub-mkimage bundled"
+else
+    echo "[initramfs] WARNING: grub-mkimage not found"
+fi
+# efibootmgr — needed to register boot entry in UEFI NVRAM
+EFIBOOTMGR="$(which efibootmgr 2>/dev/null)"
+if [ -x "$EFIBOOTMGR" ]; then
+    cp "$EFIBOOTMGR" "$STAGE/bin/efibootmgr"
+    ldd "$EFIBOOTMGR" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+    echo "[initramfs] efibootmgr bundled"
+else
+    echo "[initramfs] WARNING: efibootmgr not found"
+fi
 
 # ── nftables firewall ─────────────────────────────────────────────────────────
 echo "[initramfs] bundling nftables..."
@@ -348,6 +425,20 @@ done
 if [ -f /usr/lib64/ld-linux-x86-64.so.2 ]; then
     cp /usr/lib64/ld-linux-x86-64.so.2 "$STAGE/usr/lib64/"
 fi
+# glibc compatibility stubs — needed by AppImage-bundled binaries (LibreWolf etc.)
+# On glibc 2.34+ these are stubs but must be present for older binaries to load.
+for lib in \
+    /usr/lib/libdl.so.2 \
+    /usr/lib/libpthread.so.0 \
+    /usr/lib/librt.so.1 \
+    /usr/lib/libutil.so.1 \
+    /usr/lib/libgcc_s.so.1 \
+    /usr/lib/libnss_files.so.2 \
+    /usr/lib/libnss_dns.so.2 \
+    /usr/lib/libresolv.so.2 \
+    /usr/lib/libm.so.6; do
+    [ -f "$lib" ] && cp "$lib" "$STAGE/usr/lib/" 2>/dev/null || true
+done
 
 echo "[initramfs] PipeWire bundled"
 

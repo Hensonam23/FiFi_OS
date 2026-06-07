@@ -67,6 +67,9 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 | Context menus: right-click desktop and file browser | **Working** |
 | Toast notifications: volume, lock, snap, and system actions | **Working** |
 | Secure Boot: USB flashing signs EFI binaries, cert exported for enrollment | **Working** |
+| In-OS installer: disk wizard, whole-disk and partition modes, GRUB dual-boot | **Working** |
+| OS update: type `update` with USB plugged in to update without reinstalling | **Working** |
+| developer tooling: AI development tool runs natively, type `setup` then `devtool` | **Working** |
 
 ---
 
@@ -75,6 +78,10 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 **Phase 5 complete. Phase 6 (Full System) in progress.**
 
 FiFi desktop runs on Linux with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 app support (Steam, browsers), WiFi via wpa_supplicant + iwd, and a full security suite in the Security Center.
+
+Phase 6 brings the in-OS installer, browser integration, and a full developer workflow. The installer is a 7-screen wizard that handles disk selection, formatting, GRUB install, and Windows dual-boot alongside existing installs. Type `setup` after booting to install developer tooling and clone the source. Type `update` with the USB plugged in to update the OS in place without reinstalling or losing any downloaded tools.
+
+The terminal received a full UTF-8 rewrite. Multi-byte sequences are now decoded correctly so developer tooling and other modern tools render cleanly. OSC sequences (window title), alternate screen, and cursor hide/show are all handled properly.
 
 Phase 5 added a security-focused feature set: DNS over HTTPS via dnscrypt-proxy, WireGuard VPN with a settings panel, Tor mode with bootstrap status, a network scanner, nmap port scanner, packet capture, password strength tester, vulnerability scanner, and intrusion detection. AppArmor profiles run the compositor and security apps in MAC mode. LUKS2 encrypted storage status and EFI Secure Boot status are shown in Security Center.
 
@@ -174,11 +181,14 @@ USB flashing signs the EFI binaries with your Secure Boot key and exports the ce
 
 ### Phase 6: Full System
 
+- [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
+- [x] OS update command: `update` copies new kernel+initramfs from USB without reinstalling
+- [x] developer tooling: runs natively on FiFi OS, `setup` installs it, `devtool` launches it
+- [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
 - [ ] Bluetooth: pairing UI, A2DP audio via PipeWire
 - [ ] Browser: Firefox or LibreWolf in a FiFi window (user chooses at install time)
 - [ ] LibreOffice: installed by default during installation
 - [ ] Desktop shortcuts, image viewer
-- [ ] In-OS installer: disk selection, browser choice, downloads LibreOffice, one click to install
 - [ ] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
 - [ ] Desktop themes: optional theme system with selectable styles
 - [ ] Built-in AI assistant: local model (Ollama/llama.cpp), no internet required, completely offline
@@ -218,7 +228,29 @@ make sdl-build
 make sdl-run
 
 # Flash to USB (single EFI partition, Secure Boot signed, verified write)
+# Also bundles Node.js on the USB for offline developer tooling install
 sudo bash scripts/flash-linux-usb.sh /dev/sdX
+
+# Update an installed FiFi OS without reinstalling (plug in USB, then run from terminal)
+update
+```
+
+### First boot after install
+
+```sh
+# Install developer tooling and clone the source (reads Node.js from USB, no download needed)
+setup
+
+# Start developer tooling
+devtool
+```
+
+### Updating after that
+
+```sh
+# From the FiFi OS terminal with USB plugged in:
+update
+# Then reboot. developer tooling, node, and the source repo are untouched.
 ```
 
 ---

@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/wait.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
@@ -391,6 +392,12 @@ void gui_spawn_app(const char *path) {
 }
 
 void gui_exec_silent(const char *path, const char *arg1, const char *arg2) {
+    /* Intercept reboot/poweroff — use syscall directly instead of forking a shell
+     * because busybox reboot/poweroff hangs in the initramfs environment. */
+    if (arg1 && arg2) {
+        if (strcmp(arg2, "reboot")   == 0) { sync(); reboot(RB_AUTOBOOT);   return; }
+        if (strcmp(arg2, "poweroff") == 0) { sync(); reboot(RB_POWER_OFF);  return; }
+    }
     signal(SIGCHLD, SIG_IGN);
     pid_t pid = fork();
     if (pid == 0) {

@@ -224,7 +224,7 @@ int g_redraw_src = 0;
 const char * const g_launcher_items[LAUNCHER_ITEMS] = {
     "Terminal", "Files", "Settings", "Viewer",
     "File Browser", "Sys Info", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
-    "Security", "WiFi", "Browser", "Install FiFi OS", "Steam", "Proton Config",
+    "Security", "WiFi", "Browser", "Steam", "Proton Config",
     "---",          /* separator -- not clickable */
     "Sleep",
     "Restart",
@@ -307,6 +307,17 @@ void gui_init(void) {
     taskbar_draw();
     fb_load(&g_wins[1].fb, "/");
     win_show(&g_wins[0], 0);
+
+#ifdef __linux__
+    /* On a live USB (not yet installed to disk), show an "Install FiFi OS"
+     * icon on the desktop. The installer creates /fifi-data/installed when
+     * done, so the icon disappears on the next boot into the installed system. */
+    if (vfs_filesize("installed") < 0) {
+        __attribute__((weak)) void gui_add_desktop_icon(const char *path, const char *label);
+        if (gui_add_desktop_icon)
+            gui_add_desktop_icon("/bin/fifi-installer", "Install FiFi OS");
+    }
+#endif
 }
 
 /* ── Forward declarations for public API functions defined later ─────── */
@@ -849,7 +860,6 @@ void gui_on_tick(void) {
                                 "/bin/fifi-security",
                                 "/bin/fifi-wifi",
                                 "/bin/fifi-browser",
-                                "/bin/fifi-installer",
                                 "/usr/bin/steam",
                                 "/bin/fifi-proton",
                             };
@@ -2610,29 +2620,39 @@ void gui_on_tick(void) {
             g_desk_icon_hover = new_hov;
             if (!g_launcher_open && !g_ctx_open) full_redraw();
         }
-        /* Left-click on desktop icon: select + open on double-click */
+        /* Left-click on desktop icon */
         if (btn_pressed && new_hov >= 0) {
-            uint64_t now = pit_ticks();
-            if (g_desk_icon_dbl == new_hov && now - g_desk_icon_click_t < 30u) {
-                /* Double-click → open */
-                const char *ipath = g_desk_icons[new_hov].path;
-                const char *ext   = strrchr(ipath, '.');
-                bool is_img = false;
-                if (ext) {
-                    static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
-                    for (int _ii = 0; imgs[_ii]; _ii++)
-                        if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
-                }
-                __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
-                if (is_img && gui_spawn_app_with_arg)
-                    gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
-                else if (gui_spawn_app_with_arg)
-                    gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
+            g_desk_icon_sel = new_hov;
+            const char *ipath = g_desk_icons[new_hov].path;
+            const char *_base = strrchr(ipath, '/');
+            _base = _base ? _base + 1 : ipath;
+            bool _is_exec = (strrchr(_base, '.') == NULL);
+            __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
+            __attribute__((weak)) void gui_spawn_app(const char *p);
+            if (_is_exec) {
+                /* Executables (no extension) open on single click */
+                if (gui_spawn_app) gui_spawn_app(ipath);
                 g_desk_icon_dbl = -1;
             } else {
-                g_desk_icon_sel   = new_hov;
-                g_desk_icon_dbl   = new_hov;
-                g_desk_icon_click_t = now;
+                /* Documents open on double-click (600ms window) */
+                uint64_t now = pit_ticks();
+                if (g_desk_icon_dbl == new_hov && now - g_desk_icon_click_t < 60u) {
+                    const char *ext = strrchr(ipath, '.');
+                    bool is_img = false;
+                    if (ext) {
+                        static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
+                        for (int _ii = 0; imgs[_ii]; _ii++)
+                            if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
+                    }
+                    if (is_img && gui_spawn_app_with_arg)
+                        gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
+                    else if (gui_spawn_app_with_arg)
+                        gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
+                    g_desk_icon_dbl = -1;
+                } else {
+                    g_desk_icon_dbl     = new_hov;
+                    g_desk_icon_click_t = now;
+                }
             }
             full_redraw();
             int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
@@ -2747,7 +2767,6 @@ void gui_on_tick(void) {
                     "/bin/fifi-security",
                     "/bin/fifi-wifi",
                     "/bin/fifi-browser",
-                    "/bin/fifi-installer",
                     "/usr/bin/steam",
                     "/bin/fifi-proton",
                 };

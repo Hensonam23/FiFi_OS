@@ -839,15 +839,16 @@ static void wl_client_recv(wl_client_t *c) {
         const uint8_t *args = c->recv + 8;
         uint32_t args_len   = msg_sz - 8;
 
-        /* If this message is CREATE_POOL (wl_shm op 0), the fd arrives via cmsg */
+        wl_handle_msg(c, obj_id, opcode, args, args_len);
+
+        /* Associate ancillary fd with the pool that was just created by CREATE_POOL.
+         * Must run AFTER wl_handle_msg() so the pool object exists to receive the fd. */
         if (rx_fd >= 0) {
-            /* Find the SHM pool that was just created — stash the fd */
-            /* It's the most recently created OBJ_SHM_POOL without a fd */
             for (int i = c->n_objs - 1; i >= 0; i--) {
                 if (c->objs[i].type == OBJ_SHM_POOL && c->objs[i].data) {
                     wl_shm_buf_t *pool = c->objs[i].data;
                     if (pool->fd < 0) {
-                        pool->fd = rx_fd;
+                        pool->fd   = rx_fd;
                         pool->data = mmap(NULL, pool->size, PROT_READ, MAP_SHARED, rx_fd, 0);
                         if (pool->data == MAP_FAILED) pool->data = NULL;
                         rx_fd = -1;
@@ -857,8 +858,6 @@ static void wl_client_recv(wl_client_t *c) {
             }
             if (rx_fd >= 0) { close(rx_fd); rx_fd = -1; }
         }
-
-        wl_handle_msg(c, obj_id, opcode, args, args_len);
 
         /* Consume message from buffer */
         memmove(c->recv, c->recv + msg_sz, c->recv_used - msg_sz);
