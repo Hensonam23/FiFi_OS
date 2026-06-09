@@ -108,6 +108,60 @@ static uint32_t g_utf8_cp     = 0;
 /* Saved cursor */
 static int   g_saved_cx = 0, g_saved_cy = 0;
 
+/* Map common Unicode codepoints to CP437 equivalents in the Terminus font */
+static uint8_t unicode_to_cp437(uint32_t cp) {
+    switch (cp) {
+    /* Box drawing — single */
+    case 0x2500: return 0xC4;  /* ─ */
+    case 0x2502: return 0xB3;  /* │ */
+    case 0x250C: return 0xDA;  /* ┌ */
+    case 0x2510: return 0xBF;  /* ┐ */
+    case 0x2514: return 0xC0;  /* └ */
+    case 0x2518: return 0xD9;  /* ┘ */
+    case 0x251C: return 0xC3;  /* ├ */
+    case 0x2524: return 0xB4;  /* ┤ */
+    case 0x252C: return 0xC2;  /* ┬ */
+    case 0x2534: return 0xC1;  /* ┴ */
+    case 0x253C: return 0xC5;  /* ┼ */
+    /* Box drawing — double */
+    case 0x2550: return 0xCD;  /* ═ */
+    case 0x2551: return 0xBA;  /* ║ */
+    case 0x2554: return 0xC9;  /* ╔ */
+    case 0x2557: return 0xBB;  /* ╗ */
+    case 0x255A: return 0xC8;  /* ╚ */
+    case 0x255D: return 0xBC;  /* ╝ */
+    case 0x2560: return 0xCC;  /* ╠ */
+    case 0x2563: return 0xB9;  /* ╣ */
+    case 0x2566: return 0xCB;  /* ╦ */
+    case 0x2569: return 0xCA;  /* ╩ */
+    case 0x256C: return 0xCE;  /* ╬ */
+    /* Block elements */
+    case 0x2580: return 0xDF;  /* ▀ */
+    case 0x2584: return 0xDC;  /* ▄ */
+    case 0x2588: return 0xDB;  /* █ */
+    case 0x258C: return 0xDD;  /* ▌ */
+    case 0x2590: return 0xDE;  /* ▐ */
+    case 0x2591: return 0xB0;  /* ░ */
+    case 0x2592: return 0xB1;  /* ▒ */
+    case 0x2593: return 0xB2;  /* ▓ */
+    /* Symbols developer tooling uses */
+    case 0x25A0: return 0xFE;  /* ■ */
+    case 0x25B2: return 0x1E;  /* ▲ */
+    case 0x25BC: return 0x1F;  /* ▼ */
+    case 0x25C6: return 0x04;  /* ◆ → ♦ */
+    case 0x2022: return 0x07;  /* • bullet */
+    case 0x2713: return 0xFB;  /* ✓ → √ */
+    case 0x2717: return 'x';   /* ✗ */
+    case 0x2192: return 0x1A;  /* → */
+    case 0x2190: return 0x1B;  /* ← */
+    case 0x2191: return 0x18;  /* ↑ */
+    case 0x2193: return 0x19;  /* ↓ */
+    case 0x00B7: return 0xFA;  /* · middle dot */
+    case 0x2026: return '.';   /* … → . */
+    default:     return ' ';
+    }
+}
+
 static void cell_clear_region(int r0, int c0, int r1, int c1) {
     for (int r = r0; r <= r1 && r < g_rows; r++)
         for (int c = c0; c < c1 && c < g_cols; c++)
@@ -257,8 +311,11 @@ static void term_putc(uint8_t c) {
         } else if (g_utf8_remain > 0) {
             g_utf8_cp = (g_utf8_cp << 6) | (c & 0x3Fu);
             if (--g_utf8_remain == 0) {
-                /* Use glyph if in font range, else a space (preserves column count) */
-                uint8_t ch = (g_utf8_cp < (uint32_t)g_n_glyph) ? (uint8_t)g_utf8_cp : ' ';
+                uint8_t ch;
+                if (g_utf8_cp < (uint32_t)g_n_glyph)
+                    ch = (uint8_t)g_utf8_cp;
+                else
+                    ch = unicode_to_cp437(g_utf8_cp);
                 g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
                 if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
             }
@@ -414,8 +471,10 @@ static int pty_spawn(void) {
         if (slave > 2) close(slave);
         /* Match the built-in terminal (platform/linux/pty.c) so both shells look identical:
          * same TERM, environment, "\w # " prompt, and ush-then-sh login shell. */
-        setenv("TERM",  "linux", 1);
-        setenv("HOME",  "/root", 1);
+        setenv("TERM",     "xterm-256color", 1);
+        setenv("LANG",     "en_US.UTF-8",   1);
+        setenv("LC_ALL",   "en_US.UTF-8",   1);
+        setenv("HOME",     "/root",          1);
         if (!getenv("PATH") || getenv("PATH")[0] == '\0')
             setenv("PATH", "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
         setenv("USER",  "fifi",  1);

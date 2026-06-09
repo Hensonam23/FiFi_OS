@@ -22,6 +22,8 @@ echo "FiFiOS" > /proc/sys/kernel/hostname 2>/dev/null || true
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
 export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0
 export TZ=PST8PDT,M3.2.0,M11.1.0
@@ -296,6 +298,7 @@ fi
 
 # ── Restore /usr/local/bin symlinks for fifi-data tools ─────────────────────
 mkdir -p /usr/local/bin
+[ -x /fifi-data/devtool ] && ln -sf /fifi-data/devtool /bin/devtool
 [ -x /fifi-data/devtool ] && ln -sf /fifi-data/devtool /usr/local/bin/devtool
 [ -x /fifi-data/dev-tooling/bin/node ] && ln -sf /fifi-data/dev-tooling/bin/node /usr/local/bin/node
 export PATH="/usr/local/bin:/fifi-data/dev-tooling/bin:$PATH"
