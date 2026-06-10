@@ -225,13 +225,25 @@ static void handle_esc_seq(void) {
         char *p = g_esc_buf;
         while (*p) {
             int n = atoi(p);
+            while (*p && *p != ';') p++;   /* advance past this param */
+            if (*p == ';') p++;
             if (n == 0)                  { g_fg = ansi_color(7, false); g_bg = ansi_color(0, false); }
-            else if (n == 1)             { /* bold — use bright fg */ }
+            else if (n == 1)             { /* bold */ }
             else if (n >= 30 && n <= 37)   g_fg = ansi_color(n - 30, false);
             else if (n >= 90 && n <= 97)   g_fg = ansi_color(n - 90, true);
             else if (n >= 40 && n <= 47)   g_bg = ansi_color(n - 40, false);
-            while (*p && *p != ';') p++;
-            if (*p == ';') p++;
+            else if (n == 38 || n == 48) {
+                /* Extended color — skip sub-params so they aren't misread as color indices */
+                int mode = atoi(p);
+                while (*p && *p != ';') p++; if (*p == ';') p++;  /* skip mode (5 or 2) */
+                if (mode == 5) {
+                    while (*p && *p != ';') p++; if (*p == ';') p++;  /* skip N */
+                } else if (mode == 2) {
+                    while (*p && *p != ';') p++; if (*p == ';') p++;  /* skip R */
+                    while (*p && *p != ';') p++; if (*p == ';') p++;  /* skip G */
+                    while (*p && *p != ';') p++; if (*p == ';') p++;  /* skip B */
+                }
+            }
         }
     } else if (cmd == 'J') {
         int n = atoi(g_esc_buf);
