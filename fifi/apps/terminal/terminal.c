@@ -108,56 +108,53 @@ static uint32_t g_utf8_cp     = 0;
 /* Saved cursor */
 static int   g_saved_cx = 0, g_saved_cy = 0;
 
-/* Map common Unicode codepoints to CP437 equivalents in the Terminus font */
-static uint8_t unicode_to_cp437(uint32_t cp) {
+/* Map Unicode codepoints to ASCII fallbacks — no font encoding dependency */
+static uint8_t unicode_to_ascii(uint32_t cp) {
+    /* Box drawing — all corners/junctions → + */
+    if (cp >= 0x250C && cp <= 0x254B) return '+';
+    /* Double-line box drawing — corners/junctions → + */
+    if (cp >= 0x2552 && cp <= 0x256C) return '+';
     switch (cp) {
-    /* Box drawing — single */
-    case 0x2500: return 0xC4;  /* ─ */
-    case 0x2502: return 0xB3;  /* │ */
-    case 0x250C: return 0xDA;  /* ┌ */
-    case 0x2510: return 0xBF;  /* ┐ */
-    case 0x2514: return 0xC0;  /* └ */
-    case 0x2518: return 0xD9;  /* ┘ */
-    case 0x251C: return 0xC3;  /* ├ */
-    case 0x2524: return 0xB4;  /* ┤ */
-    case 0x252C: return 0xC2;  /* ┬ */
-    case 0x2534: return 0xC1;  /* ┴ */
-    case 0x253C: return 0xC5;  /* ┼ */
-    /* Box drawing — double */
-    case 0x2550: return 0xCD;  /* ═ */
-    case 0x2551: return 0xBA;  /* ║ */
-    case 0x2554: return 0xC9;  /* ╔ */
-    case 0x2557: return 0xBB;  /* ╗ */
-    case 0x255A: return 0xC8;  /* ╚ */
-    case 0x255D: return 0xBC;  /* ╝ */
-    case 0x2560: return 0xCC;  /* ╠ */
-    case 0x2563: return 0xB9;  /* ╣ */
-    case 0x2566: return 0xCB;  /* ╦ */
-    case 0x2569: return 0xCA;  /* ╩ */
-    case 0x256C: return 0xCE;  /* ╬ */
-    /* Block elements */
-    case 0x2580: return 0xDF;  /* ▀ */
-    case 0x2584: return 0xDC;  /* ▄ */
-    case 0x2588: return 0xDB;  /* █ */
-    case 0x258C: return 0xDD;  /* ▌ */
-    case 0x2590: return 0xDE;  /* ▐ */
-    case 0x2591: return 0xB0;  /* ░ */
-    case 0x2592: return 0xB1;  /* ▒ */
-    case 0x2593: return 0xB2;  /* ▓ */
+    case 0x2500: case 0x2501:
+    case 0x2504: case 0x2505: case 0x2508: case 0x2509:
+    case 0x254C: case 0x254D:
+    case 0x2550: return '-';   /* ─ ━ variants → - */
+    case 0x2502: case 0x2503:
+    case 0x2506: case 0x2507: case 0x250A: case 0x250B:
+    case 0x254E: case 0x254F:
+    case 0x2551: return '|';   /* │ ┃ variants → | */
+    /* Block elements → # */
+    case 0x2580: case 0x2584: case 0x2588:
+    case 0x258C: case 0x2590:
+    case 0x2591: case 0x2592: case 0x2593: case 0x2594: case 0x2595:
+    case 0x25A0: case 0x25A1: return '#';
+    /* Arrows */
+    case 0x2190: case 0x21D0: case 0x27F5: return '<';
+    case 0x2192: case 0x21D2: case 0x27F6: return '>';
+    case 0x2191: case 0x21D1: return '^';
+    case 0x2193: case 0x21D3: return 'v';
+    case 0x21B5: case 0x23CE: return '<';   /* ↵ enter */
     /* Symbols developer tooling uses */
-    case 0x25A0: return 0xFE;  /* ■ */
-    case 0x25B2: return 0x1E;  /* ▲ */
-    case 0x25BC: return 0x1F;  /* ▼ */
-    case 0x25C6: return 0x04;  /* ◆ → ♦ */
-    case 0x2022: return 0x07;  /* • bullet */
-    case 0x2713: return 0xFB;  /* ✓ → √ */
-    case 0x2717: return 'x';   /* ✗ */
-    case 0x2192: return 0x1A;  /* → */
-    case 0x2190: return 0x1B;  /* ← */
-    case 0x2191: return 0x18;  /* ↑ */
-    case 0x2193: return 0x19;  /* ↓ */
-    case 0x00B7: return 0xFA;  /* · middle dot */
+    case 0x25C6: case 0x25C7:
+    case 0x25C8: case 0x25C9: return '*';   /* ◆ ◇ → * */
+    case 0x25CF: return 'o';                /* ● → o */
+    case 0x25CB: case 0x25CC: return 'o';   /* ○ → o */
+    case 0x25B2: case 0x25B3: return '^';   /* ▲ → ^ */
+    case 0x25BC: case 0x25BD: return 'v';   /* ▼ → v */
+    case 0x25B6: return '>';                /* ▶ → > */
+    case 0x25C0: return '<';                /* ◀ → < */
+    case 0x2022: case 0x2023:
+    case 0x00B7: case 0x2027:
+    case 0x2219: return '.';   /* • · → . */
+    case 0x2713: case 0x2714:
+    case 0x2705: return '+';   /* ✓ ✔ → + */
+    case 0x2717: case 0x2718:
+    case 0x274C: return 'x';   /* ✗ ✘ → x */
     case 0x2026: return '.';   /* … → . */
+    case 0x2014: return '-';   /* — → - */
+    case 0x2013: return '-';   /* – → - */
+    case 0x2018: case 0x2019:
+    case 0x201C: case 0x201D: return '"';   /* curly quotes */
     default:     return ' ';
     }
 }
@@ -315,7 +312,7 @@ static void term_putc(uint8_t c) {
                 if (g_utf8_cp < (uint32_t)g_n_glyph)
                     ch = (uint8_t)g_utf8_cp;
                 else
-                    ch = unicode_to_cp437(g_utf8_cp);
+                    ch = unicode_to_ascii(g_utf8_cp);
                 g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
                 if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
             }
