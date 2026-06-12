@@ -89,7 +89,8 @@ static int      g_win_w = DEF_WIN_W, g_win_h = DEF_WIN_H;
 static int      g_cx = 0, g_cy = 0;
 static uint32_t g_fg = 0xFFd8e8f8u;
 static uint32_t g_bg = 0xFF0e1418u;
-static bool     g_cursor_vis = true;
+static bool     g_cursor_vis  = true;
+static bool     g_cursor_hide = false;  /* ESC[?25l sets this; blink respects it */
 static bool     g_dirty = true;
 static int      g_pty_master = -1;
 static pid_t    g_child_pid  = -1;
@@ -207,10 +208,10 @@ static void handle_esc_seq(void) {
     if (g_esc_buf[0] == '?') {
         int n = atoi(g_esc_buf + 1);
         if (cmd == 'h') {
-            if (n == 25)   g_cursor_vis = true;
+            if (n == 25)   { g_cursor_hide = false; g_cursor_vis = true; }
             if (n == 1049) { cell_clear_all(); g_cx = 0; g_cy = 0; }
         } else if (cmd == 'l') {
-            if (n == 25)   g_cursor_vis = false;
+            if (n == 25)   { g_cursor_hide = true; g_cursor_vis = false; }
             if (n == 1049) { cell_clear_all(); g_cx = 0; g_cy = 0; }
         }
         g_esc = g_esc_bracket = false; g_esc_len = 0;
@@ -726,7 +727,7 @@ int main(void) {
 
         /* ── Cursor blink ── */
         tick++;
-        if ((tick % 30) == 0) { g_cursor_vis = !g_cursor_vis; g_dirty = true; }
+        if ((tick % 30) == 0 && !g_cursor_hide) { g_cursor_vis = !g_cursor_vis; g_dirty = true; }
 
         if (g_dirty && g_fb) {
             render();

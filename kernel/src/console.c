@@ -205,9 +205,64 @@ static bool     g_tsb_suppress = false;
  *   40-47      set bg (standard 8 colours)
  *   90-97      set fg (bright 8 colours)
  *   100-107    set bg (bright 8 colours)   */
-typedef enum { ANSI_NORM, ANSI_ESC, ANSI_CSI } ansi_state_t;
+typedef enum { ANSI_NORM, ANSI_ESC, ANSI_CSI, ANSI_OSC } ansi_state_t;
 static ansi_state_t g_ansi_st   = ANSI_NORM;
-static uint8_t      g_ansi_buf[16];
+static uint8_t      g_esc_pend  = 0;      /* >0: consume next N bytes after ESC (charset designators) */
+static uint64_t     g_saved_cx  = 0;
+static uint64_t     g_saved_cy  = 0;
+
+/* UTF-8 multi-byte decode state */
+static int      g_utf8_remain = 0;
+static uint32_t g_utf8_cp     = 0;
+
+/* CSI parameter buffer — must hold truecolor SGR (e.g. "38;2;215;119;87m" = 16
+ * bytes) and combined sequences; too small a buffer leaks fragments as text. */
+#define ANSI_BUF_CAP 64u
+
+static uint8_t unicode_to_ascii(uint32_t cp) {
+    if (cp >= 0x250Cu && cp <= 0x254Bu) return '+';
+    if (cp >= 0x2552u && cp <= 0x256Cu) return '+';
+    if (cp >= 0x256Du && cp <= 0x257Fu) return '+';
+    switch (cp) {
+    case 0x2500u: case 0x2501u: case 0x2504u: case 0x2505u:
+    case 0x2508u: case 0x2509u: case 0x254Cu: case 0x254Du:
+    case 0x2550u: case 0x2212u: case 0x2013u: case 0x2014u:
+    case 0x2010u: case 0x2043u: return '-';
+    case 0x2502u: case 0x2503u: case 0x2506u: case 0x2507u:
+    case 0x250Au: case 0x250Bu: case 0x254Eu: case 0x254Fu:
+    case 0x2551u: return '|';
+    case 0x2580u: case 0x2584u: case 0x2588u: case 0x258Cu:
+    case 0x2590u: case 0x2591u: case 0x2592u: case 0x2593u:
+    case 0x2594u: case 0x2595u: case 0x25A0u: case 0x25A1u: return '#';
+    case 0x2190u: case 0x21D0u: case 0x27F5u: case 0x25C0u:
+    case 0x25C4u: return '<';
+    case 0x2192u: case 0x21D2u: case 0x27F6u: case 0x25B6u:
+    case 0x25BAu: case 0x276Fu: case 0x203Au: return '>';
+    case 0x2191u: case 0x21D1u: case 0x25B2u: case 0x25B3u: return '^';
+    case 0x2193u: case 0x21D3u: case 0x25BCu: case 0x25BDu: return 'v';
+    case 0x21B5u: case 0x23CEu: return '<';
+    case 0x25C6u: case 0x25C7u: case 0x25C8u: case 0x25C9u: return '*';
+    case 0x25CFu: case 0x25CBu: case 0x25CCu: case 0x25EFu: return 'o';
+    case 0x2022u: case 0x2023u: case 0x00B7u: case 0x2027u:
+    case 0x2219u: case 0x2024u: return '.';
+    case 0x2026u: return '.';
+    case 0x2713u: case 0x2714u: case 0x2705u: case 0x221Au: return '+';
+    case 0x2717u: case 0x2718u: case 0x274Cu: case 0x00D7u:
+    case 0x2612u: case 0x24E7u: return 'x';
+    case 0x2610u: case 0x24DEu: case 0x24BEu: return 'o';
+    case 0x2018u: case 0x2019u: case 0x201Cu: case 0x201Du: return '"';
+    case 0x2139u: return 'i';
+    case 0x26A0u: return '!';
+    case 0x2605u: case 0x2606u: case 0x2736u: return '*';
+    case 0x2630u: return '=';
+    case 0x00BDu: case 0x00BCu: case 0x00BEu: return '/';
+    case 0x2302u: return '#';
+    case 0x2665u: return '+';
+    case 0x266Au: case 0x266Bu: return '~';
+    default: return ' ';
+    }
+}
+static uint8_t      g_ansi_buf[ANSI_BUF_CAP];
 static uint8_t      g_ansi_len  = 0;
 static uint32_t     g_ansi_fg0  = 0x00FFFFFFu; /* default fg */
 static uint32_t     g_ansi_bg0  = 0x00101010u; /* default bg */
@@ -261,12 +316,20 @@ static void ansi_apply_sgr(uint8_t *params, int n) {
     for (int pi = 0; pi < n; pi++) {
         uint8_t p = params[pi];
         if (p == 0) {
-            /* Reset */
             con.fg = g_ansi_fg0;
             con.bg = g_ansi_bg0;
             g_ansi_bold = false;
         } else if (p == 1) {
             g_ansi_bold = true;
+        } else if (p == 22) {
+            g_ansi_bold = false;
+        } else if (p == 38 || p == 48) {
+            /* Extended color (38;5;n or 38;2;r;g;b) — skip sub-params */
+            if (pi + 1 < n && params[pi + 1] == 5u) {
+                pi += 2;  /* skip mode(5) + index */
+            } else if (pi + 1 < n && params[pi + 1] == 2u) {
+                pi += 4;  /* skip mode(2) + R + G + B */
+            }
         } else if (p >= 30u && p <= 37u) {
             con.fg = g_ansi_bold ? ansi_fg_brt[p - 30u] : ansi_fg_std[p - 30u];
         } else if (p >= 40u && p <= 47u) {
@@ -281,6 +344,7 @@ static void ansi_apply_sgr(uint8_t *params, int n) {
 
 /* Forward declarations for functions defined later in this file */
 static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
+static void ensure_cursor_visible(void);
 
 static void ansi_process_csi(void) {
     /* Parse semicolon-separated decimal params, then dispatch on final char */
@@ -302,8 +366,22 @@ static void ansi_process_csi(void) {
 
     uint8_t final_ch = g_ansi_len > 0 ? g_ansi_buf[g_ansi_len - 1u] : 0u;
 
-    /* Private mode sequences (?n h/l): ignore (cursor visibility, etc.) */
-    if (private_mode) return;
+    /* Private mode sequences: handle alternate screen & cursor visibility */
+    if (private_mode) {
+        if ((final_ch == 'h' || final_ch == 'l') && np >= 1) {
+            uint16_t n = params[0];
+            if (n == 1049u || n == 47u || n == 1047u) {
+                /* Alternate screen: just clear and home cursor */
+                fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
+                con.cx = 0; con.cy = 0;
+                for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
+                    for (uint64_t c2 = 0; c2 < CELL_MAX_COLS; c2++)
+                        cell_buf[r][c2] = ' ';
+            }
+            /* All other private modes (cursor blink, bracketed paste, etc.) ignored */
+        }
+        return;
+    }
 
     if (final_ch == 'm') {
         if (np == 1 && params[0] == 0) {
@@ -387,8 +465,49 @@ static void ansi_process_csi(void) {
             for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
                 cell_buf[con.cy][c] = ' ';
         }
+    } else if (final_ch == 's') {              /* SCP — save cursor */
+        g_saved_cx = con.cx; g_saved_cy = con.cy;
+    } else if (final_ch == 'u') {              /* RCP — restore cursor */
+        con.cx = g_saved_cx; con.cy = g_saved_cy;
+        ensure_cursor_visible();
+    } else if (final_ch == 'd') {              /* VPA — cursor vertical absolute */
+        uint16_t row = (params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
+        con.cy = (con.rows > 0 && row < con.rows) ? row : (con.rows > 0 ? con.rows - 1 : 0);
+    } else if (final_ch == 'E') {              /* CNL — cursor next line */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cy += n; con.cx = 0;
+        if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
+    } else if (final_ch == 'F') {              /* CPL — cursor prev line */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        con.cy = (con.cy >= n) ? con.cy - n : 0; con.cx = 0;
+    } else if (final_ch == 'X') {              /* ECH — erase character */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        for (uint64_t i = con.cx; i < con.cx + n && i < con.cols && i < CELL_MAX_COLS; i++) {
+            fill_rect(con.x_off + i * g_fw, con.y_offset + con.cy * g_fh, g_fw, g_fh, con.bg);
+            cell_buf[con.cy][i] = ' ';
+        }
+    } else if (final_ch == 'L') {              /* IL — insert line */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        if (con.cy < con.rows && n > 0) {
+            uint64_t move = (con.rows - con.cy > n) ? (con.rows - con.cy - n) : 0;
+            if (move > 0)
+                memmove(&cell_buf[con.cy + n], &cell_buf[con.cy],
+                        sizeof(cell_buf[0]) * move);
+            for (uint16_t i = 0; i < n && con.cy + i < con.rows; i++)
+                memset(cell_buf[con.cy + i], ' ', sizeof(cell_buf[0]));
+        }
+    } else if (final_ch == 'M') {              /* DL — delete line */
+        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        if (con.cy < con.rows && n > 0) {
+            uint64_t move = (con.rows > con.cy + n) ? (con.rows - con.cy - n) : 0;
+            if (move > 0)
+                memmove(&cell_buf[con.cy], &cell_buf[con.cy + n],
+                        sizeof(cell_buf[0]) * move);
+            for (uint64_t i = (con.cy + move); i < con.rows && i < CELL_MAX_ROWS; i++)
+                memset(cell_buf[i], ' ', sizeof(cell_buf[0]));
+        }
     }
-    /* ESC[h/l (mode set/reset): ignore */
+    /* All other CSI sequences ignored */
 }
 
 void console_set_suppress_draw(bool on) { g_tsb_suppress = on; }
@@ -763,14 +882,47 @@ void console_putc(char c) {
     if (!con.initialized) return;
     uint8_t uc = (uint8_t)c;
 
+    /* ── OSC: consume until BEL (0x07) or ESC (start of ST) ── */
+    if (g_ansi_st == ANSI_OSC) {
+        if (uc == 0x07u) { g_ansi_st = ANSI_NORM; g_utf8_remain = 0; }
+        else if (uc == 0x1Bu) { g_ansi_st = ANSI_ESC; g_utf8_remain = 0; }
+        return;
+    }
+
+    /* ── Consume extra byte for two-byte ESC sequences (e.g. ESC ( B) ── */
+    if (g_esc_pend > 0) { g_esc_pend--; return; }
+
     /* ── ANSI escape sequence state machine ── */
     if (g_ansi_st == ANSI_ESC) {
-        if (uc == '[') { g_ansi_st = ANSI_CSI; g_ansi_len = 0; return; }
-        g_ansi_st = ANSI_NORM;   /* unknown sequence — abort */
+        g_ansi_st = ANSI_NORM;
+        g_utf8_remain = 0;
+        switch (uc) {
+        case '[':  g_ansi_st = ANSI_CSI; g_ansi_len = 0; break;
+        case ']':  g_ansi_st = ANSI_OSC;                 break;
+        case '\\': /* ST — already back to NORM */        break;
+        case 'M':  /* Reverse linefeed */
+            if (con.cy > 0) { con.cy--; }
+            break;
+        case '7':  /* Save cursor (DEC) */
+            g_saved_cx = con.cx; g_saved_cy = con.cy;    break;
+        case '8':  /* Restore cursor (DEC) */
+            con.cx = g_saved_cx; con.cy = g_saved_cy;
+            ensure_cursor_visible();                       break;
+        case '(':  case ')':  case '*':  case '+':
+        case '%':  case '#':
+            g_esc_pend = 1;  /* consume one more byte (charset/flags) */ break;
+        case 'c':  /* Full reset — clear screen */
+            con.cx = 0; con.cy = 0;
+            con.fg = g_ansi_fg0; con.bg = g_ansi_bg0;
+            g_ansi_bold = false;
+            break;
+        default: break; /* all other two-byte ESC seqs: consume and discard */
+        }
+        return;
     } else if (g_ansi_st == ANSI_CSI) {
-        if ((uc >= 0x40u && uc <= 0x7Eu) || g_ansi_len >= 15u) {
+        if ((uc >= 0x40u && uc <= 0x7Eu) || g_ansi_len >= (uint8_t)(ANSI_BUF_CAP - 1u)) {
             /* Final byte of CSI sequence */
-            if (g_ansi_len < 15u) g_ansi_buf[g_ansi_len++] = uc;
+            if (g_ansi_len < (uint8_t)(ANSI_BUF_CAP - 1u)) g_ansi_buf[g_ansi_len++] = uc;
             ansi_process_csi();
             g_ansi_st = ANSI_NORM;
         } else {
@@ -779,8 +931,34 @@ void console_putc(char c) {
         return;
     } else if (uc == 0x1Bu) {   /* ESC */
         g_ansi_st = ANSI_ESC;
+        g_utf8_remain = 0;
         return;
     }
+
+    /* ── UTF-8 multi-byte decoding ── */
+    if (uc >= 0x80u) {
+        if (uc >= 0xC0u) {
+            /* Lead byte — start new sequence */
+            if      (uc >= 0xF0u) { g_utf8_remain = 3; g_utf8_cp = uc & 0x07u; }
+            else if (uc >= 0xE0u) { g_utf8_remain = 2; g_utf8_cp = uc & 0x0Fu; }
+            else                  { g_utf8_remain = 1; g_utf8_cp = uc & 0x1Fu; }
+        } else if (g_utf8_remain > 0) {
+            /* Continuation byte */
+            g_utf8_cp = (g_utf8_cp << 6) | (uc & 0x3Fu);
+            if (--g_utf8_remain == 0) {
+                uint8_t mapped = (g_utf8_cp < 0x80u)
+                    ? (uint8_t)g_utf8_cp
+                    : unicode_to_ascii(g_utf8_cp);
+                console_putc((char)mapped);  /* render as ASCII through normal path */
+            }
+        } else {
+            g_utf8_remain = 0;  /* stray continuation — ignore */
+        }
+        return;
+    }
+
+    /* ── Normal ASCII byte — reset UTF-8 state ── */
+    g_utf8_remain = 0;
 
     /* Always capture to scrollback ring (skip control codes except \n) */
     if (uc >= 0x20u || uc == '\n') tsb_push(uc);

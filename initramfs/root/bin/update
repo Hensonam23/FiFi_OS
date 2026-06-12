@@ -1,6 +1,6 @@
 #!/bin/sh
 # update — apply a new FiFi OS kernel+initramfs from USB without reinstalling.
-# fifi-data (dev-tooling, node, source repo) is completely untouched.
+# fifi-data (installed tools, source repo) is completely untouched.
 # Plug in the USB, type: update  then reboot.
 
 log()  { echo "[update] $*"; }

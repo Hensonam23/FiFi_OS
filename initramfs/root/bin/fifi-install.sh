@@ -384,6 +384,8 @@ menuentry "Windows" {
     insmod part_gpt
     insmod fat
     insmod chain
+    insmod search_fs_file
+    search --set=root --file $WIN_CHAINLOAD
     chainloader $WIN_CHAINLOAD
 }
 WINCFG

@@ -21,7 +21,7 @@ echo "FiFiOS" > /proc/sys/kernel/hostname 2>/dev/null || true
 # ── PATH ──────────────────────────────────────────────────────────────────────
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
-export TERM=linux
+export TERM=xterm-256color
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 export XDG_RUNTIME_DIR=/tmp
@@ -296,17 +296,7 @@ if [ -x /usr/bin/Xwayland ]; then
     ) &
 fi
 
-# ── Restore /usr/local/bin symlinks for fifi-data tools ─────────────────────
 mkdir -p /usr/local/bin
-[ -x /fifi-data/devtool ] && ln -sf /fifi-data/devtool /bin/devtool
-[ -x /fifi-data/devtool ] && ln -sf /fifi-data/devtool /usr/local/bin/devtool
-[ -x /fifi-data/dev-tooling/bin/node ] && ln -sf /fifi-data/dev-tooling/bin/node /usr/local/bin/node
-export PATH="/usr/local/bin:/fifi-data/dev-tooling/bin:$PATH"
-
-# ── Sudoers: fifi user gets passwordless sudo so devtool can control the system
-[ -f /etc/sudoers ] || echo "root ALL=(ALL) ALL" > /etc/sudoers
-grep -q '^fifi ' /etc/sudoers 2>/dev/null || echo 'fifi ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-chmod 440 /etc/sudoers 2>/dev/null || true
 
 # ── Launch FiFi compositor ────────────────────────────────────────────────────
 # Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not
