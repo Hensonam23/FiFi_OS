@@ -122,16 +122,6 @@ fi
 
 touch "$MNT/.fifi-live-usb"
 
-echo "[flash] Bundling Node.js v22 on USB (enables offline setup)..."
-NODE_URL=$(curl -sf "https://nodejs.org/dist/latest-v22.x/" | grep -oE "node-v[0-9.]+-linux-x64\.tar\.xz" | head -1)
-if [ -n "$NODE_URL" ]; then
-    curl -fL "https://nodejs.org/dist/latest-v22.x/$NODE_URL" -o "$MNT/$NODE_URL" 2>/dev/null && \
-        echo "[flash] Node.js bundled: $NODE_URL" || \
-        echo "[flash] WARNING: Node.js download failed -- setup will download at runtime"
-else
-    echo "[flash] WARNING: Could not find Node.js URL -- setup will download at runtime"
-fi
-
 echo "[flash] Syncing to device..."
 sync
 umount "$MNT"

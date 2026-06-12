@@ -195,7 +195,10 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_VOLUMEUP:   return FIFI_KEY_F12;
         case KEY_SYSRQ: return FIFI_KEY_PRTSC;
         /* ASCII control */
-        case KEY_BACKSPACE: return '\b';
+        /* Backspace sends DEL (0x7f), not BS (0x08): the PTY line discipline's
+         * erase char (VERASE) is 0x7f, and raw-mode TUIs (readline, Ink-based
+         * apps) also expect 0x7f. Sending 0x08 left both unable to delete. */
+        case KEY_BACKSPACE: return 0x7Fu;
         case KEY_TAB:       return '\t';
         case KEY_ENTER:     return '\n';
         case KEY_ESC:       return 0x1Bu;

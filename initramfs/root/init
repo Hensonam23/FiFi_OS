@@ -298,6 +298,19 @@ fi
 
 mkdir -p /usr/local/bin
 
+# ── Persistent user-installed tools ───────────────────────────────────────────
+# Anything the user installs into /fifi-data survives OS updates. Expose tools
+# placed in /fifi-data/bin on the PATH (symlinked into /usr/local/bin), and run
+# an optional /fifi-data/profile for any custom environment setup. This is a
+# generic mechanism — no specific tool is referenced in the OS source.
+if [ -d /fifi-data/bin ]; then
+    for _t in /fifi-data/bin/*; do
+        [ -x "$_t" ] && ln -sf "$_t" /usr/local/bin/"$(basename "$_t")"
+    done
+fi
+[ -f /fifi-data/profile ] && . /fifi-data/profile
+export PATH="/usr/local/bin:$PATH"
+
 # ── Launch FiFi compositor ────────────────────────────────────────────────────
 # Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not
 # fully initialise ZMM XSAVE state, causing SIGILL on zmm instructions.

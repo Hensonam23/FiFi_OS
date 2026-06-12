@@ -157,8 +157,8 @@ void pty_poll_output(void) {
 /* Write a single key to the PTY, translating FiFi extended codes to ANSI */
 void pty_write_input(uint8_t c) {
     if (g_pty_master < 0) return;
-    /* Enter must reach the PTY as CR (like xterm): raw-mode apps (developer tooling,
-     * Ink-based TUIs) only recognize \r as Enter; the line discipline's ICRNL
+    /* Enter must reach the PTY as CR (like xterm): raw-mode apps (Ink-based
+     * TUIs, etc.) only recognize \r as Enter; the line discipline's ICRNL
      * converts it back to \n for canonical-mode apps like the shell. */
     if (c == '\n') c = '\r';
     char ansi[8];

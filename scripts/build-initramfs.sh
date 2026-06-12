@@ -48,11 +48,16 @@ mkdir -p "$STAGE/bin" "$STAGE/sbin" "$STAGE/usr/bin" "$STAGE/usr/sbin"
 cp "$BUSYBOX_BIN" "$STAGE/bin/busybox"
 chmod +x "$STAGE/bin/busybox"
 
-# Populate symlinks: sh, mount, ls, cat, echo, etc.
-for applet in sh ash bash mount umount ls cat echo cp mv rm mkdir mknod \
-              ln chmod chown hostname dmesg free ps kill sleep \
-              modprobe insmod lsmod ifconfig ip udhcpc ntpd nc wget \
-              readlink realpath dirname basename; do
+# Populate symlinks for EVERY applet this busybox supports (head, id, whoami,
+# sort, sed, grep, tail, wc, tr, find, xargs, env, tee, du, stat, etc.).
+# Querying `busybox --list` guarantees nothing the binary provides is missing.
+# Excluded: 'busybox' itself (the real binary) and 'bash'/'blkid', which get
+# real binaries bundled later — symlinking them would be overwritten via the
+# symlink and corrupt the busybox binary.
+for applet in $("$BUSYBOX_BIN" --list 2>/dev/null); do
+    case "$applet" in
+        busybox|bash|blkid) continue ;;
+    esac
     ln -sf busybox "$STAGE/bin/$applet" 2>/dev/null || true
 done
 
@@ -62,6 +67,52 @@ if [ -x "$USH_BIN" ]; then
     cp "$USH_BIN" "$STAGE/bin/ush"
     echo "[initramfs] included ush shell"
 fi
+
+# ── Real GNU bash + its shared libraries ──────────────────────────────────────
+# Many tools and scripts use bash-only syntax (arrays, [[ ]], pipefail,
+# process substitution) that busybox ash cannot handle.
+mkdir -p "$STAGE/usr/lib" "$STAGE/usr/lib64"
+if [ -x /usr/bin/bash ]; then
+    rm -f "$STAGE/bin/bash"
+    cp /usr/bin/bash "$STAGE/bin/bash"
+    ln -sf /bin/bash "$STAGE/usr/bin/bash" 2>/dev/null || true
+    ldd /usr/bin/bash 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        cp -n "$lib" "$STAGE/usr/lib/$(basename "$lib")" 2>/dev/null || true
+    done
+    echo "[initramfs] real bash bundled ($(du -sh /usr/bin/bash | cut -f1))"
+else
+    ln -sf busybox "$STAGE/bin/bash"
+    echo "[initramfs] WARNING: /usr/bin/bash not found — bash falls back to busybox"
+fi
+
+# ── sudo shim ─────────────────────────────────────────────────────────────────
+# FiFi OS runs everything as root (initramfs root system), so a real setuid sudo
+# (with PAM + /etc/sudoers) is unnecessary and would fail without that config.
+# This shim parses past sudo's common options and execs the target command
+# directly, so 'sudo <cmd>' and 'sudo -u user <cmd>' both just run <cmd> as root.
+cat > "$STAGE/bin/sudo" << 'SUDOSHIM'
+#!/bin/sh
+# Minimal sudo shim — already root, just run the command.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u|-g|-h|-p|-U|-C|-r|-t|-T) shift 2 ;;   # option that takes an argument
+        -i|-s)                                    # login/shell mode
+            shift
+            [ $# -eq 0 ] && exec /bin/bash -l
+            ;;
+        -E|-H|-S|-b|-n|-k|-K|-v|-l|--) shift ;;   # flags with no argument
+        --*) shift ;;                             # any other long option
+        -*) shift ;;                              # any other short flag
+        *) break ;;                               # first non-option = the command
+    esac
+done
+[ $# -eq 0 ] && exec /bin/bash -l
+exec "$@"
+SUDOSHIM
+chmod +x "$STAGE/bin/sudo"
+ln -sf /bin/sudo "$STAGE/usr/bin/sudo" 2>/dev/null || true
+echo "[initramfs] sudo shim installed"
 
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
@@ -168,6 +219,7 @@ mkdir -p "$STAGE/usr/lib"
 for tool in parted mkfs.ext4 mkfs.fat blkid; do
     bin="$(which $tool 2>/dev/null)"
     if [ -x "$bin" ]; then
+        rm -f "$STAGE/bin/$tool"   # never cp through a busybox applet symlink
         cp "$bin" "$STAGE/bin/$tool"
         # Copy shared library dependencies
         ldd "$bin" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do

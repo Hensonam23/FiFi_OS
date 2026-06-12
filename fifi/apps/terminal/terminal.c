@@ -135,7 +135,7 @@ static uint8_t unicode_to_ascii(uint32_t cp) {
     case 0x2191: case 0x21D1: return '^';
     case 0x2193: case 0x21D3: return 'v';
     case 0x21B5: case 0x23CE: return '<';   /* ↵ enter */
-    /* Symbols developer tooling uses */
+    /* Symbols modern TUI apps use */
     case 0x25C6: case 0x25C7:
     case 0x25C8: case 0x25C9: return '*';   /* ◆ ◇ → * */
     case 0x25CF: return 'o';                /* ● → o */
