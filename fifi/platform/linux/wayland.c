@@ -144,6 +144,34 @@
 #define XDG_TOPLEVEL_SET_FULLSCREEN 11
 #define XDG_TOPLEVEL_UNSET_FULLSCREEN 12
 
+/* wl_data_device_manager opcodes (requests) */
+#define WL_DDM_CREATE_DATA_SOURCE 0
+#define WL_DDM_GET_DATA_DEVICE    1
+
+/* wl_data_device opcodes */
+#define WL_DD_START_DRAG          0   /* request */
+#define WL_DD_SET_SELECTION       1   /* request */
+#define WL_DD_RELEASE             2   /* request */
+#define WL_DD_DATA_OFFER          0   /* event */
+#define WL_DD_SELECTION           3   /* event */
+
+/* wl_data_source opcodes (requests) */
+#define WL_DS_OFFER               0
+#define WL_DS_DESTROY             1
+#define WL_DS_SET_ACTIONS         2
+
+/* wl_subcompositor opcodes (requests) */
+#define WL_SUBCOMP_DESTROY        0
+#define WL_SUBCOMP_GET_SUBSURFACE 1
+
+/* wl_subsurface opcodes (requests) */
+#define WL_SUBSURF_DESTROY        0
+#define WL_SUBSURF_SET_POSITION   1
+#define WL_SUBSURF_PLACE_ABOVE    2
+#define WL_SUBSURF_PLACE_BELOW    3
+#define WL_SUBSURF_SET_SYNC       4
+#define WL_SUBSURF_SET_DESYNC     5
+
 /* ── Object ID allocation ────────────────────────────────────────────────── */
 /* IDs 1..WL_PREALLOC_MAX are server-assigned (display=1, etc.)
  * IDs > that are client-assigned. */
@@ -172,6 +200,8 @@ typedef enum {
     OBJ_DATA_SOURCE,
     OBJ_DATA_DEVICE,
     OBJ_DATA_OFFER,
+    OBJ_SUBCOMPOSITOR,
+    OBJ_SUBSURFACE,
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -207,6 +237,12 @@ typedef struct {
     uint32_t     xdg_toplevel_id;
     uint32_t     output_id;   /* wl_output this surface is on */
     uint32_t     serial;      /* xdg configure serial */
+    /* wl_subsurface role: position is relative to parent_surface_id. Firefox/GTK
+     * REQUIRE wl_subcompositor (MOZ_RELEASE_ASSERT(GetSubcompositor())) and render
+     * web content into a subsurface of the toplevel — without this they crash. */
+    bool         is_subsurface;
+    uint32_t     parent_surface_id;
+    int32_t      sub_x, sub_y;
 } wl_surface_t;
 
 /* ── Client ───────────────────────────────────────────────────────────────── */
@@ -381,6 +417,7 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
     send_registry_global(c, reg_id,  4, "wl_output",              4);
     send_registry_global(c, reg_id,  5, "xdg_wm_base",            3);
     send_registry_global(c, reg_id,  6, "wl_data_device_manager", 3);
+    send_registry_global(c, reg_id,  7, "wl_subcompositor",       1);
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -536,6 +573,16 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     wl_obj_t *obj = wl_find_obj(c, obj_id);
     obj_type_t type = obj ? obj->type : (obj_id == 1 ? OBJ_DISPLAY : OBJ_NONE);
 
+    /* Per-request trace (off by default; set FIFI_WL_TRACE=1 to enable). Logs every
+     * dispatched request so a client crash can be located from the SERVER's last
+     * processed message — pairs with the "unknown obj" line below for unhandled ops.
+     * Used to debug the LibreWolf startup crash; harmless when the env is unset. */
+    static int s_trace = -1;
+    if (s_trace < 0) s_trace = getenv("FIFI_WL_TRACE") ? 1 : 0;
+    if (s_trace)
+        fprintf(stderr, "[wl-trace] fd=%d obj=%u type=%d op=%u len=%u\n",
+                c->fd, obj_id, (int)type, opcode, args_len);
+
     switch (type) {
 
     /* ── wl_display ──────────────────────────────────────────────────── */
@@ -593,6 +640,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 wl_end_msg(c, h);
             } else if (name == 6 && strncmp(iface, "wl_data_device_manager", iface_len) == 0) {
                 wl_new_obj(c, new_id, OBJ_DATA_DEVICE_MGR, NULL);
+            } else if (name == 7 && strncmp(iface, "wl_subcompositor", iface_len) == 0) {
+                /* Required by GTK/Firefox. Binding it makes Gecko's
+                 * GetSubcompositor() non-null so its release-assert passes. */
+                wl_new_obj(c, new_id, OBJ_SUBCOMPOSITOR, NULL);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -692,6 +743,22 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 }
             }
             wl_new_obj(c, buf_id, OBJ_BUFFER, buf);
+        } else if (opcode == WL_SHM_POOL_RESIZE && args_len >= 4) {
+            /* Client grew the pool (it can only grow). Re-map at the new size so
+             * pool->data stays valid; ignoring this left a stale undersized map
+             * (e.g. 2304B while the client used 25216B) — real toolkits (GTK/Gecko)
+             * resize the pool several times during init before creating buffers. */
+            int32_t newsz; memcpy(&newsz, args, 4);
+            if (newsz > 0 && (size_t)newsz > pool->size) {
+                if (pool->fd >= 0) {
+                    void *nm = mmap(NULL, (size_t)newsz, PROT_READ, MAP_SHARED, pool->fd, 0);
+                    if (nm != MAP_FAILED) {
+                        if (pool->data) munmap(pool->data, pool->size);
+                        pool->data = nm;
+                    }
+                }
+                pool->size = (size_t)newsz;
+            }
         } else if (opcode == WL_SHM_POOL_DESTROY) {
             wl_delete_obj(c, obj_id);
         }
@@ -788,8 +855,68 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
     /* ── data device manager ─────────────────────────────────────────── */
     case OBJ_DATA_DEVICE_MGR:
-        /* Stub — enough to satisfy client bind without errors */
+        /* The client creates new_id objects here; we MUST register them or the
+         * IDs become phantoms (later requests on them hit the "unknown obj"
+         * path). GTK/Gecko always call get_data_device during seat init. */
+        if (opcode == WL_DDM_GET_DATA_DEVICE && args_len >= 4) {
+            uint32_t dd_id; memcpy(&dd_id, args, 4);  /* arg1=new id, arg2=seat */
+            wl_new_obj(c, dd_id, OBJ_DATA_DEVICE, NULL);
+            /* No selection/clipboard yet: per protocol we simply send nothing
+             * (an absent selection event means "empty"). */
+        } else if (opcode == WL_DDM_CREATE_DATA_SOURCE && args_len >= 4) {
+            uint32_t ds_id; memcpy(&ds_id, args, 4);
+            wl_new_obj(c, ds_id, OBJ_DATA_SOURCE, NULL);
+        }
         break;
+
+    /* ── data device ─────────────────────────────────────────────────── */
+    case OBJ_DATA_DEVICE:
+        /* set_selection / start_drag: we don't implement clipboard transfer yet,
+         * but must accept the requests without erroring. release destroys it. */
+        if (opcode == WL_DD_RELEASE) wl_delete_obj(c, obj_id);
+        break;
+
+    /* ── data source ─────────────────────────────────────────────────── */
+    case OBJ_DATA_SOURCE:
+        if (opcode == WL_DS_DESTROY) wl_delete_obj(c, obj_id);
+        break;
+
+    /* ── wl_subcompositor ────────────────────────────────────────────── */
+    case OBJ_SUBCOMPOSITOR:
+        if (opcode == WL_SUBCOMP_GET_SUBSURFACE && args_len >= 12) {
+            /* get_subsurface(new id sub, surface, parent): assign the subsurface
+             * role to an EXISTING wl_surface. The new wl_subsurface object points
+             * at that same wl_surface_t so set_position reaches it; blit composites
+             * it at (parent.x+sub_x, parent.y+sub_y). */
+            uint32_t sub_id, surf_id, parent_id;
+            memcpy(&sub_id,    args,     4);
+            memcpy(&surf_id,   args + 4, 4);
+            memcpy(&parent_id, args + 8, 4);
+            wl_obj_t *so = wl_find_obj(c, surf_id);
+            wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
+            if (s) {
+                s->is_subsurface      = true;
+                s->parent_surface_id  = parent_id;
+                s->sub_x = 0; s->sub_y = 0;
+            }
+            wl_new_obj(c, sub_id, OBJ_SUBSURFACE, s);
+        }
+        break;
+
+    /* ── wl_subsurface ───────────────────────────────────────────────── */
+    case OBJ_SUBSURFACE: {
+        wl_surface_t *s = obj ? obj->data : NULL;   /* the surface holding this role */
+        if (opcode == WL_SUBSURF_SET_POSITION && args_len >= 8 && s) {
+            memcpy(&s->sub_x, args,     4);
+            memcpy(&s->sub_y, args + 4, 4);
+        } else if (opcode == WL_SUBSURF_DESTROY) {
+            if (s) s->is_subsurface = false;
+            wl_delete_obj(c, obj_id);
+        }
+        /* place_above/below + set_sync/set_desync: accepted, no-op (single content
+         * subsurface drawn after its parent in object order = correct stacking). */
+        break;
+    }
 
     default:
         /* Unknown object — send error */
@@ -1087,8 +1214,18 @@ void wayland_blit_surfaces(void) {
             wl_surface_t *s = c->objs[oi].data;
             if (!s || !s->mapped || !s->buf || !s->buf->data) continue;
             if (s->w <= 0 || s->h <= 0) continue;
+            int32_t bx = s->x, by = s->y;
+            if (s->is_subsurface) {
+                /* Position relative to the parent surface (Firefox renders web
+                 * content into this). Skip if the parent is gone/unmapped. */
+                wl_obj_t *po = wl_find_obj(c, s->parent_surface_id);
+                wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+                if (!p) continue;
+                bx = p->x + s->sub_x;
+                by = p->y + s->sub_y;
+            }
             console_paste_rect((const uint32_t *)s->buf->data,
-                               (uint64_t)s->x, (uint64_t)s->y,
+                               (uint64_t)bx, (uint64_t)by,
                                (uint64_t)s->w, (uint64_t)s->h);
         }
     }

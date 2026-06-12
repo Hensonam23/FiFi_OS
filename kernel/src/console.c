@@ -262,6 +262,19 @@ static uint8_t unicode_to_ascii(uint32_t cp) {
     default: return ' ';
     }
 }
+
+/* Terminal column width of a codepoint: 0 = zero-width (combining marks, ZWJ),
+ * 2 = East-Asian-Wide / emoji, 1 = normal. The program driving the PTY advances
+ * its cursor by this width, so we must match it or text after wide/zero-width
+ * glyphs desyncs and overlaps. */
+static int cp_width(uint32_t cp) {
+    if (cp == 0 || cp == 0x200Du || (cp >= 0x300u && cp <= 0x36Fu) ||
+        cp == 0xFE0Fu || (cp >= 0xFE00u && cp <= 0xFE0Fu)) return 0;  /* ZWJ, combining, variation selectors */
+    if ((cp >= 0x1F000u && cp <= 0x1FFFFu) || (cp >= 0x2E80u && cp <= 0x9FFFu) ||
+        (cp >= 0xAC00u && cp <= 0xD7A3u) || (cp >= 0xFF00u && cp <= 0xFF60u)) return 2;  /* CJK + emoji + Hangul + fullwidth */
+    return 1;
+}
+
 static uint8_t      g_ansi_buf[ANSI_BUF_CAP];
 static uint8_t      g_ansi_len  = 0;
 static uint32_t     g_ansi_fg0  = 0x00FFFFFFu; /* default fg */
@@ -946,10 +959,15 @@ void console_putc(char c) {
             /* Continuation byte */
             g_utf8_cp = (g_utf8_cp << 6) | (uc & 0x3Fu);
             if (--g_utf8_remain == 0) {
-                uint8_t mapped = (g_utf8_cp < 0x80u)
-                    ? (uint8_t)g_utf8_cp
-                    : unicode_to_ascii(g_utf8_cp);
-                console_putc((char)mapped);  /* render as ASCII through normal path */
+                int w = cp_width(g_utf8_cp);
+                if (w != 0) {   /* w==0: combining/ZWJ/variation selector — drop, no advance */
+                    uint8_t mapped = (g_utf8_cp < 0x80u)
+                        ? (uint8_t)g_utf8_cp
+                        : unicode_to_ascii(g_utf8_cp);
+                    console_putc((char)mapped);  /* render as ASCII through normal path (advances 1 col) */
+                    if (w == 2)
+                        console_putc(' ');  /* wide glyph: 2nd column keeps following text aligned */
+                }
             }
         } else {
             g_utf8_remain = 0;  /* stray continuation — ignore */
