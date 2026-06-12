@@ -458,6 +458,8 @@ static const char s_keymap[] =
     "  xkb_geometry { include \"pc(pc105)\" };\n"
     "};\n";
 
+static void wl_client_flush(wl_client_t *c);   /* defined below */
+
 static void send_keymap(wl_client_t *c) {
     if (!c->keyboard_id) return;
     /* Write keymap to a memfd so we can pass an fd to the client */
@@ -481,7 +483,10 @@ static void send_keymap(wl_client_t *c) {
     uint8_t buf[32];
     int hdr_off = 0;
     uint32_t obj  = c->keyboard_id;
-    uint32_t hdr2 = ((uint32_t)24u << 16) | WL_KBD_KEYMAP;
+    /* Message size is header(8)+format(4)+size(4)=16. The fd travels out-of-band
+     * via SCM_RIGHTS and must NOT be counted here — declaring 24 desyncs the
+     * client stream ("message too short, invalid header"). */
+    uint32_t hdr2 = ((uint32_t)16u << 16) | WL_KBD_KEYMAP;
     uint32_t fmt  = WL_KBD_KEYMAP_FORMAT_XKB;
     uint32_t sz   = (uint32_t)klen;
     memcpy(buf + 0,  &obj,  4);
@@ -489,6 +494,12 @@ static void send_keymap(wl_client_t *c) {
     memcpy(buf + 8,  &fmt,  4);
     memcpy(buf + 12, &sz,   4);
     (void)hdr_off;
+
+    /* Drain any buffered events FIRST. The keymap goes out via a raw sendmsg()
+     * (below) to carry the fd, bypassing the c->send buffer; if buffered events
+     * are still pending they would arrive AFTER the keymap, corrupting message
+     * order (clients then see bogus objects/opcodes and stall during init). */
+    wl_client_flush(c);
 
     /* Build ancillary message with the fd */
     struct iovec iov = { buf, 16 };
@@ -506,15 +517,13 @@ static void send_keymap(wl_client_t *c) {
     sendmsg(c->fd, &msgh, MSG_NOSIGNAL);
     close(kfd);
 
-    /* keyboard enter with empty keys pressed */
-    int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_ENTER);
-    wl_push_u32(c, next_serial(c));
-    wl_push_u32(c, 0);   /* surface id — 0 for now */
-    wl_push_u32(c, 0);   /* keys array length */
-    wl_end_msg(c, h);
+    /* NOTE: do NOT send wl_keyboard.enter here. enter's surface argument is
+     * non-nullable; sending it with surface=0 before any surface has focus makes
+     * libwayland abort ("NULL object received on non-nullable type, enter(uoa)").
+     * The real enter is sent from wl_send_kbd_enter() on actual focus change. */
 
     /* repeat info */
-    h = wl_begin_msg(c, c->keyboard_id, WL_KBD_REPEAT_INFO);
+    int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_REPEAT_INFO);
     wl_push_u32(c, 25);   /* rate */
     wl_push_u32(c, 300);  /* delay ms */
     wl_end_msg(c, h);

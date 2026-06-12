@@ -109,6 +109,28 @@ static uint32_t g_utf8_cp     = 0;
 /* Saved cursor */
 static int   g_saved_cx = 0, g_saved_cy = 0;
 
+/* East-Asian-Wide / emoji codepoints occupy TWO terminal columns. The program
+ * driving us advances its cursor by 2 for these, so we must too — otherwise
+ * everything after a wide glyph overlaps / shifts left. We only flag ranges that
+ * are unambiguously width-2 (CJK, Hangul, fullwidth forms, and the
+ * supplementary-plane emoji blocks); ambiguous BMP symbols stay width-1 so
+ * narrow glyphs like the checkmark (U+2713) are not over-advanced. */
+static int is_wide_cp(uint32_t cp) {
+    return (cp >= 0x1100 && cp <= 0x115F) ||   /* Hangul Jamo */
+           (cp >= 0x2E80 && cp <= 0x303E) ||   /* CJK radicals .. Kangxi */
+           (cp >= 0x3041 && cp <= 0x33FF) ||   /* Kana .. CJK symbols */
+           (cp >= 0x3400 && cp <= 0x4DBF) ||   /* CJK Ext-A */
+           (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK Unified */
+           (cp >= 0xA000 && cp <= 0xA4CF) ||   /* Yi */
+           (cp >= 0xAC00 && cp <= 0xD7A3) ||   /* Hangul syllables */
+           (cp >= 0xF900 && cp <= 0xFAFF) ||   /* CJK compatibility */
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||   /* CJK compat forms */
+           (cp >= 0xFF00 && cp <= 0xFF60) ||   /* fullwidth forms */
+           (cp >= 0xFFE0 && cp <= 0xFFE6) ||   /* fullwidth signs */
+           (cp >= 0x1F000 && cp <= 0x1FAFF) || /* emoji & pictographs */
+           (cp >= 0x20000 && cp <= 0x3FFFD);   /* CJK Ext-B and beyond */
+}
+
 /* Map Unicode codepoints to ASCII fallbacks — no font encoding dependency */
 static uint8_t unicode_to_ascii(uint32_t cp) {
     /* Box drawing — all corners/junctions → + */
@@ -326,8 +348,18 @@ static void term_putc(uint8_t c) {
                     ch = (uint8_t)g_utf8_cp;
                 else
                     ch = unicode_to_ascii(g_utf8_cp);
+                int wide = is_wide_cp(g_utf8_cp);
+                /* a double-width glyph that would straddle the right edge wraps first */
+                if (wide && g_cx + 1 >= g_cols) {
+                    g_cx = 0;
+                    if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); }
+                }
                 g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
                 if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
+                if (wide) {   /* second column keeps following text aligned */
+                    g_cells[g_cy][g_cx] = (Cell){ ' ', g_fg, g_bg };
+                    if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
+                }
             }
         } else { g_utf8_remain = 0; }
         return;
