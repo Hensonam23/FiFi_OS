@@ -1400,9 +1400,10 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
         wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
         wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
         if (!p) return 0;
-        /* Subsurface blit: parent screen pos + parent geometry offset + sub offset */
-        bx = (p->x - p->geom_x) + s->sub_x;
-        by = (p->y - p->geom_y) + s->sub_y;
+        /* Subsurface blit: parent LOGICAL position + sub offset.
+         * sub_x/sub_y are in parent SURFACE coordinates (before geometry adjustment). */
+        bx = p->x + s->sub_x;
+        by = p->y + s->sub_y;
     } else {
         /* Non-subsurface: offset by window geometry so content area starts at s->x,s->y */
         bx = s->x - s->geom_x;
