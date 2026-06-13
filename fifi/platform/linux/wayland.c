@@ -1357,37 +1357,50 @@ bool wayland_has_focus(void) { return g_focus_ci >= 0; }
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */
 
 /* Called from compositor main after ipc_blit_all() */
-void wayland_blit_surfaces(void) {
+/* Blit one surface at its computed screen position */
+static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log) {
     extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
                                     uint64_t w, uint64_t h);
+    if (do_log)
+        fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d data=%p w=%d h=%d sub=%d\n",
+                ci, obj_id, s->mapped, s->buf ? s->buf->data : NULL,
+                s->w, s->h, s->is_subsurface);
+    if (!s->mapped || !s->buf || !s->buf->data) return 0;
+    if (s->w <= 0 || s->h <= 0) return 0;
+    int32_t bx = s->x, by = s->y;
+    if (s->is_subsurface) {
+        wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
+        wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+        if (!p) return 0;
+        bx = p->x + s->sub_x;
+        by = p->y + s->sub_y;
+    }
+    console_paste_rect((const uint32_t *)s->buf->data,
+                       (uint64_t)bx, (uint64_t)by,
+                       (uint64_t)s->w, (uint64_t)s->h);
+    return 1;
+}
+
+void wayland_blit_surfaces(void) {
     static int blit_log_ticker = 0;
-    int do_log = (++blit_log_ticker % 600 == 0); /* log every ~10s at 60fps */
+    int do_log = (++blit_log_ticker % 600 == 0);
     int blitted = 0;
-    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
-        wl_client_t *c = &g_wl_clients[ci];
-        if (!c->active) continue;
-        for (int oi = 0; oi < c->n_objs; oi++) {
-            if (c->objs[oi].type != OBJ_SURFACE) continue;
-            wl_surface_t *s = c->objs[oi].data;
-            if (!s) continue;
-            if (do_log)
-                fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d buf=%p data=%p w=%d h=%d sub=%d\n",
-                        ci, c->objs[oi].id, s->mapped, (void*)s->buf,
-                        s->buf ? s->buf->data : NULL, s->w, s->h, s->is_subsurface);
-            if (!s->mapped || !s->buf || !s->buf->data) continue;
-            if (s->w <= 0 || s->h <= 0) continue;
-            int32_t bx = s->x, by = s->y;
-            if (s->is_subsurface) {
-                wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
-                wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
-                if (!p) continue;
-                bx = p->x + s->sub_x;
-                by = p->y + s->sub_y;
+
+    /* Two-pass: parent surfaces first, then subsurfaces on top.
+     * Without this, parents overwrite subsurface content. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            wl_client_t *c = &g_wl_clients[ci];
+            if (!c->active) continue;
+            for (int oi = 0; oi < c->n_objs; oi++) {
+                if (c->objs[oi].type != OBJ_SURFACE) continue;
+                wl_surface_t *s = c->objs[oi].data;
+                if (!s) continue;
+                /* pass 0 = non-subsurfaces, pass 1 = subsurfaces */
+                if (pass == 0 && s->is_subsurface) continue;
+                if (pass == 1 && !s->is_subsurface) continue;
+                blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
             }
-            console_paste_rect((const uint32_t *)s->buf->data,
-                               (uint64_t)bx, (uint64_t)by,
-                               (uint64_t)s->w, (uint64_t)s->h);
-            blitted++;
         }
     }
     if (do_log) fprintf(stderr, "[blit] total drawn: %d\n", blitted);
