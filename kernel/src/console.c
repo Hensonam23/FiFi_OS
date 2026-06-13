@@ -205,77 +205,9 @@ static bool     g_tsb_suppress = false;
  *   40-47      set bg (standard 8 colours)
  *   90-97      set fg (bright 8 colours)
  *   100-107    set bg (bright 8 colours)   */
-typedef enum { ANSI_NORM, ANSI_ESC, ANSI_CSI, ANSI_OSC } ansi_state_t;
+typedef enum { ANSI_NORM, ANSI_ESC, ANSI_CSI, ANSI_OSC, ANSI_CHARSET } ansi_state_t;
 static ansi_state_t g_ansi_st   = ANSI_NORM;
-static uint8_t      g_esc_pend  = 0;      /* >0: consume next N bytes after ESC (charset designators) */
-static uint64_t     g_saved_cx  = 0;
-static uint64_t     g_saved_cy  = 0;
-
-/* UTF-8 multi-byte decode state */
-static int      g_utf8_remain = 0;
-static uint32_t g_utf8_cp     = 0;
-
-/* CSI parameter buffer — must hold truecolor SGR (e.g. "38;2;215;119;87m" = 16
- * bytes) and combined sequences; too small a buffer leaks fragments as text. */
-#define ANSI_BUF_CAP 64u
-
-static uint8_t unicode_to_ascii(uint32_t cp) {
-    if (cp >= 0x250Cu && cp <= 0x254Bu) return '+';
-    if (cp >= 0x2552u && cp <= 0x256Cu) return '+';
-    if (cp >= 0x256Du && cp <= 0x257Fu) return '+';
-    switch (cp) {
-    case 0x2500u: case 0x2501u: case 0x2504u: case 0x2505u:
-    case 0x2508u: case 0x2509u: case 0x254Cu: case 0x254Du:
-    case 0x2550u: case 0x2212u: case 0x2013u: case 0x2014u:
-    case 0x2010u: case 0x2043u: return '-';
-    case 0x2502u: case 0x2503u: case 0x2506u: case 0x2507u:
-    case 0x250Au: case 0x250Bu: case 0x254Eu: case 0x254Fu:
-    case 0x2551u: return '|';
-    case 0x2580u: case 0x2584u: case 0x2588u: case 0x258Cu:
-    case 0x2590u: case 0x2591u: case 0x2592u: case 0x2593u:
-    case 0x2594u: case 0x2595u: case 0x25A0u: case 0x25A1u: return '#';
-    case 0x2190u: case 0x21D0u: case 0x27F5u: case 0x25C0u:
-    case 0x25C4u: return '<';
-    case 0x2192u: case 0x21D2u: case 0x27F6u: case 0x25B6u:
-    case 0x25BAu: case 0x276Fu: case 0x203Au: return '>';
-    case 0x2191u: case 0x21D1u: case 0x25B2u: case 0x25B3u: return '^';
-    case 0x2193u: case 0x21D3u: case 0x25BCu: case 0x25BDu: return 'v';
-    case 0x21B5u: case 0x23CEu: return '<';
-    case 0x25C6u: case 0x25C7u: case 0x25C8u: case 0x25C9u: return '*';
-    case 0x25CFu: case 0x25CBu: case 0x25CCu: case 0x25EFu: return 'o';
-    case 0x2022u: case 0x2023u: case 0x00B7u: case 0x2027u:
-    case 0x2219u: case 0x2024u: return '.';
-    case 0x2026u: return '.';
-    case 0x2713u: case 0x2714u: case 0x2705u: case 0x221Au: return '+';
-    case 0x2717u: case 0x2718u: case 0x274Cu: case 0x00D7u:
-    case 0x2612u: case 0x24E7u: return 'x';
-    case 0x2610u: case 0x24DEu: case 0x24BEu: return 'o';
-    case 0x2018u: case 0x2019u: case 0x201Cu: case 0x201Du: return '"';
-    case 0x2139u: return 'i';
-    case 0x26A0u: return '!';
-    case 0x2605u: case 0x2606u: case 0x2736u: return '*';
-    case 0x2630u: return '=';
-    case 0x00BDu: case 0x00BCu: case 0x00BEu: return '/';
-    case 0x2302u: return '#';
-    case 0x2665u: return '+';
-    case 0x266Au: case 0x266Bu: return '~';
-    default: return ' ';
-    }
-}
-
-/* Terminal column width of a codepoint: 0 = zero-width (combining marks, ZWJ),
- * 2 = East-Asian-Wide / emoji, 1 = normal. The program driving the PTY advances
- * its cursor by this width, so we must match it or text after wide/zero-width
- * glyphs desyncs and overlaps. */
-static int cp_width(uint32_t cp) {
-    if (cp == 0 || cp == 0x200Du || (cp >= 0x300u && cp <= 0x36Fu) ||
-        cp == 0xFE0Fu || (cp >= 0xFE00u && cp <= 0xFE0Fu)) return 0;  /* ZWJ, combining, variation selectors */
-    if ((cp >= 0x1F000u && cp <= 0x1FFFFu) || (cp >= 0x2E80u && cp <= 0x9FFFu) ||
-        (cp >= 0xAC00u && cp <= 0xD7A3u) || (cp >= 0xFF00u && cp <= 0xFF60u)) return 2;  /* CJK + emoji + Hangul + fullwidth */
-    return 1;
-}
-
-static uint8_t      g_ansi_buf[ANSI_BUF_CAP];
+static uint8_t      g_ansi_buf[64];
 static uint8_t      g_ansi_len  = 0;
 static uint32_t     g_ansi_fg0  = 0x00FFFFFFu; /* default fg */
 static uint32_t     g_ansi_bg0  = 0x00101010u; /* default bg */
@@ -325,43 +257,71 @@ static const uint32_t ansi_bg_brt[8] = {
     0x00606060u, /* bright white */
 };
 
+static uint32_t ansi_256_color(uint8_t n) {
+    if (n < 8u)  return ansi_fg_std[n];
+    if (n < 16u) return ansi_fg_brt[n - 8u];
+    if (n < 232u) {
+        uint8_t i = n - 16u;
+        uint8_t b = i % 6u, g = (i / 6u) % 6u, r = i / 36u;
+        uint8_t rv = r ? (uint8_t)(95u + (r-1u)*40u) : 0u;
+        uint8_t gv = g ? (uint8_t)(95u + (g-1u)*40u) : 0u;
+        uint8_t bv = b ? (uint8_t)(95u + (b-1u)*40u) : 0u;
+        return ((uint32_t)rv << 16) | ((uint32_t)gv << 8) | bv;
+    }
+    uint8_t v = (uint8_t)(8u + (uint8_t)(n - 232u) * 10u);
+    return ((uint32_t)v << 16) | ((uint32_t)v << 8) | v;
+}
+
 static void ansi_apply_sgr(uint8_t *params, int n) {
     for (int pi = 0; pi < n; pi++) {
         uint8_t p = params[pi];
         if (p == 0) {
-            con.fg = g_ansi_fg0;
-            con.bg = g_ansi_bg0;
-            g_ansi_bold = false;
+            con.fg = g_ansi_fg0; con.bg = g_ansi_bg0; g_ansi_bold = false;
         } else if (p == 1) {
             g_ansi_bold = true;
-        } else if (p == 22) {
+        } else if (p == 22u) {
             g_ansi_bold = false;
-        } else if (p == 38 || p == 48) {
-            /* Extended color (38;5;n or 38;2;r;g;b) — skip sub-params */
-            if (pi + 1 < n && params[pi + 1] == 5u) {
-                pi += 2;  /* skip mode(5) + index */
-            } else if (pi + 1 < n && params[pi + 1] == 2u) {
-                pi += 4;  /* skip mode(2) + R + G + B */
-            }
         } else if (p >= 30u && p <= 37u) {
             con.fg = g_ansi_bold ? ansi_fg_brt[p - 30u] : ansi_fg_std[p - 30u];
+        } else if (p == 39u) {
+            con.fg = g_ansi_fg0;
         } else if (p >= 40u && p <= 47u) {
             con.bg = ansi_bg_std[p - 40u];
+        } else if (p == 49u) {
+            con.bg = g_ansi_bg0;
         } else if (p >= 90u && p <= 97u) {
             con.fg = ansi_fg_brt[p - 90u];
         } else if (p >= 100u && p <= 107u) {
             con.bg = ansi_bg_brt[p - 100u];
+        } else if ((p == 38u || p == 48u) && pi + 1 < n) {
+            bool is_fg = (p == 38u);
+            uint8_t sub = params[pi + 1];
+            if (sub == 5u && pi + 2 < n) {
+                uint32_t c = ansi_256_color(params[pi + 2]);
+                if (is_fg) con.fg = c; else con.bg = c;
+                pi += 2;
+            } else if (sub == 2u && pi + 4 < n) {
+                uint32_t c = ((uint32_t)params[pi+2] << 16) | ((uint32_t)params[pi+3] << 8) | params[pi+4];
+                if (is_fg) con.fg = c; else con.bg = c;
+                pi += 4;
+            }
         }
     }
 }
 
 /* Forward declarations for functions defined later in this file */
 static void fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
-static void ensure_cursor_visible(void);
+static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc);
+
+/* Alt-screen state (for ?1049h/l) */
+static uint8_t  g_alt_buf[CELL_MAX_ROWS][CELL_MAX_COLS];
+static uint64_t g_alt_cx = 0, g_alt_cy = 0;
+static uint32_t g_alt_fg = 0x00FFFFFFu, g_alt_bg = 0x00101010u;
+static bool     g_in_altscreen = false;
+static bool     g_cursor_vis = true;
 
 static void ansi_process_csi(void) {
-    /* Parse semicolon-separated decimal params, then dispatch on final char */
-    uint16_t params[8];
+    uint16_t params[16] = {0};
     int      np = 0;
     uint16_t cur = 0;
     bool     private_mode = false;
@@ -371,72 +331,98 @@ static void ansi_process_csi(void) {
         if (c2 >= '0' && c2 <= '9') {
             cur = (uint16_t)(cur * 10u + (c2 - '0'));
         } else if (c2 == ';') {
-            if (np < 8) params[np++] = cur;
+            if (np < 16) params[np++] = cur;
             cur = 0;
         }
     }
-    if (np < 8) params[np++] = cur;
+    if (np < 16) params[np++] = cur;
 
     uint8_t final_ch = g_ansi_len > 0 ? g_ansi_buf[g_ansi_len - 1u] : 0u;
 
-    /* Private mode sequences: handle alternate screen & cursor visibility */
     if (private_mode) {
-        if ((final_ch == 'h' || final_ch == 'l') && np >= 1) {
-            uint16_t n = params[0];
-            if (n == 1049u || n == 47u || n == 1047u) {
-                /* Alternate screen: just clear and home cursor */
-                fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
-                con.cx = 0; con.cy = 0;
-                for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
-                    for (uint64_t c2 = 0; c2 < CELL_MAX_COLS; c2++)
-                        cell_buf[r][c2] = ' ';
+        if (final_ch == 'h' || final_ch == 'l') {
+            bool on = (final_ch == 'h');
+            for (int pi = 0; pi < np; pi++) {
+                switch (params[pi]) {
+                case 25u:   g_cursor_vis = on; break;
+                case 1049u:
+                    if (on) {
+                        /* Enter alt screen: save main screen, clear */
+                        memcpy(g_alt_buf, cell_buf, sizeof(cell_buf));
+                        g_alt_cx = con.cx; g_alt_cy = con.cy;
+                        g_alt_fg = con.fg; g_alt_bg = con.bg;
+                        g_in_altscreen = true;
+                        fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
+                        memset(cell_buf, ' ', sizeof(cell_buf));
+                        con.cx = 0; con.cy = 0;
+                    } else {
+                        /* Exit alt screen: restore main screen */
+                        memcpy(cell_buf, g_alt_buf, sizeof(cell_buf));
+                        con.cx = g_alt_cx; con.cy = g_alt_cy;
+                        con.fg = g_alt_fg; con.bg = g_alt_bg;
+                        g_in_altscreen = false;
+                        fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
+                        uint64_t vr = (con.rows < CELL_MAX_ROWS) ? con.rows : CELL_MAX_ROWS;
+                        uint64_t vc = (con.cols < CELL_MAX_COLS) ? con.cols : CELL_MAX_COLS;
+                        for (uint64_t r = 0; r < vr; r++)
+                            for (uint64_t c = 0; c < vc; c++)
+                                render_char(c, r, cell_buf[r][c]);
+                    }
+                    break;
+                }
             }
-            /* All other private modes (cursor blink, bracketed paste, etc.) ignored */
         }
         return;
     }
 
     if (final_ch == 'm') {
-        if (np == 1 && params[0] == 0) {
-            con.fg = g_ansi_fg0; con.bg = g_ansi_bg0; g_ansi_bold = false;
-        } else {
-            uint8_t p8[8];
-            for (int i = 0; i < np; i++) p8[i] = (uint8_t)params[i];
-            ansi_apply_sgr(p8, np);
-        }
+        uint8_t p8[16];
+        for (int i = 0; i < np; i++) p8[i] = (uint8_t)(params[i] > 255u ? 255u : params[i]);
+        ansi_apply_sgr(p8, np);
     } else if (final_ch == 'A') {          /* CUU — cursor up */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         con.cy = (con.cy >= n) ? con.cy - n : 0;
     } else if (final_ch == 'B') {          /* CUD — cursor down */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         con.cy += n;
         if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
     } else if (final_ch == 'C') {          /* CUF — cursor forward */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         con.cx += n;
         if (con.cols > 0 && con.cx >= con.cols) con.cx = con.cols - 1;
     } else if (final_ch == 'D') {          /* CUB — cursor back */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         con.cx = (con.cx >= n) ? con.cx - n : 0;
+    } else if (final_ch == 'E') {          /* CNL — cursor next line */
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
+        con.cx = 0; con.cy += n;
+        if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
+    } else if (final_ch == 'F') {          /* CPL — cursor prev line */
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
+        con.cx = 0; con.cy = (con.cy >= n) ? con.cy - n : 0;
     } else if (final_ch == 'G') {          /* CHA — cursor horizontal absolute */
-        uint16_t col = (params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
+        uint16_t col = (params[0] > 0u) ? (uint16_t)(params[0] - 1u) : 0u;
         con.cx = (con.cols > 0 && col < con.cols) ? col : (con.cols > 0 ? con.cols - 1 : 0);
-    } else if (final_ch == 'H' || final_ch == 'f') {  /* CUP — cursor position */
-        uint16_t row = (np >= 1 && params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
-        uint16_t col = (np >= 2 && params[1] > 0) ? (uint16_t)(params[1] - 1) : 0;
+    } else if (final_ch == 'd') {          /* VPA — vertical position absolute */
+        uint16_t row = (params[0] > 0u) ? (uint16_t)(params[0] - 1u) : 0u;
+        con.cy = (con.rows > 0 && row < con.rows) ? row : (con.rows > 0 ? con.rows - 1 : 0);
+    } else if (final_ch == 'H' || final_ch == 'f') {  /* CUP / HVP — cursor position */
+        uint16_t row = (np >= 1 && params[0] > 0u) ? (uint16_t)(params[0] - 1u) : 0u;
+        uint16_t col = (np >= 2 && params[1] > 0u) ? (uint16_t)(params[1] - 1u) : 0u;
         con.cy = (con.rows > 0 && row < con.rows) ? row : (con.rows > 0 ? con.rows - 1 : 0);
         con.cx = (con.cols > 0 && col < con.cols) ? col : (con.cols > 0 ? con.cols - 1 : 0);
+    } else if (final_ch == 's') {          /* SCP — save cursor (ANSI) */
+        g_alt_cx = con.cx; g_alt_cy = con.cy;
+    } else if (final_ch == 'u') {          /* RCP — restore cursor (ANSI) */
+        if (g_alt_cx < con.cols) con.cx = g_alt_cx;
+        if (g_alt_cy < con.rows) con.cy = g_alt_cy;
     } else if (final_ch == 'J') {          /* ED — erase display */
         uint16_t mode = params[0];
-        if (mode == 2 || mode == 3) {
-            /* Clear all: inline console_clear() */
+        if (mode == 2u || mode == 3u) {
             fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.vp_h, con.bg);
             con.cx = 0; con.cy = 0;
-            for (uint64_t r = 0; r < CELL_MAX_ROWS; r++)
-                for (uint64_t c = 0; c < CELL_MAX_COLS; c++)
-                    cell_buf[r][c] = ' ';
-        } else if (mode == 0) {
-            /* Erase cursor to end */
+            memset(cell_buf, ' ', sizeof(cell_buf));
+        } else if (mode == 0u) {
             if (con.cols > con.cx)
                 fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
                           (con.cols - con.cx) * g_fw, g_fh, con.bg);
@@ -449,8 +435,7 @@ static void ansi_process_csi(void) {
                     for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
                         cell_buf[r][c] = ' ';
             }
-        } else if (mode == 1) {
-            /* Erase start to cursor */
+        } else if (mode == 1u) {
             if (con.cy > 0) {
                 fill_rect(con.x_off, con.y_offset, con.cols * g_fw, con.cy * g_fh, con.bg);
                 for (uint64_t r = 0; r < con.cy && r < CELL_MAX_ROWS; r++)
@@ -463,44 +448,29 @@ static void ansi_process_csi(void) {
         }
     } else if (final_ch == 'K') {          /* EL — erase line */
         uint16_t mode = params[0];
-        if (mode == 0) {
+        if (mode == 0u) {
             if (con.cols > con.cx)
                 fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
                           (con.cols - con.cx) * g_fw, g_fh, con.bg);
             for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
                 cell_buf[con.cy][c] = ' ';
-        } else if (mode == 1) {
+        } else if (mode == 1u) {
             fill_rect(con.x_off, con.y_offset + con.cy * g_fh, (con.cx + 1u) * g_fw, g_fh, con.bg);
             for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
                 cell_buf[con.cy][c] = ' ';
-        } else if (mode == 2) {
+        } else if (mode == 2u) {
             fill_rect(con.x_off, con.y_offset + con.cy * g_fh, con.cols * g_fw, g_fh, con.bg);
             for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
                 cell_buf[con.cy][c] = ' ';
         }
-    } else if (final_ch == 's') {              /* SCP — save cursor */
-        g_saved_cx = con.cx; g_saved_cy = con.cy;
-    } else if (final_ch == 'u') {              /* RCP — restore cursor */
-        con.cx = g_saved_cx; con.cy = g_saved_cy;
-        ensure_cursor_visible();
-    } else if (final_ch == 'd') {              /* VPA — cursor vertical absolute */
-        uint16_t row = (params[0] > 0) ? (uint16_t)(params[0] - 1) : 0;
-        con.cy = (con.rows > 0 && row < con.rows) ? row : (con.rows > 0 ? con.rows - 1 : 0);
-    } else if (final_ch == 'E') {              /* CNL — cursor next line */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
-        con.cy += n; con.cx = 0;
-        if (con.rows > 0 && con.cy >= con.rows) con.cy = con.rows - 1;
-    } else if (final_ch == 'F') {              /* CPL — cursor prev line */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
-        con.cy = (con.cy >= n) ? con.cy - n : 0; con.cx = 0;
     } else if (final_ch == 'X') {              /* ECH — erase character */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         for (uint64_t i = con.cx; i < con.cx + n && i < con.cols && i < CELL_MAX_COLS; i++) {
             fill_rect(con.x_off + i * g_fw, con.y_offset + con.cy * g_fh, g_fw, g_fh, con.bg);
             cell_buf[con.cy][i] = ' ';
         }
     } else if (final_ch == 'L') {              /* IL — insert line */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         if (con.cy < con.rows && n > 0) {
             uint64_t move = (con.rows - con.cy > n) ? (con.rows - con.cy - n) : 0;
             if (move > 0)
@@ -510,7 +480,7 @@ static void ansi_process_csi(void) {
                 memset(cell_buf[con.cy + i], ' ', sizeof(cell_buf[0]));
         }
     } else if (final_ch == 'M') {              /* DL — delete line */
-        uint16_t n = (params[0] > 0) ? params[0] : 1;
+        uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         if (con.cy < con.rows && n > 0) {
             uint64_t move = (con.rows > con.cy + n) ? (con.rows - con.cy - n) : 0;
             if (move > 0)
@@ -520,7 +490,7 @@ static void ansi_process_csi(void) {
                 memset(cell_buf[i], ' ', sizeof(cell_buf[0]));
         }
     }
-    /* All other CSI sequences ignored */
+    /* Other CSI sequences silently consumed */
 }
 
 void console_set_suppress_draw(bool on) { g_tsb_suppress = on; }
@@ -891,51 +861,215 @@ void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
     }
 }
 
+/* UTF-8 decoder state. Accumulates continuation bytes. */
+static uint32_t g_utf8_cp;
+static int g_utf8_remain;
+/* Display width of the most-recently decoded Unicode codepoint (1 or 2).
+ * Set by the UTF-8 completion path so the cursor-advance step uses the
+ * TRUE width of the original codepoint, NOT cp_width() of the ASCII fallback
+ * that unicode_to_ascii() maps it to (which would always return 1). */
+static int g_cell_w = 1;
+
+/* ESC 7/8 save-restore cursor */
+static uint64_t g_saved_cx = 0, g_saved_cy = 0;
+
+/* Map Unicode codepoint to displayable ASCII (space for anything unmapped). */
+static uint8_t unicode_to_ascii(uint32_t cp) {
+    if (cp < 0x80u) return (uint8_t)cp;
+    /* Box drawing — all corners/junctions → + */
+    if (cp >= 0x250Cu && cp <= 0x254Bu) return '+';
+    /* Double-line box drawing */
+    if (cp >= 0x2552u && cp <= 0x256Cu) return '+';
+    /* Rounded corners ╭ ╮ ╯ ╰ */
+    if (cp >= 0x256Du && cp <= 0x2570u) return '+';
+    /* Diagonals ╱ ╲ ╳ */
+    if (cp == 0x2571u) return '/';
+    if (cp == 0x2572u) return '\\';
+    if (cp == 0x2573u) return 'X';
+    /* Partial box lines ╴..╿ — horizontal (even) → -, vertical (odd) → | */
+    if (cp >= 0x2574u && cp <= 0x257Fu) return (cp & 1u) ? '|' : '-';
+    /* Braille patterns (progress spinners) */
+    if (cp >= 0x2800u && cp <= 0x28FFu) return '*';
+    /* Latin-1 accented letters → base ASCII */
+    if (cp == 0x00A0u) return ' ';
+    if (cp >= 0x00C0u && cp <= 0x00C6u) return 'A';
+    if (cp == 0x00C7u) return 'C';
+    if (cp >= 0x00C8u && cp <= 0x00CBu) return 'E';
+    if (cp >= 0x00CCu && cp <= 0x00CFu) return 'I';
+    if (cp == 0x00D0u) return 'D';
+    if (cp == 0x00D1u) return 'N';
+    if (cp >= 0x00D2u && cp <= 0x00D6u) return 'O';
+    if (cp == 0x00D7u) return 'x';
+    if (cp == 0x00D8u) return 'O';
+    if (cp >= 0x00D9u && cp <= 0x00DCu) return 'U';
+    if (cp == 0x00DDu) return 'Y';
+    if (cp == 0x00DFu) return 's';
+    if (cp >= 0x00E0u && cp <= 0x00E6u) return 'a';
+    if (cp == 0x00E7u) return 'c';
+    if (cp >= 0x00E8u && cp <= 0x00EBu) return 'e';
+    if (cp >= 0x00ECu && cp <= 0x00EFu) return 'i';
+    if (cp == 0x00F0u) return 'd';
+    if (cp == 0x00F1u) return 'n';
+    if (cp >= 0x00F2u && cp <= 0x00F6u) return 'o';
+    if (cp == 0x00F7u) return '/';
+    if (cp == 0x00F8u) return 'o';
+    if (cp >= 0x00F9u && cp <= 0x00FCu) return 'u';
+    if (cp == 0x00FDu || cp == 0x00FFu) return 'y';
+    switch (cp) {
+    /* Box line variants */
+    case 0x2500u: case 0x2501u:
+    case 0x2504u: case 0x2505u: case 0x2508u: case 0x2509u:
+    case 0x254Cu: case 0x254Du: case 0x2550u: return '-';
+    case 0x2502u: case 0x2503u:
+    case 0x2506u: case 0x2507u: case 0x250Au: case 0x250Bu:
+    case 0x254Eu: case 0x254Fu: case 0x2551u: return '|';
+    /* Block elements */
+    case 0x2580u: case 0x2584u: case 0x2588u:
+    case 0x258Cu: case 0x2590u:
+    case 0x2591u: case 0x2592u: case 0x2593u: case 0x2594u: case 0x2595u:
+    case 0x25A0u: case 0x25A1u: return '#';
+    /* Arrows */
+    case 0x2190u: case 0x21D0u: case 0x27F5u: return '<';
+    case 0x2192u: case 0x21D2u: case 0x27F6u: return '>';
+    case 0x2191u: case 0x21D1u: return '^';
+    case 0x2193u: case 0x21D3u: return 'v';
+    case 0x21B5u: case 0x23CEu: return '<';
+    /* Geometric shapes */
+    case 0x25C6u: case 0x25C7u: case 0x25C8u: case 0x25C9u: return '*';
+    case 0x25CFu: case 0x25CBu: case 0x25CCu: return 'o';
+    case 0x25B2u: case 0x25B3u: return '^';
+    case 0x25BCu: case 0x25BDu: return 'v';
+    case 0x25B6u: return '>';
+    case 0x25C0u: return '<';
+    /* Bullets and dots */
+    case 0x2022u: case 0x2023u: case 0x00B7u: case 0x2027u: case 0x2219u: return '.';
+    /* Check marks, crosses */
+    case 0x2713u: case 0x2714u: case 0x2705u: return '+';
+    case 0x2717u: case 0x2718u: case 0x274Cu: return 'x';
+    /* Misc punctuation */
+    case 0x2026u: return '.';
+    case 0x2014u: case 0x2013u: return '-';
+    case 0x2018u: case 0x2019u: case 0x201Cu: case 0x201Du: return '"';
+    /* Stars */
+    case 0x2605u: case 0x2606u: return '*';
+    /* Warning / info */
+    case 0x26A0u: return '!';
+    case 0x2139u: return 'i';
+    /* Misc symbols Claude Code uses */
+    case 0x25E6u: return 'o';
+    case 0x2794u: return '>';
+    default: return ' ';
+    }
+}
+
+/* Display width: 0=combining/zero-width, 1=normal, 2=wide (CJK/emoji). */
+static int cp_width(uint32_t cp) {
+    /* Zero-width: combining marks, joiners, variation selectors, ZWSP/BOM */
+    if (cp == 0x200Bu || cp == 0x200Cu || cp == 0x200Du || cp == 0xFEFFu ||
+        (cp >= 0x0300u && cp <= 0x036Fu) || (cp >= 0x0483u && cp <= 0x0489u) ||
+        (cp >= 0x0591u && cp <= 0x05BDu) || (cp >= 0x0610u && cp <= 0x061Au) ||
+        (cp >= 0x064Bu && cp <= 0x065Fu) || (cp >= 0x06D6u && cp <= 0x06DCu) ||
+        (cp >= 0x1AB0u && cp <= 0x1AFFu) || (cp >= 0x1DC0u && cp <= 0x1DFFu) ||
+        (cp >= 0x20D0u && cp <= 0x20FFu) || (cp >= 0xFE20u && cp <= 0xFE2Fu) ||
+        (cp >= 0xFE00u && cp <= 0xFE0Fu) || (cp >= 0xE0100u && cp <= 0xE01EFu))
+        return 0;
+    /* Wide: East-Asian Wide & Fullwidth + supplementary-plane emoji */
+    if ((cp >= 0x1100u && cp <= 0x115Fu) ||
+        cp == 0x2329u || cp == 0x232Au ||
+        (cp >= 0x2E80u && cp <= 0x303Eu) ||
+        (cp >= 0x3041u && cp <= 0x33FFu) ||
+        (cp >= 0x3400u && cp <= 0x4DBFu) ||
+        (cp >= 0x4E00u && cp <= 0x9FFFu) ||
+        (cp >= 0xA000u && cp <= 0xA4CFu) ||
+        (cp >= 0xAC00u && cp <= 0xD7A3u) ||
+        (cp >= 0xF900u && cp <= 0xFAFFu) ||
+        (cp >= 0xFE10u && cp <= 0xFE19u) ||
+        (cp >= 0xFE30u && cp <= 0xFE4Fu) ||
+        (cp >= 0xFF00u && cp <= 0xFF60u) ||
+        (cp >= 0xFFE0u && cp <= 0xFFE6u) ||
+        (cp >= 0x1F000u && cp <= 0x1FAFFu) ||
+        (cp >= 0x20000u && cp <= 0x3FFFDu))
+        return 2;
+    /* BMP emoji with default emoji presentation (Claude Code emits these standalone) */
+    if (cp == 0x231Au || cp == 0x231Bu || (cp >= 0x23E9u && cp <= 0x23ECu) ||
+        cp == 0x23F0u || cp == 0x23F3u || cp == 0x25FDu || cp == 0x25FEu ||
+        cp == 0x2614u || cp == 0x2615u || (cp >= 0x2648u && cp <= 0x2653u) ||
+        cp == 0x267Fu || cp == 0x2693u || cp == 0x26A1u ||
+        cp == 0x26AAu || cp == 0x26ABu || cp == 0x26BDu || cp == 0x26BEu ||
+        cp == 0x26C4u || cp == 0x26C5u || cp == 0x26CEu || cp == 0x26D4u ||
+        cp == 0x26EAu || cp == 0x26F2u || cp == 0x26F3u || cp == 0x26F5u ||
+        cp == 0x26FAu || cp == 0x26FDu || cp == 0x2705u ||
+        cp == 0x270Au || cp == 0x270Bu || cp == 0x2728u ||
+        cp == 0x274Cu || cp == 0x274Eu || (cp >= 0x2753u && cp <= 0x2755u) ||
+        cp == 0x2757u || (cp >= 0x2795u && cp <= 0x2797u) ||
+        cp == 0x27B0u || cp == 0x27BFu || cp == 0x2B1Bu || cp == 0x2B1Cu ||
+        cp == 0x2B50u || cp == 0x2B55u)
+        return 2;
+    return 1;
+}
+
 void console_putc(char c) {
     if (!con.initialized) return;
     uint8_t uc = (uint8_t)c;
 
-    /* ── OSC: consume until BEL (0x07) or ESC (start of ST) ── */
-    if (g_ansi_st == ANSI_OSC) {
-        if (uc == 0x07u) { g_ansi_st = ANSI_NORM; g_utf8_remain = 0; }
-        else if (uc == 0x1Bu) { g_ansi_st = ANSI_ESC; g_utf8_remain = 0; }
-        return;
+    /* ── UTF-8 decoder ── */
+    if (uc >= 0x80) {
+        /* Continuation byte or start byte */
+        if (uc >= 0xC0) {   /* Start byte */
+            if (g_utf8_remain > 0) g_utf8_cp = 0;  /* Drop incomplete sequence */
+            if (uc < 0xE0) { g_utf8_cp = uc & 0x1F; g_utf8_remain = 1; }
+            else if (uc < 0xF0) { g_utf8_cp = uc & 0x0F; g_utf8_remain = 2; }
+            else { g_utf8_cp = uc & 0x07; g_utf8_remain = 3; }
+            return;
+        } else if (g_utf8_remain > 0) {  /* Continuation byte */
+            g_utf8_cp = (g_utf8_cp << 6) | (uc & 0x3F);
+            g_utf8_remain--;
+            if (g_utf8_remain == 0) {
+                uint32_t cp = g_utf8_cp;
+                g_utf8_cp = 0;
+                int cpw = cp_width(cp);
+                if (cpw == 0) return;   /* zero-width combining mark: skip entirely */
+                g_cell_w = cpw;         /* remember true width for cursor-advance below */
+                uc = unicode_to_ascii(cp);
+            } else {
+                return;  /* Need more bytes */
+            }
+        } else {
+            uc = '?';  /* Orphan continuation — replace with ? */
+        }
     }
-
-    /* ── Consume extra byte for two-byte ESC sequences (e.g. ESC ( B) ── */
-    if (g_esc_pend > 0) { g_esc_pend--; return; }
 
     /* ── ANSI escape sequence state machine ── */
     if (g_ansi_st == ANSI_ESC) {
         g_ansi_st = ANSI_NORM;
-        g_utf8_remain = 0;
         switch (uc) {
-        case '[':  g_ansi_st = ANSI_CSI; g_ansi_len = 0; break;
-        case ']':  g_ansi_st = ANSI_OSC;                 break;
-        case '\\': /* ST — already back to NORM */        break;
-        case 'M':  /* Reverse linefeed */
-            if (con.cy > 0) { con.cy--; }
+        case '[': g_ansi_st = ANSI_CSI; g_ansi_len = 0; break;
+        case ']': g_ansi_st = ANSI_OSC; break;
+        case '\\': break;  /* ST string terminator — consume */
+        case 'M':  /* RI — reverse index */
+            if (con.cy > 0) con.cy--;
             break;
-        case '7':  /* Save cursor (DEC) */
-            g_saved_cx = con.cx; g_saved_cy = con.cy;    break;
-        case '8':  /* Restore cursor (DEC) */
-            con.cx = g_saved_cx; con.cy = g_saved_cy;
-            ensure_cursor_visible();                       break;
-        case '(':  case ')':  case '*':  case '+':
-        case '%':  case '#':
-            g_esc_pend = 1;  /* consume one more byte (charset/flags) */ break;
-        case 'c':  /* Full reset — clear screen */
-            con.cx = 0; con.cy = 0;
-            con.fg = g_ansi_fg0; con.bg = g_ansi_bg0;
-            g_ansi_bold = false;
+        case '7':  g_saved_cx = con.cx; g_saved_cy = con.cy; break;
+        case '8':
+            if (g_saved_cx < con.cols) con.cx = g_saved_cx;
+            if (g_saved_cy < con.rows) con.cy = g_saved_cy;
             break;
-        default: break; /* all other two-byte ESC seqs: consume and discard */
+        case '(': case ')': case '*': case '+':
+            g_ansi_st = ANSI_CHARSET; break;  /* charset designator follows */
+        default: break;  /* unknown ESC — consume */
         }
         return;
+    } else if (g_ansi_st == ANSI_OSC) {
+        if (uc == 0x07u) { g_ansi_st = ANSI_NORM; }   /* BEL terminates OSC */
+        else if (uc == 0x1Bu) { g_ansi_st = ANSI_ESC; }  /* ESC starts potential ST */
+        return;  /* consume all OSC payload */
+    } else if (g_ansi_st == ANSI_CHARSET) {
+        g_ansi_st = ANSI_NORM;  /* consume the one-byte charset designator */
+        return;
     } else if (g_ansi_st == ANSI_CSI) {
-        if ((uc >= 0x40u && uc <= 0x7Eu) || g_ansi_len >= (uint8_t)(ANSI_BUF_CAP - 1u)) {
+        if ((uc >= 0x40u && uc <= 0x7Eu) || g_ansi_len >= 63u) {
             /* Final byte of CSI sequence */
-            if (g_ansi_len < (uint8_t)(ANSI_BUF_CAP - 1u)) g_ansi_buf[g_ansi_len++] = uc;
+            if (g_ansi_len < 63u) g_ansi_buf[g_ansi_len++] = uc;
             ansi_process_csi();
             g_ansi_st = ANSI_NORM;
         } else {
@@ -944,47 +1078,17 @@ void console_putc(char c) {
         return;
     } else if (uc == 0x1Bu) {   /* ESC */
         g_ansi_st = ANSI_ESC;
-        g_utf8_remain = 0;
         return;
     }
-
-    /* ── UTF-8 multi-byte decoding ── */
-    if (uc >= 0x80u) {
-        if (uc >= 0xC0u) {
-            /* Lead byte — start new sequence */
-            if      (uc >= 0xF0u) { g_utf8_remain = 3; g_utf8_cp = uc & 0x07u; }
-            else if (uc >= 0xE0u) { g_utf8_remain = 2; g_utf8_cp = uc & 0x0Fu; }
-            else                  { g_utf8_remain = 1; g_utf8_cp = uc & 0x1Fu; }
-        } else if (g_utf8_remain > 0) {
-            /* Continuation byte */
-            g_utf8_cp = (g_utf8_cp << 6) | (uc & 0x3Fu);
-            if (--g_utf8_remain == 0) {
-                int w = cp_width(g_utf8_cp);
-                if (w != 0) {   /* w==0: combining/ZWJ/variation selector — drop, no advance */
-                    uint8_t mapped = (g_utf8_cp < 0x80u)
-                        ? (uint8_t)g_utf8_cp
-                        : unicode_to_ascii(g_utf8_cp);
-                    console_putc((char)mapped);  /* render as ASCII through normal path (advances 1 col) */
-                    if (w == 2)
-                        console_putc(' ');  /* wide glyph: 2nd column keeps following text aligned */
-                }
-            }
-        } else {
-            g_utf8_remain = 0;  /* stray continuation — ignore */
-        }
-        return;
-    }
-
-    /* ── Normal ASCII byte — reset UTF-8 state ── */
-    g_utf8_remain = 0;
 
     /* Always capture to scrollback ring (skip control codes except \n) */
     if (uc >= 0x20u || uc == '\n') tsb_push(uc);
 
     if (g_tsb_suppress) {
+        int w = g_cell_w; g_cell_w = 1;
         if (c == '\n') { con.cx = 0; con.cy++; }
         else if (c == '\r') con.cx = 0;
-        else if (c != '\x7f' && c != '\b') con.cx++;
+        else con.cx += (uint64_t)w;
         return;
     }
 
@@ -1010,10 +1114,17 @@ void console_putc(char c) {
         return;
     }
 
+    int w = g_cell_w; g_cell_w = 1;
+    /* Wide char straddling the right margin: wrap to next line first */
+    if (w == 2 && con.cx + 1 >= con.cols) {
+        con.cx = 0; con.cy++;
+    }
     ensure_cursor_visible();
-    draw_char_at(con.cx, con.cy, (unsigned char)c);
-
-    con.cx++;
+    draw_char_at(con.cx, con.cy, (unsigned char)uc);
+    con.cx += (uint64_t)w;
+    /* Blank the phantom second column so later erases/scrolls stay aligned */
+    if (w == 2 && con.cx < con.cols)
+        draw_char_at(con.cx, con.cy, ' ');
     ensure_cursor_visible();
 }
 

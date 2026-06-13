@@ -458,7 +458,11 @@ static void tab_handle_csi(Tab *t) {
     } else if (cmd == 'J') {
         int n = atoi(buf);
         if (n == 2 || n == 3) { tab_clear_all(t); t->cx = t->cy = 0; }
-        else if (n == 0) tab_clear_region(t, t->cy, t->cx, t->rows-1, t->cols);
+        else if (n == 0) {
+            /* erase from cursor to end of screen: current row from cx, subsequent rows from col 0 */
+            tab_clear_region(t, t->cy, t->cx, t->cy, t->cols);
+            if (t->cy + 1 < t->rows) tab_clear_region(t, t->cy + 1, 0, t->rows - 1, t->cols);
+        }
         else if (n == 1) { tab_clear_region(t, 0, 0, t->cy-1, t->cols); tab_clear_region(t, t->cy, 0, t->cy, t->cx+1); }
     } else if (cmd == 'K') {
         int n = atoi(buf);

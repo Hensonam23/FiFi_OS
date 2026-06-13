@@ -243,6 +243,10 @@ typedef struct {
     bool         is_subsurface;
     uint32_t     parent_surface_id;
     int32_t      sub_x, sub_y;
+    /* Pending frame callback: fired during commit (not on frame request).
+     * Firing immediately on frame request causes clients to destroy buffers
+     * before we process the commit, breaking the render pipeline. */
+    uint32_t     pending_frame_cb;
 } wl_surface_t;
 
 /* ── Client ───────────────────────────────────────────────────────────────── */
@@ -271,8 +275,42 @@ struct wl_client {
     uint32_t  xdg_wm_id;
 };
 
+/* ── Orphan buffer pool ────────────────────────────────────────────────────── */
+/* Firefox/LibreWolf creates buffers in a GPU-process connection that disconnects
+ * before the parent process commits surfaces. Buffers are saved here so they
+ * survive the disconnect and the cross-client commit lookup can find them. */
+#define MAX_ORPHAN_BUFS 64
+typedef struct { uint32_t id; wl_shm_buf_t *buf; } orphan_buf_t;
+static orphan_buf_t g_orphan_bufs[MAX_ORPHAN_BUFS];
+static int          g_n_orphans = 0;
+
+static void orphan_save_buffers(wl_client_t *c) {
+    int saved = 0;
+    for (int i = 0; i < c->n_objs; i++) {
+        if (c->objs[i].type != OBJ_BUFFER || !c->objs[i].data) continue;
+        if (g_n_orphans >= MAX_ORPHAN_BUFS) break;
+        wl_shm_buf_t *b = c->objs[i].data;
+        fprintf(stderr, "[orphan] saving fd=%d buf_id=%u w=%d h=%d data=%p\n",
+                c->fd, c->objs[i].id, b->width, b->height, b->data);
+        g_orphan_bufs[g_n_orphans].id  = c->objs[i].id;
+        g_orphan_bufs[g_n_orphans].buf = b;
+        g_n_orphans++;
+        saved++;
+        c->objs[i].data = NULL;  /* prevent free in slot-clear */
+    }
+    if (saved) fprintf(stderr, "[orphan] saved %d buffers from fd=%d total=%d\n", saved, c->fd, g_n_orphans);
+}
+
+static wl_shm_buf_t *orphan_find(uint32_t id) {
+    for (int i = 0; i < g_n_orphans; i++)
+        if (g_orphan_bufs[i].id == id) return g_orphan_bufs[i].buf;
+    return NULL;
+}
+
+/* wl_find_obj_any is defined after the server state globals below */
+
 /* ── Server state ─────────────────────────────────────────────────────────── */
-#define MAX_WL_CLIENTS 8
+#define MAX_WL_CLIENTS 16
 static int         g_wl_fd      = -1;   /* listening socket */
 static wl_client_t g_wl_clients[MAX_WL_CLIENTS];
 static uint32_t    g_global_serial = 1;
@@ -342,7 +380,16 @@ static wl_obj_t *wl_find_obj(wl_client_t *c, uint32_t id) {
 }
 
 static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *data) {
-    /* Reuse deleted slot if available */
+    /* If this ID already exists (from a previous session or re-use), overwrite it */
+    for (int i = 0; i < c->n_objs; i++) {
+        if (c->objs[i].id == id) {
+            /* Free old data if it was a surface or buffer */
+            if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) free(c->objs[i].data);
+            c->objs[i] = (wl_obj_t){ type, id, data };
+            return &c->objs[i];
+        }
+    }
+    /* Reuse a deleted (OBJ_NONE) slot */
     for (int i = 0; i < c->n_objs; i++) {
         if (c->objs[i].type == OBJ_NONE) {
             c->objs[i] = (wl_obj_t){ type, id, data };
@@ -375,6 +422,16 @@ static void wl_delete_obj(wl_client_t *c, uint32_t id) {
             return;
         }
     }
+}
+
+/* Find an object in ANY client slot (active or zombie) */
+static wl_obj_t *wl_find_obj_any(uint32_t id) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (g_wl_clients[ci].n_objs == 0) continue;
+        wl_obj_t *o = wl_find_obj(&g_wl_clients[ci], id);
+        if (o) return o;
+    }
+    return NULL;
 }
 
 /* ── Event senders ───────────────────────────────────────────────────────── */
@@ -571,6 +628,16 @@ static void send_keymap(wl_client_t *c) {
 static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                            const uint8_t *args, uint32_t args_len) {
     wl_obj_t *obj = wl_find_obj(c, obj_id);
+    /* Firefox reconnects and sends ops for objects from previous connections.
+     * If not found in current client, search all other slots (active or zombie). */
+    wl_client_t *obj_owner = c;
+    if (!obj && obj_id != 1) {
+        for (int _zi = 0; _zi < MAX_WL_CLIENTS; _zi++) {
+            if (&g_wl_clients[_zi] == c || g_wl_clients[_zi].n_objs == 0) continue;
+            wl_obj_t *_zo = wl_find_obj(&g_wl_clients[_zi], obj_id);
+            if (_zo) { obj = _zo; obj_owner = &g_wl_clients[_zi]; break; }
+        }
+    }
     obj_type_t type = obj ? obj->type : (obj_id == 1 ? OBJ_DISPLAY : OBJ_NONE);
 
     /* Per-request trace (off by default; set FIFI_WL_TRACE=1 to enable). Logs every
@@ -660,6 +727,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         } else if (opcode == WL_COMPOSITOR_CREATE_REGION && args_len >= 4) {
             uint32_t rid; memcpy(&rid, args, 4);
             wl_new_obj(c, rid, OBJ_REGION, NULL);
+            fprintf(stderr, "[region] create rid=%u fd=%d n_objs=%d\n", rid, c->fd, c->n_objs);
         }
         break;
 
@@ -671,28 +739,66 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&s->buffer_id, args, 4);
             /* dx, dy at args+4 and args+8 — ignore for now */
         } else if (opcode == WL_SURFACE_COMMIT) {
-            /* Commit: if a buffer is attached, mark surface as mapped */
+            /* Commit: if a buffer is attached, mark surface as mapped.
+             * Multi-process clients (Firefox/LibreWolf) create buffers in one
+             * client slot and surfaces in another. If the buffer isn't found in
+             * the current client, search all other active clients. */
             if (s->buffer_id) {
-                wl_obj_t *bobj = wl_find_obj(c, s->buffer_id);
-                if (bobj && bobj->type == OBJ_BUFFER) {
-                    s->buf = bobj->data;
-                    s->mapped = true;
-                    if (s->buf && s->buf->width && s->buf->height) {
-                        s->w = s->buf->width;
-                        s->h = s->buf->height;
+                wl_obj_t *bobj = wl_find_obj_any(s->buffer_id);
+                if (!bobj || bobj->type != OBJ_BUFFER) {
+                    /* Cross-client buffer lookup for multi-process apps */
+                    for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
+                        if (!g_wl_clients[_ci].active || &g_wl_clients[_ci] == c) continue;
+                        wl_obj_t *_b = wl_find_obj(&g_wl_clients[_ci], s->buffer_id);
+                        if (_b && _b->type == OBJ_BUFFER) { bobj = _b; break; }
                     }
                 }
+                /* Also check orphan pool (buffers from disconnected clients) */
+                wl_shm_buf_t *orphan_b = (!bobj || bobj->type != OBJ_BUFFER)
+                    ? orphan_find(s->buffer_id) : NULL;
+                if (bobj && bobj->type == OBJ_BUFFER) {
+                    s->buf    = bobj->data;
+                    s->mapped = true;
+                    if (s->buf && s->buf->width && s->buf->height) {
+                        s->w = s->buf->width; s->h = s->buf->height;
+                    }
+                } else if (orphan_b) {
+                    s->buf    = orphan_b;
+                    s->mapped = true;
+                    if (s->buf && s->buf->width && s->buf->height) {
+                        s->w = s->buf->width; s->h = s->buf->height;
+                    }
+                    fprintf(stderr, "[orphan] MAPPED obj=%u w=%d h=%d buf_id=%u data=%p\n",
+                            obj_id, s->w, s->h, s->buffer_id, s->buf ? s->buf->data : NULL);
+                } else {
+                    fprintf(stderr, "[nomatch] obj=%u buf_id=%u not found anywhere\n",
+                            obj_id, s->buffer_id);
+                }
             }
-            /* Send buffer_release so client can reuse the buffer */
+            /* Fire pending frame callback (stored at WL_SURFACE_FRAME time) */
+            if (s->pending_frame_cb) {
+                send_wl_callback_done(c, s->pending_frame_cb, g_global_serial++);
+                s->pending_frame_cb = 0;
+            }
+            /* Send buffer_release to the client that owns the buffer */
             if (s->buffer_id) {
-                int h = wl_begin_msg(c, s->buffer_id, WL_BUFFER_RELEASE);
-                wl_end_msg(c, h);
+                wl_client_t *buf_owner = c;
+                /* If buffer was found cross-client, send release to its owner */
+                for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
+                    if (!g_wl_clients[_ci].active) continue;
+                    if (wl_find_obj(&g_wl_clients[_ci], s->buffer_id)) {
+                        buf_owner = &g_wl_clients[_ci]; break;
+                    }
+                }
+                int h = wl_begin_msg(buf_owner, s->buffer_id, WL_BUFFER_RELEASE);
+                wl_end_msg(buf_owner, h);
             }
         } else if (opcode == WL_SURFACE_FRAME && args_len >= 4) {
             uint32_t cb_id; memcpy(&cb_id, args, 4);
             wl_new_obj(c, cb_id, OBJ_CALLBACK, NULL);
-            /* Fire immediately — we don't do vsync scheduling yet */
-            send_wl_callback_done(c, cb_id, g_global_serial++);
+            /* Store callback — fire it during commit so the client doesn't
+             * free buffers before we've had a chance to process the commit. */
+            if (s) s->pending_frame_cb = cb_id;
         } else if (opcode == WL_SURFACE_DESTROY) {
             s->mapped = false;
             wl_delete_obj(c, obj_id);
@@ -710,12 +816,14 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             pool->size = (size_t)sz;
             pool->fd   = -1;  /* fd set by caller after msg parse */
             wl_new_obj(c, pool_id, OBJ_SHM_POOL, pool);
+            fprintf(stderr, "[pool] create fd=%d pool_id=%u sz=%d n_objs=%d\n", c->fd, pool_id, sz, c->n_objs);
         }
         break;
 
     /* ── wl_shm_pool ─────────────────────────────────────────────────── */
     case OBJ_SHM_POOL: {
         wl_shm_buf_t *pool = obj ? obj->data : NULL;
+        fprintf(stderr, "[pool] fd=%d op=%u pool_id=%u obj=%p pool=%p pool_fd=%d\n", c->fd, opcode, obj_id, (void*)obj, (void*)pool, pool ? pool->fd : -99);
         if (!pool) break;
         if (opcode == WL_SHM_POOL_CREATE_BUFFER && args_len >= 24) {
             uint32_t buf_id;
@@ -742,6 +850,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     buf->size = (size_t)(h * stride);
                 }
             }
+            fprintf(stderr, "[pool] create_buffer buf_id=%u pool_fd=%d w=%d h=%d data=%p\n",
+                    buf_id, pool->fd, w, h, buf->data);
             wl_new_obj(c, buf_id, OBJ_BUFFER, buf);
         } else if (opcode == WL_SHM_POOL_RESIZE && args_len >= 4) {
             /* Client grew the pool (it can only grow). Re-map at the new size so
@@ -767,8 +877,25 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
     /* ── wl_buffer ───────────────────────────────────────────────────── */
     case OBJ_BUFFER:
-        if (opcode == WL_BUFFER_DESTROY)
+        if (opcode == WL_BUFFER_DESTROY) {
+            /* Null out any surface still holding a pointer to this buffer.
+             * We send wl_buffer.release immediately on commit, so the client
+             * is entitled to destroy it at any time — but s->buf may still
+             * point here until the next commit. Clear to avoid use-after-free. */
+            void *dying_buf = obj ? obj->data : NULL;
+            if (dying_buf) {
+                for (int _i = 0; _i < c->n_objs; _i++) {
+                    if (c->objs[_i].type == OBJ_SURFACE && c->objs[_i].data) {
+                        wl_surface_t *_s = c->objs[_i].data;
+                        if (_s->buf == dying_buf) {
+                            _s->buf    = NULL;
+                            _s->mapped = false;
+                        }
+                    }
+                }
+            }
             wl_delete_obj(c, obj_id);
+        }
         break;
 
     /* ── wl_seat ─────────────────────────────────────────────────────── */
@@ -795,7 +922,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&surf_id,     args+4, 4);
             wl_new_obj(c, xdg_surf_id, OBJ_XDG_SURFACE, NULL);
             /* link surface to its xdg_surface */
-            wl_obj_t *so = wl_find_obj(c, surf_id);
+            wl_obj_t *so = wl_find_obj_any(surf_id);
             if (so && so->type == OBJ_SURFACE && so->data) {
                 wl_surface_t *s = so->data;
                 s->xdg_surface_id = xdg_surf_id;
@@ -892,7 +1019,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&sub_id,    args,     4);
             memcpy(&surf_id,   args + 4, 4);
             memcpy(&parent_id, args + 8, 4);
-            wl_obj_t *so = wl_find_obj(c, surf_id);
+            wl_obj_t *so = wl_find_obj_any(surf_id);
             wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
             if (s) {
                 s->is_subsurface      = true;
@@ -917,6 +1044,13 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
          * subsurface drawn after its parent in object order = correct stacking). */
         break;
     }
+
+    /* ── wl_region ───────────────────────────────────────────────────── */
+    case OBJ_REGION:
+        /* op=0: destroy, op=1: add, op=2: subtract — we don't clip, just track */
+        if (opcode == 0) wl_delete_obj(c, obj_id);
+        /* add/subtract silently accepted */
+        break;
 
     default:
         /* Unknown object — send error */
@@ -950,9 +1084,13 @@ static void wl_client_recv(wl_client_t *c) {
     if (n <= 0) {
         if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
             fprintf(stderr, "[wayland] client fd=%d disconnected\n", c->fd);
+            orphan_save_buffers(c);
             close(c->fd);
             c->fd     = -1;
             c->active = false;
+            /* Keep c->n_objs and c->objs intact — Firefox reconnects to the same
+             * compositor and sends messages for objects it created in the previous
+             * connection. Mark as zombie so the objects stay findable. */
         }
         return;
     }
@@ -1206,19 +1344,25 @@ bool wayland_has_focus(void) { return g_focus_ci >= 0; }
 void wayland_blit_surfaces(void) {
     extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
                                     uint64_t w, uint64_t h);
+    static int blit_log_ticker = 0;
+    int do_log = (++blit_log_ticker % 600 == 0); /* log every ~10s at 60fps */
+    int blitted = 0;
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         wl_client_t *c = &g_wl_clients[ci];
         if (!c->active) continue;
         for (int oi = 0; oi < c->n_objs; oi++) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
-            if (!s || !s->mapped || !s->buf || !s->buf->data) continue;
+            if (!s) continue;
+            if (do_log)
+                fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d buf=%p data=%p w=%d h=%d sub=%d\n",
+                        ci, c->objs[oi].id, s->mapped, (void*)s->buf,
+                        s->buf ? s->buf->data : NULL, s->w, s->h, s->is_subsurface);
+            if (!s->mapped || !s->buf || !s->buf->data) continue;
             if (s->w <= 0 || s->h <= 0) continue;
             int32_t bx = s->x, by = s->y;
             if (s->is_subsurface) {
-                /* Position relative to the parent surface (Firefox renders web
-                 * content into this). Skip if the parent is gone/unmapped. */
-                wl_obj_t *po = wl_find_obj(c, s->parent_surface_id);
+                wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
                 wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
                 if (!p) continue;
                 bx = p->x + s->sub_x;
@@ -1227,8 +1371,10 @@ void wayland_blit_surfaces(void) {
             console_paste_rect((const uint32_t *)s->buf->data,
                                (uint64_t)bx, (uint64_t)by,
                                (uint64_t)s->w, (uint64_t)s->h);
+            blitted++;
         }
     }
+    if (do_log) fprintf(stderr, "[blit] total drawn: %d\n", blitted);
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -1299,11 +1445,23 @@ void wayland_poll(void) {
         bool accepted = false;
         for (int i = 0; i < MAX_WL_CLIENTS; i++) {
             if (!g_wl_clients[i].active) {
-                memset(&g_wl_clients[i], 0, sizeof(wl_client_t));
-                g_wl_clients[i].fd     = cfd;
-                g_wl_clients[i].active = true;
-                g_wl_clients[i].serial = 1;
-                fprintf(stderr, "[wayland] new client fd=%d slot=%d\n", cfd, i);
+                /* Preserve objects array — Firefox reconnects and reuses object IDs
+                 * from previous sessions. Only reset connection-state fields. */
+                g_wl_clients[i].fd          = cfd;
+                g_wl_clients[i].active      = true;
+                g_wl_clients[i].serial      = 1;
+                g_wl_clients[i].send_used   = 0;
+                g_wl_clients[i].recv_used   = 0;
+                g_wl_clients[i].send_overflow = false;
+                /* Keep n_objs and objs[] intact for zombie-session object reuse */
+                g_wl_clients[i].compositor_id = 0;
+                g_wl_clients[i].shm_id        = 0;
+                g_wl_clients[i].seat_id       = 0;
+                g_wl_clients[i].keyboard_id   = 0;
+                g_wl_clients[i].pointer_id    = 0;
+                g_wl_clients[i].output_id     = 0;
+                g_wl_clients[i].xdg_wm_id     = 0;
+                fprintf(stderr, "[wayland] new client fd=%d slot=%d (objs=%d from prev)\n", cfd, i, g_wl_clients[i].n_objs);
                 accepted = true;
                 break;
             }

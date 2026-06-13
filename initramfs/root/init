@@ -90,6 +90,39 @@ ip addr add 127.0.0.1/8 dev lo 2>/dev/null
 cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
 ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
 
+# ── SSH server (Dropbear) — keys persist in /fifi-data/ssh across updates ────
+# Add your public key to /fifi-data/ssh/authorized_keys for key-based login.
+# Password auth is disabled; key auth only.
+if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
+    mkdir -p /fifi-data/ssh
+    chmod 700 /fifi-data/ssh
+
+    # Generate host keys on first boot (stored in /fifi-data/ssh — survives updates)
+    [ -f /fifi-data/ssh/dropbear_ed25519_host_key ] || \
+        /usr/bin/dropbearkey -t ed25519 -f /fifi-data/ssh/dropbear_ed25519_host_key \
+            >>/fifi-data/sshd.log 2>&1
+    [ -f /fifi-data/ssh/dropbear_rsa_host_key ] || \
+        /usr/bin/dropbearkey -t rsa -s 3072 -f /fifi-data/ssh/dropbear_rsa_host_key \
+            >>/fifi-data/sshd.log 2>&1
+
+    # Ensure /etc/passwd + /etc/group exist (dropbear needs them to resolve root's home)
+    [ -f /etc/passwd ] || echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
+    [ -f /etc/group ]  || echo 'root:x:0:' > /etc/group
+
+    # /root/.ssh -> /fifi-data/ssh so authorized_keys is persistent
+    mkdir -p /root
+    [ -L /root/.ssh ] || [ -d /root/.ssh ] || ln -sf /fifi-data/ssh /root/.ssh
+
+    # Start dropbear: key-only auth (-s), disable port forwarding (-j -k)
+    /usr/sbin/dropbear \
+        -r /fifi-data/ssh/dropbear_ed25519_host_key \
+        -r /fifi-data/ssh/dropbear_rsa_host_key \
+        -p 22 -s -j -k -I 3600 \
+        >>/fifi-data/sshd.log 2>&1 && \
+        echo "ssh: dropbear started on port 22" >> /fifi-data/network.log || \
+        echo "ssh: dropbear failed to start — check /fifi-data/sshd.log" >> /fifi-data/network.log
+fi
+
 # ── Bring up ethernet in background (autoneg needs time) ─────────────────────
 (
     # Bring up only real Ethernet interfaces (type=1, skips sit0/lo/tun/etc.)

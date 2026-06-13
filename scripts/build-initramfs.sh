@@ -623,6 +623,39 @@ else
     echo "[initramfs] NOTE: tor not found -- install tor for Tor routing support"
 fi
 
+# ── Dropbear SSH daemon ───────────────────────────────────────────────────────
+echo "[initramfs] bundling Dropbear SSH daemon..."
+DROPBEAR_BIN=""
+for candidate in /usr/sbin/dropbear /usr/bin/dropbear; do
+    [ -x "$candidate" ] && DROPBEAR_BIN="$candidate" && break
+done
+DROPBEARKEY_BIN=""
+for candidate in /usr/bin/dropbearkey /usr/sbin/dropbearkey; do
+    [ -x "$candidate" ] && DROPBEARKEY_BIN="$candidate" && break
+done
+if [ -n "$DROPBEAR_BIN" ]; then
+    mkdir -p "$STAGE/usr/sbin" "$STAGE/usr/bin" "$STAGE/usr/lib"
+    cp "$DROPBEAR_BIN" "$STAGE/usr/sbin/dropbear"
+    chmod +x "$STAGE/usr/sbin/dropbear"
+    [ -n "$DROPBEARKEY_BIN" ] && cp "$DROPBEARKEY_BIN" "$STAGE/usr/bin/dropbearkey" && \
+        chmod +x "$STAGE/usr/bin/dropbearkey"
+    for _dbin in "$DROPBEAR_BIN" "$DROPBEARKEY_BIN"; do
+        [ -z "$_dbin" ] && continue
+        _dlibs=$(ldd "$_dbin" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+        for lib in $_dlibs; do
+            real=$(realpath "$lib" 2>/dev/null) || continue
+            [ -f "$real" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$real")"
+            [ -f "$dest" ] || cp "$real" "$dest"
+            link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
+            [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
+        done
+    done
+    echo "[initramfs] Dropbear bundled ($(du -sh "$DROPBEAR_BIN" | cut -f1))"
+else
+    echo "[initramfs] NOTE: dropbear not found — install dropbear for SSH access"
+fi
+
 # ── WiFi: iwd daemon + iw tool + Intel/Qualcomm firmware + regulatory DB ──────
 echo "[initramfs] bundling WiFi support..."
 
