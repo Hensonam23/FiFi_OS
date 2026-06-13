@@ -424,6 +424,9 @@ static void wl_delete_obj(wl_client_t *c, uint32_t id) {
     }
 }
 
+/* Forward declaration — defined after server state globals */
+static int pending_fd_pop(void);
+
 /* Find an object in ANY client slot (active or zombie) */
 static wl_obj_t *wl_find_obj_any(uint32_t id) {
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
@@ -811,13 +814,20 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         /* create_pool: new_id(4) + fd(0 wire bytes, cmsg only) + size(4) = 8 bytes */
         if (opcode == WL_SHM_CREATE_POOL && args_len >= 8) {
             uint32_t pool_id; memcpy(&pool_id, args,   4);
-            int32_t  sz;      memcpy(&sz,      args+4, 4);  /* size is right after new_id, fd has 0 wire bytes */
-            /* The fd arrives via cmsg ancillary data — we stash it in pool */
+            int32_t  sz;      memcpy(&sz,      args+4, 4);
             wl_shm_buf_t *pool = calloc(1, sizeof(wl_shm_buf_t));
             pool->size = (size_t)sz;
-            pool->fd   = -1;  /* fd set by caller after msg parse */
+            pool->fd   = -1;
+            /* Pop the next queued fd — each create_pool has exactly one fd via cmsg */
+            int rx_fd = pending_fd_pop();
+            if (rx_fd >= 0) {
+                pool->fd   = rx_fd;
+                pool->data = mmap(NULL, pool->size, PROT_READ, MAP_SHARED, rx_fd, 0);
+                if (pool->data == MAP_FAILED) pool->data = NULL;
+            }
             wl_new_obj(c, pool_id, OBJ_SHM_POOL, pool);
-            fprintf(stderr, "[pool] create fd=%d pool_id=%u sz=%d n_objs=%d\n", c->fd, pool_id, sz, c->n_objs);
+            fprintf(stderr, "[pool] create fd=%d pool_id=%u sz=%d pool_fd=%d data=%p\n",
+                    c->fd, pool_id, sz, pool->fd, pool->data);
         }
         break;
 
@@ -1063,18 +1073,38 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
 /* ── Receive messages from a client ──────────────────────────────────────── */
 
-/* Receive any ancillary fds from a recvmsg — returns the first fd or -1 */
-static int recv_fd(struct msghdr *msgh) {
-    struct cmsghdr *cm = CMSG_FIRSTHDR(msgh);
-    if (!cm || cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS)
-        return -1;
-    int fd;
-    memcpy(&fd, CMSG_DATA(cm), sizeof(int));
+/* Pending fd queue — holds all fds received via SCM_RIGHTS in one recvmsg */
+#define PENDING_FD_MAX 8
+static int g_pending_fds[PENDING_FD_MAX];
+static int g_pending_fd_head = 0;
+static int g_pending_fd_tail = 0;
+
+static void recv_all_fds(struct msghdr *msgh) {
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msgh); cm;
+         cm = CMSG_NXTHDR(msgh, cm)) {
+        if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS) continue;
+        int nfds = (int)((cm->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+        int *fds = (int *)CMSG_DATA(cm);
+        for (int i = 0; i < nfds; i++) {
+            if (((g_pending_fd_tail + 1) % PENDING_FD_MAX) == g_pending_fd_head) {
+                close(fds[i]);  /* queue full — drop */
+            } else {
+                g_pending_fds[g_pending_fd_tail] = fds[i];
+                g_pending_fd_tail = (g_pending_fd_tail + 1) % PENDING_FD_MAX;
+            }
+        }
+    }
+}
+
+static int pending_fd_pop(void) {
+    if (g_pending_fd_head == g_pending_fd_tail) return -1;
+    int fd = g_pending_fds[g_pending_fd_head];
+    g_pending_fd_head = (g_pending_fd_head + 1) % PENDING_FD_MAX;
     return fd;
 }
 
 static void wl_client_recv(wl_client_t *c) {
-    uint8_t     anc[CMSG_SPACE(sizeof(int) * 4)];
+    uint8_t     anc[CMSG_SPACE(sizeof(int) * PENDING_FD_MAX)];
     struct iovec iov = { c->recv + c->recv_used, WL_RECV_BUF - c->recv_used };
     struct msghdr msgh = {0};
     msgh.msg_iov        = &iov;
@@ -1098,8 +1128,8 @@ static void wl_client_recv(wl_client_t *c) {
     }
     c->recv_used += (int)n;
 
-    /* Extract any ancillary fd */
-    int rx_fd = recv_fd(&msgh);
+    /* Collect ALL ancillary fds into the pending queue (one per create_pool) */
+    recv_all_fds(&msgh);
 
     /* Parse complete messages from recv buffer */
     while (c->recv_used >= 8) {
@@ -1117,23 +1147,7 @@ static void wl_client_recv(wl_client_t *c) {
 
         wl_handle_msg(c, obj_id, opcode, args, args_len);
 
-        /* Associate ancillary fd with the pool that was just created by CREATE_POOL.
-         * Must run AFTER wl_handle_msg() so the pool object exists to receive the fd. */
-        if (rx_fd >= 0) {
-            for (int i = c->n_objs - 1; i >= 0; i--) {
-                if (c->objs[i].type == OBJ_SHM_POOL && c->objs[i].data) {
-                    wl_shm_buf_t *pool = c->objs[i].data;
-                    if (pool->fd < 0) {
-                        pool->fd   = rx_fd;
-                        pool->data = mmap(NULL, pool->size, PROT_READ, MAP_SHARED, rx_fd, 0);
-                        if (pool->data == MAP_FAILED) pool->data = NULL;
-                        rx_fd = -1;
-                        break;
-                    }
-                }
-            }
-            if (rx_fd >= 0) { close(rx_fd); rx_fd = -1; }
-        }
+        /* fd assignment now happens inside create_pool handler via pending_fd_pop() */
 
         /* Consume message from buffer */
         memmove(c->recv, c->recv + msg_sz, c->recv_used - msg_sz);
