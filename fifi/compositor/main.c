@@ -648,7 +648,7 @@ int main(void) {
                     if (uc == 0x96u) { take_screenshot(); continue; }
                     if (uc == 0x97u) { ipc_close_focused(); continue; }
                     if (uc == 0x89u) { ipc_cycle_focus(); continue; }
-                    if (uc == 0x17u) { ipc_close_focused(); continue; }
+                    /* 0x17 (Ctrl+W) passes through to IPC app — terminals handle tab/window close */
                     if (uc == 0x98u) { ipc_snap_focused(1); continue; }
                     if (uc == 0x99u) { ipc_snap_focused(2); continue; }
                     if (uc == 0x9Au) { ipc_snap_focused(3); continue; }
