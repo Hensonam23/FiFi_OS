@@ -546,7 +546,9 @@ static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
     int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CONFIGURE);
     wl_push_u32(c, (uint32_t)s->w ? (uint32_t)s->w : (uint32_t)g_w);
     wl_push_u32(c, (uint32_t)s->h ? (uint32_t)s->h : (uint32_t)g_h);
-    wl_push_u32(c, 0);  /* states array length = 0 */
+    /* states array: XDG_TOPLEVEL_STATE_ACTIVATED=4 so Firefox accepts input */
+    wl_push_u32(c, 4);  /* array length = 4 bytes (one uint32) */
+    wl_push_u32(c, 4);  /* XDG_TOPLEVEL_STATE_ACTIVATED */
     wl_end_msg(c, h);
     /* xdg_surface configure */
     h = wl_begin_msg(c, s->xdg_surface_id, XDG_SURFACE_CONFIGURE);
@@ -1216,6 +1218,8 @@ static uint32_t wl_fixed(int32_t v) { return (uint32_t)(v * 256); }
 /* Send pointer enter/leave events when focus changes */
 static void wl_send_ptr_enter(wl_client_t *c, uint32_t surf_id,
                                int32_t mx, int32_t my) {
+    fprintf(stderr, "[focus] ptr_enter fd=%d surf=%u ptr_id=%u kbd_id=%u\n",
+            c->fd, surf_id, c->pointer_id, c->keyboard_id);
     if (!c->pointer_id) return;
     uint32_t ser = next_serial(c);
     int h = wl_begin_msg(c, c->pointer_id, WL_PTR_ENTER);
@@ -1240,6 +1244,8 @@ static void wl_send_ptr_leave(wl_client_t *c, uint32_t surf_id) {
 }
 
 static void wl_send_kbd_enter(wl_client_t *c, uint32_t surf_id) {
+    fprintf(stderr, "[focus] kbd_enter fd=%d surf=%u kbd_id=%u\n",
+            c->fd, surf_id, c->keyboard_id);
     if (!c->keyboard_id) return;
     uint32_t ser = next_serial(c);
     int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_ENTER);
@@ -1266,12 +1272,23 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
     uint32_t new_sid = 0;
     wl_surface_t *new_s = NULL;
 
+    static int mouse_log_ticker = 0;
+    int do_mouse_log = (++mouse_log_ticker % 120 == 0); /* log every ~2s */
+    if (do_mouse_log)
+        fprintf(stderr, "[mouse] send mx=%d my=%d btns=%d focus_ci=%d focus_sid=%u\n",
+                mx, my, btns, g_focus_ci, g_focus_sid);
+
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         wl_client_t *c = &g_wl_clients[ci];
         if (!c->active) continue;
         for (int oi = 0; oi < c->n_objs; oi++) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
+            if (do_mouse_log)
+                fprintf(stderr, "[mouse] check ci=%d obj=%u mapped=%d x=%d y=%d w=%d h=%d hit=%d\n",
+                        ci, c->objs[oi].id, s ? s->mapped : -1,
+                        s ? s->x : -1, s ? s->y : -1, s ? s->w : -1, s ? s->h : -1,
+                        s ? (int)wl_surface_hit(s, mx, my) : 0);
             if (wl_surface_hit(s, mx, my)) {
                 new_ci  = ci;
                 new_sid = c->objs[oi].id;
@@ -1280,6 +1297,8 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
             }
         }
     }
+    if (do_mouse_log)
+        fprintf(stderr, "[mouse] result new_ci=%d new_sid=%u\n", new_ci, new_sid);
 
     /* Handle focus changes */
     if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
