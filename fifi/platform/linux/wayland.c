@@ -1095,6 +1095,25 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         /* add/subtract silently accepted */
         break;
 
+    /* ── wl_pointer ─────────────────────────────────────────────────── */
+    case OBJ_POINTER:
+        /* op=0: set_cursor, op=1: release/destroy — clear tracking ID */
+        if (opcode == 1) {
+            if (c->pointer_id == obj_id) c->pointer_id = 0;
+            wl_delete_obj(c, obj_id);
+        }
+        /* set_cursor, motion, button etc silently accepted */
+        break;
+
+    /* ── wl_keyboard ─────────────────────────────────────────────────── */
+    case OBJ_KEYBOARD:
+        /* op=0: release/destroy — clear tracking ID */
+        if (opcode == 0) {
+            if (c->keyboard_id == obj_id) c->keyboard_id = 0;
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+
     default:
         /* Unknown object — log with client fd and type for diagnosis */
         fprintf(stderr, "[wayland] unknown fd=%d obj=%u type=%d op=%u (owner_fd=%d)\n",
