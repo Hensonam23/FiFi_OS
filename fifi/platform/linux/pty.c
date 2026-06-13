@@ -157,6 +157,9 @@ void pty_poll_output(void) {
 /* Write a single key to the PTY, translating FiFi extended codes to ANSI */
 void pty_write_input(uint8_t c) {
     if (g_pty_master < 0) return;
+    /* Enter arrives as \n from the compositor; raw-mode TUIs (Claude Code, Ink)
+     * require \r. Line discipline ICRNL converts \r→\n for canonical-mode apps. */
+    if (c == '\n') c = '\r';
     char ansi[8];
     int len = fifi_to_ansi(c, ansi);
     const char *p = ansi;
