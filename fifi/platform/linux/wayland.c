@@ -1115,9 +1115,40 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         break;
 
     default:
-        /* Unknown object — log with client fd and type for diagnosis */
-        fprintf(stderr, "[wayland] unknown fd=%d obj=%u type=%d op=%u (owner_fd=%d)\n",
-                c->fd, obj_id, (int)type, opcode, obj_owner ? obj_owner->fd : -1);
+        /* Unknown/destroyed object — silently handle commit to unblock Firefox.
+         * When closing a tab, Firefox commits to a surface we don't know about.
+         * Without sending buffer_release + frame_done, Firefox hangs/crashes. */
+        if (type == OBJ_NONE) {
+            static uint32_t s_pending_buf = 0;
+            if (opcode == WL_SURFACE_ATTACH && args_len >= 4) {
+                /* Remember the buffer being attached to this unknown surface */
+                memcpy(&s_pending_buf, args, 4);
+            } else if (opcode == WL_SURFACE_COMMIT) {
+                /* Send buffer_release so Firefox doesn't wait forever */
+                if (s_pending_buf) {
+                    wl_obj_t *bobj = wl_find_obj_any(s_pending_buf);
+                    if (bobj) {
+                        wl_client_t *bowner = NULL;
+                        for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
+                            if (wl_find_obj(&g_wl_clients[_ci], s_pending_buf)) {
+                                bowner = &g_wl_clients[_ci]; break;
+                            }
+                        }
+                        if (bowner && bowner->fd >= 0) {
+                            int h = wl_begin_msg(bowner, s_pending_buf, WL_BUFFER_RELEASE);
+                            wl_end_msg(bowner, h);
+                            wl_client_flush(bowner);
+                        }
+                    }
+                    s_pending_buf = 0;
+                }
+            } else if (opcode == WL_SURFACE_FRAME && args_len >= 4) {
+                /* Fire frame callback immediately so rendering loop doesn't stall */
+                uint32_t cb_id; memcpy(&cb_id, args, 4);
+                wl_new_obj(c, cb_id, OBJ_CALLBACK, NULL);
+                send_wl_callback_done(c, cb_id, g_global_serial++);
+            }
+        }
         break;
     }
 }
