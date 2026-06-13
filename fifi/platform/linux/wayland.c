@@ -808,9 +808,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
     /* ── wl_shm ──────────────────────────────────────────────────────── */
     case OBJ_SHM:
-        if (opcode == WL_SHM_CREATE_POOL && args_len >= 12) {
-            uint32_t pool_id; memcpy(&pool_id, args, 4);
-            int32_t  sz;      memcpy(&sz,      args+8, 4);
+        /* create_pool: new_id(4) + fd(0 wire bytes, cmsg only) + size(4) = 8 bytes */
+        if (opcode == WL_SHM_CREATE_POOL && args_len >= 8) {
+            uint32_t pool_id; memcpy(&pool_id, args,   4);
+            int32_t  sz;      memcpy(&sz,      args+4, 4);  /* size is right after new_id, fd has 0 wire bytes */
             /* The fd arrives via cmsg ancillary data — we stash it in pool */
             wl_shm_buf_t *pool = calloc(1, sizeof(wl_shm_buf_t));
             pool->size = (size_t)sz;
@@ -1053,8 +1054,9 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         break;
 
     default:
-        /* Unknown object — send error */
-        fprintf(stderr, "[wayland] unknown obj=%u op=%u\n", obj_id, opcode);
+        /* Unknown object — log with client fd and type for diagnosis */
+        fprintf(stderr, "[wayland] unknown fd=%d obj=%u type=%d op=%u (owner_fd=%d)\n",
+                c->fd, obj_id, (int)type, opcode, obj_owner ? obj_owner->fd : -1);
         break;
     }
 }
