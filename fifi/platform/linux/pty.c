@@ -114,15 +114,15 @@ void pty_init(void) {
         dup2(slave_fd, STDERR_FILENO);
         if (slave_fd > STDERR_FILENO) close(slave_fd);
 
-        setenv("TERM",  "xterm-256color", 1);
-        setenv("LANG",  "en_US.UTF-8",    1);
-        setenv("LC_ALL","en_US.UTF-8",    1);
-        setenv("HOME",  "/root",      1);
-        setenv("PATH",  "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
-        setenv("USER",  "fifi",       1);
-        setenv("SHELL", "/bin/sh",    1);
+        setenv("TERM",   "xterm-256color", 1);  /* not "linux" — supports 256 colors + TERM-aware apps */
+        setenv("LANG",   "C.UTF-8",    1);  /* UTF-8 locale for proper character handling */
+        setenv("LC_ALL", "C.UTF-8",    1);
+        setenv("HOME",   "/root",      1);
+        setenv("PATH",   "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/fifi-data/local/bin", 1);
+        setenv("USER",   "fifi",       1);
+        setenv("SHELL",  "/bin/sh",    1);
         /* Familiar Linux-style prompt: fifi@FiFiOS:<cwd>$  (e.g. fifi@FiFiOS:~$). */
-        setenv("PS1",   "fifi@FiFiOS:\\w$ ", 1);
+        setenv("PS1",    "fifi@FiFiOS:\\w$ ", 1);
 
         /* Try ush first (FiFi shell), then busybox sh, then sh */
         execl("/bin/ush", "-ush", NULL);
@@ -157,10 +157,6 @@ void pty_poll_output(void) {
 /* Write a single key to the PTY, translating FiFi extended codes to ANSI */
 void pty_write_input(uint8_t c) {
     if (g_pty_master < 0) return;
-    /* Enter must reach the PTY as CR (like xterm): raw-mode apps (Ink-based
-     * TUIs, etc.) only recognize \r as Enter; the line discipline's ICRNL
-     * converts it back to \n for canonical-mode apps like the shell. */
-    if (c == '\n') c = '\r';
     char ansi[8];
     int len = fifi_to_ansi(c, ansi);
     const char *p = ansi;
