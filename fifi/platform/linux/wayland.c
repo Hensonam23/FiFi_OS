@@ -1348,6 +1348,9 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
 
     /* Button changes — Wayland uses Linux BTN codes directly */
     uint8_t changed = btns ^ g_prev_btns;
+    if (changed)
+        fprintf(stderr, "[click] btns=%u->%u ci=%d sid=%u ptr_id=%u\n",
+                g_prev_btns, btns, g_focus_ci, g_focus_sid, fc ? fc->pointer_id : 0);
     if (changed) {
         /* BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112 */
         static const uint32_t btn_codes[3] = { 0x110, 0x111, 0x112 };
@@ -1377,9 +1380,17 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
 /* Deliver a key event to the focused Wayland surface.
  * key is a Linux evdev keycode (KEY_A=30, etc.), state: 1=press, 0=release. */
 void wayland_send_key(uint32_t evdev_key, uint32_t state) {
-    if (g_focus_ci < 0 || !g_focus_sid) return;
+    if (g_focus_ci < 0 || !g_focus_sid) {
+        fprintf(stderr, "[key] no focus: ci=%d sid=%u\n", g_focus_ci, g_focus_sid);
+        return;
+    }
     wl_client_t *fc = &g_wl_clients[g_focus_ci];
-    if (!fc->active || !fc->keyboard_id) return;
+    if (!fc->active || !fc->keyboard_id) {
+        fprintf(stderr, "[key] bad kbd: active=%d kbd_id=%u\n", fc->active, fc->keyboard_id);
+        return;
+    }
+    fprintf(stderr, "[key] send key=%u state=%u ci=%d kbd=%u\n",
+            evdev_key, state, g_focus_ci, fc->keyboard_id);
     uint32_t ser = next_serial(fc);
     int h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
     wl_push_u32(fc, ser);
