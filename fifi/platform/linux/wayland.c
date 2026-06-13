@@ -929,12 +929,14 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         if (opcode == WL_SEAT_GET_KEYBOARD && args_len >= 4) {
             uint32_t kid; memcpy(&kid, args, 4);
             wl_new_obj(c, kid, OBJ_KEYBOARD, NULL);
-            c->keyboard_id = kid;
-            send_keymap(c);
+            /* Keep the FIRST keyboard — Firefox creates two (second is GPU process).
+             * Input events go to the first (main process) keyboard; second discards. */
+            if (!c->keyboard_id) { c->keyboard_id = kid; send_keymap(c); }
         } else if (opcode == WL_SEAT_GET_POINTER && args_len >= 4) {
             uint32_t pid; memcpy(&pid, args, 4);
             wl_new_obj(c, pid, OBJ_POINTER, NULL);
-            c->pointer_id = pid;
+            /* Keep the FIRST pointer — Firefox creates two; input goes to first */
+            if (!c->pointer_id) c->pointer_id = pid;
         }
         break;
 
@@ -1253,6 +1255,7 @@ static void wl_send_kbd_enter(wl_client_t *c, uint32_t surf_id) {
     wl_push_u32(c, surf_id);
     wl_push_u32(c, 0);  /* empty keys array */
     wl_end_msg(c, h);
+
 }
 
 static void wl_send_kbd_leave(wl_client_t *c, uint32_t surf_id) {

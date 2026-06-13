@@ -716,6 +716,13 @@ int main(void) {
         keyboard_done:;
 
         /* ── Wayland key forwarding (raw evdev codes to focused surface) ── */
+        {
+            extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
+            static int kb_log = 0;
+            if (++kb_log % 300 == 0)  /* log every 5s */
+                fprintf(stderr, "[kbd_route] has_focus=%d ipc_active=%d\n",
+                        (int)wayland_has_focus(), (int)ipc_keyboard_active());
+        }
         if (wayland_has_focus()) {
             extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
             uint16_t raw_code; uint8_t raw_state;
