@@ -109,26 +109,60 @@ static uint32_t g_utf8_cp     = 0;
 /* Saved cursor */
 static int   g_saved_cx = 0, g_saved_cy = 0;
 
-/* East-Asian-Wide / emoji codepoints occupy TWO terminal columns. The program
- * driving us advances its cursor by 2 for these, so we must too — otherwise
- * everything after a wide glyph overlaps / shifts left. We only flag ranges that
- * are unambiguously width-2 (CJK, Hangul, fullwidth forms, and the
- * supplementary-plane emoji blocks); ambiguous BMP symbols stay width-1 so
- * narrow glyphs like the checkmark (U+2713) are not over-advanced. */
-static int is_wide_cp(uint32_t cp) {
-    return (cp >= 0x1100 && cp <= 0x115F) ||   /* Hangul Jamo */
-           (cp >= 0x2E80 && cp <= 0x303E) ||   /* CJK radicals .. Kangxi */
-           (cp >= 0x3041 && cp <= 0x33FF) ||   /* Kana .. CJK symbols */
-           (cp >= 0x3400 && cp <= 0x4DBF) ||   /* CJK Ext-A */
-           (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK Unified */
-           (cp >= 0xA000 && cp <= 0xA4CF) ||   /* Yi */
-           (cp >= 0xAC00 && cp <= 0xD7A3) ||   /* Hangul syllables */
-           (cp >= 0xF900 && cp <= 0xFAFF) ||   /* CJK compatibility */
-           (cp >= 0xFE30 && cp <= 0xFE4F) ||   /* CJK compat forms */
-           (cp >= 0xFF00 && cp <= 0xFF60) ||   /* fullwidth forms */
-           (cp >= 0xFFE0 && cp <= 0xFFE6) ||   /* fullwidth signs */
-           (cp >= 0x1F000 && cp <= 0x1FAFF) || /* emoji & pictographs */
-           (cp >= 0x20000 && cp <= 0x3FFFD);   /* CJK Ext-B and beyond */
+/* Display width of a codepoint in terminal columns: 0, 1, or 2. The program
+ * driving us (e.g. Claude Code) lays out its UI by counting Unicode
+ * East-Asian-Width + emoji; if our cursor advance disagrees, every line that
+ * follows drifts and text overlaps. So we must match it per codepoint:
+ *   0 — combining marks, joiners, variation selectors (attach to prev cell)
+ *   2 — East-Asian-Wide / fullwidth / emoji-presentation glyphs
+ *   1 — everything else.
+ * (A previous version only flagged a few wide ranges and advanced 1 for
+ *  combining marks and BMP emoji — that under-advance is what overlapped.) */
+static int cp_width(uint32_t cp) {
+    /* Zero-width: combining marks, joiners, variation selectors, BOM/ZWSP */
+    if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF ||
+        (cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x0483 && cp <= 0x0489) ||
+        (cp >= 0x0591 && cp <= 0x05BD) || (cp >= 0x0610 && cp <= 0x061A) ||
+        (cp >= 0x064B && cp <= 0x065F) || (cp >= 0x06D6 && cp <= 0x06DC) ||
+        (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+        (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F) ||
+        (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xE0100 && cp <= 0xE01EF))
+        return 0;
+    /* Wide: East-Asian Wide & Fullwidth + supplementary-plane emoji */
+    if ((cp >= 0x1100 && cp <= 0x115F) ||   /* Hangul Jamo */
+        cp == 0x2329 || cp == 0x232A ||     /* angle brackets 〈 〉 */
+        (cp >= 0x2E80 && cp <= 0x303E) ||   /* CJK radicals .. Kangxi */
+        (cp >= 0x3041 && cp <= 0x33FF) ||   /* Kana .. CJK symbols */
+        (cp >= 0x3400 && cp <= 0x4DBF) ||   /* CJK Ext-A */
+        (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK Unified */
+        (cp >= 0xA000 && cp <= 0xA4CF) ||   /* Yi */
+        (cp >= 0xAC00 && cp <= 0xD7A3) ||   /* Hangul syllables */
+        (cp >= 0xF900 && cp <= 0xFAFF) ||   /* CJK compatibility */
+        (cp >= 0xFE10 && cp <= 0xFE19) ||   /* vertical forms */
+        (cp >= 0xFE30 && cp <= 0xFE4F) ||   /* CJK compat forms */
+        (cp >= 0xFF00 && cp <= 0xFF60) ||   /* fullwidth forms */
+        (cp >= 0xFFE0 && cp <= 0xFFE6) ||   /* fullwidth signs */
+        (cp >= 0x1F000 && cp <= 0x1F0FF) || /* mahjong/dominoes/cards */
+        (cp >= 0x1F300 && cp <= 0x1FAFF) || /* emoji & pictographs */
+        (cp >= 0x20000 && cp <= 0x3FFFD))   /* CJK Ext-B and beyond */
+        return 2;
+    /* BMP symbols with default *emoji* presentation are also width 2 (these are
+     * the ones Claude Code emits standalone: ✅ ❌ ⭐ ✨ ❓ ❗ …). */
+    if (cp == 0x231A || cp == 0x231B || (cp >= 0x23E9 && cp <= 0x23EC) ||
+        cp == 0x23F0 || cp == 0x23F3 || cp == 0x25FD || cp == 0x25FE ||
+        cp == 0x2614 || cp == 0x2615 || (cp >= 0x2648 && cp <= 0x2653) ||
+        cp == 0x267F || cp == 0x2693 || cp == 0x26A1 ||
+        cp == 0x26AA || cp == 0x26AB || cp == 0x26BD || cp == 0x26BE ||
+        cp == 0x26C4 || cp == 0x26C5 || cp == 0x26CE || cp == 0x26D4 ||
+        cp == 0x26EA || cp == 0x26F2 || cp == 0x26F3 || cp == 0x26F5 ||
+        cp == 0x26FA || cp == 0x26FD || cp == 0x2705 ||
+        cp == 0x270A || cp == 0x270B || cp == 0x2728 ||
+        cp == 0x274C || cp == 0x274E || (cp >= 0x2753 && cp <= 0x2755) ||
+        cp == 0x2757 || (cp >= 0x2795 && cp <= 0x2797) ||
+        cp == 0x27B0 || cp == 0x27BF || cp == 0x2B1B || cp == 0x2B1C ||
+        cp == 0x2B50 || cp == 0x2B55)
+        return 2;
+    return 1;
 }
 
 /* Map Unicode codepoints to ASCII fallbacks — no font encoding dependency */
@@ -137,6 +171,41 @@ static uint8_t unicode_to_ascii(uint32_t cp) {
     if (cp >= 0x250C && cp <= 0x254B) return '+';
     /* Double-line box drawing — corners/junctions → + */
     if (cp >= 0x2552 && cp <= 0x256C) return '+';
+    /* Rounded box corners ╭ ╮ ╯ ╰ (Claude Code's UI boxes) → + */
+    if (cp >= 0x256D && cp <= 0x2570) return '+';
+    /* Diagonals ╱ ╲ ╳ */
+    if (cp == 0x2571) return '/';
+    if (cp == 0x2572) return '\\';
+    if (cp == 0x2573) return 'X';
+    /* Partial box lines ╴..╿ — horizontal (even) → -, vertical (odd) → | */
+    if (cp >= 0x2574 && cp <= 0x257F) return (cp & 1u) ? '|' : '-';
+    /* Braille patterns — used by progress spinners */
+    if (cp >= 0x2800 && cp <= 0x28FF) return '*';
+    /* Latin-1 accented letters → base ASCII (font has no glyphs for these) */
+    if (cp == 0x00A0) return ' ';                       /* nbsp */
+    if (cp >= 0x00C0 && cp <= 0x00C6) return 'A';
+    if (cp == 0x00C7) return 'C';
+    if (cp >= 0x00C8 && cp <= 0x00CB) return 'E';
+    if (cp >= 0x00CC && cp <= 0x00CF) return 'I';
+    if (cp == 0x00D0) return 'D';
+    if (cp == 0x00D1) return 'N';
+    if (cp >= 0x00D2 && cp <= 0x00D6) return 'O';
+    if (cp == 0x00D7) return 'x';                       /* × */
+    if (cp == 0x00D8) return 'O';
+    if (cp >= 0x00D9 && cp <= 0x00DC) return 'U';
+    if (cp == 0x00DD) return 'Y';
+    if (cp == 0x00DF) return 's';                       /* ß */
+    if (cp >= 0x00E0 && cp <= 0x00E6) return 'a';
+    if (cp == 0x00E7) return 'c';
+    if (cp >= 0x00E8 && cp <= 0x00EB) return 'e';
+    if (cp >= 0x00EC && cp <= 0x00EF) return 'i';
+    if (cp == 0x00F0) return 'd';
+    if (cp == 0x00F1) return 'n';
+    if (cp >= 0x00F2 && cp <= 0x00F6) return 'o';
+    if (cp == 0x00F7) return '/';                       /* ÷ */
+    if (cp == 0x00F8) return 'o';
+    if (cp >= 0x00F9 && cp <= 0x00FC) return 'u';
+    if (cp == 0x00FD || cp == 0x00FF) return 'y';
     switch (cp) {
     case 0x2500: case 0x2501:
     case 0x2504: case 0x2505: case 0x2508: case 0x2509:
@@ -157,7 +226,7 @@ static uint8_t unicode_to_ascii(uint32_t cp) {
     case 0x2191: case 0x21D1: return '^';
     case 0x2193: case 0x21D3: return 'v';
     case 0x21B5: case 0x23CE: return '<';   /* ↵ enter */
-    /* Symbols modern TUI apps use */
+    /* Symbols Claude Code uses */
     case 0x25C6: case 0x25C7:
     case 0x25C8: case 0x25C9: return '*';   /* ◆ ◇ → * */
     case 0x25CF: return 'o';                /* ● → o */
@@ -343,22 +412,32 @@ static void term_putc(uint8_t c) {
         } else if (g_utf8_remain > 0) {
             g_utf8_cp = (g_utf8_cp << 6) | (c & 0x3Fu);
             if (--g_utf8_remain == 0) {
-                uint8_t ch;
-                if (g_utf8_cp < (uint32_t)g_n_glyph)
-                    ch = (uint8_t)g_utf8_cp;
-                else
-                    ch = unicode_to_ascii(g_utf8_cp);
-                int wide = is_wide_cp(g_utf8_cp);
-                /* a double-width glyph that would straddle the right edge wraps first */
-                if (wide && g_cx + 1 >= g_cols) {
-                    g_cx = 0;
-                    if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); }
-                }
-                g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
-                if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
-                if (wide) {   /* second column keeps following text aligned */
-                    g_cells[g_cy][g_cx] = (Cell){ ' ', g_fg, g_bg };
+                int w = cp_width(g_utf8_cp);
+                if (w == 0) {
+                    /* combining mark / joiner / variation selector: occupies no
+                     * column and has no standalone glyph — the base char already
+                     * advanced the cursor, so we just drop it. */
+                } else {
+                    uint8_t ch;
+                    /* Only ASCII maps 1:1 onto a PSF font slot. For >= 0x80 the
+                     * font's slot index is NOT the Unicode value (this build
+                     * ignores the font's unicode table), so go through the ASCII
+                     * fallback instead of indexing a wrong/blank glyph. */
+                    if (g_utf8_cp < 0x80u)
+                        ch = (uint8_t)g_utf8_cp;
+                    else
+                        ch = unicode_to_ascii(g_utf8_cp);
+                    /* a double-width cell that would straddle the right edge wraps first */
+                    if (w == 2 && g_cx + 1 >= g_cols) {
+                        g_cx = 0;
+                        if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); }
+                    }
+                    g_cells[g_cy][g_cx] = (Cell){ ch, g_fg, g_bg };
                     if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
+                    if (w == 2) {   /* blank second column keeps following text aligned */
+                        g_cells[g_cy][g_cx] = (Cell){ ' ', g_fg, g_bg };
+                        if (++g_cx >= g_cols) { g_cx = 0; if (++g_cy >= g_rows) { g_cy = g_rows-1; scroll_up(); } }
+                    }
                 }
             }
         } else { g_utf8_remain = 0; }
