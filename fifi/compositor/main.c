@@ -582,12 +582,27 @@ int main(void) {
                     ipc_clear_focus();
                 }
             }
+            /* If a Wayland app is showing, clicking on it clears IPC focus */
+            {
+                extern bool wayland_any_mapped(void);
+                if (wayland_any_mapped() && mlb && !pb_l && ipc_keyboard_active()) {
+                    uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
+                    if (!ipc_z)  /* no IPC window on top — click is on Wayland */
+                        ipc_clear_focus();
+                }
+            }
+
             if (ipc_keyboard_active() && !dragging && !resizing)
                 ipc_send_focused_mouse(mcx, mcy, btns);
             mouse_done:;
 
-            if (!ipc_keyboard_active())
-                wayland_send_mouse(mcx, mcy, btns);
+            /* Send mouse to Wayland: either when Wayland has focus, or when a Wayland
+             * surface is showing and no IPC window covers the cursor position */
+            {
+                extern bool wayland_any_mapped(void);
+                if (!ipc_keyboard_active() || wayland_any_mapped())
+                    wayland_send_mouse(mcx, mcy, btns);
+            }
         }
 
         /* ── Activity tracking ──────────────────────────────────────────── */
@@ -639,7 +654,7 @@ int main(void) {
                 keyboard_clear_state();
                 goto keyboard_done;
             }
-            if (ipc_keyboard_active()) {
+            if (ipc_keyboard_active() && !wayland_has_focus()) {
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);

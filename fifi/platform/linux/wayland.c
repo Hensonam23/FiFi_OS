@@ -1382,6 +1382,19 @@ void wayland_send_key(uint32_t evdev_key, uint32_t state) {
 /* Returns true if a Wayland surface has keyboard focus */
 bool wayland_has_focus(void) { return g_focus_ci >= 0; }
 
+/* Returns true if any Wayland surface has pixel data mapped (browser is showing) */
+bool wayland_any_mapped(void) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->mapped && s->buf && s->buf->data) return true;
+        }
+    }
+    return false;
+}
+
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */
 
 /* Called from compositor main after ipc_blit_all() */
