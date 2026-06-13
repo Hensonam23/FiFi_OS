@@ -243,6 +243,11 @@ typedef struct {
     bool         is_subsurface;
     uint32_t     parent_surface_id;
     int32_t      sub_x, sub_y;
+    /* xdg_surface window geometry — the "visible" content area within the surface.
+     * Used to shift the blit so shadows/decorations extend off-screen rather than
+     * pushing the content off the right/bottom edge. */
+    int32_t      geom_x, geom_y;  /* offset of content area within surface (shadow size) */
+    uint32_t     surface_id;       /* this surface's own wl_surface object ID */
     /* Pending frame callback: fired during commit (not on frame request).
      * Firing immediately on frame request causes clients to destroy buffers
      * before we process the commit, breaking the render pipeline. */
@@ -530,6 +535,13 @@ static void send_output_info(wl_client_t *c, uint32_t out_id) {
 static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
     uint32_t ser = next_serial(c);
     s->serial = ser;
+    /* wl_surface.enter: tell the client which output this surface is on.
+     * Without this Firefox won't know its display scale/resolution. */
+    if (c->output_id && s->surface_id) {
+        int h0 = wl_begin_msg(c, s->surface_id, WL_SURFACE_ENTER);
+        wl_push_u32(c, c->output_id);
+        wl_end_msg(c, h0);
+    }
     /* xdg_toplevel configure: states array (empty = normal window) */
     int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CONFIGURE);
     wl_push_u32(c, (uint32_t)s->w ? (uint32_t)s->w : (uint32_t)g_w);
@@ -725,6 +737,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         if (opcode == WL_COMPOSITOR_CREATE_SURFACE && args_len >= 4) {
             uint32_t sid; memcpy(&sid, args, 4);
             wl_surface_t *s = calloc(1, sizeof(wl_surface_t));
+            s->surface_id = sid;
             wl_new_obj(c, sid, OBJ_SURFACE, s);
             fprintf(stderr, "[wayland] create surface id=%u\n", sid);
         } else if (opcode == WL_COMPOSITOR_CREATE_REGION && args_len >= 4) {
@@ -956,6 +969,21 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                         s->xdg_toplevel_id = tl_id;
                         /* Send initial configure */
                         send_xdg_surface_configure(c, s);
+                        break;
+                    }
+                }
+            }
+        } else if (opcode == XDG_SURFACE_SET_WINDOW_GEOMETRY && args_len >= 16) {
+            /* Store geometry so blit can offset surface by (-geom_x,-geom_y) */
+            int32_t gx, gy;
+            memcpy(&gx, args,     4);
+            memcpy(&gy, args + 4, 4);
+            /* Find the surface that owns this xdg_surface and store geometry */
+            for (int i = 0; i < c->n_objs; i++) {
+                if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) {
+                    wl_surface_t *s = c->objs[i].data;
+                    if (s->xdg_surface_id == obj_id) {
+                        s->geom_x = gx; s->geom_y = gy;
                         break;
                     }
                 }
@@ -1362,9 +1390,9 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
     extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
                                     uint64_t w, uint64_t h);
     if (do_log)
-        fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d data=%p w=%d h=%d sub=%d\n",
+        fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d data=%p w=%d h=%d sub=%d geom=%d,%d\n",
                 ci, obj_id, s->mapped, s->buf ? s->buf->data : NULL,
-                s->w, s->h, s->is_subsurface);
+                s->w, s->h, s->is_subsurface, s->geom_x, s->geom_y);
     if (!s->mapped || !s->buf || !s->buf->data) return 0;
     if (s->w <= 0 || s->h <= 0) return 0;
     int32_t bx = s->x, by = s->y;
@@ -1372,8 +1400,13 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
         wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
         wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
         if (!p) return 0;
-        bx = p->x + s->sub_x;
-        by = p->y + s->sub_y;
+        /* Subsurface blit: parent screen pos + parent geometry offset + sub offset */
+        bx = (p->x - p->geom_x) + s->sub_x;
+        by = (p->y - p->geom_y) + s->sub_y;
+    } else {
+        /* Non-subsurface: offset by window geometry so content area starts at s->x,s->y */
+        bx = s->x - s->geom_x;
+        by = s->y - s->geom_y;
     }
     console_paste_rect((const uint32_t *)s->buf->data,
                        (uint64_t)bx, (uint64_t)by,

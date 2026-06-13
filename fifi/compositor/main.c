@@ -700,6 +700,19 @@ int main(void) {
         }
         keyboard_done:;
 
+        /* ── Wayland key forwarding (raw evdev codes to focused surface) ── */
+        if (wayland_has_focus()) {
+            extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
+            uint16_t raw_code; uint8_t raw_state;
+            while (keyboard_try_get_raw(&raw_code, &raw_state))
+                wayland_send_key(raw_code, raw_state);
+        } else {
+            /* Drain queue even when no Wayland focus to prevent buildup */
+            extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
+            uint16_t raw_code; uint8_t raw_state;
+            while (keyboard_try_get_raw(&raw_code, &raw_state)) {}
+        }
+
         /* ── Screen blank / auto-lock check ────────────────────────────── */
         {
             struct timespec now_ts;

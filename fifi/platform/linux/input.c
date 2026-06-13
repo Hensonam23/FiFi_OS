@@ -124,6 +124,25 @@ static bool g_ctrl  = false;
 static bool g_alt   = false;
 static bool g_super = false;
 
+/* Raw evdev key queue for Wayland clients (evdev code + press/release) */
+#define RAW_KEY_RING 64
+typedef struct { uint16_t code; uint8_t state; } raw_key_t;
+static raw_key_t g_raw_ring[RAW_KEY_RING];
+static int g_raw_head = 0, g_raw_tail = 0;
+static void raw_key_push(uint16_t code, uint8_t state) {
+    int next = (g_raw_tail + 1) % RAW_KEY_RING;
+    if (next == g_raw_head) return;  /* full */
+    g_raw_ring[g_raw_tail] = (raw_key_t){ code, state };
+    g_raw_tail = next;
+}
+int keyboard_try_get_raw(uint16_t *code, uint8_t *state) {
+    if (g_raw_head == g_raw_tail) return 0;
+    *code  = g_raw_ring[g_raw_head].code;
+    *state = g_raw_ring[g_raw_head].state;
+    g_raw_head = (g_raw_head + 1) % RAW_KEY_RING;
+    return 1;
+}
+
 /* ── Mouse state ─────────────────────────────────────────────────────────── */
 static int32_t g_mx = 400, g_my = 300;
 static bool    g_lbtn = false, g_rbtn = false;
@@ -603,6 +622,8 @@ void input_poll(void) {
         while (read(g_kbd_fds[ki], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type != EV_KEY) continue;
             bool pressed = (ev.value == 1 || ev.value == 2);
+            /* Always enqueue raw evdev event for Wayland key forwarding */
+            raw_key_push((uint16_t)ev.code, ev.value ? 1 : 0);
 
             if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT)
                 g_shift = pressed;
