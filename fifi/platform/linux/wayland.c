@@ -384,12 +384,27 @@ static wl_obj_t *wl_find_obj(wl_client_t *c, uint32_t id) {
     return NULL;
 }
 
+static void free_obj_data(wl_obj_t *o) {
+    if (!o->data) return;
+    if (o->type == OBJ_SURFACE) {
+        free(o->data);
+    } else if (o->type == OBJ_SHM_POOL || o->type == OBJ_BUFFER) {
+        wl_shm_buf_t *b = o->data;
+        if (b->data && b->size) { munmap(b->data, b->size); b->data = NULL; }
+        if (b->fd >= 0) { close(b->fd); b->fd = -1; }
+        free(b);
+    } else if (o->data) {
+        free(o->data);
+    }
+    o->data = NULL;
+}
+
 static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *data) {
     /* If this ID already exists (from a previous session or re-use), overwrite it */
     for (int i = 0; i < c->n_objs; i++) {
         if (c->objs[i].id == id) {
-            /* Free old data if it was a surface or buffer */
-            if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) free(c->objs[i].data);
+            /* Properly free old data to prevent double-free and leaks */
+            free_obj_data(&c->objs[i]);
             c->objs[i] = (wl_obj_t){ type, id, data };
             return &c->objs[i];
         }
@@ -409,19 +424,7 @@ static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *
 static void wl_delete_obj(wl_client_t *c, uint32_t id) {
     for (int i = 0; i < c->n_objs; i++) {
         if (c->objs[i].id == id) {
-            if (c->objs[i].type == OBJ_SURFACE) {
-                wl_surface_t *s = c->objs[i].data;
-                if (s) free(s);
-            } else if (c->objs[i].type == OBJ_SHM_POOL || c->objs[i].type == OBJ_BUFFER) {
-                wl_shm_buf_t *b = c->objs[i].data;
-                if (b) {
-                    if (b->data) munmap(b->data, b->size);
-                    if (b->fd >= 0) close(b->fd);
-                    free(b);
-                }
-            } else {
-                free(c->objs[i].data);
-            }
+            free_obj_data(&c->objs[i]);
             c->objs[i].type = OBJ_NONE;
             c->objs[i].data = NULL;
             return;
