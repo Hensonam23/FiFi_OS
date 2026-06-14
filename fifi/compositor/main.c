@@ -678,7 +678,10 @@ int main(void) {
                         ipc_send_focused_key(uc);
                     }
                 }
-            } else if (!keyboard_gui_capture_active()) {
+            } else if (!keyboard_gui_capture_active() && !wayland_has_focus()) {
+                /* PTY terminal path — skipped when Wayland (browser) has focus to
+                 * prevent F-keys from spawning system apps (fifi-browser etc.) while
+                 * the browser is running. Raw keys already forwarded to Wayland above. */
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
@@ -695,6 +698,17 @@ int main(void) {
                     if ((uint8_t)c == 0x87u) { gui_term_scroll_page(+1); continue; }
                     if ((uint8_t)c == 0x88u) { gui_term_scroll_page(-1); continue; }
                     pty_write_input((uint8_t)c);
+                }
+            } else if (!keyboard_gui_capture_active() && wayland_has_focus()) {
+                /* Drain FiFi char queue when Wayland has focus (keys go to browser only) */
+                int c;
+                while ((c = keyboard_try_getchar()) != -1) {
+                    clock_gettime(CLOCK_MONOTONIC, &g_last_input);
+                    if (g_blanked) { g_blanked = false; break; }
+                    /* Only allow screenshot and lock shortcuts, not app launchers */
+                    if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
+                    if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
+                    /* Discard everything else — raw keys already forwarded to Wayland */
                 }
             } else {
                 int c;
