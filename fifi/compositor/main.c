@@ -130,7 +130,7 @@ static bool     g_blanked     = false;
 static bool     g_locked      = false;
 static int      g_lock_timeout_s = 0;
 static struct timespec g_last_input;
-#define BLANK_TIMEOUT_S 300
+#define BLANK_TIMEOUT_S 3600  /* 1 hour — extended for browser testing */
 
 /* ── Lock screen PIN state ───────────────────────────────────────────────── */
 static char g_lock_buf[64];
