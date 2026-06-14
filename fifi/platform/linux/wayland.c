@@ -1343,9 +1343,13 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                         s ? s->x : -1, s ? s->y : -1, s ? s->w : -1, s ? s->h : -1,
                         s ? (int)wl_surface_hit(s, mx, my) : 0);
             if (wl_surface_hit(s, mx, my)) {
-                new_ci  = ci;
-                new_sid = c->objs[oi].id;
-                new_s   = s;
+                /* Only focus surfaces that have an xdg_toplevel role — sending
+                 * keyboard enter to toolbar/cursor/subsurfaces causes Firefox crashes */
+                if (s->xdg_toplevel_id || !s->xdg_surface_id) {
+                    new_ci  = ci;
+                    new_sid = c->objs[oi].id;
+                    new_s   = s;
+                }
                 /* keep searching — last (topmost draw order) wins */
             }
         }
