@@ -264,8 +264,47 @@ uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my) {
 
 /* ── gui_init ────────────────────────────────────────────────────────── */
 
+/* ── Settings persistence (linux-desktop only) ──────────────────────────────
+ * The OS root is RAM and wiped each boot; /fifi-data survives. Persist the user's
+ * theme/customizations there and reload them at startup. */
+#ifdef __linux__
+#define FIFI_SETTINGS_PATH "/fifi-data/fifi-settings.conf"
+void gui_settings_save(void) {
+    FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
+    if (!f) return;
+    fprintf(f, "accent=%u\nwallpaper=%d\nclock_12h=%d\nanimations=%d\n"
+               "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n",
+            (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.clock_12h,
+            (int)g_theme.animations, (int)g_theme.statusbar,
+            (int)g_theme.desktop_info, (int)g_theme.utc_offset);
+    fclose(f);
+}
+void gui_settings_load(void) {
+    FILE *f = fopen(FIFI_SETTINGS_PATH, "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        int v; unsigned uv;
+        if      (sscanf(line, "accent=%u", &uv) == 1)       g_theme.accent = uv;
+        else if (sscanf(line, "wallpaper=%d", &v) == 1)     { if (v >= 0 && v < WALLPAPER_COUNT) g_theme.wallpaper = v; }
+        else if (sscanf(line, "clock_12h=%d", &v) == 1)     g_theme.clock_12h = (v != 0);
+        else if (sscanf(line, "animations=%d", &v) == 1)    g_theme.animations = (v != 0);
+        else if (sscanf(line, "statusbar=%d", &v) == 1)     g_theme.statusbar = (v != 0);
+        else if (sscanf(line, "desktop_info=%d", &v) == 1)  g_theme.desktop_info = (v != 0);
+        else if (sscanf(line, "utc_offset=%d", &v) == 1)    { if (v >= -12 && v <= 14) g_theme.utc_offset = (int8_t)v; }
+    }
+    fclose(f);
+}
+#else
+void gui_settings_save(void) {}
+void gui_settings_load(void) {}
+#endif
+
 void gui_init(void) {
     uint64_t fb_w = console_fb_width();
+
+    /* Load persisted user settings (theme/colors/toggles) over the defaults. */
+    gui_settings_load();
 
     /* Pick font based on display resolution so text is readable at any DPI. */
     if      (fb_w >= 3840) g_font_idx = 4;  /* ter32b -- 4K */
@@ -2376,7 +2415,11 @@ void gui_on_tick(void) {
             if (my < (int32_t)_w->y || my >= (int32_t)(_w->y + _w->h)) continue;
             if (_w->raise_z > _gui_z) _gui_z = _w->raise_z;
         }
-        int8_t scroll = (_ipc_z > 0 && _ipc_z > _gui_z) ? 0 : mouse_consume_scroll();
+        bool _wl_focus = false;
+#ifdef __linux__
+        { extern bool wayland_has_focus(void); _wl_focus = wayland_has_focus(); }
+#endif
+        int8_t scroll = (_wl_focus || (_ipc_z > 0 && _ipc_z > _gui_z)) ? 0 : mouse_consume_scroll();
         if (scroll) {
             /* Close fb context menu on scroll */
             if (g_fb_ctx_open) { g_fb_ctx_open = false; full_redraw(); }
@@ -2669,7 +2712,13 @@ void gui_on_tick(void) {
     }
 
     /* ── Right-click: context menu on desktop ── */
-    if (rbtn_pressed && (uint64_t)my < ty) {
+    /* When a Wayland app (browser) has focus, right-click belongs to it, not the
+     * desktop — otherwise the FiFi desktop menu pops up over the browser. */
+    bool wl_focused_rc = false;
+#ifdef __linux__
+    { extern bool wayland_has_focus(void); wl_focused_rc = wayland_has_focus(); }
+#endif
+    if (rbtn_pressed && !wl_focused_rc && (uint64_t)my < ty) {
         /* Check if click is on any window */
         bool on_win = false;
         for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
@@ -3686,6 +3735,7 @@ void gui_on_tick(void) {
                                 (uint64_t)mx >= g_theme_accent_bx[ai] &&
                                 (uint64_t)mx <  g_theme_accent_bx[ai] + g_theme_swatch_sz) {
                                 g_theme.accent = g_accent_presets[ai];
+                                gui_settings_save();
                                 full_redraw();
                                 break;
                             }
@@ -3700,6 +3750,7 @@ void gui_on_tick(void) {
                                 (uint64_t)mx >= g_theme_wall_bx[wi] &&
                                 (uint64_t)mx <  g_theme_wall_bx[wi] + g_theme_wall_bw) {
                                 g_theme.wallpaper = wi;
+                                gui_settings_save();
                                 full_redraw();
                                 break;
                             }
@@ -3716,6 +3767,7 @@ void gui_on_tick(void) {
                                 if (ti == 1) g_theme.animations   = !g_theme.animations;
                                 if (ti == 2) g_theme.statusbar    = !g_theme.statusbar;
                                 if (ti == 3) g_theme.desktop_info = !g_theme.desktop_info;
+                                gui_settings_save();
                                 full_redraw();
                                 break;
                             }
@@ -3728,10 +3780,12 @@ void gui_on_tick(void) {
                         if ((uint64_t)mx >= g_utc_minus_bx &&
                             (uint64_t)mx <  g_utc_minus_bx + g_font_btn_bw) {
                             if (g_theme.utc_offset > -12) g_theme.utc_offset--;
+                            gui_settings_save();
                             full_redraw();
                         } else if ((uint64_t)mx >= g_utc_plus_bx &&
                                    (uint64_t)mx <  g_utc_plus_bx + g_font_btn_bw) {
                             if (g_theme.utc_offset < 14) g_theme.utc_offset++;
+                            gui_settings_save();
                             full_redraw();
                         }
                     }
@@ -4042,20 +4096,11 @@ void gui_on_tick(void) {
         long _ms_click = _SUB_MS(_stB, _stC);
         long _ms_max   = _ms_hover > _ms_kbd ? _ms_hover : _ms_kbd;
         if (_ms_click > _ms_max) _ms_max = _ms_click;
-        if (_ms_max >= 3)
-            fprintf(stderr, "[subtick] hover=%ldms kbd=%ldms click=%ldms\n",
-                    _ms_hover, _ms_kbd, _ms_click);
+        (void)_ms_max;
     }
 #undef _SUB_MS
 #endif
 
-#ifdef __linux__
-    /* Periodic cursor position log — once every ~2 s at 60 fps */
-    if ((g_gui_tick % 120) == 0)
-        fprintf(stderr, "[cursor] tick=%lu mx=%d my=%d edge_win=%d edge_dir=%d\n",
-                (unsigned long)g_gui_tick, mx, my,
-                g_resize_hover_win, (int)g_resize_hover_dir);
-#endif
 }
 
 /* ── Public helpers callable from platform code ─────────────────────────── */

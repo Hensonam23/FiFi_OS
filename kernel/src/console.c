@@ -819,6 +819,8 @@ void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_
 
 uint64_t console_fb_width(void)           { return con.w; }
 uint64_t console_fb_height(void)          { return con.h; }
+uint64_t console_cols(void)               { return con.cols; }
+uint64_t console_rows(void)               { return con.rows; }
 uint64_t console_viewport_x(void)         { return con.x_off; }
 uint64_t console_viewport_y(void)         { return con.y_offset; }
 volatile uint32_t *console_fb_ptr(void)   { return con.pix; }
@@ -1329,6 +1331,92 @@ void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w,
         uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;
         for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++)
             dst[xx] = src[xx];
+    }
+}
+
+/* Blit a sub-rectangle of a larger source image. src points at the full image with
+ * row stride src_stride (in pixels); (sx,sy,w,h) selects the region to copy to
+ * screen (dx,dy). Used to crop a CSD window's content out of its shadow margin. */
+void console_paste_subrect(const uint32_t *src, uint64_t src_stride,
+                           uint64_t sx, uint64_t sy, uint64_t w, uint64_t h,
+                           uint64_t dx, uint64_t dy) {
+    if (!g_back || !src) return;
+    g_dirty = true;
+    if ((uint32_t)dy < g_dirty_y0) g_dirty_y0 = (uint32_t)dy;
+    uint32_t _sy1 = (uint32_t)(dy + h);
+    if (_sy1 > g_dirty_y1) g_dirty_y1 = _sy1;
+    for (uint64_t yy = 0; yy < h && dy + yy < con.h; yy++) {
+        const uint32_t *s = src + (sy + yy) * src_stride + sx;
+        uint32_t       *d = g_back + (dy + yy) * con.pitch32 + dx;
+        for (uint64_t xx = 0; xx < w && dx + xx < con.w; xx++)
+            d[xx] = s[xx];
+    }
+}
+
+/* True alpha compositing: blend each ARGB source pixel over the current back-buffer
+ * contents: out = src*a + dst*(1-a). Transparent pixels leave the background
+ * untouched; semi-transparent shadow blends softly instead of stamping black. */
+void console_paste_rect_blend(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!g_back || !buf) return;
+    g_dirty = true;
+    if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+    uint32_t _by1 = (uint32_t)(y + h);
+    if (_by1 > g_dirty_y1) g_dirty_y1 = _by1;
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        const uint32_t *src = buf + yy * w;
+        uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++) {
+            uint32_t s = src[xx];
+            uint32_t a = s >> 24;
+            if (a == 0) continue;             /* fully transparent — keep background */
+            if (a == 0xFF) { dst[xx] = s | 0xFF000000u; continue; }
+            uint32_t d = dst[xx];
+            uint32_t na = 255u - a;
+            uint32_t r = (((s >> 16) & 0xFF) * a + ((d >> 16) & 0xFF) * na) / 255u;
+            uint32_t g = (((s >> 8)  & 0xFF) * a + ((d >> 8)  & 0xFF) * na) / 255u;
+            uint32_t b = (((s)       & 0xFF) * a + ((d)       & 0xFF) * na) / 255u;
+            dst[xx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+/* Draw only (near-)fully-opaque source pixels; skip anything with partial alpha.
+ * Used for CSD windows so the whole shadow (transparent margin + semi-transparent
+ * gradient) is skipped, leaving just the opaque window content — no shadow at all. */
+void console_paste_rect_opaque(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!g_back || !buf) return;
+    g_dirty = true;
+    if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+    uint32_t _oy1 = (uint32_t)(y + h);
+    if (_oy1 > g_dirty_y1) g_dirty_y1 = _oy1;
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        const uint32_t *src = buf + yy * w;
+        uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++) {
+            uint32_t px = src[xx];
+            if ((px >> 24) < 0xF0u) continue;   /* not fully opaque → shadow, skip */
+            dst[xx] = px | 0xFF000000u;
+        }
+    }
+}
+
+/* Like console_paste_rect but treats the source as ARGB: fully-transparent source
+ * pixels (alpha == 0) are skipped rather than stamped as black. Used for popups /
+ * subsurfaces so an empty/transparent overlay surface doesn't paint a black box. */
+void console_paste_rect_alpha(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h) {
+    if (!g_back || !buf) return;
+    g_dirty = true;
+    if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+    uint32_t _pry1 = (uint32_t)(y + h);
+    if (_pry1 > g_dirty_y1) g_dirty_y1 = _pry1;
+    for (uint64_t yy = 0; yy < h && y + yy < con.h; yy++) {
+        const uint32_t *src = buf + yy * w;
+        uint32_t       *dst = g_back + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w && x + xx < con.w; xx++) {
+            uint32_t px = src[xx];
+            if ((px >> 24) == 0) continue;   /* fully transparent — leave background */
+            dst[xx] = px | 0xFF000000u;      /* force opaque (we don't alpha-blend) */
+        }
     }
 }
 

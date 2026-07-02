@@ -143,6 +143,12 @@
 #define XDG_TOPLEVEL_UNSET_MAXIMIZED 10
 #define XDG_TOPLEVEL_SET_FULLSCREEN 11
 #define XDG_TOPLEVEL_UNSET_FULLSCREEN 12
+#define XDG_TOPLEVEL_SET_MINIMIZED  13
+/* xdg_toplevel.state values (for the configure states array) */
+#define XDG_TOPLEVEL_STATE_MAXIMIZED  1
+#define XDG_TOPLEVEL_STATE_FULLSCREEN 2
+#define XDG_TOPLEVEL_STATE_RESIZING   3
+#define XDG_TOPLEVEL_STATE_ACTIVATED  4
 
 /* wl_data_device_manager opcodes (requests) */
 #define WL_DDM_CREATE_DATA_SOURCE 0
@@ -159,6 +165,23 @@
 #define WL_DS_OFFER               0
 #define WL_DS_DESTROY             1
 #define WL_DS_SET_ACTIONS         2
+
+/* xdg_positioner opcodes */
+#define XDG_POSITIONER_DESTROY                  0
+#define XDG_POSITIONER_SET_SIZE                 1
+#define XDG_POSITIONER_SET_ANCHOR_RECT          2
+#define XDG_POSITIONER_SET_ANCHOR               3
+#define XDG_POSITIONER_SET_GRAVITY              4
+#define XDG_POSITIONER_SET_CONSTRAINT_ADJUSTMENT 5
+#define XDG_POSITIONER_SET_OFFSET               6
+
+/* xdg_popup opcodes (requests) */
+#define XDG_POPUP_DESTROY    0
+#define XDG_POPUP_GRAB       1
+#define XDG_POPUP_REPOSITION 2
+/* xdg_popup events */
+#define XDG_POPUP_CONFIGURE  0
+#define XDG_POPUP_DONE       1
 
 /* wl_subcompositor opcodes (requests) */
 #define WL_SUBCOMP_DESTROY        0
@@ -202,6 +225,8 @@ typedef enum {
     OBJ_DATA_OFFER,
     OBJ_SUBCOMPOSITOR,
     OBJ_SUBSURFACE,
+    OBJ_POSITIONER,
+    OBJ_XDG_POPUP,
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -225,10 +250,24 @@ typedef struct {
     bool     released;  /* compositor has released it */
 } wl_shm_buf_t;
 
+/* ── Positioner ───────────────────────────────────────────────────────────── */
+typedef struct {
+    int32_t  w, h;
+    int32_t  ar_x, ar_y, ar_w, ar_h;
+    int32_t  off_x, off_y;
+} xdg_positioner_t;
+
 /* ── Surface ──────────────────────────────────────────────────────────────── */
 typedef struct {
     uint32_t     buffer_id;   /* 0 = no buffer attached */
-    wl_shm_buf_t *buf;        /* current committed buffer */
+    bool         has_new_buffer; /* a new buffer was attached since the last commit */
+    wl_shm_buf_t *buf;        /* transient: client buffer located during commit (not kept) */
+    /* Compositor-owned copy of the committed pixels. We copy at commit and release
+     * the client buffer immediately, so our rendering never depends on client buffer
+     * lifetime (no use-after-free, no premature-release crashes, no stale dims). */
+    uint32_t    *own_pix;
+    size_t       own_cap;     /* allocated bytes of own_pix */
+    int32_t      own_w, own_h;/* dimensions of the owned copy */
     int32_t      x, y;        /* position on screen */
     int32_t      w, h;
     char         title[128];
@@ -247,11 +286,24 @@ typedef struct {
      * Used to shift the blit so shadows/decorations extend off-screen rather than
      * pushing the content off the right/bottom edge. */
     int32_t      geom_x, geom_y;  /* offset of content area within surface (shadow size) */
+    int32_t      geom_w, geom_h;  /* size of content area (0 = whole buffer) */
     uint32_t     surface_id;       /* this surface's own wl_surface object ID */
     /* Pending frame callback: fired during commit (not on frame request).
      * Firing immediately on frame request causes clients to destroy buffers
      * before we process the commit, breaking the render pipeline. */
     uint32_t     pending_frame_cb;
+    /* xdg_popup role */
+    bool         is_popup;
+    uint32_t     xdg_popup_id;
+    int32_t      popup_x, popup_y;  /* absolute screen position */
+    bool         popup_has_grab;
+    /* Toplevel window state (interactive move/resize + maximize/fullscreen/minimize) */
+    bool         maximized, fullscreen, minimized;
+    bool         placed;            /* initial window placement done */
+    int32_t      restore_x, restore_y, restore_w, restore_h;  /* saved windowed geom */
+    /* Pending destroy: set by DESTROY, cleaned up on next COMMIT so Firefox can
+     * receive buffer_release before the surface is gone (fixes tab-close crash). */
+    bool         pending_destroy;
 } wl_surface_t;
 
 /* ── Client ───────────────────────────────────────────────────────────────── */
@@ -384,19 +436,98 @@ static wl_obj_t *wl_find_obj(wl_client_t *c, uint32_t id) {
     return NULL;
 }
 
+/* Exact live-set of currently-allocated buffer/pool structs (wl_shm_buf_t).
+ * The orphan pool + zombie slot-reuse across Firefox's multiple client
+ * connections can leave the same pointer reachable from more than one route;
+ * freeing it twice aborts (double free in tcache). We track every wl_shm_buf_t
+ * at allocation and free it ONLY if still tracked, removing it atomically — so a
+ * second (dangling) free is a no-op. A reused heap address is re-tracked on its
+ * next allocation, so this never wrongly skips a legitimate free. */
+#define MAX_LIVE_BUFS 8192
+static void *g_live_bufs[MAX_LIVE_BUFS];
+static int   g_n_live = 0;
+static void track_buf(void *p) {
+    if (!p) return;
+    /* Dedup: a heap address reused after a free-that-didn't-untrack could leave a
+     * stale entry; never let the same pointer sit in the set twice or a later free
+     * sees it "live" after glibc already freed it (double-free abort). */
+    for (int i = 0; i < g_n_live; i++)
+        if (g_live_bufs[i] == p) return;   /* already tracked */
+    if (g_n_live < MAX_LIVE_BUFS) g_live_bufs[g_n_live++] = p;
+    /* else: table full — drop (extremely unlikely at MAX_LIVE_BUFS) */
+}
+/* Remove ALL instances of p; returns true if it was tracked. */
+static bool untrack_buf(void *p) {
+    bool found = false;
+    for (int i = 0; i < g_n_live; ) {
+        if (g_live_bufs[i] == p) { g_live_bufs[i] = g_live_bufs[--g_n_live]; found = true; }
+        else i++;
+    }
+    return found;
+}
+
 static void free_obj_data(wl_obj_t *o) {
     if (!o->data) return;
     if (o->type == OBJ_SURFACE) {
+        wl_surface_t *s = o->data;
+        if (s->own_pix) free(s->own_pix);  /* free the compositor-owned pixel copy */
         free(o->data);
     } else if (o->type == OBJ_SHM_POOL || o->type == OBJ_BUFFER) {
         wl_shm_buf_t *b = o->data;
-        if (b->data && b->size) { munmap(b->data, b->size); b->data = NULL; }
-        if (b->fd >= 0) { close(b->fd); b->fd = -1; }
-        free(b);
+        /* Drop any other reference to this exact pointer (other slots, orphan pool)
+         * so nothing tries to use it after free. */
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+                wl_obj_t *other = &g_wl_clients[ci].objs[oi];
+                if (other != o && other->data == b) { other->data = NULL; other->type = OBJ_NONE; }
+            }
+        }
+        for (int i = 0; i < g_n_orphans; i++)
+            if (g_orphan_bufs[i].buf == b) g_orphan_bufs[i].buf = NULL;
+        /* Free exactly once: only if still in the live-set. */
+        if (untrack_buf(b)) {
+            if (b->data && b->size) { munmap(b->data, b->size); b->data = NULL; }
+            if (b->fd >= 0) { close(b->fd); b->fd = -1; }
+            free(b);
+        }
+        /* else: already freed via another reference — skip silently (no abort). */
+    } else if (o->type == OBJ_SUBSURFACE) {
+        /* A subsurface is only a ROLE handle aliasing a wl_surface_t that is owned
+         * by that surface's OBJ_SURFACE slot. It does NOT own the pointer — freeing
+         * it here double-frees the surface (the OBJ_SURFACE slot frees it too).
+         * Just drop the alias. */
     } else if (o->data) {
         free(o->data);
     }
     o->data = NULL;
+}
+
+/* Copy a client SHM buffer's pixels into the surface's own packed copy.
+ * Handles row stride and bounds the read to the actual mapped size so a
+ * smaller/short buffer can never cause an out-of-bounds read. */
+static void surface_copy_buffer(wl_surface_t *s, wl_shm_buf_t *b) {
+    if (!b || !b->data || b->width <= 0 || b->height <= 0) return;
+    int64_t w = b->width, h = b->height;
+    int64_t stride_px = b->stride > 0 ? b->stride / 4 : w;
+    if (stride_px < w) stride_px = w;
+    if (b->size) {                              /* never read past the mmap */
+        int64_t max_rows = (int64_t)(b->size / (size_t)(stride_px * 4));
+        if (h > max_rows) h = max_rows;
+    }
+    if (h <= 0) return;
+    size_t need = (size_t)(w * h * 4);
+    if (s->own_cap < need) {
+        uint32_t *p = realloc(s->own_pix, need);
+        if (!p) return;                         /* keep old copy on OOM */
+        s->own_pix = p;
+        s->own_cap = need;
+    }
+    const uint32_t *src = (const uint32_t *)b->data;
+    for (int64_t row = 0; row < h; row++)
+        memcpy(s->own_pix + row * w, src + row * stride_px, (size_t)(w * 4));
+    s->own_w = (int32_t)w;
+    s->own_h = (int32_t)h;
+    s->mapped = true;
 }
 
 static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *data) {
@@ -535,25 +666,49 @@ static void send_output_info(wl_client_t *c, uint32_t out_id) {
     wl_end_msg(c, h);
 }
 
-static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
+/* Send an xdg_toplevel + xdg_surface configure with a specific size and up to two
+ * extra states (0 = none). ACTIVATED is always included so Firefox accepts input. */
+static void send_toplevel_configure(wl_client_t *c, wl_surface_t *s,
+                                     int32_t cw, int32_t ch,
+                                     uint32_t st1, uint32_t st2) {
     uint32_t ser = next_serial(c);
     s->serial = ser;
-    /* wl_surface.enter: tell the client which output this surface is on.
-     * Without this Firefox won't know its display scale/resolution. */
     if (c->output_id && s->surface_id) {
         int h0 = wl_begin_msg(c, s->surface_id, WL_SURFACE_ENTER);
         wl_push_u32(c, c->output_id);
         wl_end_msg(c, h0);
     }
-    /* xdg_toplevel configure: states array (empty = normal window) */
     int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CONFIGURE);
-    wl_push_u32(c, (uint32_t)s->w ? (uint32_t)s->w : (uint32_t)g_w);
-    wl_push_u32(c, (uint32_t)s->h ? (uint32_t)s->h : (uint32_t)g_h);
-    /* states array: XDG_TOPLEVEL_STATE_ACTIVATED=4 so Firefox accepts input */
-    wl_push_u32(c, 4);  /* array length = 4 bytes (one uint32) */
-    wl_push_u32(c, 4);  /* XDG_TOPLEVEL_STATE_ACTIVATED */
+    wl_push_u32(c, (uint32_t)(cw > 0 ? cw : g_w));
+    wl_push_u32(c, (uint32_t)(ch > 0 ? ch : g_h));
+    uint32_t n = 1 + (st1 ? 1 : 0) + (st2 ? 1 : 0);  /* ACTIVATED + extras */
+    wl_push_u32(c, n * 4);                            /* states array byte length */
+    if (st1) wl_push_u32(c, st1);
+    if (st2) wl_push_u32(c, st2);
+    wl_push_u32(c, XDG_TOPLEVEL_STATE_ACTIVATED);
     wl_end_msg(c, h);
-    /* xdg_surface configure */
+    h = wl_begin_msg(c, s->xdg_surface_id, XDG_SURFACE_CONFIGURE);
+    wl_push_u32(c, ser);
+    wl_end_msg(c, h);
+}
+
+static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
+    uint32_t st = s->fullscreen ? XDG_TOPLEVEL_STATE_FULLSCREEN
+                : s->maximized  ? XDG_TOPLEVEL_STATE_MAXIMIZED : 0;
+    send_toplevel_configure(c, s, s->w, s->h, st, 0);
+}
+
+static void send_xdg_popup_configure(wl_client_t *c, wl_surface_t *s,
+                                      int32_t px, int32_t py,
+                                      int32_t pw, int32_t ph) {
+    uint32_t ser = next_serial(c);
+    s->serial = ser;
+    int h = wl_begin_msg(c, s->xdg_popup_id, XDG_POPUP_CONFIGURE);
+    wl_push_u32(c, (uint32_t)px);
+    wl_push_u32(c, (uint32_t)py);
+    wl_push_u32(c, (uint32_t)pw);
+    wl_push_u32(c, (uint32_t)ph);
+    wl_end_msg(c, h);
     h = wl_begin_msg(c, s->xdg_surface_id, XDG_SURFACE_CONFIGURE);
     wl_push_u32(c, ser);
     wl_end_msg(c, h);
@@ -641,6 +796,45 @@ static void send_keymap(wl_client_t *c) {
     wl_push_u32(c, 25);   /* rate */
     wl_push_u32(c, 300);  /* delay ms */
     wl_end_msg(c, h);
+}
+
+/* Send wl_buffer.release for buffer_id to whichever client owns it. */
+static void wl_release_buffer(uint32_t buffer_id) {
+    if (!buffer_id) return;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        if (wl_find_obj(&g_wl_clients[ci], buffer_id)) {
+            int h = wl_begin_msg(&g_wl_clients[ci], buffer_id, WL_BUFFER_RELEASE);
+            wl_end_msg(&g_wl_clients[ci], h);
+            return;
+        }
+    }
+}
+
+/* ── Focus + interactive-op state (used by dispatch and the mouse handler) ──── */
+static int      g_focus_ci  = -1;  /* client index with keyboard focus */
+static uint32_t g_focus_sid = 0;   /* surface obj id with keyboard focus */
+static int32_t  g_prev_mx = -1, g_prev_my = -1;
+static uint8_t  g_prev_btns = 0;
+
+/* Interactive move/resize state (driven by xdg_toplevel.move / .resize) */
+static int      g_iop = 0;          /* 0=none 1=move 2=resize */
+static int      g_iop_ci = -1;
+static uint32_t g_iop_sid = 0;      /* wl_surface obj id being manipulated */
+static int32_t  g_iop_sx, g_iop_sy; /* mouse pos at op start */
+static int32_t  g_iop_ox, g_iop_oy, g_iop_ow, g_iop_oh;  /* surface geom at op start */
+static uint32_t g_iop_edges;        /* resize edges */
+
+/* Find the wl_surface_t + its client index that owns a given xdg_toplevel id. */
+static wl_surface_t *find_surface_by_toplevel(uint32_t tl_id, int *out_ci) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->xdg_toplevel_id == tl_id) { if (out_ci) *out_ci = ci; return s; }
+        }
+    }
+    return NULL;
 }
 
 /* ── Message dispatch ─────────────────────────────────────────────────────── */
@@ -744,11 +938,9 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             wl_surface_t *s = calloc(1, sizeof(wl_surface_t));
             s->surface_id = sid;
             wl_new_obj(c, sid, OBJ_SURFACE, s);
-            fprintf(stderr, "[wayland] create surface id=%u\n", sid);
         } else if (opcode == WL_COMPOSITOR_CREATE_REGION && args_len >= 4) {
             uint32_t rid; memcpy(&rid, args, 4);
             wl_new_obj(c, rid, OBJ_REGION, NULL);
-            fprintf(stderr, "[region] create rid=%u fd=%d n_objs=%d\n", rid, c->fd, c->n_objs);
         }
         break;
 
@@ -758,61 +950,43 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         if (!s) break;
         if (opcode == WL_SURFACE_ATTACH && args_len >= 12) {
             memcpy(&s->buffer_id, args, 4);
+            s->has_new_buffer = true;  /* consume + release exactly once on next commit */
             /* dx, dy at args+4 and args+8 — ignore for now */
         } else if (opcode == WL_SURFACE_COMMIT) {
-            /* Commit: if a buffer is attached, mark surface as mapped.
-             * Multi-process clients (Firefox/LibreWolf) create buffers in one
-             * client slot and surfaces in another. If the buffer isn't found in
-             * the current client, search all other active clients. */
-            if (s->buffer_id) {
-                wl_obj_t *bobj = wl_find_obj_any(s->buffer_id);
-                if (!bobj || bobj->type != OBJ_BUFFER) {
-                    /* Cross-client buffer lookup for multi-process apps */
-                    for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
-                        if (!g_wl_clients[_ci].active || &g_wl_clients[_ci] == c) continue;
-                        wl_obj_t *_b = wl_find_obj(&g_wl_clients[_ci], s->buffer_id);
-                        if (_b && _b->type == OBJ_BUFFER) { bobj = _b; break; }
+            /* Tab-close fix: DESTROY set pending_destroy; clean up on commit. */
+            if (s->pending_destroy) {
+                if (s->buffer_id) wl_release_buffer(s->buffer_id);
+                wl_delete_obj(c, obj_id);
+                break;
+            }
+            /* Copy-at-commit, but ONLY when a new buffer was actually attached.
+             * A client may commit without attaching (damage-only / frame-driven);
+             * releasing again then would double-release a buffer GDK has already
+             * taken back and reused as its staging surface → cairo assertion + crash.
+             * Locate the buffer (Firefox creates it in one process and commits the
+             * surface in another, so search all clients + orphan pool), copy its
+             * pixels into our OWN store, then release the client buffer exactly once. */
+            if (s->has_new_buffer) {
+                s->has_new_buffer = false;
+                if (s->buffer_id) {
+                    wl_obj_t *bobj = wl_find_obj_any(s->buffer_id);
+                    wl_shm_buf_t *src = (bobj && bobj->type == OBJ_BUFFER) ? bobj->data : NULL;
+                    if (!src) src = orphan_find(s->buffer_id);
+                    if (src && src->data) {
+                        surface_copy_buffer(s, src);  /* sets own_pix/own_w/own_h, mapped */
+                        if (src->width > 0 && src->height > 0) {
+                            s->w = src->width; s->h = src->height;
+                        }
                     }
-                }
-                /* Also check orphan pool (buffers from disconnected clients) */
-                wl_shm_buf_t *orphan_b = (!bobj || bobj->type != OBJ_BUFFER)
-                    ? orphan_find(s->buffer_id) : NULL;
-                if (bobj && bobj->type == OBJ_BUFFER) {
-                    s->buf    = bobj->data;
-                    s->mapped = true;
-                    if (s->buf && s->buf->width && s->buf->height) {
-                        s->w = s->buf->width; s->h = s->buf->height;
-                    }
-                } else if (orphan_b) {
-                    s->buf    = orphan_b;
-                    s->mapped = true;
-                    if (s->buf && s->buf->width && s->buf->height) {
-                        s->w = s->buf->width; s->h = s->buf->height;
-                    }
-                    fprintf(stderr, "[orphan] MAPPED obj=%u w=%d h=%d buf_id=%u data=%p\n",
-                            obj_id, s->w, s->h, s->buffer_id, s->buf ? s->buf->data : NULL);
+                    wl_release_buffer(s->buffer_id);  /* exactly once per attach */
                 } else {
-                    fprintf(stderr, "[nomatch] obj=%u buf_id=%u not found anywhere\n",
-                            obj_id, s->buffer_id);
+                    s->mapped = false;  /* NULL attach = unmap */
                 }
             }
             /* Fire pending frame callback (stored at WL_SURFACE_FRAME time) */
             if (s->pending_frame_cb) {
                 send_wl_callback_done(c, s->pending_frame_cb, g_global_serial++);
                 s->pending_frame_cb = 0;
-            }
-            /* Send buffer_release to the client that owns the buffer */
-            if (s->buffer_id) {
-                wl_client_t *buf_owner = c;
-                /* If buffer was found cross-client, send release to its owner */
-                for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
-                    if (!g_wl_clients[_ci].active) continue;
-                    if (wl_find_obj(&g_wl_clients[_ci], s->buffer_id)) {
-                        buf_owner = &g_wl_clients[_ci]; break;
-                    }
-                }
-                int h = wl_begin_msg(buf_owner, s->buffer_id, WL_BUFFER_RELEASE);
-                wl_end_msg(buf_owner, h);
             }
         } else if (opcode == WL_SURFACE_FRAME && args_len >= 4) {
             uint32_t cb_id; memcpy(&cb_id, args, 4);
@@ -822,7 +996,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             if (s) s->pending_frame_cb = cb_id;
         } else if (opcode == WL_SURFACE_DESTROY) {
             s->mapped = false;
-            wl_delete_obj(c, obj_id);
+            s->pending_destroy = true;
+            /* Defer delete until next commit so Firefox receives buffer_release first */
         }
         break;
     }
@@ -834,6 +1009,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             uint32_t pool_id; memcpy(&pool_id, args,   4);
             int32_t  sz;      memcpy(&sz,      args+4, 4);
             wl_shm_buf_t *pool = calloc(1, sizeof(wl_shm_buf_t));
+            track_buf(pool);
             pool->size = (size_t)sz;
             pool->fd   = -1;
             /* Pop the next queued fd — each create_pool has exactly one fd via cmsg */
@@ -844,15 +1020,12 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 if (pool->data == MAP_FAILED) pool->data = NULL;
             }
             wl_new_obj(c, pool_id, OBJ_SHM_POOL, pool);
-            fprintf(stderr, "[pool] create fd=%d pool_id=%u sz=%d pool_fd=%d data=%p\n",
-                    c->fd, pool_id, sz, pool->fd, pool->data);
         }
         break;
 
     /* ── wl_shm_pool ─────────────────────────────────────────────────── */
     case OBJ_SHM_POOL: {
         wl_shm_buf_t *pool = obj ? obj->data : NULL;
-        fprintf(stderr, "[pool] fd=%d op=%u pool_id=%u obj=%p pool=%p pool_fd=%d\n", c->fd, opcode, obj_id, (void*)obj, (void*)pool, pool ? pool->fd : -99);
         if (!pool) break;
         if (opcode == WL_SHM_POOL_CREATE_BUFFER && args_len >= 24) {
             uint32_t buf_id;
@@ -865,6 +1038,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&stride,  args + 16, 4);
             memcpy(&fmt,     args + 20, 4);
             wl_shm_buf_t *buf = calloc(1, sizeof(wl_shm_buf_t));
+            track_buf(buf);
             buf->fd     = -1;
             buf->width  = w;
             buf->height = h;
@@ -879,8 +1053,6 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     buf->size = (size_t)(h * stride);
                 }
             }
-            fprintf(stderr, "[pool] create_buffer buf_id=%u pool_fd=%d w=%d h=%d data=%p\n",
-                    buf_id, pool->fd, w, h, buf->data);
             wl_new_obj(c, buf_id, OBJ_BUFFER, buf);
         } else if (opcode == WL_SHM_POOL_RESIZE && args_len >= 4) {
             /* Client grew the pool (it can only grow). Re-map at the new size so
@@ -947,6 +1119,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     case OBJ_XDG_WM_BASE:
         if (opcode == XDG_WM_BASE_PONG) {
             /* client responded to our ping — good */
+        } else if (opcode == XDG_WM_BASE_CREATE_POSITIONER && args_len >= 4) {
+            uint32_t pos_id; memcpy(&pos_id, args, 4);
+            xdg_positioner_t *pos = calloc(1, sizeof(xdg_positioner_t));
+            wl_new_obj(c, pos_id, OBJ_POSITIONER, pos);
         } else if (opcode == XDG_WM_BASE_GET_XDG_SURFACE && args_len >= 8) {
             uint32_t xdg_surf_id, surf_id;
             memcpy(&xdg_surf_id, args,   4);
@@ -974,26 +1150,79 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     wl_surface_t *s = c->objs[i].data;
                     if (s->xdg_surface_id == obj_id) {
                         s->xdg_toplevel_id = tl_id;
-                        /* Send initial configure */
-                        send_xdg_surface_configure(c, s);
+                        /* Place the window: start maximized (full screen) with a
+                         * sensible centered windowed size saved for restore, so the
+                         * CSD restore/maximize/move/resize controls all work. */
+                        if (!s->placed) {
+                            s->placed = true;
+                            int32_t rw = g_w * 82 / 100, rh = g_h * 85 / 100;
+                            if (rw > 1600) rw = 1600;
+                            if (rh > 1000) rh = 1000;
+                            s->restore_w = rw; s->restore_h = rh;
+                            s->restore_x = (g_w - rw) / 2; s->restore_y = (g_h - rh) / 2;
+                            s->maximized = true; s->x = 0; s->y = 0;
+                            send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                        } else {
+                            send_xdg_surface_configure(c, s);
+                        }
                         break;
                     }
                 }
             }
         } else if (opcode == XDG_SURFACE_SET_WINDOW_GEOMETRY && args_len >= 16) {
-            /* Store geometry so blit can offset surface by (-geom_x,-geom_y) */
-            int32_t gx, gy;
-            memcpy(&gx, args,     4);
-            memcpy(&gy, args + 4, 4);
-            /* Find the surface that owns this xdg_surface and store geometry */
+            /* Content rect within the surface buffer. The area OUTSIDE it is the CSD
+             * shadow (transparent) — we crop to this rect in the blit so the shadow
+             * isn't painted as a black border. */
+            int32_t gx, gy, gw, gh;
+            memcpy(&gx, args,      4);
+            memcpy(&gy, args + 4,  4);
+            memcpy(&gw, args + 8,  4);
+            memcpy(&gh, args + 12, 4);
             for (int i = 0; i < c->n_objs; i++) {
                 if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) {
                     wl_surface_t *s = c->objs[i].data;
                     if (s->xdg_surface_id == obj_id) {
                         s->geom_x = gx; s->geom_y = gy;
+                        s->geom_w = gw; s->geom_h = gh;
                         break;
                     }
                 }
+            }
+        } else if (opcode == XDG_SURFACE_GET_POPUP && args_len >= 12) {
+            uint32_t popup_id, parent_xdg_id, positioner_id;
+            memcpy(&popup_id,      args,   4);
+            memcpy(&parent_xdg_id, args+4, 4);
+            memcpy(&positioner_id, args+8, 4);
+            wl_new_obj(c, popup_id, OBJ_XDG_POPUP, NULL);
+            for (int i = 0; i < c->n_objs; i++) {
+                if (c->objs[i].type != OBJ_SURFACE || !c->objs[i].data) continue;
+                wl_surface_t *s = c->objs[i].data;
+                if (s->xdg_surface_id != obj_id) continue;
+                s->xdg_popup_id = popup_id;
+                s->is_popup     = true;
+                wl_obj_t *po = wl_find_obj(c, positioner_id);
+                xdg_positioner_t *pos = (po && po->type == OBJ_POSITIONER) ? po->data : NULL;
+                /* Find parent surface screen position */
+                int32_t par_x = 0, par_y = 0;
+                for (int j = 0; j < c->n_objs; j++) {
+                    if (c->objs[j].type != OBJ_SURFACE || !c->objs[j].data) continue;
+                    wl_surface_t *ps = c->objs[j].data;
+                    if (ps->xdg_surface_id == parent_xdg_id) {
+                        par_x = ps->x; par_y = ps->y; break;
+                    }
+                }
+                int32_t pw = 200, ph = 100, rel_x = 0, rel_y = 0;
+                if (pos) {
+                    if (pos->w > 0) pw = pos->w;
+                    if (pos->h > 0) ph = pos->h;
+                    rel_x = pos->ar_x + pos->off_x;
+                    rel_y = pos->ar_y + pos->ar_h + pos->off_y;
+                }
+                s->w = pw; s->h = ph;
+                s->popup_x = par_x + rel_x;
+                s->popup_y = par_y + rel_y;
+                send_xdg_popup_configure(c, s, rel_x, rel_y, pw, ph);
+                break;
             }
         } else if (opcode == XDG_SURFACE_ACK_CONFIGURE) {
             /* client acknowledged configure — nothing to do yet */
@@ -1021,10 +1250,106 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     }
                 }
             }
+        } else if (opcode == XDG_TOPLEVEL_MOVE) {
+            /* Interactive move: args = seat(4), serial(4). Start tracking the drag. */
+            int mci = -1; wl_surface_t *s = find_surface_by_toplevel(obj_id, &mci);
+            if (s && !s->maximized && !s->fullscreen) {
+                g_iop = 1; g_iop_ci = mci; g_iop_sid = s->surface_id;
+                g_iop_sx = g_prev_mx; g_iop_sy = g_prev_my;
+                g_iop_ox = s->x; g_iop_oy = s->y;
+            }
+        } else if (opcode == XDG_TOPLEVEL_RESIZE && args_len >= 12) {
+            /* Interactive resize: args = seat(4), serial(4), edges(4). */
+            uint32_t edges; memcpy(&edges, args + 8, 4);
+            int mci = -1; wl_surface_t *s = find_surface_by_toplevel(obj_id, &mci);
+            if (s && !s->maximized && !s->fullscreen) {
+                g_iop = 2; g_iop_ci = mci; g_iop_sid = s->surface_id;
+                g_iop_sx = g_prev_mx; g_iop_sy = g_prev_my;
+                g_iop_ox = s->x; g_iop_oy = s->y; g_iop_ow = s->w; g_iop_oh = s->h;
+                g_iop_edges = edges;
+            }
+        } else if (opcode == XDG_TOPLEVEL_SET_MAXIMIZED) {
+            wl_surface_t *s = find_surface_by_toplevel(obj_id, NULL);
+            if (s && !s->maximized) {
+                if (!s->fullscreen) { s->restore_x = s->x; s->restore_y = s->y;
+                                      s->restore_w = s->w; s->restore_h = s->h; }
+                s->maximized = true; s->x = 0; s->y = 0;
+                send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+            }
+        } else if (opcode == XDG_TOPLEVEL_UNSET_MAXIMIZED) {
+            wl_surface_t *s = find_surface_by_toplevel(obj_id, NULL);
+            if (s && s->maximized) {
+                s->maximized = false;
+                s->x = s->restore_x; s->y = s->restore_y;
+                send_toplevel_configure(c, s, s->restore_w, s->restore_h, 0, 0);
+            }
+        } else if (opcode == XDG_TOPLEVEL_SET_FULLSCREEN) {
+            wl_surface_t *s = find_surface_by_toplevel(obj_id, NULL);
+            if (s && !s->fullscreen) {
+                if (!s->maximized) { s->restore_x = s->x; s->restore_y = s->y;
+                                     s->restore_w = s->w; s->restore_h = s->h; }
+                s->fullscreen = true; s->x = 0; s->y = 0;
+                send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_FULLSCREEN, 0);
+            }
+        } else if (opcode == XDG_TOPLEVEL_UNSET_FULLSCREEN) {
+            wl_surface_t *s = find_surface_by_toplevel(obj_id, NULL);
+            if (s && s->fullscreen) {
+                s->fullscreen = false;
+                if (s->maximized) { s->x = 0; s->y = 0;
+                    send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                } else {
+                    s->x = s->restore_x; s->y = s->restore_y;
+                    send_toplevel_configure(c, s, s->restore_w, s->restore_h, 0, 0);
+                }
+            }
+        } else if (opcode == XDG_TOPLEVEL_SET_MINIMIZED) {
+            /* No-op for now: hiding the surface would strand the user (the FiFi
+             * taskbar has no entry to restore a Wayland window). Needs taskbar
+             * integration — deferred. The minimized field/blit-skip is ready. */
         } else if (opcode == XDG_TOPLEVEL_DESTROY) {
             wl_delete_obj(c, obj_id);
         }
         break;
+
+    /* ── xdg_positioner ─────────────────────────────────────────────── */
+    case OBJ_POSITIONER: {
+        xdg_positioner_t *pos = obj ? obj->data : NULL;
+        if (!pos) break;
+        if (opcode == XDG_POSITIONER_SET_SIZE && args_len >= 8) {
+            memcpy(&pos->w, args,   4);
+            memcpy(&pos->h, args+4, 4);
+        } else if (opcode == XDG_POSITIONER_SET_ANCHOR_RECT && args_len >= 16) {
+            memcpy(&pos->ar_x, args,    4);
+            memcpy(&pos->ar_y, args+4,  4);
+            memcpy(&pos->ar_w, args+8,  4);
+            memcpy(&pos->ar_h, args+12, 4);
+        } else if (opcode == XDG_POSITIONER_SET_OFFSET && args_len >= 8) {
+            memcpy(&pos->off_x, args,   4);
+            memcpy(&pos->off_y, args+4, 4);
+        } else if (opcode == XDG_POSITIONER_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        /* SET_ANCHOR / SET_GRAVITY / SET_CONSTRAINT_ADJUSTMENT: accept, no-op */
+        break;
+    }
+
+    /* ── xdg_popup ──────────────────────────────────────────────────── */
+    case OBJ_XDG_POPUP: {
+        wl_surface_t *ps = NULL;
+        for (int i = 0; i < c->n_objs; i++) {
+            if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) {
+                wl_surface_t *_s = c->objs[i].data;
+                if (_s->xdg_popup_id == obj_id) { ps = _s; break; }
+            }
+        }
+        if (opcode == XDG_POPUP_GRAB) {
+            if (ps) ps->popup_has_grab = true;
+        } else if (opcode == XDG_POPUP_DESTROY) {
+            if (ps) { ps->is_popup = false; ps->popup_has_grab = false; ps->mapped = false; }
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+    }
 
     /* ── data device manager ─────────────────────────────────────────── */
     case OBJ_DATA_DEVICE_MGR:
@@ -1201,13 +1526,23 @@ static void wl_client_recv(wl_client_t *c) {
     if (n <= 0) {
         if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
             fprintf(stderr, "[wayland] client fd=%d disconnected\n", c->fd);
+            /* Rescue buffers to the orphan pool (a parent process may still commit
+             * a surface referencing a GPU-process buffer after that process exits).
+             * orphan_save NULLs each saved buffer's slot data so it won't be freed. */
             orphan_save_buffers(c);
+            /* Free EVERYTHING else and reset the slot. Previously we kept all objects
+             * as "zombies" for ID reuse — but that left pools and other structs with
+             * live pointers that got aliased/double-freed across Firefox's many
+             * connect/disconnect cycles. A Wayland reconnect is a NEW connection with
+             * a fresh object-ID space, so there is nothing legitimate to preserve. */
+            for (int i = 0; i < c->n_objs; i++)
+                free_obj_data(&c->objs[i]);   /* rescued buffers are data=NULL → no-op */
+            c->n_objs = 0;
+            c->compositor_id = c->shm_id = c->seat_id = 0;
+            c->keyboard_id = c->pointer_id = c->output_id = c->xdg_wm_id = 0;
             close(c->fd);
             c->fd     = -1;
             c->active = false;
-            /* Keep c->n_objs and c->objs intact — Firefox reconnects to the same
-             * compositor and sends messages for objects it created in the previous
-             * connection. Mark as zombie so the objects stay findable. */
         }
         return;
     }
@@ -1253,18 +1588,12 @@ static void wl_client_flush(wl_client_t *c) {
     }
 }
 
-/* ── Focus tracking ──────────────────────────────────────────────────────── */
-
-static int      g_focus_ci  = -1;  /* client index with keyboard focus */
-static uint32_t g_focus_sid = 0;   /* surface obj id with keyboard focus */
-static int32_t  g_prev_mx = -1, g_prev_my = -1;
-static uint8_t  g_prev_btns = 0;
-
 /* Find the topmost mapped Wayland surface that contains (mx, my) */
 static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
-    if (!s || !s->mapped) return false;
-    return mx >= s->x && mx < s->x + s->w &&
-           my >= s->y && my < s->y + s->h;
+    if (!s || !s->mapped || s->minimized) return false;
+    int32_t ox = s->is_popup ? s->popup_x : s->x;
+    int32_t oy = s->is_popup ? s->popup_y : s->y;
+    return mx >= ox && mx < ox + s->w && my >= oy && my < oy + s->h;
 }
 
 /* Wl-fixed is 24.8 fixed-point (value * 256) */
@@ -1273,8 +1602,6 @@ static uint32_t wl_fixed(int32_t v) { return (uint32_t)(v * 256); }
 /* Send pointer enter/leave events when focus changes */
 static void wl_send_ptr_enter(wl_client_t *c, uint32_t surf_id,
                                int32_t mx, int32_t my) {
-    fprintf(stderr, "[focus] ptr_enter fd=%d surf=%u ptr_id=%u kbd_id=%u\n",
-            c->fd, surf_id, c->pointer_id, c->keyboard_id);
     if (!c->pointer_id) return;
     uint32_t ser = next_serial(c);
     int h = wl_begin_msg(c, c->pointer_id, WL_PTR_ENTER);
@@ -1299,8 +1626,6 @@ static void wl_send_ptr_leave(wl_client_t *c, uint32_t surf_id) {
 }
 
 static void wl_send_kbd_enter(wl_client_t *c, uint32_t surf_id) {
-    fprintf(stderr, "[focus] kbd_enter fd=%d surf=%u kbd_id=%u\n",
-            c->fd, surf_id, c->keyboard_id);
     if (!c->keyboard_id) return;
     uint32_t ser = next_serial(c);
     int h = wl_begin_msg(c, c->keyboard_id, WL_KBD_ENTER);
@@ -1323,16 +1648,42 @@ static void wl_send_kbd_leave(wl_client_t *c, uint32_t surf_id) {
 /* Deliver mouse events to Wayland surfaces.
  * Call from main.c after input_poll() with current mouse state. */
 void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
+    /* Interactive move/resize: while active, the drag drives window geometry and
+     * pointer events are NOT forwarded to the client. Ends when the button is up. */
+    if (g_iop) {
+        if (!(btns & 1)) { g_iop = 0; }   /* button released → finish */
+        else if (g_iop_ci >= 0 && g_wl_clients[g_iop_ci].active) {
+            wl_client_t *c = &g_wl_clients[g_iop_ci];
+            wl_obj_t *o = wl_find_obj(c, g_iop_sid);
+            wl_surface_t *s = (o && o->type == OBJ_SURFACE) ? o->data : NULL;
+            if (s) {
+                if (g_iop == 1) {                 /* move */
+                    s->x = g_iop_ox + (mx - g_iop_sx);
+                    s->y = g_iop_oy + (my - g_iop_sy);
+                } else {                          /* resize */
+                    int32_t nw = g_iop_ow, nh = g_iop_oh, nx = g_iop_ox, ny = g_iop_oy;
+                    int32_t dx = mx - g_iop_sx, dy = my - g_iop_sy;
+                    /* edges: 1=top 2=bottom 4=left 8=right */
+                    if (g_iop_edges & 8) nw = g_iop_ow + dx;
+                    if (g_iop_edges & 4) { nw = g_iop_ow - dx; nx = g_iop_ox + dx; }
+                    if (g_iop_edges & 2) nh = g_iop_oh + dy;
+                    if (g_iop_edges & 1) { nh = g_iop_oh - dy; ny = g_iop_oy + dy; }
+                    if (nw < 200) nw = 200;
+                    if (nh < 150) nh = 150;
+                    s->x = nx; s->y = ny;
+                    send_toplevel_configure(c, s, nw, nh,
+                                            XDG_TOPLEVEL_STATE_RESIZING, 0);
+                    wl_client_flush(c);
+                }
+            } else { g_iop = 0; }
+        } else { g_iop = 0; }
+        g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
+        return;
+    }
     /* Find topmost surface under cursor */
     int  new_ci  = -1;
     uint32_t new_sid = 0;
     wl_surface_t *new_s = NULL;
-
-    static int mouse_log_ticker = 0;
-    int do_mouse_log = (++mouse_log_ticker % 120 == 0); /* log every ~2s */
-    if (do_mouse_log)
-        fprintf(stderr, "[mouse] send mx=%d my=%d btns=%d focus_ci=%d focus_sid=%u\n",
-                mx, my, btns, g_focus_ci, g_focus_sid);
 
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         wl_client_t *c = &g_wl_clients[ci];
@@ -1340,14 +1691,10 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         for (int oi = 0; oi < c->n_objs; oi++) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
-            if (do_mouse_log)
-                fprintf(stderr, "[mouse] check ci=%d obj=%u mapped=%d x=%d y=%d w=%d h=%d hit=%d\n",
-                        ci, c->objs[oi].id, s ? s->mapped : -1,
-                        s ? s->x : -1, s ? s->y : -1, s ? s->w : -1, s ? s->h : -1,
-                        s ? (int)wl_surface_hit(s, mx, my) : 0);
             if (wl_surface_hit(s, mx, my)) {
-                /* Only focus surfaces that have an xdg_toplevel role — sending
-                 * keyboard enter to toolbar/cursor/subsurfaces causes Firefox crashes */
+                /* Only focus surfaces with an xdg_toplevel role (or non-xdg
+                 * subsurfaces like web content). Sending keyboard enter to a
+                 * toolbar/cursor/popup xdg_surface crashes Firefox. */
                 if (s->xdg_toplevel_id || !s->xdg_surface_id) {
                     new_ci  = ci;
                     new_sid = c->objs[oi].id;
@@ -1357,8 +1704,6 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
             }
         }
     }
-    if (do_mouse_log)
-        fprintf(stderr, "[mouse] result new_ci=%d new_sid=%u\n", new_ci, new_sid);
 
     /* Handle focus changes */
     if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
@@ -1388,6 +1733,27 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
     wl_client_t *fc = &g_wl_clients[g_focus_ci];
     if (!fc->active || !fc->pointer_id) { g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns; return; }
 
+    /* Dismiss grabbed popup on click outside its bounds */
+    if (btns && !g_prev_btns) {
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            wl_client_t *pc = &g_wl_clients[ci];
+            if (!pc->active) continue;
+            for (int oi = 0; oi < pc->n_objs; oi++) {
+                if (pc->objs[oi].type != OBJ_SURFACE || !pc->objs[oi].data) continue;
+                wl_surface_t *ps = pc->objs[oi].data;
+                if (!ps->is_popup || !ps->popup_has_grab || !ps->mapped) continue;
+                if (mx < ps->popup_x || mx >= ps->popup_x + ps->w ||
+                    my < ps->popup_y || my >= ps->popup_y + ps->h) {
+                    int ph = wl_begin_msg(pc, ps->xdg_popup_id, XDG_POPUP_DONE);
+                    wl_end_msg(pc, ph);
+                    ps->mapped = false;
+                    ps->popup_has_grab = false;
+                    wl_client_flush(pc);
+                }
+            }
+        }
+    }
+
     /* Find focused surface to compute local coords */
     wl_surface_t *fs = NULL;
     for (int oi = 0; oi < fc->n_objs; oi++) {
@@ -1408,9 +1774,6 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
 
     /* Button changes — Wayland uses Linux BTN codes directly */
     uint8_t changed = btns ^ g_prev_btns;
-    if (changed)
-        fprintf(stderr, "[click] btns=%u->%u ci=%d sid=%u ptr_id=%u\n",
-                g_prev_btns, btns, g_focus_ci, g_focus_sid, fc ? fc->pointer_id : 0);
     if (changed) {
         /* BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112 */
         static const uint32_t btn_codes[3] = { 0x110, 0x111, 0x112 };
@@ -1437,20 +1800,30 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
     g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
 }
 
+/* Deliver a scroll-wheel event to the focused Wayland surface.
+ * dir > 0 = wheel up, dir < 0 = wheel down. */
+void wayland_send_scroll(int8_t dir) {
+    if (!dir || g_focus_ci < 0 || !g_focus_sid) return;
+    wl_client_t *fc = &g_wl_clients[g_focus_ci];
+    if (!fc->active || !fc->pointer_id) return;
+    /* wl_pointer.axis(time, axis=0 vertical, value). Positive value scrolls the
+     * content down; wheel-up (dir>0) is a negative value. ~15 units per notch. */
+    int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_AXIS);
+    wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+    wl_push_u32(fc, 0);                       /* axis 0 = vertical scroll */
+    wl_push_u32(fc, wl_fixed(dir > 0 ? -15 : 15));
+    wl_end_msg(fc, h);
+    h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_FRAME);
+    wl_end_msg(fc, h);
+    wl_client_flush(fc);
+}
+
 /* Deliver a key event to the focused Wayland surface.
  * key is a Linux evdev keycode (KEY_A=30, etc.), state: 1=press, 0=release. */
 void wayland_send_key(uint32_t evdev_key, uint32_t state) {
-    if (g_focus_ci < 0 || !g_focus_sid) {
-        fprintf(stderr, "[key] no focus: ci=%d sid=%u\n", g_focus_ci, g_focus_sid);
-        return;
-    }
+    if (g_focus_ci < 0 || !g_focus_sid) return;
     wl_client_t *fc = &g_wl_clients[g_focus_ci];
-    if (!fc->active || !fc->keyboard_id) {
-        fprintf(stderr, "[key] bad kbd: active=%d kbd_id=%u\n", fc->active, fc->keyboard_id);
-        return;
-    }
-    fprintf(stderr, "[key] send key=%u state=%u ci=%d kbd=%u\n",
-            evdev_key, state, g_focus_ci, fc->keyboard_id);
+    if (!fc->active || !fc->keyboard_id) return;
     uint32_t ser = next_serial(fc);
     int h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
     wl_push_u32(fc, ser);
@@ -1479,7 +1852,7 @@ bool wayland_any_mapped(void) {
         for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
             if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
-            if (s && s->mapped && s->buf && s->buf->data) return true;
+            if (s && s->mapped && s->own_pix) return true;
         }
     }
     return false;
@@ -1492,29 +1865,48 @@ bool wayland_any_mapped(void) {
 static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log) {
     extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
                                     uint64_t w, uint64_t h);
-    if (do_log)
-        fprintf(stderr, "[blit] ci=%d obj=%u mapped=%d data=%p w=%d h=%d sub=%d geom=%d,%d\n",
-                ci, obj_id, s->mapped, s->buf ? s->buf->data : NULL,
-                s->w, s->h, s->is_subsurface, s->geom_x, s->geom_y);
-    if (!s->mapped || !s->buf || !s->buf->data) return 0;
-    if (s->w <= 0 || s->h <= 0) return 0;
-    int32_t bx = s->x, by = s->y;
-    if (s->is_subsurface) {
+    extern void console_paste_rect_alpha(const uint32_t *src, uint64_t dx, uint64_t dy,
+                                    uint64_t w, uint64_t h);
+    (void)ci; (void)obj_id; (void)do_log;
+    /* Blit from our OWN packed copy (own_w*own_h, tightly packed). Never touches
+     * client buffer memory, so it can't fault on a freed/resized client buffer. */
+    if (!s->mapped || !s->own_pix || s->minimized) return 0;
+    if (s->own_w <= 0 || s->own_h <= 0) return 0;
+    if (s->is_popup) {
+        /* Only draw popups that took an input grab — i.e. interactive menus and
+         * dropdowns. Passive popups (hover tooltips) are skipped: their multi-surface
+         * layout composites poorly here (black frames, flicker, fragments) and they
+         * add no function. This keeps right-click menus / dropdowns working. */
+        if (!s->popup_has_grab) return 0;
+        int total = s->own_w * s->own_h, step = total > 4096 ? total / 4096 : 1, opaque = 0;
+        for (int i = 0; i < total; i += step) if ((s->own_pix[i] >> 24) != 0) { opaque = 1; break; }
+        if (!opaque) return 0;
+    }
+    int32_t bx, by;
+    if (s->is_popup) {
+        bx = s->popup_x; by = s->popup_y;
+    } else if (s->is_subsurface) {
         wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
         wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
         if (!p) return 0;
-        /* Subsurface blit: parent LOGICAL position + sub offset.
-         * sub_x/sub_y are in parent SURFACE coordinates (before geometry adjustment). */
         bx = p->x + s->sub_x;
         by = p->y + s->sub_y;
     } else {
-        /* Non-subsurface: offset by window geometry so content area starts at s->x,s->y */
-        bx = s->x - s->geom_x;
-        by = s->y - s->geom_y;
+        bx = s->x; by = s->y;
     }
-    console_paste_rect((const uint32_t *)s->buf->data,
-                       (uint64_t)bx, (uint64_t)by,
-                       (uint64_t)s->w, (uint64_t)s->h);
+    /* Subsurface = the browser content: draw only fully-opaque pixels so the ENTIRE
+     * CSD shadow (transparent margin + semi-transparent gradient) is skipped — no
+     * shadow at all. Popups (menus) may be legitimately semi-transparent, so they
+     * only skip fully-transparent pixels. Toplevels are the opaque base — plain copy. */
+    extern void console_paste_rect_opaque(const uint32_t *src, uint64_t dx, uint64_t dy,
+                                          uint64_t w, uint64_t h);
+    extern void console_paste_rect_blend(const uint32_t *src, uint64_t dx, uint64_t dy,
+                                         uint64_t w, uint64_t h);
+    /* All Wayland surfaces are ARGB. Alpha-blend over the wallpaper (repainted under
+     * the window each frame) so the browser's semi-transparent CSD shadow margin
+     * composites away instead of being stamped as a black ring. */
+    console_paste_rect_blend(s->own_pix, (uint64_t)bx, (uint64_t)by,
+                             (uint64_t)s->own_w, (uint64_t)s->own_h);
     return 1;
 }
 
@@ -1523,9 +1915,8 @@ void wayland_blit_surfaces(void) {
     int do_log = (++blit_log_ticker % 600 == 0);
     int blitted = 0;
 
-    /* Two-pass: parent surfaces first, then subsurfaces on top.
-     * Without this, parents overwrite subsurface content. */
-    for (int pass = 0; pass < 2; pass++) {
+    /* Three-pass: non-subsurface non-popup first, then subsurfaces, then popups on top. */
+    for (int pass = 0; pass < 3; pass++) {
         for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
             wl_client_t *c = &g_wl_clients[ci];
             if (!c->active) continue;
@@ -1534,13 +1925,14 @@ void wayland_blit_surfaces(void) {
                 wl_surface_t *s = c->objs[oi].data;
                 if (!s) continue;
                 /* pass 0 = non-subsurfaces, pass 1 = subsurfaces */
-                if (pass == 0 && s->is_subsurface) continue;
-                if (pass == 1 && !s->is_subsurface) continue;
+                if (pass == 0 && (s->is_subsurface || s->is_popup)) continue;
+                if (pass == 1 && (!s->is_subsurface || s->is_popup)) continue;
+                if (pass == 2 && !s->is_popup) continue;
                 blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
             }
         }
     }
-    if (do_log) fprintf(stderr, "[blit] total drawn: %d\n", blitted);
+    (void)blitted;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

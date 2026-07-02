@@ -26,6 +26,8 @@ void     console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uin
 void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch, uint64_t scale, uint32_t fg, uint32_t bg);
 uint64_t           console_fb_width(void);
 uint64_t           console_fb_height(void);
+uint64_t           console_cols(void);   /* visible character columns */
+uint64_t           console_rows(void);   /* visible character rows    */
 uint64_t           console_viewport_x(void);
 uint64_t           console_viewport_y(void);
 volatile uint32_t *console_fb_ptr(void);

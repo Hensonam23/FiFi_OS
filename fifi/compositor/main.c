@@ -318,6 +318,11 @@ static void *render_thread_fn(void *arg)
             struct timespec t0, t1, t2, t3;
             clock_gettime(CLOCK_MONOTONIC, &t0);
             gui_on_tick();
+            /* When a Wayland window (browser) is showing, repaint the desktop
+             * beneath it every frame so its transparent CSD shadow margin blends
+             * over the wallpaper instead of stale black. */
+            { extern bool wayland_any_mapped(void); extern void full_redraw(void);
+              if (wayland_any_mapped()) full_redraw(); }
             clock_gettime(CLOCK_MONOTONIC, &t1);
             ipc_blit_all();
             wayland_blit_surfaces();
@@ -351,10 +356,7 @@ static void *render_thread_fn(void *arg)
                 long tick_ms  = (t1.tv_sec - t0.tv_sec)*1000 + (t1.tv_nsec - t0.tv_nsec)/1000000;
                 long flip_ms  = (t3.tv_sec - t2.tv_sec)*1000 + (t3.tv_nsec - t2.tv_nsec)/1000000;
                 long total_ms = (t3.tv_sec - t0.tv_sec)*1000 + (t3.tv_nsec - t0.tv_nsec)/1000000;
-                extern int g_redraw_src;
-                if (total_ms >= 8)
-                    fprintf(stderr, "[slow_frame] total=%ldms tick=%ldms flip=%ldms cx=%d cy=%d flipped=%d src=%d\n",
-                            total_ms, tick_ms, flip_ms, cx, cy, (int)flipped, g_redraw_src);
+                (void)flip_ms; (void)total_ms; (void)tick_ms;
             }
 
             do_flush = (flipped || cursor_moved) && g_using_drm;
@@ -445,22 +447,17 @@ int main(void) {
 
     /* Compute the terminal grid size, THEN spawn the shell at exactly that size.
      * Spawning first and resizing afterward sent a SIGWINCH that made the shell
-     * reprint its prompt — the "double / # line" on first open. */
+     * reprint its prompt — the "double / # line" on first open.
+     * Use the actual console dimensions (set by gui_init/console_load_psf) so the
+     * PTY matches what is rendered — a geometry-derived guess gave fewer rows than
+     * the console actually rendered, causing Ink TUI ghost text. */
     {
-        uint32_t fw = console_font_width();
-        uint32_t fh = console_font_height();
-        uint16_t cols = 80, rows = 24;
-        if (fw > 0 && fh > 0) {
-            uint64_t desk_h = g_lmfb.height > 52u ? g_lmfb.height - 52u : g_lmfb.height;
-            uint64_t win_w  = g_lmfb.width * 88u / 100u;
-            uint64_t win_h  = desk_h * 90u / 100u;
-            uint64_t inner_w = win_w > 10u ? win_w - 10u : 1u;
-            uint64_t inner_h = win_h > 33u ? win_h - 33u : 1u;
-            cols = (uint16_t)(inner_w / fw);
-            rows = (uint16_t)(inner_h / fh);
-            if (cols < 20) cols = 20;
-            if (rows < 5)  rows = 5;
-        }
+        uint16_t cols = (uint16_t)console_cols();
+        uint16_t rows = (uint16_t)console_rows();
+        /* Reserve 2 rows for the taskbar at the bottom */
+        if (rows > 2) rows -= 2;
+        if (cols < 20) cols = 20;
+        if (rows < 5)  rows = 5;
         pty_set_initial_winsize(cols, rows);
         pty_init();
         fprintf(stderr, "[compositor] terminal %ux%u chars\n", cols, rows);
@@ -603,6 +600,14 @@ int main(void) {
                 if (!ipc_keyboard_active() || wayland_any_mapped())
                     wayland_send_mouse(mcx, mcy, btns);
             }
+            /* Scroll wheel → focused Wayland surface (browser). Consume it here so the
+             * desktop/terminal don't also scroll from the same wheel motion. */
+            if (wayland_has_focus()) {
+                extern int8_t mouse_consume_scroll(void);
+                extern void wayland_send_scroll(int8_t dir);
+                int8_t sc = mouse_consume_scroll();
+                if (sc) wayland_send_scroll(sc);
+            }
         }
 
         /* ── Activity tracking ──────────────────────────────────────────── */
@@ -732,10 +737,6 @@ int main(void) {
         /* ── Wayland key forwarding (raw evdev codes to focused surface) ── */
         {
             extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
-            static int kb_log = 0;
-            if (++kb_log % 300 == 0)  /* log every 5s */
-                fprintf(stderr, "[kbd_route] has_focus=%d ipc_active=%d\n",
-                        (int)wayland_has_focus(), (int)ipc_keyboard_active());
         }
         if (wayland_has_focus()) {
             extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
