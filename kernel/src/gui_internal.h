@@ -404,6 +404,12 @@ extern int          g_lto_idx;
 extern bool         g_vol_popup_open;
 extern uint64_t     g_vol_tray_x;
 extern uint64_t     g_vol_tray_w;
+
+extern bool         g_cal_popup_open;   /* clock/calendar popup */
+extern uint64_t     g_clk_x;            /* clock hit region on the taskbar */
+extern uint64_t     g_clk_w;
+extern uint64_t     g_cal_pop_x, g_cal_pop_y, g_cal_pop_w, g_cal_pop_h;
+void     cal_popup_draw(void);
 extern uint64_t     g_vol_pop_x;
 extern uint64_t     g_vol_pop_y;
 extern uint64_t     g_vol_pop_h;

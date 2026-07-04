@@ -653,6 +653,8 @@ void full_redraw(void) {
         launcher_draw();
     if (g_vol_popup_open)
         vol_popup_draw();
+    if (g_cal_popup_open)
+        cal_popup_draw();
     if (g_ctx_open)
         ctx_draw();
     if (g_fb_ctx_open)
@@ -686,6 +688,7 @@ void full_redraw(void) {
 void gui_draw_popups(void) {
     if (g_launcher_open)  launcher_draw();
     if (g_vol_popup_open) vol_popup_draw();
+    if (g_cal_popup_open) cal_popup_draw();
     if (g_ctx_open)       ctx_draw();
     if (g_fb_ctx_open)    fb_ctx_draw();
     if (g_txt_ctx_open)   txt_ctx_draw();

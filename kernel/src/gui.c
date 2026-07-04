@@ -2578,6 +2578,7 @@ void gui_on_tick(void) {
 
         if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w())) {
             g_vol_popup_open = false;
+            g_cal_popup_open = false;
             g_launcher_open = !g_launcher_open;
             g_launcher_hover = -1;
             if (g_launcher_open) {
@@ -2597,10 +2598,29 @@ void gui_on_tick(void) {
             mx <  (int32_t)(g_vol_tray_x + g_vol_tray_w)) {
             g_launcher_open  = false;
             g_launcher_hover = -1;
+            g_cal_popup_open = false;
             g_vol_popup_open = !g_vol_popup_open;
             if (g_vol_popup_open) {
                 taskbar_draw_tray();
                 vol_popup_draw();
+            } else {
+                full_redraw();
+            }
+            mouse_consume_click(&cx, &cy);
+            return;
+        }
+
+        /* ── Clock click → calendar popup ── */
+        if (g_clk_w > 0u &&
+            mx >= (int32_t)g_clk_x &&
+            mx <  (int32_t)(g_clk_x + g_clk_w)) {
+            g_launcher_open  = false;
+            g_launcher_hover = -1;
+            g_vol_popup_open = false;
+            g_cal_popup_open = !g_cal_popup_open;
+            if (g_cal_popup_open) {
+                taskbar_draw_tray();
+                cal_popup_draw();
             } else {
                 full_redraw();
             }
@@ -2944,6 +2964,9 @@ void gui_on_tick(void) {
             if (g_vol_popup_open) {
                 g_vol_popup_open = false;
             }
+            if (g_cal_popup_open) {
+                g_cal_popup_open = false;
+            }
             if (g_fb_ctx_open) {
                 g_fb_ctx_open = false;
                 full_redraw();
@@ -3042,6 +3065,21 @@ void gui_on_tick(void) {
             full_redraw();
             return;
         }
+    }
+
+    /* ── Calendar popup clicks: consume inside, close outside ── */
+    if (btn_pressed && g_cal_popup_open) {
+        int32_t cx, cy;
+        bool inside = ((uint64_t)mx >= g_cal_pop_x && (uint64_t)mx < g_cal_pop_x + g_cal_pop_w &&
+                       (uint64_t)my >= g_cal_pop_y && (uint64_t)my < g_cal_pop_y + g_cal_pop_h);
+        if (inside) {
+            mouse_consume_click(&cx, &cy);
+            return;
+        }
+        g_cal_popup_open = false;
+        mouse_consume_click(&cx, &cy);
+        full_redraw();
+        return;
     }
 
     /* ── File browser context menu clicks ── */
