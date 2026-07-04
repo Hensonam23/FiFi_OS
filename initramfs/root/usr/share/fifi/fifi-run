@@ -64,8 +64,14 @@ launch_dir() {
         mkdir -p /fifi-data/home 2>/dev/null || true
         export HOME=/fifi-data/home
         export MOZ_DISABLE_CONTENT_SANDBOX=1
+        # Dedicated persistent profile next to the app, created up front so the
+        # first run initializes it in place (an empty -profile dir shows "Profile
+        # Missing"; a non-existent one too). --no-remote so it never forwards to
+        # a stale instance/lock and silently exit.
+        prof="$(dirname "$dir")/profile"
+        mkdir -p "$prof" 2>/dev/null || true
         export APPDIR="$dir"; cd "$dir"
-        exec "$dir/AppRun" "$@"
+        exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
     fi
     if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then
         set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
