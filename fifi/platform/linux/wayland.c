@@ -1785,10 +1785,44 @@ static void wl_client_flush(wl_client_t *c) {
 /* Find the topmost mapped Wayland surface that contains (mx, my) */
 static bool g_wl_minimized;   /* real definition below (taskbar minimize) */
 
+/* Composed screen origin of a surface: popups sit at popup_x/y; a subsurface
+ * adds its offset to the parent's origin (recursively — so a menu's content
+ * subsurface lands on its popup, not at screen 0,0); toplevels use x/y. This is
+ * what lets popup-menu hit-testing/pointer routing match where the menu draws. */
+static void surface_screen_origin(wl_surface_t *s, int32_t *ox, int32_t *oy) {
+    int guard = 0;
+    int32_t ax = 0, ay = 0;
+    while (s && guard++ < 8) {
+        if (s->is_popup)      { ax += s->popup_x; ay += s->popup_y; return (void)(*ox = ax, *oy = ay); }
+        if (s->is_subsurface) {
+            ax += s->sub_x; ay += s->sub_y;
+            wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
+            s = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+            continue;
+        }
+        ax += s->x; ay += s->y; break;
+    }
+    *ox = ax; *oy = ay;
+}
+
+/* True if s is a grabbing popup or a subsurface descending from one — such
+ * surfaces get pointer input but NOT keyboard enter (kbd on a popup tree drives
+ * Firefox a11y and can crash it). */
+static bool surface_in_popup_tree(wl_surface_t *s) {
+    int guard = 0;
+    while (s && guard++ < 8) {
+        if (s->is_popup) return true;
+        if (!s->is_subsurface) return false;
+        wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
+        s = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+    }
+    return false;
+}
+
 static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
     if (!s || !s->mapped || s->minimized || g_wl_minimized || !s->own_pix) return false;
-    int32_t ox = s->is_popup ? s->popup_x : s->x;
-    int32_t oy = s->is_popup ? s->popup_y : s->y;
+    int32_t ox, oy;
+    surface_screen_origin(s, &ox, &oy);
     /* Hit-test against the ACTUAL committed buffer, not the configured size — a
      * client (e.g. Electron) may configure huge but commit a small window. */
     int32_t lx = mx - ox, ly = my - oy;
@@ -2021,8 +2055,12 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         if (new_ci >= 0 && new_sid) {
             wl_client_t *nc = &g_wl_clients[new_ci];
             wl_surface_t *s_loc = new_s;
-            wl_send_ptr_enter(nc, new_sid, mx - s_loc->x, my - s_loc->y);
-            wl_send_kbd_enter(nc, new_sid);
+            int32_t sox, soy; surface_screen_origin(s_loc, &sox, &soy);
+            wl_send_ptr_enter(nc, new_sid, mx - sox, my - soy);
+            /* Popup-tree surfaces (menus) get pointer but NOT keyboard enter —
+             * kbd on a popup drives Firefox a11y and can crash it. */
+            if (!surface_in_popup_tree(s_loc))
+                wl_send_kbd_enter(nc, new_sid);
             wl_client_flush(nc);
         }
         g_focus_ci  = new_ci;
@@ -2061,8 +2099,8 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         if (fc->objs[oi].id == g_focus_sid && fc->objs[oi].type == OBJ_SURFACE)
             fs = fc->objs[oi].data;
     }
-    int32_t lx = fs ? mx - fs->x : mx;
-    int32_t ly = fs ? my - fs->y : my;
+    int32_t lx = mx, ly = my;
+    if (fs) { int32_t fox, foy; surface_screen_origin(fs, &fox, &foy); lx = mx - fox; ly = my - foy; }
 
     /* Motion */
     if (mx != g_prev_mx || my != g_prev_my) {

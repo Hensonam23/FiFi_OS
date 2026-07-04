@@ -43,9 +43,15 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 
 | Feature | Status |
 |---|---|
-| GUI compositor: window manager, z-order, drag/resize | **Working** |
-| Taskbar: launcher, window buttons, clock, volume/FPS tray | **Working** |
-| Theme system: 16 accent presets, 5 wallpaper patterns | **Working** |
+| GUI compositor: window manager, z-order, drag/resize, rounded corners | **Working** |
+| Searchable app launcher (kickoff): live filter over built-in + installed apps, real icons | **Working** |
+| Taskbar favorites: built-in + pinned apps as icons, drag-to-reorder, persist, running indicators | **Working** |
+| App Store: install / launch / update / uninstall / search, Installed tab, live catalog | **Working** |
+| App runtime: downloaded AppImages/apps launch via one unified launcher; real logos everywhere | **Working** |
+| System tray: battery (laptop-only, charge + charging bolt), volume, network, clock | **Working** |
+| Tray hover tooltips: battery time-remaining, network IP, volume, memory, full date | **Working** |
+| Clock calendar popup: month nav arrows + month/year picker, today highlighted | **Working** |
+| Theme system: 16 accent presets, wallpaper patterns, full-screen gradient | **Working** |
 | File browser: list/grid view, sidebar, search, operations | **Working** |
 | Text viewer/editor: syntax highlight, edit mode, undo | **Working** |
 | Settings panel: theme, clock, audio, gaming, network, VPN | **Working** |
@@ -80,7 +86,9 @@ FiFi desktop runs on Linux with DRM/KMS display, ALSA + PipeWire audio, XWayland
 
 Phase 6 brings the in-OS installer, browser integration, and a full developer workflow. The installer is a 7-screen wizard that handles disk selection, formatting, GRUB install, and Windows dual-boot alongside existing installs. Type `setup` after booting to clone the source. Type `update` with the USB plugged in to update the OS in place without reinstalling or losing any downloaded tools.
 
-The terminal received a full UTF-8 rewrite. Multi-byte sequences are now decoded correctly so modern terminal tools render cleanly. OSC sequences (window title), alternate screen, and cursor hide/show are all handled properly.
+The desktop now has a full app ecosystem. A searchable kickoff launcher lists every built-in and installed app with its real icon; the App Store installs, launches, updates, and uninstalls apps and tracks running services; downloaded AppImages run through one unified launcher so everything opens the same way. The taskbar is a single icon strip — the built-in apps (Terminal, Files, Settings, Viewer) sit alongside pinned favorites, each showing a running indicator when open, and favorites can be dragged to reorder and are remembered across reboots. The tray adds a laptop-only battery indicator (charge level, a charging bolt when plugged in, and hover-for-time-remaining) plus hover tooltips across every tray item, and clicking the clock opens a month calendar with a month/year picker.
+
+The terminal received a full UTF-8 rewrite. Multi-byte sequences are now decoded correctly so modern terminal tools render cleanly. OSC sequences (window title), alternate screen, and cursor hide/show are all handled properly. The PTY grid tracks the terminal window: text wraps at the window border and re-flows live when the window is resized.
 
 Phase 5 added a security-focused feature set: DNS over HTTPS via dnscrypt-proxy, WireGuard VPN with a settings panel, Tor mode with bootstrap status, a network scanner, nmap port scanner, packet capture, password strength tester, vulnerability scanner, and intrusion detection. AppArmor profiles run the compositor and security apps in MAC mode. LUKS2 encrypted storage status and EFI Secure Boot status are shown in Security Center.
 
