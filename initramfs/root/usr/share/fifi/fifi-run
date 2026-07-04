@@ -54,6 +54,19 @@ launch_dir() {
         exec busybox unshare -U -- "$dir/AppRun" "$@"
     fi
     export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
+    # Firefox/LibreWolf refuse to run as root ONLY when $HOME is owned by a
+    # different uid — and /root here belongs to the image-builder uid. Point HOME
+    # at the root-owned persistent /fifi-data/home so the check passes (no need to
+    # drop privileges), and disable the content sandbox whose nested user-namespace
+    # clone is blocked on this box. Runtime xkb/fontconfig/libs are read fine as root.
+    if [ -e "$dir/librewolf-bin" ] || [ -e "$dir/librewolf" ] || \
+       [ -e "$dir/firefox-bin" ]  || [ -e "$dir/firefox" ]; then
+        mkdir -p /fifi-data/home 2>/dev/null || true
+        export HOME=/fifi-data/home
+        export MOZ_DISABLE_CONTENT_SANDBOX=1
+        export APPDIR="$dir"; cd "$dir"
+        exec "$dir/AppRun" "$@"
+    fi
     if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then
         set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
     fi
