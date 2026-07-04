@@ -553,6 +553,7 @@ void draw_desktop_bg(void) {
 void tick_redraw(void) {
     draw_status_bar();  /* top strip (STATUS_H px) */
     taskbar_draw();     /* bottom strip (TASKBAR_H px) — clock, volume, FPS */
+    if (g_tray_hover >= 0) tray_tip_draw();
     /* Redraw settings only if it is the topmost visible native window.
      * If another window is covering it, fall through to full_redraw so
      * the covering window isn't painted over. */
@@ -673,6 +674,8 @@ void full_redraw(void) {
         vol_popup_draw();
     if (g_cal_popup_open)
         cal_popup_draw();
+    if (g_tray_hover >= 0)
+        tray_tip_draw();
     if (g_ctx_open)
         ctx_draw();
     if (g_fb_ctx_open)
@@ -707,6 +710,7 @@ void gui_draw_popups(void) {
     if (g_launcher_open)  launcher_draw();
     if (g_vol_popup_open) vol_popup_draw();
     if (g_cal_popup_open) cal_popup_draw();
+    if (g_tray_hover >= 0) tray_tip_draw();
     if (g_ctx_open)       ctx_draw();
     if (g_fb_ctx_open)    fb_ctx_draw();
     if (g_txt_ctx_open)   txt_ctx_draw();

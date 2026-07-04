@@ -140,6 +140,87 @@ void rtc_get_date(uint8_t *day, uint8_t *mon, uint16_t *year) {
 
 /* HDA functions live in audio.c (ALSA raw-ioctl backend) */
 
+/* ── Battery / power (laptops) — read from /sys/class/power_supply/BAT* ─────── */
+static bool bat_dir(char *out, size_t n) {
+    DIR *d = opendir("/sys/class/power_supply");
+    if (!d) return false;
+    struct dirent *e; bool found = false;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "BAT", 3) == 0) {
+            snprintf(out, n, "/sys/class/power_supply/%s", e->d_name);
+            found = true; break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+static long bat_read_long(const char *dir, const char *file) {
+    char p[224]; snprintf(p, sizeof p, "%s/%s", dir, file);
+    FILE *f = fopen(p, "r"); if (!f) return -1;
+    long v = -1; if (fscanf(f, "%ld", &v) != 1) v = -1;
+    fclose(f); return v;
+}
+static bool bat_read_str(const char *dir, const char *file, char *out, size_t n) {
+    char p[224]; snprintf(p, sizeof p, "%s/%s", dir, file);
+    FILE *f = fopen(p, "r"); if (!f) return false;
+    bool ok = (fgets(out, (int)n, f) != NULL);
+    fclose(f);
+    if (ok) { char *nl = strchr(out, '\n'); if (nl) *nl = '\0'; }
+    return ok;
+}
+bool battery_present(void) { char d[192]; return bat_dir(d, sizeof d); }
+int battery_percent(void) {
+    char d[192]; if (!bat_dir(d, sizeof d)) return -1;
+    return (int)bat_read_long(d, "capacity");
+}
+/* "Charging" indicator (a bolt) shows whenever plugged in — i.e. not discharging. */
+bool battery_charging(void) {
+    char d[192]; if (!bat_dir(d, sizeof d)) return false;
+    char s[32] = ""; bat_read_str(d, "status", s, sizeof s);
+    return strncmp(s, "Discharging", 11) != 0;
+}
+/* Estimated minutes remaining (discharging) or to full (charging); -1 if unknown. */
+int battery_minutes(void) {
+    char d[192]; if (!bat_dir(d, sizeof d)) return -1;
+    char s[32] = ""; bat_read_str(d, "status", s, sizeof s);
+    bool disch = (strncmp(s, "Discharging", 11) == 0);
+    bool chg   = (strncmp(s, "Charging", 8) == 0);
+    long now, rate, full;
+    long e_now = bat_read_long(d, "energy_now"), p_now = bat_read_long(d, "power_now");
+    long e_full = bat_read_long(d, "energy_full");
+    if (p_now > 0 && e_now >= 0) { now = e_now; rate = p_now; full = e_full; }
+    else {
+        long c_now = bat_read_long(d, "charge_now"), i_now = bat_read_long(d, "current_now");
+        long c_full = bat_read_long(d, "charge_full");
+        if (i_now > 0 && c_now >= 0) { now = c_now; rate = i_now; full = c_full; }
+        else return -1;
+    }
+    if (disch) return (int)(60L * now / rate);
+    if (chg && full > now) return (int)(60L * (full - now) / rate);
+    return -1;
+}
+
+/* ── CPU usage % — delta of /proc/stat between calls (call ~1/sec) ──────────── */
+int cpu_usage_percent(void) {
+    static unsigned long long p_total = 0, p_idle = 0;
+    FILE *f = fopen("/proc/stat", "r"); if (!f) return -1;
+    char cpu[8];
+    unsigned long long u = 0, n = 0, s = 0, idle = 0, io = 0, irq = 0, sirq = 0, steal = 0;
+    int r = fscanf(f, "%7s %llu %llu %llu %llu %llu %llu %llu %llu",
+                   cpu, &u, &n, &s, &idle, &io, &irq, &sirq, &steal);
+    fclose(f);
+    if (r < 5) return -1;
+    unsigned long long idle_all = idle + io;
+    unsigned long long total = u + n + s + idle + io + irq + sirq + steal;
+    unsigned long long dt = (total > p_total) ? total - p_total : 0;
+    unsigned long long di = (idle_all > p_idle) ? idle_all - p_idle : 0;
+    p_total = total; p_idle = idle_all;
+    if (dt == 0) return -1;
+    int pct = (int)(100ULL * (dt - di) / dt);
+    if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+    return pct;
+}
+
 /* ── NET — detect virtio NIC from /proc/net/dev ───────────────────────────── */
 
 uint8_t  net_mac[6]  = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };

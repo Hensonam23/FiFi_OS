@@ -408,6 +408,29 @@ extern uint64_t     g_vol_tray_w;
 extern bool         g_cal_popup_open;   /* clock/calendar popup */
 extern uint64_t     g_clk_x;            /* clock hit region on the taskbar */
 extern uint64_t     g_clk_w;
+
+/* ── System tray indicators + hover tooltips ─────────────────────────── */
+#define TRAY_NONE (-1)
+#define TRAY_BATT  0
+#define TRAY_CPU   1
+#define TRAY_NET   2
+#define TRAY_MEM   3
+#define TRAY_VOL   4
+#define TRAY_CLK   5
+extern bool     g_batt_present;
+extern uint64_t g_batt_x, g_batt_w;
+extern uint64_t g_cpu_tray_x, g_cpu_tray_w;
+extern uint64_t g_net_tray_x, g_net_tray_w;
+extern uint64_t g_mem_tray_x, g_mem_tray_w;
+extern int      g_tray_hover;           /* TRAY_* id under cursor, or TRAY_NONE */
+int      tray_item_at(int32_t mx, int32_t my);
+void     tray_tip_draw(void);
+/* platform battery/cpu (weak — Linux-only) */
+__attribute__((weak)) bool battery_present(void);
+__attribute__((weak)) int  battery_percent(void);
+__attribute__((weak)) bool battery_charging(void);
+__attribute__((weak)) int  battery_minutes(void);
+__attribute__((weak)) int  cpu_usage_percent(void);
 extern uint64_t     g_cal_pop_x, g_cal_pop_y, g_cal_pop_w, g_cal_pop_h;
 extern int          g_cal_view_mon, g_cal_view_year;   /* month being displayed */
 extern bool         g_cal_pick_open;    /* month/year picker overlay */

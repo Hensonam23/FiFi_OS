@@ -160,6 +160,7 @@ void taskbar_draw_tray(void) {
     console_fill_rect(bx, by + 7u, bar_full_w, 1u, 0x00202838u);
     console_fill_rect(bx, by, 1u, 8u, 0x00202838u);
     console_fill_rect(bx + bar_full_w - 1u, by, 1u, 8u, 0x00202838u);
+    g_mem_tray_x = bx; g_mem_tray_w = bar_full_w;
 
     /* ── Gamepad indicator (shown when gamepad connected) ── */
     uint64_t tray_right = bx > 4u ? bx - 4u : 0u;
@@ -188,6 +189,7 @@ void taskbar_draw_tray(void) {
         console_fill_rect(nx, ty + 3u, nw, TASKBAR_H - 6u, net_bg);
         if (has_nic || has_ip)
             gui_draw_str(nx + 4u, ty + (TASKBAR_H - fh) / 2u, net_lbl, net_fg, net_bg);
+        g_net_tray_x = nx; g_net_tray_w = nw;
         tray_right = nx > 4u ? nx - 4u : 0u;
     }
 
@@ -239,6 +241,156 @@ void taskbar_draw_tray(void) {
         g_vol_tray_x = vx;
         g_vol_tray_w = vw;
     }
+
+    uint64_t left_edge = g_vol_tray_x > 6u ? g_vol_tray_x - 6u : 0u;
+
+    /* ── CPU usage bar (left of volume) ── */
+    g_cpu_tray_x = 0; g_cpu_tray_w = 0;
+    if (cpu_usage_percent) {
+        int cpct = cpu_usage_percent();
+        if (cpct < 0) cpct = 0; if (cpct > 100) cpct = 100;
+        uint64_t cbar = 32u;
+        uint64_t cx = left_edge > cbar ? left_edge - cbar : 0u;
+        uint64_t cy = ty + (TASKBAR_H - 8u) / 2u;
+        uint64_t cfill = (uint64_t)cpct * cbar / 100u;
+        uint32_t ccol = cpct >= 85 ? 0x00e86040u : cpct >= 60 ? 0x00e8c040u : 0x0050c0e0u;
+        console_fill_rect(cx, cy, cbar, 8u, 0x00101828u);
+        if (cfill > 0u) console_fill_rect(cx, cy, cfill, 8u, ccol);
+        console_fill_rect(cx, cy, cbar, 1u, 0x00202838u);
+        console_fill_rect(cx, cy + 7u, cbar, 1u, 0x00202838u);
+        console_fill_rect(cx, cy, 1u, 8u, 0x00202838u);
+        console_fill_rect(cx + cbar - 1u, cy, 1u, 8u, 0x00202838u);
+        g_cpu_tray_x = cx; g_cpu_tray_w = cbar;
+        left_edge = cx > 8u ? cx - 8u : 0u;
+    }
+
+    /* ── Battery (laptops only) — glyph fill + charging bolt ── */
+    g_batt_present = false; g_batt_x = 0; g_batt_w = 0;
+    if (battery_present && battery_present()) {
+        g_batt_present = true;
+        int pct = battery_percent ? battery_percent() : -1;
+        bool chg = battery_charging && battery_charging();
+        if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+        uint64_t bodyw = 24u, bodyh = 12u, nub = 2u;
+        uint64_t total = bodyw + nub;
+        uint64_t bxx = left_edge > total ? left_edge - total : 0u;
+        uint64_t byy = ty + (TASKBAR_H - bodyh) / 2u;
+        uint32_t oc = 0x00b8c8dcu;
+        console_fill_rect(bxx, byy, bodyw, 1u, oc);
+        console_fill_rect(bxx, byy + bodyh - 1u, bodyw, 1u, oc);
+        console_fill_rect(bxx, byy, 1u, bodyh, oc);
+        console_fill_rect(bxx + bodyw - 1u, byy, 1u, bodyh, oc);
+        console_fill_rect(bxx + bodyw, byy + (bodyh - 6u) / 2u, nub, 6u, oc);
+        uint32_t fc = chg ? 0x0050d090u : (pct <= 15 ? 0x00e05050u : pct <= 35 ? 0x00e8c040u : 0x0060c860u);
+        uint64_t innerw = bodyw - 4u;
+        uint64_t fillw = (uint64_t)pct * innerw / 100u;
+        if (fillw > 0u) console_fill_rect(bxx + 2u, byy + 2u, fillw, bodyh - 4u, fc);
+        if (chg) {   /* white lightning bolt centered on the battery */
+            uint64_t cxb = bxx + bodyw / 2u, cyb = byy + 2u;
+            uint32_t blt = 0x00ffffffu;
+            console_fill_rect(cxb + 1u, cyb,      2u, 3u, blt);
+            console_fill_rect(cxb - 2u, cyb + 3u, 5u, 1u, blt);
+            console_fill_rect(cxb - 2u, cyb + 4u, 2u, 3u, blt);
+        }
+        g_batt_x = bxx; g_batt_w = bodyw + nub;
+        left_edge = bxx > 8u ? bxx - 8u : 0u;
+    }
+}
+
+/* ── System tray indicators state + hover tooltips ───────────────────── */
+static int cal_dow(int y, int m, int d);   /* defined in the calendar section below */
+bool     g_batt_present = false;
+uint64_t g_batt_x = 0, g_batt_w = 0;
+uint64_t g_cpu_tray_x = 0, g_cpu_tray_w = 0;
+uint64_t g_net_tray_x = 0, g_net_tray_w = 0;
+uint64_t g_mem_tray_x = 0, g_mem_tray_w = 0;
+int      g_tray_hover = TRAY_NONE;
+
+static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
+    switch (id) {
+        case TRAY_BATT: *x = g_batt_x;     *w = g_batt_w;     break;
+        case TRAY_CPU:  *x = g_cpu_tray_x; *w = g_cpu_tray_w; break;
+        case TRAY_NET:  *x = g_net_tray_x; *w = g_net_tray_w; break;
+        case TRAY_MEM:  *x = g_mem_tray_x; *w = g_mem_tray_w; break;
+        case TRAY_VOL:  *x = g_vol_tray_x; *w = g_vol_tray_w; break;
+        case TRAY_CLK:  *x = g_clk_x;      *w = g_clk_w;      break;
+        default:        *x = 0;            *w = 0;            break;
+    }
+}
+
+int tray_item_at(int32_t mx, int32_t my) {
+    uint64_t ty = console_fb_height() - TASKBAR_H;
+    if ((uint64_t)my < ty) return TRAY_NONE;
+    static const int ids[6] = { TRAY_BATT, TRAY_CPU, TRAY_NET, TRAY_MEM, TRAY_VOL, TRAY_CLK };
+    for (int k = 0; k < 6; k++) {
+        if (ids[k] == TRAY_BATT && !g_batt_present) continue;
+        uint64_t x, w; tray_item_region(ids[k], &x, &w);
+        if (w > 0u && (uint64_t)mx >= x && (uint64_t)mx < x + w) return ids[k];
+    }
+    return TRAY_NONE;
+}
+
+static void tray_tip_text(int id, char *buf, int n) {
+    buf[0] = '\0';
+    switch (id) {
+    case TRAY_BATT: {
+        int pct = battery_percent ? battery_percent() : -1;
+        bool chg = battery_charging && battery_charging();
+        int m = battery_minutes ? battery_minutes() : -1;
+        if (chg) {
+            if (m > 0) snprintf(buf, n, "Charging - %d%% (%dh %02dm to full)", pct, m / 60, m % 60);
+            else       snprintf(buf, n, "Charging - %d%%", pct);
+        } else {
+            if (m > 0) snprintf(buf, n, "%d%% - %dh %02dm remaining", pct, m / 60, m % 60);
+            else       snprintf(buf, n, "%d%% remaining", pct);
+        }
+        break; }
+    case TRAY_CPU: { int c = cpu_usage_percent ? cpu_usage_percent() : -1; snprintf(buf, n, "CPU: %d%%", c < 0 ? 0 : c); break; }
+    case TRAY_NET:
+        if (net_ip) { char ip[20]; gui_ip4_str(net_ip, ip, (int)sizeof ip); snprintf(buf, n, "Network: %s", ip); }
+        else snprintf(buf, n, "Network: disconnected");
+        break;
+    case TRAY_MEM: {
+        uint64_t tp = pmm_get_total_pages(), fp = pmm_get_free_pages();
+        unsigned long long usedMB = (unsigned long long)(tp - fp) * 4096ull / 1048576ull;
+        unsigned long long totMB  = (unsigned long long)tp * 4096ull / 1048576ull;
+        snprintf(buf, n, "Memory: %llu / %llu MB", usedMB, totMB);
+        break; }
+    case TRAY_VOL: { int v = hda_is_ready() ? hda_get_volume() : -1; if (v < 0) snprintf(buf, n, "Volume: n/a"); else snprintf(buf, n, "Volume: %d%%", v); break; }
+    case TRAY_CLK: {
+        uint8_t d = 1, mo = 1; uint16_t y = 2026; rtc_get_date(&d, &mo, &y);
+        static const char *wd[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        static const char *mnames[] = { "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December" };
+        if (mo < 1 || mo > 12) mo = 1;
+        int dow = cal_dow((int)y, (int)mo, (int)d);
+        if (dow < 0 || dow > 6) dow = 0;
+        snprintf(buf, n, "%s, %s %d, %d", wd[dow], mnames[mo - 1], d, y);
+        break; }
+    default: break;
+    }
+}
+
+void tray_tip_draw(void) {
+    if (g_tray_hover < 0) return;
+    char buf[96]; tray_tip_text(g_tray_hover, buf, (int)sizeof buf);
+    if (!buf[0]) return;
+    uint64_t fw = console_font_width(), fh = console_font_height();
+    uint64_t ty = console_fb_height() - TASKBAR_H;
+    uint64_t tlen = (uint64_t)gui_strlen(buf);
+    uint64_t tw = tlen * fw + 16u, th = fh + 10u;
+    uint64_t ix, iw; tray_item_region(g_tray_hover, &ix, &iw);
+    uint64_t center = ix + iw / 2u;
+    uint64_t px = center > tw / 2u ? center - tw / 2u : 0u;
+    uint64_t fbw = console_fb_width();
+    if (px + tw > fbw) px = fbw > tw ? fbw - tw : 0u;
+    uint64_t py = ty > th + 6u ? ty - th - 6u : 0u;
+    console_fill_rect(px, py, tw, th, 0x000e1622u);
+    console_fill_rect(px, py, tw, 1u, 0x00304a70u);
+    console_fill_rect(px, py + th - 1u, tw, 1u, 0x00223048u);
+    console_fill_rect(px, py, 1u, th, 0x00223048u);
+    console_fill_rect(px + tw - 1u, py, 1u, th, 0x00223048u);
+    gui_draw_str_fg(px + 8u, py + (th - fh) / 2u, buf, 0x00d6e6f7u);
 }
 
 /* Icon path + label for a unified favbar index (built-ins first, then user favs). */

@@ -842,6 +842,15 @@ void gui_on_tick(void) {
 
     /* (Built-in window buttons are now favorites — handled by favbar hover above.) */
 
+    /* ── Tray icon hover tooltips (battery/cpu/net/mem/vol/clock) ── */
+    {
+        int it = g_launcher_open ? TRAY_NONE : tray_item_at(mx, my);
+        if (it != g_tray_hover) {
+            g_tray_hover = it;
+            full_redraw();   /* render path draws the tooltip when g_tray_hover >= 0 */
+        }
+    }
+
     /* ── Context menu hover tracking ── */
     if (g_ctx_open) {
         static const char *_ci_arr[CTX_ITEMS] = {
