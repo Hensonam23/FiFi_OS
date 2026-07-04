@@ -610,6 +610,7 @@ void tick_redraw(void);
 void draw_status_bar(void);
 void draw_desktop_bg(void);
 void draw_desktop_icons(void);
+uint64_t desk_icon_col_x(void);
 void draw_desktop_info(void);
 void draw_resize_hint(int slot, resize_dir_t dir);
 int  desk_icon_at(int mx, int my);

@@ -210,13 +210,36 @@ static icon_img_t *desk_icon_logo(int i) {
     return c->img ? c : NULL;
 }
 
+/* X of the right-edge icon column. Normally flush-right (DESK_ICON_PAD margin),
+ * but nudged left just enough that the widest label can sit CENTERED under its
+ * icon without running off the screen edge (so labels never right-align). */
+uint64_t desk_icon_col_x(void) {
+    uint64_t fw  = console_font_width();
+    uint64_t fbw = console_fb_width();
+    uint64_t flush = (fbw > DESK_ICON_W + DESK_ICON_PAD) ? fbw - DESK_ICON_W - DESK_ICON_PAD : 0u;
+    uint64_t maxlw = 0;
+    for (int i = 0; i < DESK_ICON_MAX; i++) {
+        if (!g_desk_icons[i].active) continue;
+        const char *nm = g_desk_icons[i].label[0]
+                         ? g_desk_icons[i].label
+                         : desk_icon_basename(g_desk_icons[i].path);
+        char lb[24]; strncpy(lb, nm, sizeof(lb) - 1); lb[sizeof(lb) - 1] = '\0';
+        uint64_t w = (uint64_t)gui_strlen(lb) * fw;
+        if (w > maxlw) maxlw = w;
+    }
+    uint64_t half = maxlw / 2u, edge = 6u;
+    uint64_t max_center = (fbw > half + edge) ? fbw - half - edge : 0u;  /* rightmost icon center that fits the label */
+    uint64_t col_for_label = (max_center > DESK_ICON_W / 2u) ? max_center - DESK_ICON_W / 2u : 0u;
+    return (flush < col_for_label) ? flush : col_for_label;  /* the more-left of the two */
+}
+
 void draw_desktop_icons(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t dt = desk_top();
     uint64_t db = desk_bot();
     /* Icons column along the right edge, top-down */
-    uint64_t icon_x = console_fb_width() - DESK_ICON_W - DESK_ICON_PAD;
+    uint64_t icon_x = desk_icon_col_x();
     uint64_t icon_y = dt + DESK_ICON_PAD;
 
     for (int i = 0; i < DESK_ICON_MAX; i++) {
@@ -300,7 +323,7 @@ void draw_desktop_icons(void) {
 int desk_icon_at(int mx, int my) {
     uint64_t dt = desk_top();
     uint64_t db = desk_bot();
-    uint64_t icon_x = console_fb_width() - DESK_ICON_W - DESK_ICON_PAD;
+    uint64_t icon_x = desk_icon_col_x();
     uint64_t icon_y = dt + DESK_ICON_PAD;
     for (int i = 0; i < DESK_ICON_MAX; i++) {
         if (!g_desk_icons[i].active) continue;
