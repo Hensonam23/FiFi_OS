@@ -2,6 +2,7 @@
 #ifdef __linux__
 #include <dirent.h>
 #include <string.h>
+#include <stdlib.h>
 #endif
 
 /* ── Context menu width helpers (font-scaled) ───────────────────────── */
@@ -37,6 +38,41 @@ static bool lw_substr_ci(const char *hay, const char *needle) {
     }
     return false;
 }
+
+/* App-icon cache: an installed app's launcher /fifi-data/apps/<Name>.sh has a
+ * sibling <Name>.png (written by appstore-install.sh). Decode once, keyed by the
+ * entry's exec path, and blit it in place of the colored dot. Linux-only — the
+ * PNG loader is a weak symbol absent on bare-metal. */
+#ifdef __linux__
+__attribute__((weak)) uint32_t *fifi_load_png(const char *path, uint32_t *w, uint32_t *h);
+typedef struct { char path[192]; uint32_t *img; uint32_t w, h; bool tried; } licon_t;
+static licon_t g_licons[LAUNCH_MAX];
+
+static licon_t *launch_icon(int i) {
+    if (!fifi_load_png || i < 0 || i >= g_launch_n) return NULL;
+    const char *ex = g_launch[i].exec;
+    if (!ex[0]) return NULL;   /* built-in windows / power actions: no icon file */
+    licon_t *c = &g_licons[i];
+    if (strncmp(c->path, ex, sizeof(c->path)) != 0) {
+        if (c->img) { free(c->img); c->img = NULL; }
+        c->tried = false;
+        strncpy(c->path, ex, sizeof(c->path) - 1);
+        c->path[sizeof(c->path) - 1] = '\0';
+    }
+    if (!c->tried) {
+        c->tried = true;
+        char png[224];
+        size_t l = strlen(ex);
+        const char *dot = strrchr(ex, '.');
+        size_t stem = dot ? (size_t)(dot - ex) : l;
+        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
+        memcpy(png, ex, stem);
+        memcpy(png + stem, ".png", 5);
+        c->img = fifi_load_png(png, &c->w, &c->h);
+    }
+    return c->img ? c : NULL;
+}
+#endif
 
 static const char *launch_builtin_path(int slot) {
     switch (slot) {
@@ -266,14 +302,30 @@ void launcher_draw(void) {
         bool sel = (idx == g_launcher_hover);
         if (sel)
             console_fill_vgrad(lx + 3u, ry + 1u, w - 6u, rh - 2u, 0x003a6cc8u, 0x002a4f9cu);
-        uint32_t dot = e->power     ? 0x00e05050u :
-                       e->builtin >= 0 ? 0x0060c8a0u : g_theme.accent;
-        uint64_t dy = ry + rh / 2u - 3u;
-        console_fill_rect(lx + 14u, dy + 1u, 6u, 4u, dot);
-        console_fill_rect(lx + 15u, dy,      4u, 6u, dot);
+        /* Icon column: real app logo when present, colored dot otherwise. */
+        uint64_t iconsz = (rh > 20u) ? rh - 10u : 12u;
+        uint64_t icx = lx + 12u, icy = ry + (rh > iconsz ? (rh - iconsz) / 2u : 0u);
+        bool drew_icon = false;
+#ifdef __linux__
+        {
+            licon_t *ic = launch_icon(g_launch_filt[idx]);
+            if (ic) {
+                console_blit_scaled_alpha(ic->img, ic->w, ic->h, icx, icy, iconsz, iconsz);
+                drew_icon = true;
+            }
+        }
+#endif
+        if (!drew_icon) {
+            uint32_t dot = e->power     ? 0x00e05050u :
+                           e->builtin >= 0 ? 0x0060c8a0u : g_theme.accent;
+            uint64_t dcx = icx + iconsz / 2u - 3u, dcy = ry + rh / 2u - 3u;
+            console_fill_rect(dcx,      dcy + 1u, 6u, 4u, dot);
+            console_fill_rect(dcx + 1u, dcy,      4u, 6u, dot);
+        }
         uint32_t fg = sel ? 0x00f2f7ffu : (e->power ? 0x00e88a80u : COL_LAUNCH_FG);
-        uint64_t spx = lx + 30u, spy = ry + (rh > fh ? (rh - fh) / 2u : 0u);
-        uint64_t maxc = (w > 44u && fw) ? (w - 44u) / fw : 8u;
+        uint64_t spx = icx + iconsz + 8u, spy = ry + (rh > fh ? (rh - fh) / 2u : 0u);
+        uint64_t lead = spx - lx + 14u;
+        uint64_t maxc = (w > lead && fw) ? (w - lead) / fw : 8u;
         gui_draw_str_clip_fg(spx, spy, e->label, fg, maxc);
     }
 
