@@ -146,24 +146,10 @@ void taskbar_draw_tray(void) {
     g_clk_w = clk_w + 8u;
     (void)bg;
 
-    /* ── Memory bar (16px wide, 8px tall) ── */
-    uint64_t total_p = pmm_get_total_pages();
-    uint64_t free_p  = pmm_get_free_pages();
-    uint64_t bar_full_w = 32u;
-    uint64_t fill = total_p > 0u ? (total_p - free_p) * bar_full_w / total_p : 0u;
-
-    uint64_t bx = clk_x > bar_full_w + 12u ? clk_x - bar_full_w - 12u : 0u;
-    uint64_t by = ty + (TASKBAR_H - 8u) / 2u;
-    console_fill_rect(bx, by, bar_full_w, 8u, 0x00101828u);
-    if (fill > 0u) console_fill_rect(bx, by, fill, 8u, g_theme.accent);
-    console_fill_rect(bx, by, bar_full_w, 1u, 0x00202838u);
-    console_fill_rect(bx, by + 7u, bar_full_w, 1u, 0x00202838u);
-    console_fill_rect(bx, by, 1u, 8u, 0x00202838u);
-    console_fill_rect(bx + bar_full_w - 1u, by, 1u, 8u, 0x00202838u);
-    g_mem_tray_x = bx; g_mem_tray_w = bar_full_w;
+    /* (Memory usage bar removed per user request — it read as a separator bar.) */
 
     /* ── Gamepad indicator (shown when gamepad connected) ── */
-    uint64_t tray_right = bx > 4u ? bx - 4u : 0u;
+    uint64_t tray_right = clk_x > 8u ? clk_x - 8u : 0u;
     {
         extern bool input_gamepad_connected(void);
         if (input_gamepad_connected()) {
@@ -242,27 +228,9 @@ void taskbar_draw_tray(void) {
         g_vol_tray_w = vw;
     }
 
+    /* (CPU usage bar removed per user request — it read as a separator bar.) */
     uint64_t left_edge = g_vol_tray_x > 6u ? g_vol_tray_x - 6u : 0u;
-
-    /* ── CPU usage bar (left of volume) ── */
     g_cpu_tray_x = 0; g_cpu_tray_w = 0;
-    if (cpu_usage_percent) {
-        int cpct = cpu_usage_percent();
-        if (cpct < 0) cpct = 0; if (cpct > 100) cpct = 100;
-        uint64_t cbar = 32u;
-        uint64_t cx = left_edge > cbar ? left_edge - cbar : 0u;
-        uint64_t cy = ty + (TASKBAR_H - 8u) / 2u;
-        uint64_t cfill = (uint64_t)cpct * cbar / 100u;
-        uint32_t ccol = cpct >= 85 ? 0x00e86040u : cpct >= 60 ? 0x00e8c040u : 0x0050c0e0u;
-        console_fill_rect(cx, cy, cbar, 8u, 0x00101828u);
-        if (cfill > 0u) console_fill_rect(cx, cy, cfill, 8u, ccol);
-        console_fill_rect(cx, cy, cbar, 1u, 0x00202838u);
-        console_fill_rect(cx, cy + 7u, cbar, 1u, 0x00202838u);
-        console_fill_rect(cx, cy, 1u, 8u, 0x00202838u);
-        console_fill_rect(cx + cbar - 1u, cy, 1u, 8u, 0x00202838u);
-        g_cpu_tray_x = cx; g_cpu_tray_w = cbar;
-        left_edge = cx > 8u ? cx - 8u : 0u;
-    }
 
     /* ── Battery (laptops only) — glyph fill + charging bolt ── */
     g_batt_present = false; g_batt_x = 0; g_batt_w = 0;
