@@ -717,24 +717,10 @@ void gui_on_tick(void) {
         mouse_set_cursor(want);
     }
 
-    /* ── Launcher hover tracking ── */
+    /* ── Launcher hover tracking (mouse moves the selection) ── */
     if (g_launcher_open) {
-        uint64_t lx  = launcher_lx();
-        uint64_t ly  = launcher_ly();
-        uint64_t lw  = launcher_eff_w();
-        uint64_t lih = launcher_item_h();
-        int new_hover = -1;
-        if ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
-            (uint64_t)my >= ly &&
-            (uint64_t)my < ly + LAUNCHER_ITEMS * lih) {
-            new_hover = (int)((uint64_t)my - ly) / (int)lih;
-            /* Don't hover-highlight separator */
-            if (new_hover >= 0 && new_hover < (int)LAUNCHER_ITEMS) {
-                const char *lbl = g_launcher_items[new_hover];
-                if (lbl[0] == '-' && lbl[1] == '-') new_hover = -1;
-            }
-        }
-        if (new_hover != g_launcher_hover) {
+        int new_hover = launcher_hit_row(mx, my);
+        if (new_hover >= 0 && new_hover != g_launcher_hover) {
             g_launcher_hover = new_hover;
             launcher_draw();
         }
@@ -928,59 +914,46 @@ void gui_on_tick(void) {
                     if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
                     continue;
                 }
-                /* ── Launcher keyboard navigation ── */
+                /* ── Launcher: type to search, arrows to move, Enter to launch ── */
                 if (g_launcher_open) {
                     if ((uint8_t)ch == KEY_UP) {
-                        if (--g_launcher_hover < 0) g_launcher_hover = (int)LAUNCHER_ITEMS - 1;
+                        if (g_launch_filt_n > 0) {
+                            if (--g_launcher_hover < 0) g_launcher_hover = g_launch_filt_n - 1;
+                            int rv = (int)launcher_rows_visible();
+                            if (g_launcher_hover < g_launcher_scroll) g_launcher_scroll = g_launcher_hover;
+                            if (g_launcher_hover >= g_launcher_scroll + rv) g_launcher_scroll = g_launcher_hover - rv + 1;
+                        }
                         launcher_draw(); continue;
                     } else if ((uint8_t)ch == KEY_DOWN) {
-                        if (++g_launcher_hover >= (int)LAUNCHER_ITEMS) g_launcher_hover = 0;
-                        launcher_draw(); continue;
-                    } else if ((ch == '\r' || ch == '\n' || ch == ' ') && g_launcher_hover >= 0) {
-                        int _li = g_launcher_hover;
-                        g_launcher_open = false; g_launcher_hover = -1;
-                        if (_li < MAX_WINS) {
-                            window_t *_lw = &g_wins[_li];
-                            raise_win(_li);
-                            if (_lw->state == WIN_HIDDEN) win_show(_lw, _li); else full_redraw();
-                        } else if (_li >= 4 && _li < (int)LAUNCHER_ITEMS) {
-                            const char *_lbl = g_launcher_items[_li];
-                            if (_lbl[0] == '-' && _lbl[1] == '-') { full_redraw(); continue; }
-                            __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
-                            if (strcmp(_lbl, "Sleep") == 0) {
-                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","echo mem>/sys/power/state");
-                                continue;
-                            }
-                            if (strcmp(_lbl, "Restart") == 0) {
-                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","reboot"); continue;
-                            }
-                            if (strcmp(_lbl, "Shutdown") == 0) {
-                                if (gui_exec_silent) gui_exec_silent("/bin/sh","-c","poweroff"); continue;
-                            }
-                            static const char *_ap[] = {
-                                "/bin/fifi-filebrowser",
-                                "/bin/fifi-settings",
-                                "/bin/fifi-gamepad",
-                                "/bin/fifi-sysmon",
-                                "/bin/fifi-netmon",
-                                "/bin/fifi-terminal",
-                                "/bin/fifi-editor",
-                                "/bin/fifi-calc",
-                                "/bin/fifi-imageviewer",
-                                "/bin/fifi-security",
-                                "/bin/fifi-wifi",
-                                "/bin/fifi-browser",
-                                "/usr/bin/steam",
-                                "/bin/fifi-proton",
-                                "/fifi-data/apps/fifi-appstore",
-                            };
-                            __attribute__((weak)) void gui_spawn_app(const char *path);
-                            int _ai = _li - 4;
-                            if (gui_spawn_app && _ai >= 0 && _ai < (int)(sizeof(_ap)/sizeof(_ap[0]))) gui_spawn_app(_ap[_ai]);
-                            full_redraw();
+                        if (g_launch_filt_n > 0) {
+                            if (++g_launcher_hover >= g_launch_filt_n) g_launcher_hover = 0;
+                            int rv = (int)launcher_rows_visible();
+                            if (g_launcher_hover < g_launcher_scroll) g_launcher_scroll = g_launcher_hover;
+                            if (g_launcher_hover >= g_launcher_scroll + rv) g_launcher_scroll = g_launcher_hover - rv + 1;
                         }
+                        launcher_draw(); continue;
+                    } else if (ch == '\r' || ch == '\n') {
+                        int _sel = g_launcher_hover;
+                        g_launcher_open = false; g_launcher_hover = -1;
+                        launcher_do_launch(_sel);
                         continue;
-                    } else { g_launcher_open = false; g_launcher_hover = -1; full_redraw(); continue; }
+                    } else if (ch == 0x1b) {   /* Escape */
+                        g_launcher_open = false; g_launcher_hover = -1; full_redraw(); continue;
+                    } else if (ch == 0x08 || ch == 0x7f) {   /* Backspace */
+                        if (g_launch_qlen > 0) {
+                            g_launch_q[--g_launch_qlen] = '\0';
+                            launcher_filter();
+                        }
+                        launcher_draw(); continue;
+                    } else if ((uint8_t)ch >= 0x20 && (uint8_t)ch < 0x7f) {   /* printable → query */
+                        if (g_launch_qlen < (int)sizeof(g_launch_q) - 1) {
+                            g_launch_q[g_launch_qlen++] = (char)ch;
+                            g_launch_q[g_launch_qlen] = '\0';
+                            launcher_filter();
+                        }
+                        launcher_draw(); continue;
+                    }
+                    continue;   /* swallow other keys while launcher is open */
                 }
                 /* ── Context menu keyboard navigation ── */
                 if (g_ctx_open) {
@@ -2492,6 +2465,16 @@ void gui_on_tick(void) {
         { extern bool wayland_has_focus(void); _wl_focus = wayland_has_focus(); }
 #endif
         int8_t scroll = (_wl_focus || (_ipc_z > 0 && _ipc_z > _gui_z)) ? 0 : mouse_consume_scroll();
+        if (scroll && g_launcher_open) {
+            int rv = (int)launcher_rows_visible();
+            if (g_launch_filt_n > rv) {
+                g_launcher_scroll -= (int)scroll;
+                if (g_launcher_scroll > g_launch_filt_n - rv) g_launcher_scroll = g_launch_filt_n - rv;
+                if (g_launcher_scroll < 0) g_launcher_scroll = 0;
+                launcher_draw();
+            }
+            scroll = 0;   /* consumed by the launcher */
+        }
         if (scroll) {
             /* Close fb context menu on scroll */
             if (g_fb_ctx_open) { g_fb_ctx_open = false; full_redraw(); }
@@ -2537,6 +2520,7 @@ void gui_on_tick(void) {
             g_launcher_open = !g_launcher_open;
             g_launcher_hover = -1;
             if (g_launcher_open) {
+                launcher_open_reset();
                 taskbar_draw();
                 launcher_draw();
             } else {
@@ -2836,24 +2820,10 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Right-click a launcher item: add it as a desktop shortcut ── */
+    /* ── Right-click a launcher item: pin it as a desktop shortcut ── */
     if (rbtn_pressed && g_launcher_open) {
-        uint64_t lx  = launcher_lx();
-        uint64_t ly  = launcher_ly();
-        uint64_t lw  = launcher_eff_w();
-        uint64_t lih = launcher_item_h();
-        bool inside = ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
-                       (uint64_t)my >= ly &&
-                       (uint64_t)my < ly + LAUNCHER_ITEMS * lih);
-        if (inside) {
-            int item = (int)((uint64_t)my - ly) / (int)lih;
-            const char *path = gui_launcher_app_path(item);
-            if (path && item >= 0 && item < (int)LAUNCHER_ITEMS) {
-                gui_add_desktop_icon(path, g_launcher_items[item]);
-                gui_desktop_save();
-                gui_toast("Added to Desktop", 0x0060a0e0u);
-            }
-        }
+        int row = launcher_hit_row(mx, my);
+        if (row >= 0) launcher_add_desktop(row);
         g_launcher_open  = false;
         g_launcher_hover = -1;
         full_redraw();
@@ -2914,75 +2884,25 @@ void gui_on_tick(void) {
     /* ── Launcher popup clicks ── */
     if (btn_pressed && g_launcher_open) {
         int32_t cx, cy;
-        uint64_t lx  = launcher_lx();
-        uint64_t ly  = launcher_ly();
-        uint64_t lw  = launcher_eff_w();
-        uint64_t lih = launcher_item_h();
-        bool inside = ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
-                       (uint64_t)my >= ly &&
-                       (uint64_t)my < ly + LAUNCHER_ITEMS * lih);
-        g_launcher_open = false;
-        g_launcher_hover = -1;
-        if (inside) {
-            int item = (int)((uint64_t)my - ly) / (int)lih;
-            if (item >= 0 && item < 4) {
-                /* Built-in windows: show/raise */
-                window_t *w = &g_wins[item];
-                raise_win(item);
-                if (w->state == WIN_HIDDEN)
-                    win_show(w, item);
-                else
-                    full_redraw();
-            } else if (item >= 4 && item < (int)LAUNCHER_ITEMS) {
-                const char *lbl = g_launcher_items[item];
-                /* Skip separator */
-                if (lbl[0] == '-' && lbl[1] == '-') { full_redraw(); goto launcher_click_done; }
-                /* Power actions */
-                __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
-                if (strcmp(lbl, "Sleep") == 0) {
-                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c",
-                        "echo mem > /sys/power/state");
-                    goto launcher_click_done;
-                }
-                if (strcmp(lbl, "Restart") == 0) {
-                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c", "reboot");
-                    goto launcher_click_done;
-                }
-                if (strcmp(lbl, "Shutdown") == 0) {
-                    if (gui_exec_silent) gui_exec_silent("/bin/sh", "-c", "poweroff");
-                    goto launcher_click_done;
-                }
-                /* IPC standalone apps — spawn via platform fork/exec */
-                static const char *app_paths[] = {
-                    "/bin/fifi-filebrowser",
-                    "/bin/fifi-settings",
-                    "/bin/fifi-gamepad",
-                    "/bin/fifi-sysmon",
-                    "/bin/fifi-netmon",
-                    "/bin/fifi-terminal",
-                    "/bin/fifi-editor",
-                    "/bin/fifi-calc",
-                    "/bin/fifi-imageviewer",
-                    "/bin/fifi-security",
-                    "/bin/fifi-wifi",
-                    "/bin/fifi-browser",
-                    "/usr/bin/steam",
-                    "/bin/fifi-proton",
-                    "/fifi-data/apps/fifi-appstore",
-                };
-                int app_count = (int)(sizeof(app_paths) / sizeof(app_paths[0]));
-                int app_idx   = item - 4;
-                __attribute__((weak)) void gui_spawn_app(const char *path);
-                if (gui_spawn_app && app_idx >= 0 && app_idx < app_count)
-                    gui_spawn_app(app_paths[app_idx]);
-                full_redraw();
-            launcher_click_done:;
-            } else {
-                full_redraw();
-            }
+        /* Click inside the search box: keep the menu open (it's always the focus). */
+        if (launcher_in_search(mx, my)) {
             mouse_consume_click(&cx, &cy);
             return;
         }
+        int row = launcher_hit_row(mx, my);
+        if (row >= 0) {
+            g_launcher_open = false; g_launcher_hover = -1;
+            launcher_do_launch(row);
+            mouse_consume_click(&cx, &cy);
+            return;
+        }
+        /* Click anywhere else in the panel (header padding) — keep open; outside — close. */
+        uint64_t lx = launcher_lx(), ly = launcher_ly();
+        uint64_t w = launcher_panel_w(), ph = launcher_panel_h();
+        bool in_panel = ((uint64_t)mx >= lx && (uint64_t)mx < lx + w &&
+                         (uint64_t)my >= ly && (uint64_t)my < ly + ph);
+        if (in_panel) { mouse_consume_click(&cx, &cy); return; }
+        g_launcher_open = false; g_launcher_hover = -1;
         full_redraw();
         /* fall through to window hit test */
     }

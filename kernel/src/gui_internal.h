@@ -481,6 +481,34 @@ extern int          g_recent_count;
 extern int          g_redraw_src;
 extern const char * const g_launcher_items[LAUNCHER_ITEMS];
 
+/* ── Kickoff launcher (searchable) ───────────────────────────────────── */
+#define LAUNCH_MAX 128
+typedef struct {
+    char    label[40];
+    char    exec[192];   /* spawn path; empty for built-in windows / power */
+    int8_t  builtin;     /* built-in window slot 0..3, else -1 */
+    uint8_t power;       /* 0 none | 1 sleep | 2 restart | 3 shutdown */
+} launch_entry_t;
+extern launch_entry_t g_launch[LAUNCH_MAX];
+extern int  g_launch_n;
+extern int  g_launch_filt[LAUNCH_MAX];   /* indices into g_launch matching query */
+extern int  g_launch_filt_n;
+extern char g_launch_q[40];
+extern int  g_launch_qlen;
+extern int  g_launcher_scroll;           /* first visible filtered row */
+
+void     launcher_open_reset(void);      /* rebuild list + clear query/sel/scroll */
+void     launcher_filter(void);          /* rebuild filtered view from query */
+void     launcher_do_launch(int filt_row);
+void     launcher_add_desktop(int filt_row);
+int      launcher_hit_row(int32_t mx, int32_t my);  /* filtered idx or -1 (body only) */
+bool     launcher_in_search(int32_t mx, int32_t my);
+uint64_t launcher_row_h(void);
+uint64_t launcher_rows_visible(void);
+uint64_t launcher_body_y(void);
+uint64_t launcher_panel_w(void);
+uint64_t launcher_panel_h(void);
+
 /* ── Platform weak declaration ───────────────────────────────────────── */
 __attribute__((weak)) bool platform_load_image(const char *path __attribute__((unused)),
     uint32_t **px __attribute__((unused)),

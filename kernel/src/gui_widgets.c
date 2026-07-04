@@ -1,4 +1,8 @@
 #include "gui_internal.h"
+#ifdef __linux__
+#include <dirent.h>
+#include <string.h>
+#endif
 
 /* ── Context menu width helpers (font-scaled) ───────────────────────── */
 /* "Show Desktop"/"File Browser" = 12 chars, "Add to Desktop" = 14, "Select All" = 10 */
@@ -6,76 +10,282 @@ uint64_t ctx_w(void)     { uint64_t f = console_font_width(); return f ? 12u*f+2
 uint64_t fb_ctx_w(void)  { uint64_t f = console_font_width(); return f ? 14u*f+24u : 192u; }
 uint64_t txt_ctx_w(void) { uint64_t f = console_font_width(); return f ? 10u*f+24u : 144u; }
 
-/* ── Launcher popup ──────────────────────────────────────────────────── */
+/* ── Kickoff launcher (searchable app menu) ──────────────────────────────
+ * A dynamic, filterable menu: a search box on top and a scrollable list of
+ * every launchable thing — built-in windows, standalone FiFi apps, and any
+ * App Store app installed under /fifi-data/apps (each has a <Name>.sh). Type
+ * to filter, up/down to move, Enter to launch, right-click to pin to desktop.
+ * g_launcher_hover doubles as the selected filtered-row index. */
 
-uint64_t launcher_item_h(void) {
-    uint64_t fh = console_font_height();
-    return (fh + 4u > LAUNCHER_ITEM_H) ? fh + 4u : LAUNCHER_ITEM_H;
+launch_entry_t g_launch[LAUNCH_MAX];
+int            g_launch_n;
+int            g_launch_filt[LAUNCH_MAX];
+int            g_launch_filt_n;
+char           g_launch_q[40];
+int            g_launch_qlen;
+int            g_launcher_scroll;
+
+extern void gui_desktop_save(void);
+
+static char lw_lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+static bool lw_substr_ci(const char *hay, const char *needle) {
+    if (!needle[0]) return true;
+    for (const char *h = hay; *h; h++) {
+        const char *a = h, *b = needle;
+        while (*a && *b && lw_lc(*a) == lw_lc(*b)) { a++; b++; }
+        if (!*b) return true;
+    }
+    return false;
 }
 
-uint64_t launcher_eff_w(void) {
+static const char *launch_builtin_path(int slot) {
+    switch (slot) {
+        case 0: return "/bin/fifi-terminal";
+        case 1: return "/bin/fifi-filebrowser";
+        case 2: return "/bin/fifi-settings";
+        case 3: return "/bin/fifi-imageviewer";
+        default: return NULL;
+    }
+}
+
+static void launch_add(const char *label, const char *exec, int8_t builtin, uint8_t power) {
+    if (g_launch_n >= LAUNCH_MAX) return;
+    launch_entry_t *e = &g_launch[g_launch_n++];
+    int i = 0; for (; label[i] && i < 39; i++) e->label[i] = label[i]; e->label[i] = '\0';
+    int j = 0; if (exec) { for (; exec[j] && j < 191; j++) e->exec[j] = exec[j]; } e->exec[j] = '\0';
+    e->builtin = builtin; e->power = power;
+}
+
+void launcher_open_reset(void) {
+    g_launch_n = 0;
+    g_launch_q[0] = '\0'; g_launch_qlen = 0;
+    g_launcher_hover = 0; g_launcher_scroll = 0;
+
+    launch_add("Terminal",        NULL, 0, 0);
+    launch_add("Files",           NULL, 1, 0);
+    launch_add("Settings",        NULL, 2, 0);
+    launch_add("Image Viewer",    NULL, 3, 0);
+    launch_add("App Store",       "/fifi-data/apps/fifi-appstore", -1, 0);
+    launch_add("Browser",         "/bin/fifi-browser",   -1, 0);
+    launch_add("Text Editor",     "/bin/fifi-editor",    -1, 0);
+    launch_add("Calculator",      "/bin/fifi-calc",      -1, 0);
+    launch_add("System Monitor",  "/bin/fifi-sysmon",    -1, 0);
+    launch_add("Network Monitor", "/bin/fifi-netmon",    -1, 0);
+    launch_add("Security",        "/bin/fifi-security",  -1, 0);
+    launch_add("WiFi",            "/bin/fifi-wifi",      -1, 0);
+    launch_add("Gamepad",         "/bin/fifi-gamepad",   -1, 0);
+    launch_add("Steam",           "/usr/bin/steam",      -1, 0);
+    launch_add("Proton Config",   "/bin/fifi-proton",    -1, 0);
+
+#ifdef __linux__
+    /* Installed App Store apps: each is /fifi-data/apps/<Name>.sh */
+    DIR *d = opendir("/fifi-data/apps");
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            const char *nm = de->d_name;
+            int l = 0; while (nm[l]) l++;
+            if (l < 4) continue;
+            if (!(nm[l-3] == '.' && nm[l-2] == 's' && nm[l-1] == 'h')) continue;
+            /* Skip the App Store's own helper scripts (appstore-*.sh) — not apps. */
+            if (strncmp(nm, "appstore-", 9) == 0) continue;
+            if (strncmp(nm, "fifi-",     5) == 0) continue;
+            char base[40]; int bl = l - 3; if (bl > 39) bl = 39;
+            for (int k = 0; k < bl; k++) base[k] = nm[k]; base[bl] = '\0';
+            char path[192]; snprintf(path, sizeof(path), "/fifi-data/apps/%s", nm);
+            launch_add(base, path, -1, 0);
+        }
+        closedir(d);
+    }
+#endif
+
+    launch_add("Sleep",    NULL, -1, 1);
+    launch_add("Restart",  NULL, -1, 2);
+    launch_add("Shutdown", NULL, -1, 3);
+
+    launcher_filter();
+}
+
+void launcher_filter(void) {
+    g_launch_filt_n = 0;
+    for (int i = 0; i < g_launch_n; i++)
+        if (lw_substr_ci(g_launch[i].label, g_launch_q))
+            g_launch_filt[g_launch_filt_n++] = i;
+    if (g_launcher_hover >= g_launch_filt_n) g_launcher_hover = g_launch_filt_n - 1;
+    if (g_launcher_hover < 0) g_launcher_hover = (g_launch_filt_n > 0) ? 0 : -1;
+    int rv = (int)launcher_rows_visible();
+    if (g_launcher_hover >= 0) {
+        if (g_launcher_hover < g_launcher_scroll) g_launcher_scroll = g_launcher_hover;
+        if (g_launcher_hover >= g_launcher_scroll + rv) g_launcher_scroll = g_launcher_hover - rv + 1;
+    }
+    if (g_launcher_scroll > g_launch_filt_n - rv) g_launcher_scroll = g_launch_filt_n - rv;
+    if (g_launcher_scroll < 0) g_launcher_scroll = 0;
+}
+
+/* ── Geometry ──────────────────────────────────────────────────────────── */
+uint64_t launcher_row_h(void)  { return console_font_height() + 8u; }
+uint64_t launcher_item_h(void) { return launcher_row_h(); }  /* compat */
+static uint64_t launcher_search_h(void) { return console_font_height() + 14u; }
+static uint64_t launcher_header_h(void) { return launcher_search_h() + 16u; }
+
+uint64_t launcher_panel_w(void) {
     uint64_t fw = console_font_width();
-    uint64_t max_len = 0;
-    for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
-        uint64_t l = (uint64_t)gui_strlen(g_launcher_items[i]);
-        if (l > max_len) max_len = l;
+    uint64_t maxl = 12;
+    for (int i = 0; i < g_launch_n; i++) {
+        uint64_t l = (uint64_t)gui_strlen(g_launch[i].label);
+        if (l > maxl) maxl = l;
     }
-    uint64_t w = max_len * fw + 44u;   /* left icon-dot gutter + padding */
-    return (w > LAUNCHER_W) ? w : LAUNCHER_W;
+    uint64_t w = maxl * fw + 72u;
+    if (w < 300u) w = 300u;
+    uint64_t scr = console_fb_width();
+    if (w > scr * 2u / 3u) w = scr * 2u / 3u;
+    return w;
 }
+uint64_t launcher_eff_w(void) { return launcher_panel_w(); }  /* compat */
 
+uint64_t launcher_rows_visible(void) {
+    uint64_t rh  = launcher_row_h();
+    uint64_t top = STATUS_H + 8u;
+    uint64_t bot = console_fb_height() - TASKBAR_H;
+    uint64_t avail = (bot > top) ? bot - top : rh;
+    uint64_t body  = (avail > launcher_header_h() + 12u) ? avail - launcher_header_h() - 12u : rh;
+    uint64_t rows = body / rh;
+    if (rows < 4u)  rows = 4u;
+    if (rows > 16u) rows = 16u;
+    return rows;
+}
+uint64_t launcher_panel_h(void) {
+    return launcher_header_h() + launcher_rows_visible() * launcher_row_h() + 8u;
+}
 uint64_t launcher_lx(void) { return LOGO_X; }
-uint64_t launcher_ly(void) {
-    return console_fb_height() - TASKBAR_H - LAUNCHER_ITEMS * launcher_item_h() - 2u;
+uint64_t launcher_ly(void) { return console_fb_height() - TASKBAR_H - launcher_panel_h(); }
+uint64_t launcher_body_y(void) { return launcher_ly() + launcher_header_h(); }
+
+/* ── Hit testing ───────────────────────────────────────────────────────── */
+bool launcher_in_search(int32_t mx, int32_t my) {
+    uint64_t lx = launcher_lx(), ly = launcher_ly(), w = launcher_panel_w();
+    uint64_t sy = ly + 8u, sh = launcher_search_h();
+    return ((uint64_t)mx >= lx + 10u && (uint64_t)mx < lx + w - 10u &&
+            (uint64_t)my >= sy && (uint64_t)my < sy + sh);
+}
+int launcher_hit_row(int32_t mx, int32_t my) {
+    uint64_t lx = launcher_lx(), w = launcher_panel_w();
+    uint64_t by = launcher_body_y(), rh = launcher_row_h(), rv = launcher_rows_visible();
+    if ((uint64_t)mx < lx || (uint64_t)mx >= lx + w) return -1;
+    if ((uint64_t)my < by || (uint64_t)my >= by + rv * rh) return -1;
+    int idx = g_launcher_scroll + (int)(((uint64_t)my - by) / rh);
+    if (idx < 0 || idx >= g_launch_filt_n) return -1;
+    return idx;
 }
 
-void launcher_draw(void) {
-    uint64_t lx  = launcher_lx();
-    uint64_t ly  = launcher_ly();
-    uint64_t fh  = console_font_height();
-    uint64_t lw  = launcher_eff_w();
-    uint64_t lih = launcher_item_h();
-    uint64_t th  = LAUNCHER_ITEMS * lih;
-
-    /* Panel: vertical gradient with soft outline */
-    console_fill_vgrad(lx, ly, lw, th, 0x00161d30u, 0x000d111du);
-
-    for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
-        uint64_t ry = ly + (uint64_t)i * lih;
-        const char *label = g_launcher_items[i];
-        bool is_sep   = (label[0] == '-' && label[1] == '-');
-        bool is_sleep = (i == (int)LAUNCHER_ITEMS - 3);
-        bool is_power = (i >= (int)LAUNCHER_ITEMS - 2); /* Restart, Shutdown */
-        bool hov = (!is_sep && g_launcher_hover == i);
-        if (is_sep) {
-            console_fill_rect(lx + 10u, ry + lih/2u, lw - 20u, 1u, 0x00263248u);
-            continue;
-        }
-        if (hov) {
-            /* hover pill: accent gradient, inset 3px */
-            console_fill_vgrad(lx + 3u, ry + 1u, lw - 6u, lih - 2u,
-                               0x003a6cc8u, 0x002a4f9cu);
-        }
-        /* icon dot: colored bullet in the left gutter */
-        uint32_t dot = is_power ? 0x00e05050u :
-                       is_sleep ? 0x005090d0u : g_theme.accent;
-        uint64_t dy0 = ry + lih / 2u - 2u;
-        console_fill_rect(lx + 12u, dy0,      4u, 4u, dot);
-        console_fill_rect(lx + 13u, dy0 - 1u, 2u, 6u, dot);
-        console_fill_rect(lx + 11u, dy0 + 1u, 6u, 2u, dot);
-        /* left-aligned label */
-        uint64_t spx = lx + 26u;
-        uint64_t spy = ry + (lih > fh ? (lih - fh) / 2u : 0u);
-        uint32_t fg  = hov      ? 0x00f2f7ffu :
-                       is_power ? 0x00e87068u :
-                       is_sleep ? 0x0070a8e0u : COL_LAUNCH_FG;
-        gui_draw_str_fg(spx, spy, label, fg);
+/* ── Launch / pin ──────────────────────────────────────────────────────── */
+void launcher_do_launch(int filt_row) {
+    if (filt_row < 0 || filt_row >= g_launch_filt_n) return;
+    launch_entry_t *e = &g_launch[g_launch_filt[filt_row]];
+    if (e->builtin >= 0) {
+        int s = e->builtin;
+        raise_win(s);
+        if (g_wins[s].state == WIN_HIDDEN) win_show(&g_wins[s], s); else full_redraw();
+        return;
     }
-    /* Outline + accent top edge */
-    console_fill_rect(lx, ly, lw, 1u, 0x003a5688u);
-    console_fill_rect(lx, ly + th, lw, 1u, 0x00223048u);
-    console_fill_rect(lx, ly, 1u, th + 1u, 0x00223048u);
-    console_fill_rect(lx + lw - 1u, ly, 1u, th + 1u, 0x00223048u);
+    if (e->power) {
+        __attribute__((weak)) void gui_exec_silent(const char *p, const char *a1, const char *a2);
+        if (gui_exec_silent) {
+            if      (e->power == 1) gui_exec_silent("/bin/sh", "-c", "echo mem > /sys/power/state");
+            else if (e->power == 2) gui_exec_silent("/bin/sh", "-c", "reboot");
+            else                    gui_exec_silent("/bin/sh", "-c", "poweroff");
+        }
+        return;
+    }
+    __attribute__((weak)) void gui_spawn_app(const char *path);
+    if (gui_spawn_app && e->exec[0]) gui_spawn_app(e->exec);
+    full_redraw();
+}
+
+void launcher_add_desktop(int filt_row) {
+    if (filt_row < 0 || filt_row >= g_launch_filt_n) return;
+    launch_entry_t *e = &g_launch[g_launch_filt[filt_row]];
+    const char *path = e->exec[0] ? e->exec : launch_builtin_path(e->builtin);
+    if (!path) return;  /* power actions can't be pinned */
+    gui_add_desktop_icon(path, e->label);
+    gui_desktop_save();
+    gui_toast("Added to Desktop", 0x0060a0e0u);
+}
+
+/* ── Draw ──────────────────────────────────────────────────────────────── */
+void launcher_draw(void) {
+    uint64_t lx = launcher_lx(), ly = launcher_ly();
+    uint64_t fw = console_font_width(), fh = console_font_height();
+    uint64_t w  = launcher_panel_w(), ph = launcher_panel_h();
+    uint64_t rh = launcher_row_h(), rv = launcher_rows_visible();
+    uint64_t sh = launcher_search_h();
+    uint64_t by = launcher_body_y();
+
+    /* Panel + outline */
+    console_fill_vgrad(lx, ly, w, ph, 0x00161d30u, 0x000d111du);
+    console_fill_rect(lx, ly, w, 1u, 0x003a5688u);
+    console_fill_rect(lx, ly + ph - 1u, w, 1u, 0x00223048u);
+    console_fill_rect(lx, ly, 1u, ph, 0x00223048u);
+    console_fill_rect(lx + w - 1u, ly, 1u, ph, 0x00223048u);
+
+    /* Search box */
+    uint64_t sx = lx + 10u, sy = ly + 8u, sw = w - 20u;
+    console_fill_rect(sx, sy, sw, sh, 0x000c1220u);
+    console_fill_rect(sx, sy, sw, 1u, 0x00304a70u);
+    console_fill_rect(sx, sy + sh - 1u, sw, 1u, 0x00223048u);
+    console_fill_rect(sx, sy, 1u, sh, 0x00223048u);
+    console_fill_rect(sx + sw - 1u, sy, 1u, sh, 0x00223048u);
+    /* magnifier glyph */
+    uint64_t gx = sx + 8u, gy = sy + sh / 2u;
+    console_fill_rect(gx,      gy - 3u, 6u, 1u, 0x005f7fb0u);
+    console_fill_rect(gx,      gy + 2u, 6u, 1u, 0x005f7fb0u);
+    console_fill_rect(gx - 1u, gy - 2u, 1u, 4u, 0x005f7fb0u);
+    console_fill_rect(gx + 6u, gy - 2u, 1u, 4u, 0x005f7fb0u);
+    console_fill_rect(gx + 6u, gy + 3u, 3u, 1u, 0x005f7fb0u);
+    uint64_t tx = sx + 22u, tyy = sy + (sh > fh ? (sh - fh) / 2u : 0u);
+    if (g_launch_qlen == 0) {
+        gui_draw_str_fg(tx, tyy, "Search apps...", 0x00566276u);
+    } else {
+        gui_draw_str_fg(tx, tyy, g_launch_q, 0x00e6ecf7u);
+        uint64_t cxp = tx + (uint64_t)g_launch_qlen * fw + 1u;
+        if ((g_gui_tick / 8u) % 2u == 0) console_fill_rect(cxp, tyy, 2u, fh, 0x0080b4ffu);
+    }
+
+    /* Body rows */
+    if (g_launch_filt_n == 0) {
+        const char *nr = "No matching apps";
+        uint64_t nl = (uint64_t)gui_strlen(nr) * fw;
+        uint64_t nx = lx + (w > nl ? (w - nl) / 2u : 0u);
+        gui_draw_str_fg(nx, by + rh, nr, 0x00566276u);
+    }
+    for (uint64_t r = 0; r < rv; r++) {
+        int idx = g_launcher_scroll + (int)r;
+        if (idx < 0 || idx >= g_launch_filt_n) break;
+        launch_entry_t *e = &g_launch[g_launch_filt[idx]];
+        uint64_t ry = by + r * rh;
+        bool sel = (idx == g_launcher_hover);
+        if (sel)
+            console_fill_vgrad(lx + 3u, ry + 1u, w - 6u, rh - 2u, 0x003a6cc8u, 0x002a4f9cu);
+        uint32_t dot = e->power     ? 0x00e05050u :
+                       e->builtin >= 0 ? 0x0060c8a0u : g_theme.accent;
+        uint64_t dy = ry + rh / 2u - 3u;
+        console_fill_rect(lx + 14u, dy + 1u, 6u, 4u, dot);
+        console_fill_rect(lx + 15u, dy,      4u, 6u, dot);
+        uint32_t fg = sel ? 0x00f2f7ffu : (e->power ? 0x00e88a80u : COL_LAUNCH_FG);
+        uint64_t spx = lx + 30u, spy = ry + (rh > fh ? (rh - fh) / 2u : 0u);
+        uint64_t maxc = (w > 44u && fw) ? (w - 44u) / fw : 8u;
+        gui_draw_str_clip_fg(spx, spy, e->label, fg, maxc);
+    }
+
+    /* Scrollbar */
+    if (g_launch_filt_n > (int)rv) {
+        uint64_t trh = rv * rh;
+        uint64_t th  = trh * rv / (uint64_t)g_launch_filt_n; if (th < 14u) th = 14u;
+        uint64_t maxs = (uint64_t)g_launch_filt_n - rv;
+        uint64_t ty2 = by + (maxs ? (uint64_t)g_launcher_scroll * (trh - th) / maxs : 0u);
+        console_fill_rect(lx + w - 5u, by,  2u, trh, 0x0018202eu);
+        console_fill_rect(lx + w - 5u, ty2, 2u, th,  0x003a5c90u);
+    }
 }
 
 /* ── Context menu ────────────────────────────────────────────────────── */
