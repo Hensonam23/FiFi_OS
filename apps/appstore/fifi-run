@@ -1,0 +1,80 @@
+#!/bin/sh
+# fifi-run — the single, unified app launcher for FiFi OS.
+#
+# Every app (App Store downloads, desktop icons, bundled apps) launches through
+# here so they all open and run the same way against the shared FiFi runtime
+# (/fifi-data/runtime: libs + xkb + fontconfig). AppImages are auto-extracted
+# once (no FUSE on the box) and cached next to the .AppImage as <name>.d/.
+#
+# Usage: fifi-run <path-to-.AppImage | path-to-executable> [args...]
+set -e
+
+RT=/fifi-data/runtime
+BROWSER=/fifi-data/browser
+target="$1"
+[ -n "$target" ] || { echo "usage: fifi-run <app> [args...]" >&2; exit 2; }
+shift 2>/dev/null || true
+
+# --- shared runtime environment (identical for every app) ---------------------
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export XKB_CONFIG_ROOT="$RT/share/X11/xkb"
+export FONTCONFIG_PATH="$RT/etc/fonts"
+export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share"
+export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# no D-Bus / a11y on the box -> disable so toolkits don't hang or crash
+export NO_AT_BRIDGE=1 GTK_A11Y=none GNOME_ACCESSIBILITY=0 QT_ACCESSIBILITY=0
+export DBUS_SESSION_BUS_ADDRESS=disabled:
+# software rendering (no GPU stack on the box yet)
+export LIBGL_ALWAYS_SOFTWARE=1
+# steer every toolkit to Wayland
+export GDK_BACKEND=wayland
+export QT_QPA_PLATFORM=wayland
+export MOZ_ENABLE_WAYLAND=1
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+export ELECTRON_DISABLE_SANDBOX=1
+export APPIMAGE_EXTRACT_AND_RUN=1
+
+launch_dir() {
+    # $1 = extracted squashfs-root dir. Detect Electron/Chromium and add the
+    # flags they need on this box (root -> no sandbox, force wayland+swgl).
+    dir="$1"; shift
+    # Archimage/JuNest packages (ivan-hc builds) run a containerized Arch inside
+    # proot and refuse to start as root. Give them a fake non-root identity via
+    # an unprivileged user namespace, a persistent bound home, and a clean env
+    # (the container is self-sufficient; FiFi runtime paths would dangle inside).
+    if [ -d "$dir/.local/share/junest" ]; then
+        chmod 0666 "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" 2>/dev/null || true
+        mkdir -p /fifi-data/home /home/fifi 2>/dev/null || true
+        chmod 0777 /fifi-data/home /home/fifi 2>/dev/null || true
+        mountpoint -q /home/fifi 2>/dev/null || \
+            mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
+        unset XDG_DATA_DIRS FONTCONFIG_PATH XKB_CONFIG_ROOT LD_LIBRARY_PATH
+        export HOME=/home/fifi USER=fifi LOGNAME=fifi
+        exec busybox unshare -U -- "$dir/AppRun" "$@"
+    fi
+    export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
+    if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then
+        set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
+    fi
+    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; exec "$dir/AppRun" "$@"; fi
+    # fallback: an executable named like the dir's parent
+    b=$(ls "$dir" 2>/dev/null | while read f; do [ -x "$dir/$f" ] && [ -f "$dir/$f" ] && echo "$f" && break; done)
+    [ -n "$b" ] && exec "$dir/$b" "$@"
+    echo "fifi-run: no launchable binary in $dir" >&2; exit 1
+}
+
+case "$target" in
+    *.AppImage)
+        base=$(basename "$target" .AppImage)
+        ext="$(dirname "$target")/$base.d"
+        if [ ! -d "$ext/squashfs-root" ]; then
+            mkdir -p "$ext"
+            ( cd "$ext" && "$target" --appimage-extract >/dev/null 2>&1 )
+        fi
+        launch_dir "$ext/squashfs-root" "$@"
+        ;;
+    *)
+        exec "$target" "$@"
+        ;;
+esac

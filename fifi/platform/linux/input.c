@@ -550,9 +550,37 @@ void input_init(void) {
     if (g_ptr_cnt == 0 && g_abs_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
 }
 
+/* Drop devices whose fd has gone dead (unplugged / uinput destroyed).
+ * Without this, repeated hotplug cycles leak list slots until input stops. */
+static void input_prune_dead(void) {
+    int v;
+    for (int i = 0; i < g_kbd_cnt; ) {
+        if (ioctl(g_kbd_fds[i], EVIOCGVERSION, &v) < 0) {
+            fprintf(stderr, "[input] pruned dead keyboard fd=%d\n", g_kbd_fds[i]);
+            close(g_kbd_fds[i]);
+            g_kbd_fds[i] = g_kbd_fds[--g_kbd_cnt];
+        } else i++;
+    }
+    for (int i = 0; i < g_ptr_cnt; ) {
+        if (ioctl(g_ptr_fds[i], EVIOCGVERSION, &v) < 0) {
+            fprintf(stderr, "[input] pruned dead mouse fd=%d\n", g_ptr_fds[i]);
+            close(g_ptr_fds[i]);
+            g_ptr_fds[i] = g_ptr_fds[--g_ptr_cnt];
+        } else i++;
+    }
+    for (int i = 0; i < g_abs_cnt; ) {
+        if (ioctl(g_abs_devs[i].fd, EVIOCGVERSION, &v) < 0) {
+            fprintf(stderr, "[input] pruned dead abs fd=%d\n", g_abs_devs[i].fd);
+            close(g_abs_devs[i].fd);
+            g_abs_devs[i] = g_abs_devs[--g_abs_cnt];
+        } else i++;
+    }
+}
+
 /* Rescan /dev/input for newly plugged devices not already open.
  * Safe to call repeatedly; skips devices already in the fd lists. */
 void input_rescan(void) {
+    input_prune_dead();
     DIR *d = opendir("/dev/input");
     if (!d) return;
     struct dirent *de;

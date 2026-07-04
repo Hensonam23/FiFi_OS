@@ -20,7 +20,7 @@ uint64_t launcher_eff_w(void) {
         uint64_t l = (uint64_t)gui_strlen(g_launcher_items[i]);
         if (l > max_len) max_len = l;
     }
-    uint64_t w = max_len * fw + 20u;
+    uint64_t w = max_len * fw + 44u;   /* left icon-dot gutter + padding */
     return (w > LAUNCHER_W) ? w : LAUNCHER_W;
 }
 
@@ -32,10 +32,13 @@ uint64_t launcher_ly(void) {
 void launcher_draw(void) {
     uint64_t lx  = launcher_lx();
     uint64_t ly  = launcher_ly();
-    uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
     uint64_t lw  = launcher_eff_w();
     uint64_t lih = launcher_item_h();
+    uint64_t th  = LAUNCHER_ITEMS * lih;
+
+    /* Panel: vertical gradient with soft outline */
+    console_fill_vgrad(lx, ly, lw, th, 0x00161d30u, 0x000d111du);
 
     for (int i = 0; i < (int)LAUNCHER_ITEMS; i++) {
         uint64_t ry = ly + (uint64_t)i * lih;
@@ -44,26 +47,35 @@ void launcher_draw(void) {
         bool is_sleep = (i == (int)LAUNCHER_ITEMS - 3);
         bool is_power = (i >= (int)LAUNCHER_ITEMS - 2); /* Restart, Shutdown */
         bool hov = (!is_sep && g_launcher_hover == i);
-        uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
-        console_fill_rect(lx, ry, lw, lih, bg);
         if (is_sep) {
-            /* Draw as a grey dividing line */
-            console_fill_rect(lx + 8u, ry + lih/2u, lw - 16u, 1u, 0x00304050u);
-        } else {
-            uint64_t slen   = (uint64_t)gui_strlen(label);
-            uint64_t text_w = slen * fw;
-            uint64_t spx    = (lw > text_w) ? lx + (lw - text_w) / 2u : lx + 4u;
-            uint64_t spy    = ry + (lih > fh ? (lih - fh) / 2u : 0u);
-            uint32_t fg = is_power  ? 0x00e05050u :   /* red for Restart/Shutdown */
-                          is_sleep  ? 0x005090d0u :   /* blue for Sleep */
-                                      COL_LAUNCH_FG;
-            gui_draw_str(spx, spy, label, fg, bg);
+            console_fill_rect(lx + 10u, ry + lih/2u, lw - 20u, 1u, 0x00263248u);
+            continue;
         }
+        if (hov) {
+            /* hover pill: accent gradient, inset 3px */
+            console_fill_vgrad(lx + 3u, ry + 1u, lw - 6u, lih - 2u,
+                               0x003a6cc8u, 0x002a4f9cu);
+        }
+        /* icon dot: colored bullet in the left gutter */
+        uint32_t dot = is_power ? 0x00e05050u :
+                       is_sleep ? 0x005090d0u : g_theme.accent;
+        uint64_t dy0 = ry + lih / 2u - 2u;
+        console_fill_rect(lx + 12u, dy0,      4u, 4u, dot);
+        console_fill_rect(lx + 13u, dy0 - 1u, 2u, 6u, dot);
+        console_fill_rect(lx + 11u, dy0 + 1u, 6u, 2u, dot);
+        /* left-aligned label */
+        uint64_t spx = lx + 26u;
+        uint64_t spy = ry + (lih > fh ? (lih - fh) / 2u : 0u);
+        uint32_t fg  = hov      ? 0x00f2f7ffu :
+                       is_power ? 0x00e87068u :
+                       is_sleep ? 0x0070a8e0u : COL_LAUNCH_FG;
+        gui_draw_str_fg(spx, spy, label, fg);
     }
-    console_fill_rect(lx, ly, lw, 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx, ly + LAUNCHER_ITEMS * lih, lw, 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx, ly, 1u, LAUNCHER_ITEMS * lih + 1u, COL_LAUNCH_HL);
-    console_fill_rect(lx + lw - 1u, ly, 1u, LAUNCHER_ITEMS * lih + 1u, COL_LAUNCH_HL);
+    /* Outline + accent top edge */
+    console_fill_rect(lx, ly, lw, 1u, 0x003a5688u);
+    console_fill_rect(lx, ly + th, lw, 1u, 0x00223048u);
+    console_fill_rect(lx, ly, 1u, th + 1u, 0x00223048u);
+    console_fill_rect(lx + lw - 1u, ly, 1u, th + 1u, 0x00223048u);
 }
 
 /* ── Context menu ────────────────────────────────────────────────────── */
@@ -87,30 +99,29 @@ void ctx_draw(void) {
     uint64_t total_h = 2u;
     for (int _i = 0; _i < (int)CTX_ITEMS; _i++)
         total_h += ctx_items[_i] ? CTX_ITEM_H : 8u;
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, total_h, COL_LAUNCH_BG);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
-    console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, COL_LAUNCH_HL);
+    console_fill_vgrad((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, 0x003a5688u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, 0x00223048u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, 0x00223048u);
+    console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, 0x00223048u);
 
     uint64_t ry = (uint64_t)cy + 1u;
     for (int i = 0; i < (int)CTX_ITEMS; i++) {
         if (ctx_items[i] == NULL) {
-            /* Separator */
-            console_fill_rect((uint64_t)cx + 1u, ry, cw - 2u, 8u, COL_LAUNCH_BG);
-            console_fill_rect((uint64_t)cx + 6u, ry + 3u, cw - 12u, 1u, COL_LAUNCH_HL);
+            console_fill_rect((uint64_t)cx + 8u, ry + 3u, cw - 16u, 1u, 0x00263248u);
             ry += 8u;
             continue;
         }
-        bool hov    = (g_ctx_hover == i);
-        uint32_t bg = hov ? COL_LAUNCH_HL : COL_LAUNCH_BG;
-        console_fill_rect((uint64_t)cx + 1u, ry, cw - 2u, CTX_ITEM_H, bg);
-        uint64_t slen = (uint64_t)gui_strlen(ctx_items[i]);
-        uint64_t spx  = (uint64_t)cx + (cw > slen * fw ? (cw - slen * fw) / 2u : 0u);
+        bool hov = (g_ctx_hover == i);
+        if (hov)
+            console_fill_vgrad((uint64_t)cx + 3u, ry + 1u, cw - 6u, CTX_ITEM_H - 2u,
+                               0x003a6cc8u, 0x002a4f9cu);
+        uint64_t spx  = (uint64_t)cx + 14u;
         uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
-        gui_draw_str(spx, spy, ctx_items[i], COL_LAUNCH_FG, bg);
+        gui_draw_str_fg(spx, spy, ctx_items[i], hov ? 0x00f2f7ffu : COL_LAUNCH_FG);
         ry += CTX_ITEM_H;
     }
+    (void)fw;
 }
 
 /* ── Text editor context menu draw ──────────────────────────────────── */

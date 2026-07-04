@@ -21,6 +21,10 @@ void     console_set_y_offset(uint64_t pixels);
 void     console_set_viewport(uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void     console_set_viewport_norender(uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void     console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color);
+/* Alpha-blend a colored rect over whatever is already drawn (alpha 0..255, 255=opaque). */
+void     console_blend_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t color, uint8_t alpha);
+/* Vertical gradient fill from color c0 (top row) to c1 (bottom row). */
+void     console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c0, uint32_t c1);
 void     console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg);
 void     console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg);
 void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch, uint64_t scale, uint32_t fg, uint32_t bg);
@@ -47,6 +51,9 @@ bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uin
 void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
                          uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);
+/* Same but ARGB source with per-pixel alpha blending (app-icon logos). */
+void console_blit_scaled_alpha(const uint32_t *src, uint64_t sw, uint64_t sh,
+                               uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);
 
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);

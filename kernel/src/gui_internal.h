@@ -37,7 +37,7 @@
 #define MIN_WIN_H       180u
 #define SNAP_DIST       14u
 #define LAUNCHER_ITEM_H 26u
-#define LAUNCHER_ITEMS  22u
+#define LAUNCHER_ITEMS  23u
 #define LAUNCHER_W      110u
 #define CTX_ITEM_H      26u
 #define CTX_ITEMS       13u  /* 4 built-in + sep + 5 IPC apps + sep + 2 desktop actions */
@@ -522,6 +522,8 @@ void         term_render_scrollback(window_t *w);
 /* ── Forward declarations: gui_taskbar.c ────────────────────────────── */
 void     taskbar_draw(void);
 void     taskbar_draw_btn(int slot, const char *label);
+void     taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label,
+                      bool vis, bool focused, bool hov);
 void     taskbar_draw_tray(void);
 uint64_t logo_eff_w(void);
 uint64_t taskbtn_start_x(void);

@@ -38,6 +38,41 @@ void raise_win(int slot) {
     z_raise(slot);
 }
 
+/* Filled circle, radius 6 — used for the titlebar traffic-light buttons. */
+static void chrome_circle(uint64_t cx, uint64_t cy, uint32_t col) {
+    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
+    for (int dy = -6; dy <= 6; dy++) {
+        uint8_t sw = spans[dy + 6];
+        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
+    }
+}
+
+/* Draw the three titlebar buttons (traffic-light circles on the title gradient).
+ * Glyphs appear on hover only, macOS/KDE style. */
+static void chrome_buttons(window_t *w, int slot, uint32_t grad_top, uint32_t grad_bot) {
+    uint64_t fw  = console_font_width();
+    uint64_t fh  = console_font_height();
+    uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
+    uint64_t cyc = w->y + TITLE_H / 2u;
+
+    struct { uint64_t bx; int btn; uint32_t col, hcol; char gl; } btns[3] = {
+        { w->btn_min_x, 3, 0x00707a8cu, 0x009aa6bcu, '_' },
+        { w->btn_max_x, 2, 0x005e9e56u, 0x0084cc78u,
+          (w->state == WIN_MAXIMIZED) ? '-' : '+' },
+        { w->btn_cls_x, 1, 0x00c05048u, 0x00ee6a5eu, 'x' },
+    };
+    for (int i = 0; i < 3; i++) {
+        bool hov = (g_chrome_win == slot && g_chrome_btn == btns[i].btn);
+        /* restore the title gradient beneath the button cell */
+        console_fill_vgrad(btns[i].bx, w->y, BTN_W, TITLE_H, grad_top, grad_bot);
+        uint64_t cxc = btns[i].bx + BTN_W / 2u;
+        chrome_circle(cxc, cyc, hov ? btns[i].hcol : btns[i].col);
+        if (hov)
+            console_render_glyph_fg(cxc - fw / 2u, tpy, (unsigned char)btns[i].gl,
+                                    0x00101418u);
+    }
+}
+
 void win_draw_chrome(window_t *w, bool fill_content) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
@@ -55,9 +90,9 @@ void win_draw_chrome(window_t *w, bool fill_content) {
         if (_ow->raise_z > global_top) global_top = _ow->raise_z;
     }
     bool active = (my_z >= global_top);
-    /* Inactive title bar is a clearly-dimmed blue (not near-black) so a deselected
-     * window still reads as a window. Active uses the bright accent border colour. */
-    uint32_t title_bg = active ? COL_BORDER : 0x00243a5cu;
+    /* Title bar gradient: focused = lifted steel-blue, unfocused = flat dark. */
+    uint32_t grad_top = active ? 0x00324a72u : 0x00202836u;
+    uint32_t grad_bot = active ? 0x001e2c48u : 0x00161c26u;
 
     /* Compute button positions (needed for both full and partial paths) */
     w->btn_cls_x = w->x + w->w - BTN_W;
@@ -67,38 +102,19 @@ void win_draw_chrome(window_t *w, bool fill_content) {
     uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
 
     if (!fill_content) {
-        /* Hover-only repaint: only redraw the 3 buttons (3×BTN_W×TITLE_H pixels).
-         * Skipping the full-width title bar fill and title text saves ~200KB of
-         * backbuffer writes and font rendering on every hover transition at 250fps. */
-        uint32_t cls_bg = (g_chrome_win == slot && g_chrome_btn == 1)
-                        ? 0x00cc3333u : COL_CLOSE;
-        console_fill_rect(w->btn_cls_x, w->y, BTN_W, TITLE_H, cls_bg);
-        console_render_glyph(w->btn_cls_x + (BTN_W - fw) / 2u, tpy,
-                             'x', COL_TITLE_FG, cls_bg);
-
-        uint32_t max_bg = (g_chrome_win == slot && g_chrome_btn == 2)
-                        ? 0x004878a0u : COL_BTN_BG;
-        console_fill_rect(w->btn_max_x, w->y, BTN_W, TITLE_H, max_bg);
-        console_render_glyph(w->btn_max_x + (BTN_W - fw) / 2u, tpy,
-                             w->state == WIN_MAXIMIZED ? '-' : '+',
-                             COL_BTN_FG, max_bg);
-
-        uint32_t min_bg = (g_chrome_win == slot && g_chrome_btn == 3)
-                        ? 0x004878a0u : COL_BTN_BG;
-        console_fill_rect(w->btn_min_x, w->y, BTN_W, TITLE_H, min_bg);
-        console_render_glyph(w->btn_min_x + (BTN_W - fw) / 2u, tpy,
-                             '_', COL_BTN_FG, min_bg);
+        /* Hover-only repaint: just the 3 button cells. */
+        chrome_buttons(w, slot, grad_top, grad_bot);
         return;
     }
 
     /* Full repaint path (fill_content=true) ─────────────────────────────── */
 
-    /* Focus ring and full-height border strips only on full redraws. */
+    /* Focus ring — a soft accent outline one pixel outside the window. */
     if (active) {
         uint64_t fb_w = console_fb_width();
         uint64_t dtop = desk_top();
         uint64_t dbot = desk_bot();
-        uint32_t ring  = 0x00183a6au;
+        uint32_t ring  = 0x002b4d80u;
         uint64_t rx    = w->x > 0u        ? w->x - 1u        : 0u;
         uint64_t rw    = w->w + (w->x > 0u ? 2u : 1u);
         if (w->x + w->w < fb_w) { /* clamp rw */ } else { rw = fb_w - rx; }
@@ -112,11 +128,10 @@ void win_draw_chrome(window_t *w, bool fill_content) {
             console_fill_rect(w->x + w->w, w->y, 1u, w->h, ring);
     }
 
-    /* Title bar with subtle gradient: lighter top strip → base color */
-    console_fill_rect(w->x, w->y, w->w, TITLE_H, title_bg);
-    /* Top highlight line */
-    uint32_t title_top = active ? 0x00223a62u : 0x001e2e44u;
-    console_fill_rect(w->x, w->y, w->w, 1u, title_top);
+    /* Title bar gradient */
+    console_fill_vgrad(w->x, w->y, w->w, TITLE_H, grad_top, grad_bot);
+    /* Top highlight hairline */
+    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x00466492u : 0x002a3446u);
     /* Bottom separator line */
     console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);
 
@@ -150,35 +165,18 @@ void win_draw_chrome(window_t *w, bool fill_content) {
         }
     }
 
-    /* Close button — with hover */
-    uint32_t cls_bg = (g_chrome_win == slot && g_chrome_btn == 1)
-                    ? 0x00cc3333u : COL_CLOSE;
-    console_fill_rect(w->btn_cls_x, w->y, BTN_W, TITLE_H, cls_bg);
-    console_render_glyph(w->btn_cls_x + (BTN_W - fw) / 2u, tpy,
-                         'x', COL_TITLE_FG, cls_bg);
-
-    /* Max button — with hover */
-    uint32_t max_bg = (g_chrome_win == slot && g_chrome_btn == 2)
-                    ? 0x004878a0u : COL_BTN_BG;
-    console_fill_rect(w->btn_max_x, w->y, BTN_W, TITLE_H, max_bg);
-    console_render_glyph(w->btn_max_x + (BTN_W - fw) / 2u, tpy,
-                         w->state == WIN_MAXIMIZED ? '-' : '+',
-                         COL_BTN_FG, max_bg);
-
-    /* Min button — with hover */
-    uint32_t min_bg = (g_chrome_win == slot && g_chrome_btn == 3)
-                    ? 0x004878a0u : COL_BTN_BG;
-    console_fill_rect(w->btn_min_x, w->y, BTN_W, TITLE_H, min_bg);
-    console_render_glyph(w->btn_min_x + (BTN_W - fw) / 2u, tpy,
-                         '_', COL_BTN_FG, min_bg);
+    /* Buttons: traffic-light circles */
+    chrome_buttons(w, slot, grad_top, grad_bot);
 
     if (fill_content) {
+        /* Neutral thin frame (accent lives in the focus ring, not the border) */
+        uint32_t frame = active ? 0x00283a58u : 0x001d2634u;
         console_fill_rect(w->x, w->y + TITLE_H,
-                          BORDER, w->h - TITLE_H, COL_BORDER);
+                          BORDER, w->h - TITLE_H, frame);
         console_fill_rect(w->x + w->w - BORDER, w->y + TITLE_H,
-                          BORDER, w->h - TITLE_H, COL_BORDER);
+                          BORDER, w->h - TITLE_H, frame);
         console_fill_rect(w->x, w->y + w->h - BORDER,
-                          w->w, BORDER, COL_BORDER);
+                          w->w, BORDER, frame);
     }
 
     if (fill_content) {
@@ -285,7 +283,7 @@ void win_render_content(window_t *w) {
 /* Punch out 4px rounded corners on a window by overwriting with desktop bg. */
 void win_round_corners(const window_t *w) {
     uint64_t x = w->x, y = w->y, W = w->w, H = w->h;
-    uint32_t bg = COL_DESKTOP;
+    uint32_t bg = 0x000e1220u;   /* matches the new wallpaper's mid tone */
     /* Top-left */
     console_fill_rect(x,   y,   3u, 1u, bg);
     console_fill_rect(x,   y+1, 2u, 1u, bg);

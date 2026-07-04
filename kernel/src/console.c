@@ -747,6 +747,50 @@ void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t 
     fill_rect(x, y, w, h, color);
 }
 
+/* Alpha-blend a colored rect over the current backbuffer contents.
+ * alpha 0..255 (255 = opaque). Falls back to a solid fill without a backbuffer
+ * (blending against VRAM reads would be slow on real hardware). */
+void console_blend_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+                        uint32_t color, uint8_t alpha) {
+    if (x >= con.w || y >= con.h || w == 0 || h == 0) return;
+    if (x + w > con.w) w = con.w - x;
+    if (y + h > con.h) h = con.h - y;
+    if (!g_back || alpha >= 250u) { fill_rect(x, y, w, h, color); return; }
+    if (alpha == 0u) return;
+    uint32_t a  = alpha, ia = 255u - alpha;
+    uint32_t sr = ((color >> 16) & 0xffu) * a;
+    uint32_t sg = ((color >>  8) & 0xffu) * a;
+    uint32_t sb = ( color        & 0xffu) * a;
+    g_dirty = true;
+    if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y;
+    if ((uint32_t)(y + h) > g_dirty_y1) g_dirty_y1 = (uint32_t)(y + h);
+    for (uint64_t yy = 0; yy < h; yy++) {
+        uint32_t *row = g_back + (y + yy) * con.pitch32 + x;
+        for (uint64_t xx = 0; xx < w; xx++) {
+            uint32_t d = row[xx];
+            uint32_t r = (sr + ((d >> 16) & 0xffu) * ia) >> 8;
+            uint32_t g = (sg + ((d >>  8) & 0xffu) * ia) >> 8;
+            uint32_t b = (sb + ( d        & 0xffu) * ia) >> 8;
+            row[xx] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+/* Vertical gradient fill: c0 at the top row, c1 at the bottom row. */
+void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+                        uint32_t c0, uint32_t c1) {
+    if (h == 0) return;
+    uint32_t r0 = (c0 >> 16) & 0xffu, g0 = (c0 >> 8) & 0xffu, b0 = c0 & 0xffu;
+    uint32_t r1 = (c1 >> 16) & 0xffu, g1 = (c1 >> 8) & 0xffu, b1 = c1 & 0xffu;
+    uint64_t hm1 = h > 1u ? h - 1u : 1u;
+    for (uint64_t yy = 0; yy < h; yy++) {
+        uint32_t r = (uint32_t)(r0 + (int64_t)((int64_t)r1 - (int64_t)r0) * (int64_t)yy / (int64_t)hm1);
+        uint32_t g = (uint32_t)(g0 + (int64_t)((int64_t)g1 - (int64_t)g0) * (int64_t)yy / (int64_t)hm1);
+        uint32_t b = (uint32_t)(b0 + (int64_t)((int64_t)b1 - (int64_t)b0) * (int64_t)yy / (int64_t)hm1);
+        fill_rect(x, y + yy, w, 1u, (r << 16) | (g << 8) | b);
+    }
+}
+
 /* Render a single glyph at absolute pixel coordinates (bypasses cell buffer). */
 void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg) {
     if (!con.initialized) return;
@@ -1436,6 +1480,34 @@ void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
         for (uint64_t x = 0; x < dw && dx + x < con.w; x++) {
             uint64_t sx = x * sw / dw;
             dst_row[x] = src_row[sx];
+        }
+    }
+}
+
+/* Scale-blit ARGB source with per-pixel alpha blending over the backbuffer.
+ * Nearest-neighbor. Used for app-icon logos over the wallpaper. */
+void console_blit_scaled_alpha(const uint32_t *src, uint64_t sw, uint64_t sh,
+                               uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh) {
+    if (!g_back || !src || !sw || !sh || !dw || !dh) return;
+    g_dirty = true;
+    if ((uint32_t)dy < g_dirty_y0) g_dirty_y0 = (uint32_t)dy;
+    uint32_t _bay1 = (uint32_t)(dy + dh);
+    if (_bay1 > g_dirty_y1) g_dirty_y1 = _bay1;
+    for (uint64_t y = 0; y < dh && dy + y < con.h; y++) {
+        uint64_t sy = y * sh / dh;
+        const uint32_t *src_row = src + sy * sw;
+        uint32_t *dst_row = g_back + (dy + y) * con.pitch32 + dx;
+        for (uint64_t x = 0; x < dw && dx + x < con.w; x++) {
+            uint32_t s = src_row[x * sw / dw];
+            uint32_t a = s >> 24;
+            if (a == 0) continue;
+            if (a >= 0xF8u) { dst_row[x] = s & 0x00ffffffu; continue; }
+            uint32_t ia = 255u - a;
+            uint32_t d  = dst_row[x];
+            uint32_t r = ((((s >> 16) & 0xffu) * a) + (((d >> 16) & 0xffu) * ia)) >> 8;
+            uint32_t g = ((((s >>  8) & 0xffu) * a) + (((d >>  8) & 0xffu) * ia)) >> 8;
+            uint32_t b = (((s         & 0xffu) * a) + ((d         & 0xffu) * ia)) >> 8;
+            dst_row[x] = (r << 16) | (g << 8) | b;
         }
     }
 }

@@ -183,6 +183,19 @@
 #define XDG_POPUP_CONFIGURE  0
 #define XDG_POPUP_DONE       1
 
+/* zxdg_decoration_manager_v1 — server-side decorations. Granting SERVER mode
+ * makes GTK/Firefox/Electron skip their own titlebars so every window on the
+ * desktop wears the same FiFi chrome. */
+#define ZXDG_DECO_MGR_DESTROY       0   /* request */
+#define ZXDG_DECO_MGR_GET_TOPLEVEL  1   /* request: new_id, xdg_toplevel */
+#define ZXDG_TL_DECO_DESTROY        0   /* request */
+#define ZXDG_TL_DECO_SET_MODE       1   /* request: uint mode */
+#define ZXDG_TL_DECO_UNSET_MODE     2   /* request */
+#define ZXDG_TL_DECO_CONFIGURE      0   /* event: uint mode */
+#define ZXDG_DECO_MODE_CLIENT       1
+#define ZXDG_DECO_MODE_SERVER       2
+#define SSD_TITLE_H                 24  /* server-side titlebar height */
+
 /* wl_subcompositor opcodes (requests) */
 #define WL_SUBCOMP_DESTROY        0
 #define WL_SUBCOMP_GET_SUBSURFACE 1
@@ -227,6 +240,8 @@ typedef enum {
     OBJ_SUBSURFACE,
     OBJ_POSITIONER,
     OBJ_XDG_POPUP,
+    OBJ_DECO_MGR,
+    OBJ_TL_DECO,        /* data ALIASES a wl_surface_t — never freed here */
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -299,6 +314,8 @@ typedef struct {
     bool         popup_has_grab;
     /* Toplevel window state (interactive move/resize + maximize/fullscreen/minimize) */
     bool         maximized, fullscreen, minimized;
+    bool         ssd;               /* server-side decorations granted (FiFi chrome) */
+    uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
     bool         placed;            /* initial window placement done */
     int32_t      restore_x, restore_y, restore_w, restore_h;  /* saved windowed geom */
     /* Pending destroy: set by DESTROY, cleaned up on next COMMIT so Firefox can
@@ -491,11 +508,10 @@ static void free_obj_data(wl_obj_t *o) {
             free(b);
         }
         /* else: already freed via another reference — skip silently (no abort). */
-    } else if (o->type == OBJ_SUBSURFACE) {
-        /* A subsurface is only a ROLE handle aliasing a wl_surface_t that is owned
-         * by that surface's OBJ_SURFACE slot. It does NOT own the pointer — freeing
-         * it here double-frees the surface (the OBJ_SURFACE slot frees it too).
-         * Just drop the alias. */
+    } else if (o->type == OBJ_SUBSURFACE || o->type == OBJ_TL_DECO) {
+        /* A subsurface / toplevel-decoration is only a ROLE handle aliasing a
+         * wl_surface_t owned by that surface's OBJ_SURFACE slot. It does NOT own
+         * the pointer — freeing it here double-frees the surface. Drop the alias. */
     } else if (o->data) {
         free(o->data);
     }
@@ -617,6 +633,7 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
     send_registry_global(c, reg_id,  5, "xdg_wm_base",            3);
     send_registry_global(c, reg_id,  6, "wl_data_device_manager", 3);
     send_registry_global(c, reg_id,  7, "wl_subcompositor",       1);
+    send_registry_global(c, reg_id,  8, "zxdg_decoration_manager_v1", 1);
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -698,6 +715,70 @@ static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
     send_toplevel_configure(c, s, s->w, s->h, st, 0);
 }
 
+static void wl_client_flush(wl_client_t *c);
+
+/* Grant server-side decorations: the client drops its own titlebar and the
+ * compositor draws the FiFi chrome instead. The window is re-placed as a
+ * centered floating window with room for the bar above it. */
+static void deco_grant_ssd(wl_client_t *c, wl_surface_t *s) {
+    if (!s->deco_id) return;
+    /* SERVER-side decorations: the compositor draws the FiFi titlebar for every
+     * app, so downloaded apps match the built-in windows. Toolkit apps (GTK/Qt)
+     * and framed Electron (Bitwarden) hide their own titlebar and show only ours.
+     * Frameless apps (Obsidian) render window buttons inside their web content —
+     * no compositor can remove those — but our chrome still works on them.
+     * We do NOT force maximize (that made Electron spawn a transparent full-screen
+     * host surface that stole clicks); the window keeps its own size. */
+    s->ssd = true;
+    int h = wl_begin_msg(c, s->deco_id, ZXDG_TL_DECO_CONFIGURE);
+    wl_push_u32(c, ZXDG_DECO_MODE_SERVER);
+    wl_end_msg(c, h);
+    send_xdg_surface_configure(c, s);
+    wl_client_flush(c);
+}
+
+/* A toplevel we should draw FiFi chrome on: an SSD toplevel with a real, opaque
+ * buffer. Electron spawns a transparent full-screen "host" surface that must NOT
+ * get a titlebar or intercept titlebar input — its center pixel is transparent. */
+static bool ssd_decorated(const wl_surface_t *s) {
+    if (!s || !s->ssd || s->is_popup || s->is_subsurface || !s->xdg_toplevel_id)
+        return false;
+    if (!s->mapped || s->minimized || !s->own_pix || s->own_w < 8 || s->own_h < 8)
+        return false;
+    uint32_t px = s->own_pix[(int64_t)(s->own_h / 2) * (int64_t)s->own_w + s->own_w / 2];
+    return (px >> 24) != 0;
+}
+
+/* Decoration objects can be created BEFORE xdg_surface.get_toplevel links the
+ * surface (Electron does this). Track unattached decorations by toplevel id and
+ * attach them when the toplevel appears. */
+#define MAX_PENDING_DECO 8
+static struct { uint32_t deco_id, tl_id; } g_pending_deco[MAX_PENDING_DECO];
+static int g_n_pending_deco = 0;
+
+static bool deco_try_attach(wl_client_t *c, uint32_t deco_id, uint32_t tl_id) {
+    for (int i = 0; i < c->n_objs; i++) {
+        if (c->objs[i].type != OBJ_SURFACE || !c->objs[i].data) continue;
+        wl_surface_t *cand = c->objs[i].data;
+        if (cand->xdg_toplevel_id != tl_id) continue;
+        wl_obj_t *dobj = wl_find_obj(c, deco_id);
+        if (dobj && dobj->type == OBJ_TL_DECO) dobj->data = cand;
+        cand->deco_id = deco_id;
+        deco_grant_ssd(c, cand);
+        return true;
+    }
+    return false;
+}
+
+static void deco_attach_pending(wl_client_t *c, uint32_t tl_id) {
+    for (int i = 0; i < g_n_pending_deco; ) {
+        if (g_pending_deco[i].tl_id == tl_id &&
+            deco_try_attach(c, g_pending_deco[i].deco_id, tl_id)) {
+            g_pending_deco[i] = g_pending_deco[--g_n_pending_deco];
+        } else i++;
+    }
+}
+
 static void send_xdg_popup_configure(wl_client_t *c, wl_surface_t *s,
                                       int32_t px, int32_t py,
                                       int32_t pw, int32_t ph) {
@@ -729,6 +810,37 @@ static const char s_keymap[] =
 
 static void wl_client_flush(wl_client_t *c);   /* defined below */
 
+/* Prefer a fully-resolved keymap file (no include directives) when present:
+ * some clients (Chromium/Electron) compile the keymap with an xkb context that
+ * cannot resolve includes, end up with no XKB state, and segfault on the first
+ * key event. /fifi-data/fifi-keymap.txt is a complete `xkbcli compile-keymap`
+ * dump; the minimal include-based string remains the fallback. */
+static char  *g_full_keymap     = NULL;
+static bool   g_full_keymap_try = false;
+
+static const char *keymap_str(void) {
+    if (!g_full_keymap_try) {
+        g_full_keymap_try = true;
+        FILE *f = fopen("/fifi-data/fifi-keymap.txt", "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz > 128 && sz < 4*1024*1024) {
+                g_full_keymap = malloc((size_t)sz + 1);
+                if (g_full_keymap) {
+                    if (fread(g_full_keymap, 1, (size_t)sz, f) == (size_t)sz) {
+                        g_full_keymap[sz] = '\0';
+                        fprintf(stderr, "[wayland] using full keymap (%ld bytes)\n", sz);
+                    } else { free(g_full_keymap); g_full_keymap = NULL; }
+                }
+            }
+            fclose(f);
+        }
+    }
+    return g_full_keymap ? g_full_keymap : s_keymap;
+}
+
 static void send_keymap(wl_client_t *c) {
     if (!c->keyboard_id) return;
     /* Write keymap to a memfd so we can pass an fd to the client */
@@ -743,8 +855,9 @@ static void send_keymap(wl_client_t *c) {
         if (kfd >= 0) unlink(tmp);
     }
     if (kfd < 0) return;
-    size_t klen = strlen(s_keymap) + 1;
-    if (write(kfd, s_keymap, klen) != (ssize_t)klen) { close(kfd); return; }
+    const char *kmap = keymap_str();
+    size_t klen = strlen(kmap) + 1;
+    if (write(kfd, kmap, klen) != (ssize_t)klen) { close(kfd); return; }
     lseek(kfd, 0, SEEK_SET);
 
     /* Send keymap event — we need to pass an fd via ancillary data.
@@ -925,6 +1038,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 /* Required by GTK/Firefox. Binding it makes Gecko's
                  * GetSubcompositor() non-null so its release-assert passes. */
                 wl_new_obj(c, new_id, OBJ_SUBCOMPOSITOR, NULL);
+            } else if (name == 8 && strncmp(iface, "zxdg_decoration_manager_v1", iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_DECO_MGR, NULL);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -974,6 +1089,19 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     if (!src) src = orphan_find(s->buffer_id);
                     if (src && src->data) {
                         surface_copy_buffer(s, src);  /* sets own_pix/own_w/own_h, mapped */
+                        /* SSD windows: keep the FiFi titlebar on-screen and the
+                         * window within the desktop area whatever size the client
+                         * actually committed. */
+                        if (s->ssd && s->xdg_toplevel_id && !s->is_popup && !s->is_subsurface) {
+                            extern uint32_t console_font_height(void);
+                            int32_t fh3  = (int32_t)console_font_height();
+                            int32_t top3 = fh3 + 6 + SSD_TITLE_H;
+                            if (s->x + s->own_w > g_w) s->x = g_w - s->own_w;
+                            if (s->x < 0) s->x = 0;
+                            int32_t bot3 = g_h - (fh3 + 10);
+                            if (s->y + s->own_h > bot3) s->y = bot3 - s->own_h;
+                            if (s->y < top3) s->y = top3;
+                        }
                         if (src->width > 0 && src->height > 0) {
                             s->w = src->width; s->h = src->height;
                         }
@@ -1128,8 +1256,11 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&xdg_surf_id, args,   4);
             memcpy(&surf_id,     args+4, 4);
             wl_new_obj(c, xdg_surf_id, OBJ_XDG_SURFACE, NULL);
-            /* link surface to its xdg_surface */
-            wl_obj_t *so = wl_find_obj_any(surf_id);
+            /* link surface to its xdg_surface — SAME client first: object IDs are
+             * per-connection, so an any-client lookup can hit another app's surface
+             * when several Wayland apps run at once (windows then never map). */
+            wl_obj_t *so = wl_find_obj(c, surf_id);
+            if (!so || so->type != OBJ_SURFACE) so = wl_find_obj_any(surf_id);
             if (so && so->type == OBJ_SURFACE && so->data) {
                 wl_surface_t *s = so->data;
                 s->xdg_surface_id = xdg_surf_id;
@@ -1150,21 +1281,30 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     wl_surface_t *s = c->objs[i].data;
                     if (s->xdg_surface_id == obj_id) {
                         s->xdg_toplevel_id = tl_id;
-                        /* Place the window: start maximized (full screen) with a
-                         * sensible centered windowed size saved for restore, so the
-                         * CSD restore/maximize/move/resize controls all work. */
+                        /* Place floating + centered below the status bar. NOT
+                         * maximized: forcing maximize made Electron spawn a
+                         * transparent full-screen host surface. The FiFi titlebar
+                         * is drawn just above the surface top (see ssd_draw_chrome). */
                         if (!s->placed) {
                             s->placed = true;
-                            int32_t rw = g_w * 82 / 100, rh = g_h * 85 / 100;
-                            if (rw > 1600) rw = 1600;
-                            if (rh > 1000) rh = 1000;
+                            extern uint32_t console_font_height(void);
+                            int32_t fhh = (int32_t)console_font_height();
+                            int32_t status = fhh + 6, taskbar = fhh + 10;
+                            int32_t top = status + SSD_TITLE_H;
+                            int32_t avail_h = g_h - top - taskbar;
+                            int32_t rw = g_w * 78 / 100, rh = avail_h * 88 / 100;
+                            if (rw > 1500) rw = 1500;
+                            if (rh > 950)  rh = 950;
                             s->restore_w = rw; s->restore_h = rh;
-                            s->restore_x = (g_w - rw) / 2; s->restore_y = (g_h - rh) / 2;
-                            s->maximized = true; s->x = 0; s->y = 0;
-                            send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                            s->restore_x = (g_w - rw) / 2;
+                            s->restore_y = top + (avail_h - rh) / 2;
+                            s->maximized = false;
+                            s->x = s->restore_x; s->y = s->restore_y;
+                            send_toplevel_configure(c, s, rw, rh, 0, 0);
                         } else {
                             send_xdg_surface_configure(c, s);
                         }
+                        deco_attach_pending(c, tl_id);   /* decoration created early? */
                         break;
                     }
                 }
@@ -1198,19 +1338,11 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 if (c->objs[i].type != OBJ_SURFACE || !c->objs[i].data) continue;
                 wl_surface_t *s = c->objs[i].data;
                 if (s->xdg_surface_id != obj_id) continue;
+                (void)parent_xdg_id;
                 s->xdg_popup_id = popup_id;
                 s->is_popup     = true;
                 wl_obj_t *po = wl_find_obj(c, positioner_id);
                 xdg_positioner_t *pos = (po && po->type == OBJ_POSITIONER) ? po->data : NULL;
-                /* Find parent surface screen position */
-                int32_t par_x = 0, par_y = 0;
-                for (int j = 0; j < c->n_objs; j++) {
-                    if (c->objs[j].type != OBJ_SURFACE || !c->objs[j].data) continue;
-                    wl_surface_t *ps = c->objs[j].data;
-                    if (ps->xdg_surface_id == parent_xdg_id) {
-                        par_x = ps->x; par_y = ps->y; break;
-                    }
-                }
                 int32_t pw = 200, ph = 100, rel_x = 0, rel_y = 0;
                 if (pos) {
                     if (pos->w > 0) pw = pos->w;
@@ -1219,8 +1351,33 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     rel_y = pos->ar_y + pos->ar_h + pos->off_y;
                 }
                 s->w = pw; s->h = ph;
-                s->popup_x = par_x + rel_x;
-                s->popup_y = par_y + rel_y;
+                /* Place the popup relative to its parent surface using the
+                 * positioner's anchor rect (the spec-correct approach): the
+                 * popup's top-left goes at parent_content_origin + anchor +
+                 * offset. The parent may be the toplevel (screen x/y) or another
+                 * popup (its popup_x/y). Fall back to the cursor if the parent
+                 * xdg_surface can't be resolved. */
+                wl_surface_t *par = NULL;
+                for (int j = 0; j < c->n_objs; j++) {
+                    if (c->objs[j].type != OBJ_SURFACE || !c->objs[j].data) continue;
+                    wl_surface_t *cand = c->objs[j].data;
+                    if (cand->xdg_surface_id == parent_xdg_id) { par = cand; break; }
+                }
+                int32_t par_ox, par_oy;
+                if (par) {
+                    par_ox = par->is_popup ? par->popup_x : par->x;
+                    par_oy = par->is_popup ? par->popup_y : par->y;
+                } else {
+                    /* fallback: cursor = par_o + rel  ->  par_o = cursor - rel */
+                    par_ox = g_prev_mx - rel_x;
+                    par_oy = g_prev_my - rel_y;
+                }
+                s->popup_x = par_ox + rel_x;
+                s->popup_y = par_oy + rel_y;
+                if (s->popup_x + pw > g_w) s->popup_x = g_w - pw;
+                if (s->popup_y + ph > g_h) s->popup_y = g_h - ph;
+                if (s->popup_x < 0) s->popup_x = 0;
+                if (s->popup_y < 0) s->popup_y = 0;
                 send_xdg_popup_configure(c, s, rel_x, rel_y, pw, ph);
                 break;
             }
@@ -1380,6 +1537,42 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         break;
 
     /* ── wl_subcompositor ────────────────────────────────────────────── */
+    /* ── zxdg_decoration_manager_v1 ──────────────────────────────────── */
+    case OBJ_DECO_MGR:
+        if (opcode == ZXDG_DECO_MGR_GET_TOPLEVEL && args_len >= 8) {
+            uint32_t deco_id, tl_id;
+            memcpy(&deco_id, args,     4);
+            memcpy(&tl_id,   args + 4, 4);
+            wl_new_obj(c, deco_id, OBJ_TL_DECO, NULL);
+            /* Answer the mode immediately — clients block their first commit on it.
+             * SERVER mode: the compositor draws the FiFi titlebar (see deco_grant_ssd). */
+            int dh = wl_begin_msg(c, deco_id, ZXDG_TL_DECO_CONFIGURE);
+            wl_push_u32(c, ZXDG_DECO_MODE_SERVER);
+            wl_end_msg(c, dh);
+            if (!deco_try_attach(c, deco_id, tl_id) && g_n_pending_deco < MAX_PENDING_DECO) {
+                g_pending_deco[g_n_pending_deco].deco_id = deco_id;
+                g_pending_deco[g_n_pending_deco].tl_id   = tl_id;
+                g_n_pending_deco++;
+                fprintf(stderr, "[wayland] deco pending for toplevel %u\n", tl_id);
+            }
+        } else if (opcode == ZXDG_DECO_MGR_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+
+    /* ── zxdg_toplevel_decoration_v1 ─────────────────────────────────── */
+    case OBJ_TL_DECO: {
+        wl_surface_t *ds = obj ? obj->data : NULL;
+        if (opcode == ZXDG_TL_DECO_SET_MODE || opcode == ZXDG_TL_DECO_UNSET_MODE) {
+            /* whatever the client prefers, we impose server-side (uniform chrome) */
+            if (ds) deco_grant_ssd(c, ds);
+        } else if (opcode == ZXDG_TL_DECO_DESTROY) {
+            if (ds) { ds->ssd = false; ds->deco_id = 0; }
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+    }
+
     case OBJ_SUBCOMPOSITOR:
         if (opcode == WL_SUBCOMP_GET_SUBSURFACE && args_len >= 12) {
             /* get_subsurface(new id sub, surface, parent): assign the subsurface
@@ -1390,7 +1583,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&sub_id,    args,     4);
             memcpy(&surf_id,   args + 4, 4);
             memcpy(&parent_id, args + 8, 4);
-            wl_obj_t *so = wl_find_obj_any(surf_id);
+            wl_obj_t *so = wl_find_obj(c, surf_id);
+            if (!so || so->type != OBJ_SURFACE) so = wl_find_obj_any(surf_id);
             wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
             if (s) {
                 s->is_subsurface      = true;
@@ -1589,11 +1783,21 @@ static void wl_client_flush(wl_client_t *c) {
 }
 
 /* Find the topmost mapped Wayland surface that contains (mx, my) */
+static bool g_wl_minimized;   /* real definition below (taskbar minimize) */
+
 static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
-    if (!s || !s->mapped || s->minimized) return false;
+    if (!s || !s->mapped || s->minimized || g_wl_minimized || !s->own_pix) return false;
     int32_t ox = s->is_popup ? s->popup_x : s->x;
     int32_t oy = s->is_popup ? s->popup_y : s->y;
-    return mx >= ox && mx < ox + s->w && my >= oy && my < oy + s->h;
+    /* Hit-test against the ACTUAL committed buffer, not the configured size — a
+     * client (e.g. Electron) may configure huge but commit a small window. */
+    int32_t lx = mx - ox, ly = my - oy;
+    if (lx < 0 || ly < 0 || lx >= s->own_w || ly >= s->own_h) return false;
+    /* Click-through fully-transparent pixels: Electron apps create a transparent
+     * full-screen "host" surface that would otherwise steal every click, and CSD
+     * apps have transparent shadow margins. Only opaque pixels own the pointer. */
+    uint32_t px = s->own_pix[(int64_t)ly * (int64_t)s->own_w + lx];
+    return (px >> 24) != 0;
 }
 
 /* Wl-fixed is 24.8 fixed-point (value * 256) */
@@ -1660,6 +1864,11 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 if (g_iop == 1) {                 /* move */
                     s->x = g_iop_ox + (mx - g_iop_sx);
                     s->y = g_iop_oy + (my - g_iop_sy);
+                    if (s->ssd) {
+                        extern uint32_t console_font_height(void);
+                        int32_t top2 = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
+                        if (s->y < top2) s->y = top2;
+                    }
                 } else {                          /* resize */
                     int32_t nw = g_iop_ow, nh = g_iop_oh, nx = g_iop_ox, ny = g_iop_oy;
                     int32_t dx = mx - g_iop_sx, dy = my - g_iop_sy;
@@ -1680,6 +1889,98 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
         return;
     }
+    /* SSD edge resize: press near the frame of a decorated toplevel starts an
+     * interactive resize (edges: 1=top 2=bottom 4=left 8=right). */
+    if ((btns & 1) && !(g_prev_btns & 1)) {
+        wl_surface_t *rs = NULL; int rs_ci = -1; uint32_t rs_sid = 0;
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            wl_client_t *cc = &g_wl_clients[ci];
+            if (!cc->active) continue;
+            for (int oi = 0; oi < cc->n_objs; oi++) {
+                if (cc->objs[oi].type != OBJ_SURFACE) continue;
+                wl_surface_t *es = cc->objs[oi].data;
+                if (g_wl_minimized || !ssd_decorated(es)) continue;
+                const int32_t M = 6;
+                int32_t wx0 = es->x, wy0 = es->y - SSD_TITLE_H;
+                int32_t wx1 = es->x + es->own_w, wy1 = es->y + es->own_h;
+                if (mx < wx0 - M || mx > wx1 + M || my < wy0 - M || my > wy1 + M) continue;
+                uint32_t e = 0;
+                if (mx <= wx0 + M) e |= 4;
+                if (mx >= wx1 - M) e |= 8;
+                if (my <= wy0 + M) e |= 1;
+                if (my >= wy1 - M) e |= 2;
+                if (e) { rs = es; rs_ci = ci; rs_sid = cc->objs[oi].id; g_iop_edges = (int)e; }
+            }
+        }
+        if (rs) {
+            g_iop = 2; g_iop_ci = rs_ci; g_iop_sid = rs_sid;
+            g_iop_sx = mx; g_iop_sy = my;
+            g_iop_ox = rs->x; g_iop_oy = rs->y;
+            g_iop_ow = rs->own_w; g_iop_oh = rs->own_h;
+            rs->maximized = false;    /* manual resize leaves maximized state */
+            g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
+            return;
+        }
+    }
+
+    /* Server-side decoration bar: clicks on the FiFi titlebar belong to the
+     * compositor (drag / minimize / maximize / close) and are never forwarded. */
+    {
+        int bar_ci = -1; uint32_t bar_sid = 0; wl_surface_t *bar_s = NULL;
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            wl_client_t *cc = &g_wl_clients[ci];
+            if (!cc->active) continue;
+            for (int oi = 0; oi < cc->n_objs; oi++) {
+                if (cc->objs[oi].type != OBJ_SURFACE) continue;
+                wl_surface_t *bs = cc->objs[oi].data;
+                if (g_wl_minimized || !ssd_decorated(bs)) continue;
+                if (mx >= bs->x && mx < bs->x + bs->own_w &&
+                    my >= bs->y - SSD_TITLE_H && my < bs->y) {
+                    bar_ci = ci; bar_sid = cc->objs[oi].id; bar_s = bs;
+                }
+            }
+        }
+        if (bar_s) {
+            if ((btns & 1) && !(g_prev_btns & 1)) {
+                int32_t rel = mx - bar_s->x;
+                int32_t bw  = bar_s->own_w;
+                wl_client_t *bc = &g_wl_clients[bar_ci];
+                extern uint32_t console_font_height(void);
+                int32_t fh2 = (int32_t)console_font_height();
+                int32_t top = fh2 + 6 + SSD_TITLE_H;
+                if (rel >= bw - 24) {                     /* close */
+                    int h = wl_begin_msg(bc, bar_s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
+                    wl_end_msg(bc, h);
+                    wl_client_flush(bc);
+                } else if (rel >= bw - 48) {              /* maximize / restore */
+                    int32_t taskbar = fh2 + 10;
+                    if (!bar_s->maximized) {
+                        bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
+                        bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
+                        bar_s->maximized = true;
+                        bar_s->x = 0; bar_s->y = top;
+                        send_toplevel_configure(bc, bar_s, g_w, g_h - top - taskbar,
+                                                XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                    } else {
+                        bar_s->maximized = false;
+                        bar_s->x = bar_s->restore_x;
+                        bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
+                        send_toplevel_configure(bc, bar_s, bar_s->restore_w, bar_s->restore_h, 0, 0);
+                    }
+                    wl_client_flush(bc);
+                } else if (rel >= bw - 72) {              /* minimize (taskbar restores) */
+                    g_wl_minimized = true;
+                } else {                                   /* drag-move */
+                    g_iop = 1; g_iop_ci = bar_ci; g_iop_sid = bar_sid;
+                    g_iop_sx = mx; g_iop_sy = my;
+                    g_iop_ox = bar_s->x; g_iop_oy = bar_s->y;
+                }
+            }
+            g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
+            return;
+        }
+    }
+
     /* Find topmost surface under cursor */
     int  new_ci  = -1;
     uint32_t new_sid = 0;
@@ -1819,34 +2120,67 @@ void wayland_send_scroll(int8_t dir) {
 }
 
 /* Deliver a key event to the focused Wayland surface.
- * key is a Linux evdev keycode (KEY_A=30, etc.), state: 1=press, 0=release. */
+ * key is a Linux evdev keycode (KEY_A=30, etc.), state: 1=press, 0=release.
+ * Tracks modifier keys so clients see correct shift/ctrl/alt state (xkb "us"
+ * mod bits: Shift=1, Lock=2, Control=4, Mod1/Alt=8, Mod2/Num=16, Mod4/Super=64). */
 void wayland_send_key(uint32_t evdev_key, uint32_t state) {
+    static uint32_t s_depressed = 0;
+    static uint32_t s_locked    = 0;
+    uint32_t bit = 0;
+    switch (evdev_key) {
+        case 42: case 54:   bit = 1u;  break;   /* L/R shift  */
+        case 29: case 97:   bit = 4u;  break;   /* L/R ctrl   */
+        case 56: case 100:  bit = 8u;  break;   /* L/R alt    */
+        case 125: case 126: bit = 64u; break;   /* L/R super  */
+    }
+    if (bit) { if (state) s_depressed |= bit; else s_depressed &= ~bit; }
+    if (evdev_key == 58 && state) s_locked ^= 2u;    /* capslock toggles Lock */
+
     if (g_focus_ci < 0 || !g_focus_sid) return;
     wl_client_t *fc = &g_wl_clients[g_focus_ci];
     if (!fc->active || !fc->keyboard_id) return;
     uint32_t ser = next_serial(fc);
-    int h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
+    /* modifiers first so the key is interpreted with the current state */
+    int h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_MODIFIERS);
     wl_push_u32(fc, ser);
+    wl_push_u32(fc, s_depressed);
+    wl_push_u32(fc, 0);          /* latched */
+    wl_push_u32(fc, s_locked);
+    wl_push_u32(fc, 0);          /* group */
+    wl_end_msg(fc, h);
+    h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
+    wl_push_u32(fc, next_serial(fc));
     wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
     wl_push_u32(fc, evdev_key);
     wl_push_u32(fc, state);
-    wl_end_msg(fc, h);
-    /* send modifiers (all zero for now) */
-    h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_MODIFIERS);
-    wl_push_u32(fc, next_serial(fc));
-    wl_push_u32(fc, 0); /* depressed */
-    wl_push_u32(fc, 0); /* latched */
-    wl_push_u32(fc, 0); /* locked */
-    wl_push_u32(fc, 0); /* group */
     wl_end_msg(fc, h);
     wl_client_flush(fc);
 }
 
 /* Returns true if a Wayland surface has keyboard focus */
-bool wayland_has_focus(void) { return g_focus_ci >= 0; }
+/* True only while the focused surface is still alive and visible. Without the
+ * validation, focus goes stale when the window is closed or the layer is
+ * minimized (wayland_send_mouse stops being called, so it never recomputes) and
+ * every keystroke gets eaten instead of reaching IPC apps like the App Store. */
+bool wayland_has_focus(void) {
+    if (g_focus_ci < 0 || !g_focus_sid || g_wl_minimized) return false;
+    wl_client_t *fc = &g_wl_clients[g_focus_ci];
+    if (!fc->active) { g_focus_ci = -1; g_focus_sid = 0; return false; }
+    wl_obj_t *o = wl_find_obj(fc, g_focus_sid);
+    wl_surface_t *s = (o && o->type == OBJ_SURFACE) ? o->data : NULL;
+    if (!s || !s->mapped || s->minimized || s->pending_destroy) {
+        g_focus_ci = -1; g_focus_sid = 0;
+        return false;
+    }
+    return true;
+}
 
-/* Returns true if any Wayland surface has pixel data mapped (browser is showing) */
-bool wayland_any_mapped(void) {
+/* Whole-browser minimize state (taskbar-driven). When true the browser is hidden
+ * and treated as absent for rendering/input, but still "present" for the taskbar. */
+static bool g_wl_minimized = false;
+
+/* True if a browser surface exists at all (mapped), regardless of minimized state. */
+bool wayland_browser_present(void) {
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         if (!g_wl_clients[ci].active) continue;
         for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
@@ -1857,8 +2191,162 @@ bool wayland_any_mapped(void) {
     }
     return false;
 }
+bool wayland_browser_minimized(void)      { return g_wl_minimized; }
+void wayland_browser_set_minimized(bool m){ g_wl_minimized = m; }
+
+/* Title of the topmost mapped Wayland toplevel (for the taskbar button).
+ * Returns NULL when no client has set a title. */
+const char *wayland_browser_title(void) {
+    const char *best = NULL;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->mapped && s->own_pix && s->xdg_toplevel_id && s->title[0])
+                best = s->title;
+        }
+    }
+    return best;
+}
+
+/* Returns true if the browser is showing (mapped and not minimized). */
+bool wayland_any_mapped(void) {
+    if (g_wl_minimized) return false;
+    return wayland_browser_present();
+}
+
+/* True if a mapped, non-minimized toplevel/subsurface (the browser window) contains
+ * the screen point (x,y). Used for window z-order / input routing. */
+bool wayland_covers(int32_t x, int32_t y) {
+    if (g_wl_minimized) return false;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (!s || !s->mapped || !s->own_pix || s->minimized || s->is_popup) continue;
+            int32_t ox = s->x, oy = s->y;
+            if (s->is_subsurface) {
+                wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
+                wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+                if (p) {
+                    int32_t pox = p->is_popup ? p->popup_x : p->x;
+                    int32_t poy = p->is_popup ? p->popup_y : p->y;
+                    ox = pox + s->sub_x; oy = poy + s->sub_y;
+                }
+            }
+            /* SSD toplevels: the FiFi titlebar sits ABOVE the surface (oy-SSD_TITLE_H
+             * .. oy). Count it as covered so titlebar clicks route to the Wayland
+             * layer (close/min/max/drag) regardless of what's painted underneath. */
+            int32_t top_ext = ssd_decorated(s) ? SSD_TITLE_H : 0;
+            if (x >= ox && x < ox + s->own_w && y >= oy - top_ext && y < oy + s->own_h) {
+                if (y < oy) return true;          /* the SSD titlebar strip is opaque */
+                int32_t lx = x - ox, ly = y - oy; /* else require an opaque pixel */
+                if (s->own_pix &&
+                    (s->own_pix[(int64_t)ly * (int64_t)s->own_w + lx] >> 24) != 0)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Drop keyboard focus from the Wayland layer (click-to-focus: called when the
+ * user clicks a built-in/IPC window so keys stop being stolen from e.g. the App
+ * Store while a Wayland app stays open behind it). */
+void wayland_clear_kbd_focus(void) {
+    if (g_focus_ci >= 0 && g_focus_sid) {
+        wl_client_t *oc = &g_wl_clients[g_focus_ci];
+        if (oc->active) { wl_send_kbd_leave(oc, g_focus_sid); wl_client_flush(oc); }
+    }
+    g_focus_ci = -1; g_focus_sid = 0;
+}
+
+/* Force-close the frontmost Wayland toplevel — a reliable close that works no
+ * matter the focus/z-order state (titlebar-button close can get flaky with
+ * Electron's multi-surface apps). Sends xdg_toplevel.close to every visible,
+ * opaque toplevel of the most-recently-mapped client. Returns true if it sent. */
+bool wayland_close_active(void) {
+    bool sent = false;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            if (c->objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = c->objs[oi].data;
+            if (!s || !s->xdg_toplevel_id || s->is_popup || s->is_subsurface) continue;
+            if (!s->mapped) continue;
+            int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
+            wl_end_msg(c, h);
+            wl_client_flush(c);
+            sent = true;
+        }
+    }
+    return sent;
+}
 
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */
+
+/* FiFi Breeze chrome for server-side-decorated Wayland toplevels: identical
+ * gradient titlebar + traffic-light circles as built-in and IPC windows. */
+static void ssd_circle(uint64_t cx, uint64_t cy, uint32_t col) {
+    extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
+    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
+    for (int dy = -6; dy <= 6; dy++) {
+        uint8_t sw = spans[dy + 6];
+        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
+    }
+}
+
+static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
+    extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
+    extern void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c0, uint32_t c1);
+    extern void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg);
+    extern uint32_t console_font_width(void);
+    extern uint32_t console_font_height(void);
+    if (by < SSD_TITLE_H) return;
+    bool focused = (ci == g_focus_ci);
+    uint64_t x = (uint64_t)bx, w = (uint64_t)s->own_w;
+    uint64_t ty = (uint64_t)(by - SSD_TITLE_H);
+    uint32_t grad_top = focused ? 0x00324a72u : 0x00202836u;
+    uint32_t grad_bot = focused ? 0x001e2c48u : 0x00161c26u;
+    console_fill_vgrad(x, ty, w, SSD_TITLE_H, grad_top, grad_bot);
+    console_fill_rect(x, ty, w, 1u, focused ? 0x00466492u : 0x002a3446u);
+    console_fill_rect(x, ty + SSD_TITLE_H - 1u, w, 1u, 0x0010192au);
+    /* title text, centered */
+    uint64_t fw = console_font_width(), fh = console_font_height();
+    if (fw && fh && s->title[0]) {
+        size_t tlen = 0; while (tlen < sizeof(s->title) && s->title[tlen]) tlen++;
+        uint64_t max_px = w > 84u ? w - 84u : 0u;   /* keep clear of buttons */
+        if (tlen * fw > max_px) tlen = max_px / fw;
+        uint64_t tx = x + (w > tlen * fw ? (w - tlen * fw) / 2u : 8u);
+        uint64_t gy = ty + (SSD_TITLE_H > fh ? (SSD_TITLE_H - fh) / 2u : 0u);
+        for (size_t j = 0; j < tlen; j++, tx += fw)
+            console_render_glyph_fg(tx, gy, (unsigned char)s->title[j], 0x00e8eeffu);
+    }
+    /* traffic lights: min grey, max green, close red */
+    uint64_t cyc = ty + SSD_TITLE_H / 2u;
+    if (w >= 88u) {
+        ssd_circle(x + w - 60u, cyc, 0x00707a8cu);
+        ssd_circle(x + w - 36u, cyc, 0x005e9e56u);
+    }
+    ssd_circle(x + w - 12u, cyc, 0x00c05048u);
+    /* frame + focus ring around bar+content */
+    uint64_t th = (uint64_t)SSD_TITLE_H + (uint64_t)s->own_h;
+    uint32_t frame = focused ? 0x00283a58u : 0x001d2634u;
+    console_fill_rect(x,          ty,          w, 1u, frame);
+    console_fill_rect(x,          ty + th - 1, w, 1u, frame);
+    console_fill_rect(x,          ty,          1u, th, frame);
+    console_fill_rect(x + w - 1,  ty,          1u, th, frame);
+    if (focused) {
+        uint32_t ring = 0x002b4d80u;
+        if (ty > 0)   console_fill_rect(x > 0 ? x-1 : 0, ty - 1, w + 2, 1u, ring);
+        console_fill_rect(x > 0 ? x-1 : 0, ty + th, w + 2, 1u, ring);
+        if (x > 0)    console_fill_rect(x - 1, ty, 1u, th, ring);
+        console_fill_rect(x + w, ty, 1u, th, ring);
+    }
+}
 
 /* Called from compositor main after ipc_blit_all() */
 /* Blit one surface at its computed screen position */
@@ -1889,8 +2377,14 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
         wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
         wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
         if (!p) return 0;
-        bx = p->x + s->sub_x;
-        by = p->y + s->sub_y;
+        /* Parent origin: a popup parent (e.g. a menu) is positioned via popup_x/y,
+         * NOT x/y (which stays 0). Firefox renders menu content as a subsurface of
+         * the popup — using p->x here draws it at screen-left instead of at the
+         * menu. Honor the popup position so the content follows its popup frame. */
+        int32_t pox = p->is_popup ? p->popup_x : p->x;
+        int32_t poy = p->is_popup ? p->popup_y : p->y;
+        bx = pox + s->sub_x;
+        by = poy + s->sub_y;
     } else {
         bx = s->x; by = s->y;
     }
@@ -1907,10 +2401,13 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
      * composites away instead of being stamped as a black ring. */
     console_paste_rect_blend(s->own_pix, (uint64_t)bx, (uint64_t)by,
                              (uint64_t)s->own_w, (uint64_t)s->own_h);
+    if (ssd_decorated(s))
+        ssd_draw_chrome(ci, s, bx, by);
     return 1;
 }
 
 void wayland_blit_surfaces(void) {
+    if (g_wl_minimized) return;   /* browser minimized — draw nothing */
     static int blit_log_ticker = 0;
     int do_log = (++blit_log_ticker % 600 == 0);
     int blitted = 0;
@@ -1975,7 +2472,9 @@ bool wayland_init(void) {
         fprintf(stderr, "[wayland] bind %s failed: %s\n", g_sock_path, strerror(errno));
         close(g_wl_fd); g_wl_fd = -1; return false;
     }
-    chmod(g_sock_path, 0700);
+    /* 0666: user-namespaced clients (archimage apps run with a fake non-root
+     * uid) must still be able to connect. The socket dir remains protected. */
+    chmod(g_sock_path, 0666);
 
     if (listen(g_wl_fd, 8) < 0) {
         fprintf(stderr, "[wayland] listen failed: %s\n", strerror(errno));

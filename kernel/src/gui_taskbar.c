@@ -18,10 +18,44 @@ uint64_t taskbtn_w(void) {
     return w > (uint64_t)TASKBTN_W ? w : (uint64_t)TASKBTN_W;
 }
 
+/* Rounded-pill task button: gradient fill + 2px corner softening + underline
+ * running/focused indicator (KDE Plasma style). */
+void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label,
+                  bool vis, bool focused, bool hov) {
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    uint64_t ph = TASKBAR_H - 6u;
+    uint32_t top = focused ? 0x003f74c8u : hov ? 0x002c3a52u : vis ? 0x00242f44u : 0x001a2232u;
+    uint32_t bot = focused ? 0x002a55a0u : hov ? 0x00202c40u : vis ? 0x001a2434u : 0x00141a28u;
+    console_fill_vgrad(bx, ty + 3u, tbw, ph, top, bot);
+    /* corner softening: notch the 4 pill corners back to the bar base */
+    uint32_t base = 0x000b0f1au;
+    console_fill_rect(bx,            ty + 3u,          2u, 1u, base);
+    console_fill_rect(bx,            ty + 4u,          1u, 1u, base);
+    console_fill_rect(bx + tbw - 2u, ty + 3u,          2u, 1u, base);
+    console_fill_rect(bx + tbw - 1u, ty + 4u,          1u, 1u, base);
+    console_fill_rect(bx,            ty + 2u + ph,     2u, 1u, base);
+    console_fill_rect(bx,            ty + 1u + ph,     1u, 1u, base);
+    console_fill_rect(bx + tbw - 2u, ty + 2u + ph,     2u, 1u, base);
+    console_fill_rect(bx + tbw - 1u, ty + 1u + ph,     1u, 1u, base);
+    /* running/focused underline */
+    if (vis) {
+        uint64_t uw = focused ? tbw - 8u : tbw / 3u;
+        uint64_t ux = bx + (tbw - uw) / 2u;
+        console_fill_rect(ux, ty + TASKBAR_H - 3u, uw, 2u,
+                          focused ? 0x0078b4ffu : 0x00446a9cu);
+    }
+    uint64_t llen     = (uint64_t)gui_strlen(label);
+    uint64_t max_ch   = tbw / fw;
+    uint64_t disp_len = llen < max_ch ? llen : max_ch;
+    uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
+    uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
+    gui_draw_str_clip_fg(lpx, lpy, label,
+                         focused ? 0x00f0f6ffu : COL_TASKBTN_FG, max_ch);
+}
+
 void taskbar_draw_btn(int slot, const char *label) {
     uint64_t fb_h = console_fb_height();
-    uint64_t fw   = console_font_width();
-    uint64_t fh   = console_font_height();
     uint64_t ty   = fb_h - TASKBAR_H;
     uint64_t tbw  = taskbtn_w();
     uint64_t bx   = taskbtn_start_x() + (uint64_t)slot * (tbw + TASKBTN_GAP);
@@ -31,21 +65,7 @@ void taskbar_draw_btn(int slot, const char *label) {
     bool     hov  = (g_taskbtn_hover == slot);
     /* Focused = topmost visible window */
     bool focused = (vis && g_z[MAX_WINS - 1] == slot);
-    uint32_t bg   = focused ? 0x003878d8u :
-                    vis     ? COL_TASKBTN_A :
-                    hov     ? 0x00283848u : COL_TASKBTN;
-
-    console_fill_rect(bx, ty + 3u, tbw, TASKBAR_H - 6u, bg);
-    /* Active indicator bar at bottom */
-    if (vis)
-        console_fill_rect(bx, ty + TASKBAR_H - 5u, tbw, 3u,
-                          focused ? 0x0060a0f0u : COL_BORDER);
-    uint64_t llen     = (uint64_t)gui_strlen(label);
-    uint64_t max_ch   = tbw / fw;
-    uint64_t disp_len = llen < max_ch ? llen : max_ch;
-    uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
-    uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
-    gui_draw_str_clip(lpx, lpy, label, COL_TASKBTN_FG, bg, max_ch);
+    taskbar_pill(bx, ty, tbw, label, vis, focused, hov);
 }
 
 /* Draw a small system-tray area on the right side of the taskbar:
@@ -88,8 +108,11 @@ void taskbar_draw_tray(void) {
     uint64_t clk_w  = (uint64_t)clk_chars * fw;
     uint64_t clk_x  = fb_w > clk_w + 8u ? fb_w - clk_w - 8u : 0u;
     uint64_t clk_y  = ty + (TASKBAR_H - fh) / 2u;
-    console_fill_rect(clk_x > 4u ? clk_x - 4u : 0u, ty + 2u, clk_w + 8u, TASKBAR_H - 4u, bg);
-    gui_draw_str(clk_x, clk_y, clk, 0x00a0c8e8u, bg);
+    /* repaint the clock cell with the panel gradient (keeps digits crisp) */
+    console_fill_vgrad(clk_x > 4u ? clk_x - 4u : 0u, ty + 1u, clk_w + 8u, TASKBAR_H - 1u,
+                       0x00101624u, 0x00080b14u);
+    gui_draw_str_fg(clk_x, clk_y, clk, 0x00b8d8f4u);
+    (void)bg;
 
     /* ── Memory bar (16px wide, 8px tall) ── */
     uint64_t total_p = pmm_get_total_pages();
@@ -193,17 +216,32 @@ void taskbar_draw(void) {
     uint64_t fh   = console_font_height();
     uint64_t ty   = fb_h - TASKBAR_H;
 
-    console_fill_rect(0, ty, fb_w, TASKBAR_H, COL_TASKBAR);
-    console_fill_rect(0, ty, fb_w, 2u, g_theme.accent);
+    /* Panel: subtle vertical gradient with a hairline accent on top */
+    console_fill_vgrad(0, ty, fb_w, TASKBAR_H, 0x00101624u, 0x00080b14u);
+    console_fill_rect(0, ty, fb_w, 1u, 0x00223350u);
 
-    uint32_t logo_bg = g_launcher_open ? COL_TASKBTN_A : COL_LOGO;
+    /* Launcher button: accent gradient pill */
     uint64_t lw = logo_eff_w();
-    console_fill_rect(LOGO_X, ty + 4u, lw, TASKBAR_H - 8u, logo_bg);
+    uint32_t lg_top = g_launcher_open ? 0x00548ae0u : 0x002d54a8u;
+    uint32_t lg_bot = g_launcher_open ? 0x003a6cc4u : 0x001f3c80u;
+    console_fill_vgrad(LOGO_X, ty + 3u, lw, TASKBAR_H - 6u, lg_top, lg_bot);
+    {   /* pill corner softening */
+        uint32_t base = 0x000b0f1au;
+        uint64_t ph = TASKBAR_H - 6u;
+        console_fill_rect(LOGO_X,           ty + 3u,      2u, 1u, base);
+        console_fill_rect(LOGO_X,           ty + 4u,      1u, 1u, base);
+        console_fill_rect(LOGO_X + lw - 2u, ty + 3u,      2u, 1u, base);
+        console_fill_rect(LOGO_X + lw - 1u, ty + 4u,      1u, 1u, base);
+        console_fill_rect(LOGO_X,           ty + 2u + ph, 2u, 1u, base);
+        console_fill_rect(LOGO_X,           ty + 1u + ph, 1u, 1u, base);
+        console_fill_rect(LOGO_X + lw - 2u, ty + 2u + ph, 2u, 1u, base);
+        console_fill_rect(LOGO_X + lw - 1u, ty + 1u + ph, 1u, 1u, base);
+    }
     const char *logo = "FiFi OS";
     uint64_t llen = (uint64_t)gui_strlen(logo);
     uint64_t lpx  = LOGO_X + (lw - llen * fw) / 2u;
     uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
-    gui_draw_str(lpx, lpy, logo, COL_TASKBTN_FG, logo_bg);
+    gui_draw_str_fg(lpx, lpy, logo, 0x00f2f7ffu);
 
     taskbar_draw_btn(0, "Terminal");
     taskbar_draw_btn(1, "Files");
@@ -225,18 +263,29 @@ void taskbar_draw(void) {
             int islot = MAX_WINS + wi;
             uint64_t ibtw = taskbtn_w();
             uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (ibtw + TASKBTN_GAP);
-            uint64_t bg = ipc_focused ? 0x003878d8u : COL_TASKBTN_A;
-            console_fill_rect(bx, ty + 3u, ibtw, TASKBAR_H - 6u, bg);
-            if (ipc_focused)
-                console_fill_rect(bx, ty + TASKBAR_H - 5u, ibtw, 3u, 0x0060a0f0u);
-            uint64_t max_ch = ibtw / fw;
-            uint64_t tlen = (uint64_t)gui_strlen(ipc_title);
-            if (tlen > max_ch) tlen = max_ch;
-            uint64_t lpx2 = bx + (ibtw > tlen * fw ? (ibtw - tlen * fw) / 2u : 0u);
-            uint64_t lpy2 = ty + (TASKBAR_H - fh) / 2u;
-            gui_draw_str_clip(lpx2, lpy2, ipc_title, COL_TASKBTN_FG, bg, max_ch);
+            taskbar_pill(bx, ty, ibtw, ipc_title, true, ipc_focused, false);
         }
     }
+
+    /* ── Wayland browser task button (after the IPC buttons) ──────────────── */
+#ifdef __linux__
+    {
+        __attribute__((weak)) bool wayland_browser_present(void);
+        __attribute__((weak)) bool wayland_browser_minimized(void);
+        __attribute__((weak)) const char *wayland_browser_title(void);
+        if (wayland_browser_present && wayland_browser_present()) {
+            int nipc = (ipc_window_count) ? ipc_window_count() : 0;
+            int bslot = MAX_WINS + (nipc < 8 ? nipc : 8);
+            uint64_t ibtw = taskbtn_w();
+            uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (ibtw + TASKBTN_GAP);
+            bool minimized = wayland_browser_minimized && wayland_browser_minimized();
+            bool focused = !minimized;   /* visible browser is the active window */
+            const char *wl_lbl = (wayland_browser_title && wayland_browser_title())
+                                 ? wayland_browser_title() : "Browser";
+            taskbar_pill(bx, ty, ibtw, wl_lbl, true, focused, false);
+        }
+    }
+#endif
 
     taskbar_draw_tray();
 }

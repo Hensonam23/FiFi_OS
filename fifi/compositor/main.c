@@ -256,6 +256,10 @@ static void take_screenshot(void) {
     gui_toast_extern("Screenshot saved", 0x0080c8a0u);
 }
 
+/* DEV: kill -USR1 <pid> requests a screenshot (handled in the event loop). */
+static volatile sig_atomic_t g_want_shot = 0;
+static void shot_sig_handler(int sig) { (void)sig; g_want_shot = 1; }
+
 /* ── Render thread ───────────────────────────────────────────────────────── */
 /*
  * Runs compositing, flip, and DRM flush on a dedicated core so the event
@@ -326,6 +330,11 @@ static void *render_thread_fn(void *arg)
             clock_gettime(CLOCK_MONOTONIC, &t1);
             ipc_blit_all();
             wayland_blit_surfaces();
+            /* Panels stay above app windows (like any desktop shell): repaint the
+             * status bar + taskbar over whatever the Wayland layer just blitted. */
+            { extern bool wayland_any_mapped(void);
+              extern void draw_status_bar(void); extern void taskbar_draw(void);
+              if (wayland_any_mapped()) { draw_status_bar(); taskbar_draw(); } }
 
             /* Erase old cursor position from backbuf before flip */
             int32_t cx, cy; bool lb, rb;
@@ -403,6 +412,7 @@ int main(void) {
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGUSR1, shot_sig_handler);
 
     write(STDOUT_FILENO, "\033[?25l", 6);
 
@@ -519,6 +529,8 @@ int main(void) {
         ipc_poll();
         wayland_poll();
 
+        if (g_want_shot) { g_want_shot = 0; take_screenshot(); }
+
         /* ── PTY output → console backbuf ──────────────────────────────── */
         pty_poll_output();
 
@@ -558,34 +570,41 @@ int main(void) {
             bool resizing = ipc_resize_update(mcx, mcy, mlb);
             bool dragging = !resizing && ipc_drag_update(mcx, mcy, mlb);
 
+            /* Cross-layer z-order: the Wayland browser participates in the same
+             * raise_z ordering as built-in and IPC windows, so clicking chooses the
+             * genuinely-topmost layer at the cursor. */
+            extern bool wayland_covers(int32_t, int32_t);
+            extern uint32_t gui_wl_z(void);
+            extern void gui_wl_raise(void);
+            extern bool wayland_any_mapped(void);
+            uint32_t gui_z = gui_topmost_z_at(mcx, mcy);
+            uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
+            bool wl_cover  = wayland_any_mapped() && wayland_covers(mcx, mcy);
+            uint32_t wl_z  = wl_cover ? gui_wl_z() : 0;
+            bool wl_top    = wl_cover && wl_z >= gui_z && wl_z >= ipc_z;
+
             if (mlb && !pb_l && !dragging && !resizing) {
-                /* Single cross-system topmost decision: whichever layer has the higher
-                 * raise_z at the cursor owns the click. The terminal is INCLUDED here so
-                 * input matches what is visually on top (gui_overdraw_top now paints the
-                 * terminal over IPC when its raise_z is highest). When the terminal is on
-                 * top it owns the click; when an IPC app is on top (it covers the terminal)
-                 * the IPC app owns it. Use the taskbar to bring a terminal-covered app back. */
-                uint32_t gui_z = gui_topmost_z_at(mcx, mcy);
-                uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
-                if (ipc_z > gui_z) {
-                    /* IPC window is on top here → route to the IPC layer. */
+                if (wl_top) {
+                    /* Click on the browser → raise it above the built-in/IPC windows
+                     * and drop IPC focus. gui_on_tick() skips its own raise when the
+                     * browser is on top here (see gui_topmost check there). */
+                    gui_wl_raise();
+                    ipc_clear_focus();
+                } else if (ipc_z > gui_z) {
+                    /* IPC window is on top here → route to the IPC layer. Drop
+                     * Wayland keyboard focus so keys reach the IPC app (App Store
+                     * search) instead of a Wayland app still open behind it. */
+                    extern void wayland_clear_kbd_focus(void);
+                    wayland_clear_kbd_focus();
                     if (!ipc_try_close_at(mcx, mcy))
                         if (!ipc_resize_begin(mcx, mcy))
                             ipc_hit_test(mcx, mcy);
                 } else {
                     /* A built-in window / terminal / empty desktop is on top here.
-                     * gui_on_tick() does the actual built-in raise/drag/button work this
-                     * same frame; we only drop IPC keyboard focus. */
+                     * gui_on_tick() does the actual built-in raise/drag/button work. */
+                    extern void wayland_clear_kbd_focus(void);
+                    wayland_clear_kbd_focus();
                     ipc_clear_focus();
-                }
-            }
-            /* If a Wayland app is showing, clicking on it clears IPC focus */
-            {
-                extern bool wayland_any_mapped(void);
-                if (wayland_any_mapped() && mlb && !pb_l && ipc_keyboard_active()) {
-                    uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
-                    if (!ipc_z)  /* no IPC window on top — click is on Wayland */
-                        ipc_clear_focus();
                 }
             }
 
@@ -593,13 +612,10 @@ int main(void) {
                 ipc_send_focused_mouse(mcx, mcy, btns);
             mouse_done:;
 
-            /* Send mouse to Wayland: either when Wayland has focus, or when a Wayland
-             * surface is showing and no IPC window covers the cursor position */
-            {
-                extern bool wayland_any_mapped(void);
-                if (!ipc_keyboard_active() || wayland_any_mapped())
-                    wayland_send_mouse(mcx, mcy, btns);
-            }
+            /* Feed the browser input only when it is the topmost layer under the
+             * cursor (so clicks on a raised built-in window over it don't leak). */
+            if (wayland_any_mapped() && (wl_top || (gui_z == 0 && ipc_z == 0)))
+                wayland_send_mouse(mcx, mcy, btns);
             /* Scroll wheel → focused Wayland surface (browser). Consume it here so the
              * desktop/terminal don't also scroll from the same wheel motion. */
             if (wayland_has_focus()) {

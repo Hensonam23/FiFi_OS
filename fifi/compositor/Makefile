@@ -25,6 +25,8 @@ SRCS := \
     ../platform/linux/audio.c \
     ../platform/linux/ipc.c \
     ../platform/linux/wayland.c \
+    ../platform/linux/png.c \
+    ../platform/linux/vendor/lodepng.c \
     ../../kernel/src/gui.c \
     ../../kernel/src/gui_text_util.c \
     ../../kernel/src/gui_window.c \
@@ -73,6 +75,12 @@ $(BUILD)/comp/ipc.o: ../platform/linux/ipc.c | $(BUILD)/comp
 
 $(BUILD)/comp/wayland.o: ../platform/linux/wayland.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/png.o: ../platform/linux/png.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/lodepng.o: ../platform/linux/vendor/lodepng.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -Wno-all -c $< -o $@
 
 # Kernel source files (compiled with Linux stubs)
 $(BUILD)/comp/gui.o: ../../kernel/src/gui.c | $(BUILD)/comp

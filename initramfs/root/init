@@ -31,6 +31,14 @@ export DISPLAY=:0
 export LD_LIBRARY_PATH=/usr/lib:/usr/lib64
 export PIPEWIRE_RUNTIME_DIR=/tmp
 export PULSE_RUNTIME_PATH=/tmp/pulse
+# Disable the GTK/at-spi accessibility bridge and D-Bus session autolaunch. There
+# is no D-Bus/X11 session here; GTK apps (e.g. Firefox/LibreWolf) otherwise try to
+# autolaunch a session bus for a11y, and that failing path crashes them when a
+# menu/popup is shown. These make the attempt a graceful no-op instead.
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+export GNOME_ACCESSIBILITY=0
+export DBUS_SESSION_BUS_ADDRESS=disabled:
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
@@ -85,6 +93,31 @@ fi
 # Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
 ip link set lo up 2>/dev/null
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null
+
+# Persistent home for apps that refuse to run as root (archimage/JuNest):
+# they run in a user namespace as user "fifi" with /home/fifi bound to the
+# data partition so settings survive reboots.
+mkdir -p /fifi-data/home /home/fifi
+chmod 0777 /fifi-data/home /home/fifi
+mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
+
+# Apps expect standard tools in /usr/bin (#!/usr/bin/env shebangs, uname, etc.):
+# link every busybox applet there unless a real binary already exists.
+for _a in $(busybox --list); do
+    [ -e "/usr/bin/$_a" ] || ln -sf /bin/busybox "/usr/bin/$_a"
+done
+
+# ── App platform: seed fifi-run / App Store / keymap into /fifi-data ─────────
+# First-boot only (never overwrites newer copies already on the data partition).
+mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
+for f in fifi-run appstore-install.sh appstore-sync.sh; do
+    if [ ! -f "/fifi-data/apps/$f" ] && [ -f "/usr/share/fifi/$f" ]; then
+        cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"
+        chmod +x "/fifi-data/apps/$f"
+    fi
+done
+[ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
+[ -f /fifi-data/runtime/etc/fonts/fonts.conf ] || cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
 
 # Log input devices for debugging
 cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true

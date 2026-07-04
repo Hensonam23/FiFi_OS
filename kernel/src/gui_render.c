@@ -172,6 +172,44 @@ const char *desk_icon_basename(const char *path) {
     return b ? b + 1 : path;
 }
 
+/* Per-icon PNG logo cache. A logo lives next to the icon target with the same
+ * basename: /path/App.sh → /path/App.png (written by appstore-install.sh).
+ * Loaded once via the Linux platform PNG loader; weak so bare-metal skips it. */
+__attribute__((weak)) uint32_t *fifi_load_png(const char *path, uint32_t *w, uint32_t *h);
+
+typedef struct {
+    char      path[192];
+    uint32_t *img;
+    uint32_t  w, h;
+    bool      tried;
+} icon_img_t;
+static icon_img_t g_icon_imgs[DESK_ICON_MAX];
+
+static icon_img_t *desk_icon_logo(int i) {
+    if (!fifi_load_png) return NULL;
+    const char *p = g_desk_icons[i].path;
+    icon_img_t *c = &g_icon_imgs[i];
+    if (strncmp(c->path, p, sizeof(c->path)) != 0) {
+        /* path changed — reset cache slot */
+        if (c->img) { free(c->img); c->img = NULL; }
+        c->tried = false;
+        strncpy(c->path, p, sizeof(c->path) - 1);
+        c->path[sizeof(c->path) - 1] = '\0';
+    }
+    if (!c->tried) {
+        c->tried = true;
+        char png[224];
+        size_t l = strlen(p);
+        const char *dot = strrchr(p, '.');
+        size_t stem = dot ? (size_t)(dot - p) : l;
+        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
+        memcpy(png, p, stem);
+        memcpy(png + stem, ".png", 5);
+        c->img = fifi_load_png(png, &c->w, &c->h);
+    }
+    return c->img ? c : NULL;
+}
+
 void draw_desktop_icons(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
@@ -194,40 +232,47 @@ void draw_desktop_icons(void) {
         if (bg) console_fill_rect(icon_x - 2u, icon_y - 2u,
                                   DESK_ICON_W + 4u, DESK_ICON_H + 4u, bg);
 
-        /* Colored file-type square */
+        /* Icon face: real PNG logo when available, colored tile otherwise */
         const char *name = g_desk_icons[i].label[0]
                            ? g_desk_icons[i].label
                            : desk_icon_basename(g_desk_icons[i].path);
-        /* Pick color by extension */
-        const char *ext = strrchr(g_desk_icons[i].path, '.');
-        uint32_t ic = 0x00304878u; /* default blue */
-        const char *ic_txt = "FILE";
-        if (ext) {
-            if (strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".ppm") == 0 ||
-                strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0) {
-                ic = 0x00305848u; ic_txt = "IMG";
-            } else if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0 ||
-                       strcasecmp(ext, ".log") == 0) {
-                ic = 0x00384860u; ic_txt = "TXT";
-            } else if (strcasecmp(ext, ".sh") == 0) {
-                ic = 0x00305030u; ic_txt = "SH";
-            }
-        }
         uint64_t isz  = 40u;
         uint64_t iix  = icon_x + (DESK_ICON_W - isz) / 2u;
         uint64_t iiy  = icon_y + 4u;
-        console_fill_rect(iix, iiy, isz, isz, ic);
-        /* border */
-        uint32_t ibc = (ic >> 1) | 0x00404040u;
-        console_fill_rect(iix,        iiy,        isz, 1u, ibc);
-        console_fill_rect(iix,        iiy+isz-1u, isz, 1u, ibc);
-        console_fill_rect(iix,        iiy,        1u, isz, ibc);
-        console_fill_rect(iix+isz-1u, iiy,        1u, isz, ibc);
-        /* type label in center of icon */
-        uint64_t tl  = (uint64_t)gui_strlen(ic_txt);
-        uint64_t ttx = iix + (isz > tl * fw ? (isz - tl * fw) / 2u : 0u);
-        uint64_t tty = iiy + (isz - fh) / 2u;
-        gui_draw_str(ttx, tty, ic_txt, 0x00c0d8f0u, ic);
+        icon_img_t *logo = desk_icon_logo(i);
+        if (logo) {
+            console_blit_scaled_alpha(logo->img, logo->w, logo->h, iix, iiy, isz, isz);
+        } else {
+            /* Pick color by extension */
+            const char *ext = strrchr(g_desk_icons[i].path, '.');
+            uint32_t ic = 0x00304878u; /* default blue */
+            const char *ic_txt = "FILE";
+            if (ext) {
+                if (strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".ppm") == 0 ||
+                    strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0) {
+                    ic = 0x00305848u; ic_txt = "IMG";
+                } else if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0 ||
+                           strcasecmp(ext, ".log") == 0) {
+                    ic = 0x00384860u; ic_txt = "TXT";
+                } else if (strcasecmp(ext, ".sh") == 0) {
+                    ic = 0x0026543cu; ic_txt = "APP";
+                } else if (strcasecmp(ext, ".AppImage") == 0) {
+                    ic = 0x0026543cu; ic_txt = "APP";
+                }
+            }
+            console_fill_vgrad(iix, iiy, isz, isz, ic | 0x00101418u, ic);
+            /* border */
+            uint32_t ibc = (ic >> 1) | 0x00404040u;
+            console_fill_rect(iix,        iiy,        isz, 1u, ibc);
+            console_fill_rect(iix,        iiy+isz-1u, isz, 1u, ibc);
+            console_fill_rect(iix,        iiy,        1u, isz, ibc);
+            console_fill_rect(iix+isz-1u, iiy,        1u, isz, ibc);
+            /* type label in center of icon */
+            uint64_t tl  = (uint64_t)gui_strlen(ic_txt);
+            uint64_t ttx = iix + (isz > tl * fw ? (isz - tl * fw) / 2u : 0u);
+            uint64_t tty = iiy + (isz - fh) / 2u;
+            gui_draw_str_fg(ttx, tty, ic_txt, 0x00d0e4f4u);
+        }
 
         /* Label below icon (truncate to fit) */
         char lbuf[20];
@@ -450,24 +495,19 @@ void draw_desktop_bg(void) {
         }
         break;
 
-    default:  /* WALLPAPER_GRADIENT */
-        /* Subtle vertical gradient: dark navy top → slightly lighter bottom */
-        for (uint64_t y = 0; y < dav; y++) {
-            uint64_t r2 = 0x1a + y * 6 / (dav > 1 ? dav : 1);
-            uint64_t g2 = 0x1a + y * 6 / (dav > 1 ? dav : 1);
-            uint64_t b2 = 0x2e + y * 12 / (dav > 1 ? dav : 1);
-            if (r2 > 0x20) r2 = 0x20;
-            if (g2 > 0x20) g2 = 0x20;
-            if (b2 > 0x3a) b2 = 0x3a;
-            uint32_t row_col = (uint32_t)((r2 << 16) | (g2 << 8) | b2);
-            console_fill_rect(0, dt + y, fb_w, 1u, row_col);
-        }
-        /* Dot grid overlay */
-        for (uint64_t y = dt + 12; y + 1 < dbot; y += 20)
-            for (uint64_t x = 12; x + 1 < fb_w; x += 20) {
-                uint32_t dot = ((y / 20 + x / 20) & 1) ? 0x00222535u : 0x00232638u;
-                console_fill_rect(x, y, 1, 1, dot);
+    default:  /* WALLPAPER_GRADIENT — deep navy → indigo → teal-navy sweep */
+        console_fill_vgrad(0, dt,            fb_w, dav / 2u,       0x000a0d1cu, 0x00141a36u);
+        console_fill_vgrad(0, dt + dav / 2u, fb_w, dav - dav / 2u, 0x00141a36u, 0x000f2030u);
+        /* Soft accent glow band across the upper third (blended, cheap) */
+        {
+            uint64_t gy = dt + dav / 5u;
+            uint64_t gh = dav / 4u;
+            uint32_t glow = g_theme.accent;
+            for (uint64_t s = 0; s < 6u && gh > 4u; s++) {
+                console_blend_rect(0, gy + gh / 2u - gh / (2u + s), fb_w, gh / (1u + s) / 2u + 1u,
+                                   glow, (uint8_t)(3u + s));
             }
+        }
         break;
     }
     draw_desktop_icons();  /* desktop icons above wallpaper, beneath windows */
@@ -539,6 +579,16 @@ void full_redraw(void) {
         window_t *w = &g_wins[i];
         if (!w->active || w->state == WIN_HIDDEN) continue;
         if (w->anim_phase == ANIM_CLOSE && w->anim_step > ANIM_TICKS) continue;
+        /* Soft drop shadow: blended bands under/right of the window. Drawn over
+         * freshly-composited content beneath, so alpha never accumulates. */
+        if (w->anim_phase == ANIM_NONE && w->state == WIN_NORMAL) {
+            static const uint8_t sh_a[4] = { 44, 30, 18, 8 };
+            for (uint64_t s = 1; s <= 4; s++) {
+                uint8_t a = sh_a[s - 1];
+                console_blend_rect(w->x + s, w->y + w->h + (s - 1u), w->w, 1u, 0x00000000u, a);
+                console_blend_rect(w->x + w->w + (s - 1u), w->y + s, 1u, w->h, 0x00000000u, a);
+            }
+        }
         if (w->anim_phase != ANIM_NONE) {
             /* Animated frame: draw a scaled placeholder rect */
             int _sidx2 = (w->anim_step >= 1 && w->anim_step <= ANIM_TICKS) ? w->anim_step - 1 : ANIM_TICKS - 1;

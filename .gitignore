@@ -79,3 +79,8 @@ fifi/apps/gamepad/fifi-gamepad
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# scratch / test artifacts
+serial*.log
+test/popup/inject
+test/popup/mtest

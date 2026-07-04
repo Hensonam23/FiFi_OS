@@ -224,7 +224,7 @@ int g_redraw_src = 0;
 const char * const g_launcher_items[LAUNCHER_ITEMS] = {
     "Terminal", "Files", "Settings", "Viewer",
     "File Browser", "Sys Info", "Gamepad", "Sys Monitor", "Net Monitor", "New Term", "Editor", "Calculator", "Image Viewer",
-    "Security", "WiFi", "Browser", "Steam", "Proton Config",
+    "Security", "WiFi", "Browser", "Steam", "Proton Config", "App Store",
     "---",          /* separator -- not clickable */
     "Sleep",
     "Restart",
@@ -233,9 +233,41 @@ const char * const g_launcher_items[LAUNCHER_ITEMS] = {
 
 
 
+/* Map a launcher item index to the standalone binary that implements it, or
+ * NULL if the item can't become a shortcut (separator / Sleep / Restart /
+ * Shutdown). Built-in windows (items 0-3) map to their standalone equivalents
+ * so a desktop shortcut launches them the same way as any other app. */
+const char *gui_launcher_app_path(int item) {
+    switch (item) {
+        case 0: return "/bin/fifi-terminal";     /* Terminal */
+        case 1: return "/bin/fifi-filebrowser";  /* Files    */
+        case 2: return "/bin/fifi-settings";     /* Settings */
+        case 3: return "/bin/fifi-imageviewer";  /* Viewer   */
+        default: break;
+    }
+    static const char *paths[] = {
+        "/bin/fifi-filebrowser", "/bin/fifi-settings", "/bin/fifi-gamepad",
+        "/bin/fifi-sysmon", "/bin/fifi-netmon", "/bin/fifi-terminal",
+        "/bin/fifi-editor", "/bin/fifi-calc", "/bin/fifi-imageviewer",
+        "/bin/fifi-security", "/bin/fifi-wifi", "/bin/fifi-browser",
+        "/usr/bin/steam", "/bin/fifi-proton", "/fifi-data/apps/fifi-appstore",
+    };
+    int idx = item - 4;
+    if (idx >= 0 && idx < (int)(sizeof(paths) / sizeof(paths[0]))) return paths[idx];
+    return NULL;
+}
+
 /* ── Z-order public API ──────────────────────────────────────────────── */
 
 uint32_t gui_next_z(void) { return g_gui_raise_z++; }
+
+/* The Wayland window (browser) participates in the same raise_z ordering as the
+ * built-in windows so it stacks like any other window. gui_wl_raise() puts it on
+ * top (called when it's clicked/focused); gui_overdraw_top() re-draws built-in
+ * windows whose raise_z beats it so they can sit above the browser. */
+uint32_t g_wl_raise_z = 0;
+void     gui_wl_raise(void)     { g_wl_raise_z = gui_next_z(); }
+uint32_t gui_wl_z(void)         { return g_wl_raise_z; }
 
 uint32_t gui_topmost_z_at(int32_t mx, int32_t my) {
     uint32_t best = 0;
@@ -295,9 +327,44 @@ void gui_settings_load(void) {
     }
     fclose(f);
 }
+
+/* ── Desktop shortcut persistence ────────────────────────────────────────
+ * User-added desktop shortcuts survive reboots via /fifi-data. The ephemeral
+ * "Install FiFi OS" icon (/bin/fifi-installer) is deliberately NOT persisted:
+ * it is re-added conditionally at boot only while the system is a live USB. */
+#define FIFI_DESKTOP_PATH "/fifi-data/fifi-desktop.conf"
+void gui_desktop_save(void) {
+    FILE *f = fopen(FIFI_DESKTOP_PATH, "w");
+    if (!f) return;
+    for (int i = 0; i < DESK_ICON_MAX; i++) {
+        if (!g_desk_icons[i].active) continue;
+        if (strcmp(g_desk_icons[i].path, "/bin/fifi-installer") == 0) continue;
+        fprintf(f, "icon=%s\t%s\n", g_desk_icons[i].path, g_desk_icons[i].label);
+    }
+    fclose(f);
+}
+void gui_desktop_load(void) {
+    FILE *f = fopen(FIFI_DESKTOP_PATH, "r");
+    if (!f) return;
+    char line[320];
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "icon=", 5) != 0) continue;
+        char *path = line + 5;
+        /* Split on TAB: path\tlabel; strip trailing newline. */
+        char *tab = strchr(path, '\t');
+        char *label = "";
+        if (tab) { *tab = '\0'; label = tab + 1; }
+        char *nl = strchr(label, '\n'); if (nl) *nl = '\0';
+        nl = strchr(path, '\n'); if (nl) *nl = '\0';
+        if (path[0]) gui_add_desktop_icon(path, label);
+    }
+    fclose(f);
+}
 #else
 void gui_settings_save(void) {}
 void gui_settings_load(void) {}
+void gui_desktop_save(void) {}
+void gui_desktop_load(void) {}
 #endif
 
 void gui_init(void) {
@@ -345,9 +412,13 @@ void gui_init(void) {
     console_fill_rect(0, desk_top(), fb_w, desk_avail(), COL_DESKTOP);
     taskbar_draw();
     fb_load(&g_wins[1].fb, "/");
-    win_show(&g_wins[0], 0);
+    /* Boot to a clean desktop — no window auto-opens. The terminal (and every
+     * other built-in) stays hidden until launched from the taskbar/launcher. */
 
 #ifdef __linux__
+    /* Restore user-added desktop shortcuts from persistent storage. */
+    gui_desktop_load();
+
     /* On a live USB (not yet installed to disk), show an "Install FiFi OS"
      * icon on the desktop. The installer creates /fifi-data/installed when
      * done, so the icon disappears on the next boot into the installed system. */
@@ -901,6 +972,7 @@ void gui_on_tick(void) {
                                 "/bin/fifi-browser",
                                 "/usr/bin/steam",
                                 "/bin/fifi-proton",
+                                "/fifi-data/apps/fifi-appstore",
                             };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
                             int _ai = _li - 4;
@@ -2526,6 +2598,37 @@ void gui_on_tick(void) {
                     }
                 }
             }
+
+            /* ── Wayland browser task button (after the IPC buttons) ── */
+#ifdef __linux__
+            {
+                extern bool wayland_browser_present(void);
+                extern bool wayland_browser_minimized(void);
+                extern void wayland_browser_set_minimized(bool);
+                extern uint32_t ipc_topmost_z(void);
+                if (wayland_browser_present()) {
+                    int nipc2 = (ipc_window_count) ? ipc_window_count() : 0;
+                    int bslot = MAX_WINS + (nipc2 < 8 ? nipc2 : 8);
+                    uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (tbw + TASKBTN_GAP);
+                    if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
+                        if (wayland_browser_minimized()) {
+                            wayland_browser_set_minimized(false);
+                            gui_wl_raise();            /* restore + bring to front */
+                        } else {
+                            /* Visible: minimize if it's on top, else raise it. */
+                            uint32_t top = ipc_topmost_z();
+                            for (int _j = 0; _j < MAX_WINS; _j++) {
+                                window_t *_w = &g_wins[_j];
+                                if (_w->active && _w->state != WIN_HIDDEN && _w->raise_z > top) top = _w->raise_z;
+                            }
+                            if (g_wl_raise_z >= top) wayland_browser_set_minimized(true);
+                            else                     gui_wl_raise();
+                        }
+                        full_redraw();
+                    }
+                }
+            }
+#endif
         }
 
         mouse_consume_click(&cx, &cy);
@@ -2600,6 +2703,27 @@ void gui_on_tick(void) {
         g_txt_ctx_open = false;
         full_redraw();
     }
+
+    /* ── Right-click the Wayland app taskbar button → force-close it ──
+     * A reliable close that works regardless of window focus/z-order state
+     * (the in-window titlebar close can get flaky with multi-surface apps). */
+#ifdef __linux__
+    if (rbtn_pressed && (uint64_t)my >= ty) {
+        extern bool wayland_browser_present(void);
+        extern bool wayland_close_active(void);
+        __attribute__((weak)) int ipc_window_count(void);
+        if (wayland_browser_present()) {
+            uint64_t tbw2 = taskbtn_w();
+            int nipc3 = (ipc_window_count) ? ipc_window_count() : 0;
+            int bslot2 = MAX_WINS + (nipc3 < 8 ? nipc3 : 8);
+            uint64_t bx2 = taskbtn_start_x() + (uint64_t)bslot2 * (tbw2 + TASKBTN_GAP);
+            if (mx >= (int32_t)bx2 && mx < (int32_t)(bx2 + tbw2)) {
+                wayland_close_active();
+                gui_toast("Closing app...", 0x00e08060u);
+            }
+        }
+    }
+#endif
 
     /* ── Right-click on Text editor window (edit mode): context menu ── */
     if (rbtn_pressed && (uint64_t)my < ty) {
@@ -2705,10 +2829,36 @@ void gui_on_tick(void) {
             g_desk_icons[new_hov].active = false;
             if (g_desk_icon_sel == new_hov) g_desk_icon_sel = -1;
             if (g_desk_icon_dbl == new_hov) g_desk_icon_dbl = -1;
+            gui_desktop_save();
             full_redraw();
             int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
             return;
         }
+    }
+
+    /* ── Right-click a launcher item: add it as a desktop shortcut ── */
+    if (rbtn_pressed && g_launcher_open) {
+        uint64_t lx  = launcher_lx();
+        uint64_t ly  = launcher_ly();
+        uint64_t lw  = launcher_eff_w();
+        uint64_t lih = launcher_item_h();
+        bool inside = ((uint64_t)mx >= lx && (uint64_t)mx < lx + lw &&
+                       (uint64_t)my >= ly &&
+                       (uint64_t)my < ly + LAUNCHER_ITEMS * lih);
+        if (inside) {
+            int item = (int)((uint64_t)my - ly) / (int)lih;
+            const char *path = gui_launcher_app_path(item);
+            if (path && item >= 0 && item < (int)LAUNCHER_ITEMS) {
+                gui_add_desktop_icon(path, g_launcher_items[item]);
+                gui_desktop_save();
+                gui_toast("Added to Desktop", 0x0060a0e0u);
+            }
+        }
+        g_launcher_open  = false;
+        g_launcher_hover = -1;
+        full_redraw();
+        int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+        return;
     }
 
     /* ── Right-click: context menu on desktop ── */
@@ -2818,6 +2968,7 @@ void gui_on_tick(void) {
                     "/bin/fifi-browser",
                     "/usr/bin/steam",
                     "/bin/fifi-proton",
+                    "/fifi-data/apps/fifi-appstore",
                 };
                 int app_count = (int)(sizeof(app_paths) / sizeof(app_paths[0]));
                 int app_idx   = item - 4;
@@ -3228,6 +3379,12 @@ void gui_on_tick(void) {
                 hit_any = true;  /* something was here, don't fall through to terminal raise */
                 break;           /* IPC window owns this click -- compositor handles it */
             }
+            /* Skip if the Wayland browser is on top here — the compositor's mouse
+             * routing raises the browser instead. */
+#ifdef __linux__
+            { extern bool wayland_covers(int32_t, int32_t);
+              if (wayland_covers(mx, my) && g_wl_raise_z > w->raise_z) { hit_any = true; break; } }
+#endif
 
             hit_any = true;
 
@@ -4244,9 +4401,14 @@ void gui_term_scroll_page(int dir) {
 void gui_overdraw_top(void) {
     extern uint32_t ipc_topmost_z_in_rect(uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
     extern int ipc_window_count(void);
+    bool wl_mapped = false;
+#ifdef __linux__
+    { extern bool wayland_any_mapped(void); wl_mapped = wayland_any_mapped(); }
+#endif
 
-    /* No IPC windows → full_redraw already painted built-ins correctly; nothing to layer. */
-    if (ipc_window_count() == 0) return;
+    /* Nothing composited above the built-ins (no IPC windows, no Wayland browser) →
+     * full_redraw already painted them correctly. */
+    if (ipc_window_count() == 0 && !wl_mapped) return;
 
     /* Visible windows sorted ascending by raise_z (lowest first, topmost last). */
     int order[MAX_WINS], n = 0;
@@ -4274,7 +4436,10 @@ void gui_overdraw_top(void) {
          * matches what is visually on top. */
         uint32_t ipc_z = ipc_topmost_z_in_rect((uint32_t)w->x, (uint32_t)w->y,
                                                (uint32_t)w->w, (uint32_t)w->h);
-        if (w->raise_z <= ipc_z) continue;
+        uint32_t below_z = ipc_z;
+        if (wl_mapped && g_wl_raise_z > below_z) below_z = g_wl_raise_z;
+        /* Only redraw over the layers below if this window is genuinely on top. */
+        if (w->raise_z <= below_z) continue;
         /* fill_content=true draws the FULL chrome (title bar + border + focus ring). */
         switch (w->type) {
         case WIN_TERM:

@@ -694,6 +694,16 @@ bool ipc_needs_redraw(void) {
  * Called from ipc_blit_all() right after each window's body so the whole window
  * (body + chrome) is painted as a unit in z-order — a higher window then fully
  * overpaints any lower window. */
+/* Filled circle, radius 6 — matches chrome_circle() in gui_window.c so IPC
+ * windows get the exact same traffic-light buttons as built-ins. */
+static void ipc_chrome_circle(uint64_t cx, uint64_t cy, uint32_t col) {
+    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
+    for (int dy = -6; dy <= 6; dy++) {
+        uint8_t sw = spans[dy + 6];
+        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
+    }
+}
+
 static void ipc_draw_chrome(ipc_client_t *c) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
@@ -701,26 +711,23 @@ static void ipc_draw_chrome(ipc_client_t *c) {
 
     bool focused = (g_focused_idx == (int)(c - g_clients));
 
-    const uint32_t TITLE_H  = 24u;
-    const uint32_t BTN_W    = 24u;
-    const uint32_t C_ACTIVE = 0xFF3060c0u, C_INACT = 0xFF243a5cu;
-    const uint32_t C_TOPHI_A= 0xFF223a62u, C_TOPHI_I=0xFF1e2e44u;
-    const uint32_t C_SEP     = 0xFF10192au;
+    const uint32_t TITLE_H   = 24u;
+    const uint32_t BTN_W     = 24u;
     const uint32_t C_TITLEFG = 0xFFe8eeffu;
-    const uint32_t C_CLOSE   = 0xFF993333u;
-    const uint32_t C_BTNBG   = 0xFF304860u;
-    const uint32_t C_BTNFG   = 0xFFa8c0e8u;
-    uint32_t title_bg = focused ? C_ACTIVE : C_INACT;
+    /* FiFi Breeze: same gradient + colors as win_draw_chrome() */
+    uint32_t grad_top = focused ? 0x00324a72u : 0x00202836u;
+    uint32_t grad_bot = focused ? 0x001e2c48u : 0x00161c26u;
 
     uint32_t cls_x = c->win_x + c->win_w - BTN_W;
     uint32_t max_x = cls_x - BTN_W;
     uint32_t min_x = max_x - BTN_W;
     uint32_t gy    = (uint32_t)c->win_y + (TITLE_H > fh ? (uint32_t)((TITLE_H - fh) / 2u) : 0u);
 
-    /* Title bar fill + top highlight + bottom separator */
-    console_fill_rect(c->win_x, c->win_y, c->win_w, TITLE_H, title_bg);
-    console_fill_rect(c->win_x, c->win_y, c->win_w, 1u, focused ? C_TOPHI_A : C_TOPHI_I);
-    console_fill_rect(c->win_x, c->win_y + TITLE_H - 1u, c->win_w, 1u, C_SEP);
+    /* Title bar gradient + top highlight hairline + bottom separator */
+    console_fill_vgrad(c->win_x, c->win_y, c->win_w, TITLE_H, grad_top, grad_bot);
+    console_fill_rect(c->win_x, c->win_y, c->win_w, 1u,
+                      focused ? 0x00466492u : 0x002a3446u);
+    console_fill_rect(c->win_x, c->win_y + TITLE_H - 1u, c->win_w, 1u, 0x0010192au);
 
     /* Title text: centered if it fits before the buttons, else left-aligned + clipped. */
     if (fw > 0 && fh > 0) {
@@ -736,22 +743,32 @@ static void ipc_draw_chrome(ipc_client_t *c) {
             console_render_glyph_fg(tx, gy, (unsigned char)c->title[j], C_TITLEFG);
     }
 
-    /* Buttons: minimize (_), maximize (+ / -), close (x) — same layout as built-ins */
+    /* Buttons: traffic-light circles (min grey, max green, close red) */
+    uint64_t cyc = c->win_y + TITLE_H / 2u;
     if (c->win_w >= BTN_W * 3u + 16u) {
-        console_fill_rect(min_x, c->win_y, BTN_W, TITLE_H, C_BTNBG);
-        console_render_glyph(min_x + (BTN_W - fw) / 2u, gy, '_', C_BTNFG, C_BTNBG);
-        console_fill_rect(max_x, c->win_y, BTN_W, TITLE_H, C_BTNBG);
-        console_render_glyph(max_x + (BTN_W - fw) / 2u, gy, c->snapped ? '-' : '+', C_BTNFG, C_BTNBG);
+        ipc_chrome_circle(min_x + BTN_W / 2u, cyc, 0x00707a8cu);
+        ipc_chrome_circle(max_x + BTN_W / 2u, cyc, 0x005e9e56u);
     }
-    console_fill_rect(cls_x, c->win_y, BTN_W, TITLE_H, C_CLOSE);
-    console_render_glyph(cls_x + (BTN_W - fw) / 2u, gy, 'x', C_TITLEFG, C_CLOSE);
+    ipc_chrome_circle(cls_x + BTN_W / 2u, cyc, 0x00c05048u);
 
-    /* 1px window border */
-    uint32_t br_col = focused ? C_ACTIVE : C_INACT;
+    /* 1px window border — neutral frame, matches built-ins */
+    uint32_t br_col = focused ? 0x00283a58u : 0x001d2634u;
     console_fill_rect(c->win_x,                 c->win_y,                 c->win_w, 1u, br_col);
     console_fill_rect(c->win_x,                 c->win_y + c->win_h - 1u, c->win_w, 1u, br_col);
     console_fill_rect(c->win_x,                 c->win_y,                 1u, c->win_h, br_col);
     console_fill_rect(c->win_x + c->win_w - 1u, c->win_y,                 1u, c->win_h, br_col);
+    /* Focus ring, one pixel outside */
+    if (focused) {
+        uint32_t ring = 0x002b4d80u;
+        if (c->win_y > 0)
+            console_fill_rect(c->win_x > 0 ? c->win_x - 1u : 0u, c->win_y - 1u,
+                              c->win_w + 2u, 1u, ring);
+        console_fill_rect(c->win_x > 0 ? c->win_x - 1u : 0u, c->win_y + c->win_h,
+                          c->win_w + 2u, 1u, ring);
+        if (c->win_x > 0)
+            console_fill_rect(c->win_x - 1u, c->win_y, 1u, c->win_h, ring);
+        console_fill_rect(c->win_x + c->win_w, c->win_y, 1u, c->win_h, ring);
+    }
 }
 
 void ipc_blit_all(void) {
