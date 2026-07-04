@@ -495,20 +495,28 @@ void draw_desktop_bg(void) {
         }
         break;
 
-    default:  /* WALLPAPER_GRADIENT — deep navy → indigo → teal-navy sweep */
-        console_fill_vgrad(0, dt,            fb_w, dav / 2u,       0x000a0d1cu, 0x00141a36u);
-        console_fill_vgrad(0, dt + dav / 2u, fb_w, dav - dav / 2u, 0x00141a36u, 0x000f2030u);
-        /* Soft accent glow band across the upper third (blended, cheap) */
+    default: {  /* WALLPAPER_GRADIENT — polished deep-blue desktop */
+        /* Smooth three-stop vertical gradient: near-black top → steel blue →
+         * deep teal-navy bottom. Row-based, so it's cheap. */
+        uint64_t h1 = dav * 46u / 100u;
+        console_fill_vgrad(0, dt,          fb_w, h1,         0x00070a15u, 0x001a2b4c);
+        console_fill_vgrad(0, dt + h1,     fb_w, dav - h1,   0x001a2b4c,  0x00091422u);
+        /* Soft glow bloom, brightest at upper-centre — a few wide blended bands
+         * (cheap approximation of a radial light). */
         {
-            uint64_t gy = dt + dav / 5u;
-            uint64_t gh = dav / 4u;
-            uint32_t glow = g_theme.accent;
-            for (uint64_t s = 0; s < 6u && gh > 4u; s++) {
-                console_blend_rect(0, gy + gh / 2u - gh / (2u + s), fb_w, gh / (1u + s) / 2u + 1u,
-                                   glow, (uint8_t)(3u + s));
+            uint64_t cy = dt + dav * 36u / 100u;
+            uint32_t soft = 0x00325fb0u;
+            for (int s = 0; s < 5; s++) {
+                uint64_t bh = dav * (uint64_t)(7 - s) / 44u; if (bh < 2u) bh = 2u;
+                uint64_t by = cy > bh / 2u ? cy - bh / 2u : dt;
+                console_blend_rect(0, by, fb_w, bh, soft, (uint8_t)(4 + s * 3));
             }
         }
+        /* Subtle vignette top + bottom for depth. */
+        console_blend_rect(0, dt,                fb_w, dav / 12u, 0x00000000u, 45);
+        console_blend_rect(0, dbot - dav / 12u,  fb_w, dav / 12u, 0x00000000u, 60);
         break;
+    }
     }
     draw_desktop_icons();  /* desktop icons above wallpaper, beneath windows */
     draw_desktop_info();   /* overlay on top of wallpaper, beneath windows */
