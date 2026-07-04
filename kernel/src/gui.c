@@ -598,7 +598,9 @@ void gui_on_tick(void) {
      * A left-press on a favorite records it (g_fav_drag_idx) and defers the
      * action to release: past a small threshold it becomes a drag that
      * reorders the strip live; otherwise release launches the app. */
-    if (g_fav_drag_idx >= 0) {
+    /* Only user favorites (unified index >= FAVBAR_BUILTINS) drag/launch here;
+     * the built-in launchers toggle their window immediately on press. */
+    if (g_fav_drag_idx >= FAVBAR_BUILTINS) {
         if (lbtn) {
             if (!g_fav_drag_active && (mx > g_fav_press_x + 8 || mx < g_fav_press_x - 8))
                 g_fav_drag_active = true;
@@ -606,15 +608,15 @@ void gui_on_tick(void) {
                 uint64_t sx  = favbar_start_x();
                 uint64_t fbw = fav_btn_w() + TASKBTN_GAP;
                 int tgt = ((uint64_t)mx >= sx) ? (int)(((uint64_t)mx - sx) / fbw) : 0;
-                if (tgt < 0) tgt = 0;
-                if (tgt >= g_fav_count) tgt = g_fav_count - 1;
+                if (tgt < FAVBAR_BUILTINS) tgt = FAVBAR_BUILTINS;   /* can't move before built-ins */
+                if (tgt >= favbar_count()) tgt = favbar_count() - 1;
                 if (tgt != g_fav_drag_idx) {
-                    fav_t tmp = g_favs[g_fav_drag_idx];
-                    if (tgt > g_fav_drag_idx)
-                        for (int i = g_fav_drag_idx; i < tgt; i++) g_favs[i] = g_favs[i + 1];
-                    else
-                        for (int i = g_fav_drag_idx; i > tgt; i--) g_favs[i] = g_favs[i - 1];
-                    g_favs[tgt] = tmp;
+                    int a = g_fav_drag_idx - FAVBAR_BUILTINS;  /* source user-fav index */
+                    int b = tgt - FAVBAR_BUILTINS;             /* dest user-fav index */
+                    fav_t tmp = g_favs[a];
+                    if (b > a) for (int i = a; i < b; i++) g_favs[i] = g_favs[i + 1];
+                    else       for (int i = a; i > b; i--) g_favs[i] = g_favs[i - 1];
+                    g_favs[b] = tmp;
                     g_fav_drag_idx = tgt;
                     g_fav_hover = tgt;
                     taskbar_draw();
@@ -629,9 +631,12 @@ void gui_on_tick(void) {
             if (was_drag) {
                 gui_fav_save();
                 gui_toast("Favorites reordered", 0x0060a0e0u);
-            } else if (idx >= 0 && idx < g_fav_count) {
-                __attribute__((weak)) void gui_spawn_app(const char *path);
-                if (gui_spawn_app) gui_spawn_app(g_favs[idx].path);
+            } else {
+                int j = idx - FAVBAR_BUILTINS;
+                if (j >= 0 && j < g_fav_count) {
+                    __attribute__((weak)) void gui_spawn_app(const char *path);
+                    if (gui_spawn_app) gui_spawn_app(g_favs[j].path);
+                }
             }
             full_redraw();
             return;
@@ -835,28 +840,7 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Taskbar button hover tracking ── */
-    if (!g_launcher_open) {
-        int new_tbhov = -1;
-        if ((uint64_t)my >= ty) {
-            int n_btns = g_wins[3].active ? 4 : 3;
-            for (int s = 0; s < n_btns; s++) {
-                uint64_t tbw2 = taskbtn_w();
-                uint64_t bx = taskbtn_start_x() + (uint64_t)s * (tbw2 + TASKBTN_GAP);
-                if ((uint64_t)mx >= bx && (uint64_t)mx < bx + tbw2) {
-                    new_tbhov = s; break;
-                }
-            }
-        }
-        if (new_tbhov != g_taskbtn_hover) {
-            const char *tbnames[] = { "Terminal", "Files", "Settings",
-                g_wins[3].text.path[0] ? g_wins[3].text.title_buf : "Viewer" };
-            int old = g_taskbtn_hover;
-            g_taskbtn_hover = new_tbhov;
-            if (old >= 0 && old < 4) taskbar_draw_btn(old, tbnames[old]);
-            if (new_tbhov >= 0 && new_tbhov < 4) taskbar_draw_btn(new_tbhov, tbnames[new_tbhov]);
-        }
-    }
+    /* (Built-in window buttons are now favorites — handled by favbar hover above.) */
 
     /* ── Context menu hover tracking ── */
     if (g_ctx_open) {
@@ -2683,43 +2667,35 @@ void gui_on_tick(void) {
         }
 
         {
-            /* ── Taskbar favorite pressed: begin drag (launch on release) ── */
+            /* ── Taskbar favorite pressed ──
+             * Built-in launchers (first FAVBAR_BUILTINS) toggle their window
+             * immediately; user favorites begin a drag (launch on release). */
             int fav_i = favbar_hit(mx, my);
             if (fav_i >= 0) {
-                g_fav_drag_idx    = fav_i;
-                g_fav_press_x     = mx;
-                g_fav_drag_active = false;
+                int bslot = favbar_builtin_slot(fav_i);
+                if (bslot >= 0) {
+                    window_t *w = &g_wins[bslot];
+                    if (w->state == WIN_HIDDEN)      { raise_win(bslot); win_show(w, bslot); }
+                    else if (g_z[MAX_WINS - 1] == bslot) win_hide(w, bslot);
+                    else                             { raise_win(bslot); full_redraw(); }
+                } else {
+                    g_fav_drag_idx    = fav_i;
+                    g_fav_press_x     = mx;
+                    g_fav_drag_active = false;
+                }
                 mouse_consume_click(&cx, &cy);
                 return;
             }
 
             uint64_t tbw = taskbtn_w();
-            for (int s = 0; s < MAX_WINS; s++) {
-                if (s == 3 && !g_wins[3].active) continue;
-                uint64_t bx = taskbtn_start_x() + (uint64_t)s * (tbw + TASKBTN_GAP);
-                if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
-                    window_t *w = &g_wins[s];
-                    if (w->state == WIN_HIDDEN) {
-                        raise_win(s);
-                        win_show(w, s);
-                    } else if (g_z[MAX_WINS - 1] == s) {
-                        win_hide(w, s);
-                    } else {
-                        raise_win(s);
-                        full_redraw();
-                    }
-                    break;
-                }
-            }
 
-            /* ── IPC window taskbar buttons ── */
+            /* ── IPC window taskbar buttons (after the favorites strip) ── */
             __attribute__((weak)) int  ipc_window_count(void);
             __attribute__((weak)) void ipc_window_focus_slot(int slot);
             if (ipc_window_count && ipc_window_focus_slot) {
                 int nipc = ipc_window_count();
                 for (int wi = 0; wi < nipc && wi < 8; wi++) {
-                    int islot = MAX_WINS + wi;
-                    uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (tbw + TASKBTN_GAP);
+                    uint64_t bx = taskbtn_start_x() + (uint64_t)wi * (tbw + TASKBTN_GAP);
                     if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
                         ipc_window_focus_slot(wi);
                         full_redraw();
@@ -2737,7 +2713,7 @@ void gui_on_tick(void) {
                 extern uint32_t ipc_topmost_z(void);
                 if (wayland_browser_present()) {
                     int nipc2 = (ipc_window_count) ? ipc_window_count() : 0;
-                    int bslot = MAX_WINS + (nipc2 < 8 ? nipc2 : 8);
+                    int bslot = (nipc2 < 8 ? nipc2 : 8);
                     uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (tbw + TASKBTN_GAP);
                     if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
                         if (wayland_browser_minimized()) {
@@ -2844,7 +2820,7 @@ void gui_on_tick(void) {
         if (wayland_browser_present()) {
             uint64_t tbw2 = taskbtn_w();
             int nipc3 = (ipc_window_count) ? ipc_window_count() : 0;
-            int bslot2 = MAX_WINS + (nipc3 < 8 ? nipc3 : 8);
+            int bslot2 = (nipc3 < 8 ? nipc3 : 8);
             uint64_t bx2 = taskbtn_start_x() + (uint64_t)bslot2 * (tbw2 + TASKBTN_GAP);
             if (mx >= (int32_t)bx2 && mx < (int32_t)(bx2 + tbw2)) {
                 wayland_close_active();
@@ -2976,13 +2952,18 @@ void gui_on_tick(void) {
         return;
     }
 
-    /* ── Right-click a taskbar favorite: unpin it ── */
+    /* ── Right-click a taskbar favorite: unpin it (built-ins can't be removed) ── */
     if (rbtn_pressed && (uint64_t)my >= ty) {
         int fi = favbar_hit(mx, my);
-        if (fi >= 0) {
-            gui_fav_remove_at(fi);
+        if (fi >= FAVBAR_BUILTINS) {
+            gui_fav_remove_at(fi - FAVBAR_BUILTINS);
             gui_fav_save();
             gui_toast("Unpinned", 0x0060a0e0u);
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+            return;
+        } else if (fi >= 0) {
+            gui_toast("Built-in app", 0x00708090u);
             full_redraw();
             int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
             return;

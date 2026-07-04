@@ -12,12 +12,27 @@ uint64_t logo_eff_w(void) {
     return (w > LOGO_W) ? w : LOGO_W;
 }
 
-/* ── Taskbar favorites (pinned app icons, left of the window buttons) ──── */
+/* ── Taskbar favorites: built-in app launchers + user-pinned apps ─────────
+ * The first FAVBAR_BUILTINS entries are the always-present built-in windows
+ * (Terminal/Files/Settings/Viewer); the rest are user-pinned favorites. Every
+ * entry is a square icon button that shows a running indicator when its
+ * window/app is open. This replaces the old wide text window-buttons. */
+static const struct { const char *label; const char *icon; int slot; } g_fav_builtin[FAVBAR_BUILTINS] = {
+    { "Terminal",     "/bin/fifi-terminal",    0 },
+    { "Files",        "/bin/fifi-filebrowser", 1 },
+    { "Settings",     "/bin/fifi-settings",    2 },
+    { "Image Viewer", "/bin/fifi-imageviewer", 3 },
+};
+
+int favbar_count(void) { return FAVBAR_BUILTINS + g_fav_count; }
+int favbar_builtin_slot(int idx) {
+    return (idx >= 0 && idx < FAVBAR_BUILTINS) ? g_fav_builtin[idx].slot : -1;
+}
+
 uint64_t fav_btn_w(void)     { return TASKBAR_H; }                 /* square icon button */
 uint64_t favbar_start_x(void){ return LOGO_X + logo_eff_w() + 8u; }
 uint64_t favbar_w(void) {
-    if (g_fav_count <= 0) return 0;
-    return (uint64_t)g_fav_count * (fav_btn_w() + TASKBTN_GAP) + 8u;
+    return (uint64_t)favbar_count() * (fav_btn_w() + TASKBTN_GAP) + 8u;
 }
 
 uint64_t taskbtn_start_x(void) {
@@ -226,15 +241,83 @@ void taskbar_draw_tray(void) {
     }
 }
 
-/* Favorite app icons: sibling <stem>.png of the pinned path, decoded once and
- * cached by path. Linux-only (weak PNG loader). Falls back to a lettered tile. */
+/* Icon path + label for a unified favbar index (built-ins first, then user favs). */
+static const char *favbar_icon_path(int i) {
+    if (i < 0) return NULL;
+    if (i < FAVBAR_BUILTINS) return g_fav_builtin[i].icon;
+    int j = i - FAVBAR_BUILTINS;
+    return (j >= 0 && j < g_fav_count) ? g_favs[j].path : NULL;
+}
+static const char *favbar_label(int i) {
+    if (i < 0) return "";
+    if (i < FAVBAR_BUILTINS) return g_fav_builtin[i].label;
+    int j = i - FAVBAR_BUILTINS;
+    return (j >= 0 && j < g_fav_count) ? g_favs[j].label : "";
+}
+
+/* Case-insensitive "does one string contain the other" (min 3 chars). */
+static bool ci_related(const char *a, const char *b) {
+    if (!a || !b || !a[0] || !b[0]) return false;
+    char la[24], lb[24];
+    int i = 0; for (; a[i] && i < 23; i++) la[i] = (a[i] >= 'A' && a[i] <= 'Z') ? (char)(a[i] + 32) : a[i]; la[i] = 0;
+    int k = 0; for (; b[k] && k < 23; k++) lb[k] = (b[k] >= 'A' && b[k] <= 'Z') ? (char)(b[k] + 32) : b[k]; lb[k] = 0;
+    if (i < 3 || k < 3) return false;
+    const char *hay = (i >= k) ? la : lb, *ndl = (i >= k) ? lb : la;
+    for (const char *h = hay; *h; h++) {
+        const char *x = h, *y = ndl;
+        while (*x && *y && *x == *y) { x++; y++; }
+        if (!*y) return true;
+    }
+    return false;
+}
+
+/* Is the app behind favbar entry `i` currently open? Built-ins map to a window
+ * slot (exact); user favorites match by title against open IPC/browser windows. */
+static bool favbar_running(int i) {
+    if (i < FAVBAR_BUILTINS) {
+        int s = g_fav_builtin[i].slot;
+        return g_wins[s].active && g_wins[s].state != WIN_HIDDEN;
+    }
+    const char *lbl = favbar_label(i);
+    __attribute__((weak)) int  ipc_window_count(void);
+    __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
+    if (ipc_window_count && ipc_window_info) {
+        int n = ipc_window_count();
+        for (int wi = 0; wi < n && wi < 8; wi++) {
+            char t[24] = ""; bool f = false;
+            ipc_window_info(wi, t, (int)sizeof(t), &f);
+            if (ci_related(t, lbl)) return true;
+        }
+    }
+#ifdef __linux__
+    {
+        __attribute__((weak)) bool wayland_browser_present(void);
+        __attribute__((weak)) const char *wayland_browser_title(void);
+        if (wayland_browser_present && wayland_browser_present()) {
+            const char *bt = (wayland_browser_title) ? wayland_browser_title() : "Browser";
+            if (ci_related(bt, lbl) || ci_related("browser", lbl)) return true;
+        }
+    }
+#endif
+    return false;
+}
+/* Built-in window that is the topmost (focused) window. */
+static bool favbar_focused(int i) {
+    if (i >= FAVBAR_BUILTINS) return false;
+    int s = g_fav_builtin[i].slot;
+    return g_wins[s].active && g_wins[s].state != WIN_HIDDEN && g_z[MAX_WINS - 1] == s;
+}
+
+/* Favorite app icons, decoded once and cached by resolved path. Falls back to a
+ * lettered tile. Linux-only (weak PNG loader). */
 #ifdef __linux__
 __attribute__((weak)) uint32_t *fifi_load_png(const char *path, uint32_t *w, uint32_t *h);
 typedef struct { char path[192]; uint32_t *img; uint32_t w, h; bool tried; } favicon_t;
-static favicon_t g_favicon[FAV_MAX];
+static favicon_t g_favicon[FAVBAR_BUILTINS + FAV_MAX];
 static uint32_t *fav_icon(int i, uint32_t *ow, uint32_t *oh) {
-    if (!fifi_load_png || i < 0 || i >= g_fav_count) return NULL;
-    const char *p = g_favs[i].path;
+    if (!fifi_load_png || i < 0 || i >= FAVBAR_BUILTINS + FAV_MAX) return NULL;
+    const char *p = favbar_icon_path(i);
+    if (!p || !p[0]) return NULL;
     favicon_t *c = &g_favicon[i];
     if (strncmp(c->path, p, sizeof(c->path)) != 0) {
         if (c->img) { free(c->img); c->img = NULL; }
@@ -252,18 +335,20 @@ static uint32_t *fav_icon(int i, uint32_t *ow, uint32_t *oh) {
 #endif
 
 void favbar_draw(void) {
-    if (g_fav_count <= 0) return;
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
     uint64_t ty  = console_fb_height() - TASKBAR_H;
     uint64_t fbw = fav_btn_w();
     uint64_t sx  = favbar_start_x();
-    for (int i = 0; i < g_fav_count; i++) {
-        if (!g_favs[i].active) continue;
+    int n = favbar_count();
+    for (int i = 0; i < n; i++) {
         uint64_t bx  = sx + (uint64_t)i * (fbw + TASKBTN_GAP);
         bool     hov = (g_fav_hover == i);
-        uint32_t top = hov ? 0x002c3a52u : 0x00202a3cu;
-        uint32_t bot = hov ? 0x00202c40u : 0x00161d2cu;
+        bool     run = favbar_running(i);
+        bool     foc = favbar_focused(i);
+        /* Background: brighter when focused, then hovered, then merely running. */
+        uint32_t top = foc ? 0x00335a94u : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
+        uint32_t bot = foc ? 0x00244572u : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
         console_fill_vgrad(bx, ty + 3u, fbw, TASKBAR_H - 6u, top, bot);
         /* icon or lettered fallback */
         uint64_t isz = (TASKBAR_H > 14u) ? TASKBAR_H - 12u : 8u;
@@ -278,22 +363,30 @@ void favbar_draw(void) {
         }
 #endif
         if (!drew) {
-            char L[2] = { g_favs[i].label[0] ? g_favs[i].label[0] : '?', '\0' };
+            const char *lbl = favbar_label(i);
+            char L[2] = { lbl[0] ? lbl[0] : '?', '\0' };
             if (L[0] >= 'a' && L[0] <= 'z') L[0] = (char)(L[0] - 32);
             uint64_t lx = bx + (fbw > fw ? (fbw - fw) / 2u : 0u);
             uint64_t ly = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
             gui_draw_str_fg(lx, ly, L, hov ? 0x00f0f6ffu : 0x0090b8e0u);
         }
+        /* Running/open indicator: an underline bar (wider + brighter when focused). */
+        if (run) {
+            uint64_t uw = foc ? fbw - 10u : fbw / 2u;
+            uint64_t ux = bx + (fbw > uw ? (fbw - uw) / 2u : 0u);
+            console_fill_rect(ux, ty + TASKBAR_H - 3u, uw, 2u,
+                              foc ? 0x0078b4ffu : 0x00507fb0u);
+        }
     }
 }
 
 int favbar_hit(int32_t mx, int32_t my) {
-    if (g_fav_count <= 0) return -1;
     uint64_t ty = console_fb_height() - TASKBAR_H;
     if ((uint64_t)my < ty) return -1;
     uint64_t fbw = fav_btn_w();
     uint64_t sx  = favbar_start_x();
-    for (int i = 0; i < g_fav_count; i++) {
+    int n = favbar_count();
+    for (int i = 0; i < n; i++) {
         uint64_t bx = sx + (uint64_t)i * (fbw + TASKBTN_GAP);
         if ((uint64_t)mx >= bx && (uint64_t)mx < bx + fbw) return i;
     }
@@ -334,18 +427,11 @@ void taskbar_draw(void) {
     uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
     gui_draw_str_fg(lpx, lpy, logo, 0x00f2f7ffu);
 
-    /* Pinned favorite apps, between the logo and the running-window buttons. */
+    /* The favorites strip now holds the built-in launchers (Terminal/Files/
+     * Settings/Viewer) plus user-pinned apps, each with a running indicator. */
     favbar_draw();
 
-    taskbar_draw_btn(0, "Terminal");
-    taskbar_draw_btn(1, "Files");
-    taskbar_draw_btn(2, "Settings");
-    if (g_wins[3].active) {
-        const char *tv_label = (g_wins[3].text.path[0]) ? g_wins[3].text.title_buf : "Viewer";
-        taskbar_draw_btn(3, tv_label);
-    }
-
-    /* ── IPC app window buttons (slots MAX_WINS .. MAX_WINS+7) ─────────────── */
+    /* ── Running IPC app windows (labeled pills, after the favorites strip) ── */
     __attribute__((weak)) int  ipc_window_count(void);
     __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
     if (ipc_window_count && ipc_window_info) {
@@ -354,9 +440,8 @@ void taskbar_draw(void) {
             char ipc_title[20] = "App";
             bool ipc_focused = false;
             ipc_window_info(wi, ipc_title, (int)sizeof(ipc_title), &ipc_focused);
-            int islot = MAX_WINS + wi;
             uint64_t ibtw = taskbtn_w();
-            uint64_t bx = taskbtn_start_x() + (uint64_t)islot * (ibtw + TASKBTN_GAP);
+            uint64_t bx = taskbtn_start_x() + (uint64_t)wi * (ibtw + TASKBTN_GAP);
             taskbar_pill(bx, ty, ibtw, ipc_title, true, ipc_focused, false);
         }
     }
@@ -369,7 +454,7 @@ void taskbar_draw(void) {
         __attribute__((weak)) const char *wayland_browser_title(void);
         if (wayland_browser_present && wayland_browser_present()) {
             int nipc = (ipc_window_count) ? ipc_window_count() : 0;
-            int bslot = MAX_WINS + (nipc < 8 ? nipc : 8);
+            int bslot = (nipc < 8 ? nipc : 8);
             uint64_t ibtw = taskbtn_w();
             uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (ibtw + TASKBTN_GAP);
             bool minimized = wayland_browser_minimized && wayland_browser_minimized();

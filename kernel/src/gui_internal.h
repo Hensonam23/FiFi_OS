@@ -518,6 +518,7 @@ void     launcher_pin_taskbar(int filt_row);
 
 /* ── Taskbar favorites (pinned apps) ─────────────────────────────────── */
 #define FAV_MAX 10
+#define FAVBAR_BUILTINS 4   /* Terminal/Files/Settings/Viewer occupy the first favbar slots */
 typedef struct { char path[192]; char label[40]; bool active; } fav_t;
 extern fav_t g_favs[FAV_MAX];
 extern int   g_fav_count;
@@ -530,7 +531,9 @@ uint64_t fav_btn_w(void);
 uint64_t favbar_start_x(void);
 uint64_t favbar_w(void);        /* total strip width (0 when no favorites) */
 void     favbar_draw(void);
-int      favbar_hit(int32_t mx, int32_t my);  /* favorite index or -1 */
+int      favbar_hit(int32_t mx, int32_t my);  /* unified favbar index or -1 */
+int      favbar_count(void);                  /* FAVBAR_BUILTINS + user favorites */
+int      favbar_builtin_slot(int idx);        /* window slot for a built-in entry, else -1 */
 uint32_t *app_load_icon_png(const char *exec, uint32_t *w, uint32_t *h);  /* gui_widgets.c */
 int      launcher_hit_row(int32_t mx, int32_t my);  /* filtered idx or -1 (body only) */
 bool     launcher_in_search(int32_t mx, int32_t my);
