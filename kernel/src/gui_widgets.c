@@ -45,13 +45,44 @@ static bool lw_substr_ci(const char *hay, const char *needle) {
  * PNG loader is a weak symbol absent on bare-metal. */
 #ifdef __linux__
 __attribute__((weak)) uint32_t *fifi_load_png(const char *path, uint32_t *w, uint32_t *h);
+
+/* Resolve an app icon for an exec path, trying two locations in order:
+ *   1. sibling <stem>.png  (installed AppImage apps ship this next to <Name>.sh)
+ *   2. /fifi-data/icons/<basename>.png  (bundled icons for built-in/standalone apps)
+ * Returns a freshly-loaded ARGB buffer (caller caches it) or NULL. */
+uint32_t *app_load_icon_png(const char *exec, uint32_t *w, uint32_t *h) {
+    if (!fifi_load_png || !exec || !exec[0]) return NULL;
+    char png[256];
+    size_t l = strlen(exec);
+    const char *dot = strrchr(exec, '.');
+    size_t stem = dot ? (size_t)(dot - exec) : l;
+    if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
+    memcpy(png, exec, stem);
+    memcpy(png + stem, ".png", 5);
+    uint32_t *img = fifi_load_png(png, w, h);
+    if (img) return img;
+    const char *base = exec;
+    for (const char *p = exec; *p; p++) if (*p == '/') base = p + 1;
+    size_t bl = strlen(base);
+    const char *bdot = strrchr(base, '.');
+    if (bdot) bl = (size_t)(bdot - base);
+    static const char pre[] = "/fifi-data/icons/";
+    if (sizeof(pre) - 1 + bl + 5 < sizeof(png)) {
+        memcpy(png, pre, sizeof(pre) - 1);
+        memcpy(png + sizeof(pre) - 1, base, bl);
+        memcpy(png + sizeof(pre) - 1 + bl, ".png", 5);
+        img = fifi_load_png(png, w, h);
+    }
+    return img;
+}
+
 typedef struct { char path[192]; uint32_t *img; uint32_t w, h; bool tried; } licon_t;
 static licon_t g_licons[LAUNCH_MAX];
 
 static licon_t *launch_icon(int i) {
     if (!fifi_load_png || i < 0 || i >= g_launch_n) return NULL;
     const char *ex = g_launch[i].exec;
-    if (!ex[0]) return NULL;   /* built-in windows / power actions: no icon file */
+    if (!ex[0]) return NULL;   /* power actions: no icon file */
     licon_t *c = &g_licons[i];
     if (strncmp(c->path, ex, sizeof(c->path)) != 0) {
         if (c->img) { free(c->img); c->img = NULL; }
@@ -61,14 +92,7 @@ static licon_t *launch_icon(int i) {
     }
     if (!c->tried) {
         c->tried = true;
-        char png[224];
-        size_t l = strlen(ex);
-        const char *dot = strrchr(ex, '.');
-        size_t stem = dot ? (size_t)(dot - ex) : l;
-        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
-        memcpy(png, ex, stem);
-        memcpy(png + stem, ".png", 5);
-        c->img = fifi_load_png(png, &c->w, &c->h);
+        c->img = app_load_icon_png(ex, &c->w, &c->h);
     }
     return c->img ? c : NULL;
 }
@@ -97,10 +121,12 @@ void launcher_open_reset(void) {
     g_launch_q[0] = '\0'; g_launch_qlen = 0;
     g_launcher_hover = 0; g_launcher_scroll = 0;
 
-    launch_add("Terminal",        NULL, 0, 0);
-    launch_add("Files",           NULL, 1, 0);
-    launch_add("Settings",        NULL, 2, 0);
-    launch_add("Image Viewer",    NULL, 3, 0);
+    /* Built-in windows: exec is set only so the icon resolver finds a logo;
+     * launcher_do_launch checks .builtin first, so these still open the window. */
+    launch_add("Terminal",        "/bin/fifi-terminal",    0, 0);
+    launch_add("Files",           "/bin/fifi-filebrowser", 1, 0);
+    launch_add("Settings",        "/bin/fifi-settings",    2, 0);
+    launch_add("Image Viewer",    "/bin/fifi-imageviewer", 3, 0);
     launch_add("App Store",       "/fifi-data/apps/fifi-appstore", -1, 0);
     launch_add("Text Editor",     "/bin/fifi-editor",    -1, 0);
     launch_add("Calculator",      "/bin/fifi-calc",      -1, 0);

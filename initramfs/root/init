@@ -119,6 +119,16 @@ done
 [ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
 [ -f /fifi-data/runtime/etc/fonts/fonts.conf ] || cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
 
+# Bundled app icons (built-in + standalone apps) — copy any missing into /fifi-data/icons.
+mkdir -p /fifi-data/icons
+if [ -d /usr/share/fifi/icons ]; then
+    for ic in /usr/share/fifi/icons/*.png; do
+        [ -f "$ic" ] || continue
+        b=$(basename "$ic")
+        [ -f "/fifi-data/icons/$b" ] || cp "$ic" "/fifi-data/icons/$b" 2>/dev/null || true
+    done
+fi
+
 # Log input devices for debugging
 cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
 ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true

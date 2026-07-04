@@ -531,6 +531,7 @@ uint64_t favbar_start_x(void);
 uint64_t favbar_w(void);        /* total strip width (0 when no favorites) */
 void     favbar_draw(void);
 int      favbar_hit(int32_t mx, int32_t my);  /* favorite index or -1 */
+uint32_t *app_load_icon_png(const char *exec, uint32_t *w, uint32_t *h);  /* gui_widgets.c */
 int      launcher_hit_row(int32_t mx, int32_t my);  /* filtered idx or -1 (body only) */
 bool     launcher_in_search(int32_t mx, int32_t my);
 uint64_t launcher_row_h(void);

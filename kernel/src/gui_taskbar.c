@@ -244,14 +244,7 @@ static uint32_t *fav_icon(int i, uint32_t *ow, uint32_t *oh) {
     }
     if (!c->tried) {
         c->tried = true;
-        char png[224];
-        size_t l = strlen(p);
-        const char *dot = strrchr(p, '.');
-        size_t stem = dot ? (size_t)(dot - p) : l;
-        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
-        memcpy(png, p, stem);
-        memcpy(png + stem, ".png", 5);
-        c->img = fifi_load_png(png, &c->w, &c->h);
+        c->img = app_load_icon_png(p, &c->w, &c->h);
     }
     if (c->img) { *ow = c->w; *oh = c->h; return c->img; }
     return NULL;
