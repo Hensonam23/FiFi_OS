@@ -274,13 +274,18 @@ void draw_desktop_icons(void) {
             gui_draw_str_fg(ttx, tty, ic_txt, 0x00d0e4f4u);
         }
 
-        /* Label below icon (truncate to fit) */
-        char lbuf[20];
+        /* Label below icon. Icons are a single right-edge column, so a long name
+         * may extend left of the icon cell without colliding — center it on the
+         * icon and clamp to the screen so full names ("LibreOffice") stay readable. */
+        char lbuf[24];
         strncpy(lbuf, name, sizeof(lbuf) - 1);
         lbuf[sizeof(lbuf) - 1] = '\0';
-        uint64_t llen = (uint64_t)gui_strlen(lbuf);
-        uint64_t llx  = icon_x + (llen * fw < DESK_ICON_W
-                        ? (DESK_ICON_W - llen * fw) / 2u : 0u);
+        uint64_t llen  = (uint64_t)gui_strlen(lbuf);
+        uint64_t lwpx  = llen * fw;
+        uint64_t ictr  = icon_x + DESK_ICON_W / 2u;
+        uint64_t llx   = (ictr > lwpx / 2u) ? ictr - lwpx / 2u : 0u;
+        if (llx + lwpx > console_fb_width())            /* clamp to right edge */
+            llx = console_fb_width() > lwpx ? console_fb_width() - lwpx : 0u;
         uint64_t lly  = icon_y + isz + 8u;
         uint32_t lbg  = (bg && g_theme.wallpaper != WALLPAPER_IMAGE) ? bg : 0x00000000u;
         gui_draw_str(llx, lly, lbuf, hov ? 0x00e0efffU : 0x00c0d8f0u, lbg);
