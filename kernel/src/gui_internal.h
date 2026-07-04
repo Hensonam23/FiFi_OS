@@ -501,6 +501,23 @@ void     launcher_open_reset(void);      /* rebuild list + clear query/sel/scrol
 void     launcher_filter(void);          /* rebuild filtered view from query */
 void     launcher_do_launch(int filt_row);
 void     launcher_add_desktop(int filt_row);
+void     launcher_pin_taskbar(int filt_row);
+
+/* ── Taskbar favorites (pinned apps) ─────────────────────────────────── */
+#define FAV_MAX 10
+typedef struct { char path[192]; char label[40]; bool active; } fav_t;
+extern fav_t g_favs[FAV_MAX];
+extern int   g_fav_count;
+extern int   g_fav_hover;
+void     gui_fav_save(void);
+void     gui_fav_load(void);
+bool     gui_fav_add(const char *path, const char *label);  /* false if dup/full */
+void     gui_fav_remove_at(int idx);
+uint64_t fav_btn_w(void);
+uint64_t favbar_start_x(void);
+uint64_t favbar_w(void);        /* total strip width (0 when no favorites) */
+void     favbar_draw(void);
+int      favbar_hit(int32_t mx, int32_t my);  /* favorite index or -1 */
 int      launcher_hit_row(int32_t mx, int32_t my);  /* filtered idx or -1 (body only) */
 bool     launcher_in_search(int32_t mx, int32_t my);
 uint64_t launcher_row_h(void);

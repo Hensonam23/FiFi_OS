@@ -360,12 +360,63 @@ void gui_desktop_load(void) {
     }
     fclose(f);
 }
+#define FIFI_FAV_PATH "/fifi-data/fifi-favorites.conf"
+void gui_fav_save(void) {
+    FILE *f = fopen(FIFI_FAV_PATH, "w");
+    if (!f) return;
+    for (int i = 0; i < g_fav_count; i++)
+        if (g_favs[i].active)
+            fprintf(f, "fav=%s\t%s\n", g_favs[i].path, g_favs[i].label);
+    fclose(f);
+}
+void gui_fav_load(void) {
+    FILE *f = fopen(FIFI_FAV_PATH, "r");
+    if (!f) return;
+    char line[320];
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "fav=", 4) != 0) continue;
+        char *path = line + 4;
+        char *tab = strchr(path, '\t');
+        char *label = "";
+        if (tab) { *tab = '\0'; label = tab + 1; }
+        char *nl = strchr(label, '\n'); if (nl) *nl = '\0';
+        nl = strchr(path, '\n'); if (nl) *nl = '\0';
+        if (path[0]) gui_fav_add(path, label);
+    }
+    fclose(f);
+}
 #else
 void gui_settings_save(void) {}
 void gui_settings_load(void) {}
 void gui_desktop_save(void) {}
 void gui_desktop_load(void) {}
+void gui_fav_save(void) {}
+void gui_fav_load(void) {}
 #endif
+
+/* ── Taskbar favorites model (shared, both platforms) ─────────────────── */
+fav_t g_favs[FAV_MAX];
+int   g_fav_count = 0;
+int   g_fav_hover = -1;
+
+bool gui_fav_add(const char *path, const char *label) {
+    if (!path || !path[0]) return false;
+    for (int i = 0; i < g_fav_count; i++)
+        if (g_favs[i].active && strcmp(g_favs[i].path, path) == 0) return false; /* dup */
+    if (g_fav_count >= FAV_MAX) return false;
+    fav_t *e = &g_favs[g_fav_count++];
+    int i = 0; for (; path[i] && i < 191; i++) e->path[i] = path[i]; e->path[i] = '\0';
+    int j = 0; if (label) { for (; label[j] && j < 39; j++) e->label[j] = label[j]; } e->label[j] = '\0';
+    e->active = true;
+    return true;
+}
+void gui_fav_remove_at(int idx) {
+    if (idx < 0 || idx >= g_fav_count) return;
+    for (int i = idx; i < g_fav_count - 1; i++) g_favs[i] = g_favs[i + 1];
+    g_fav_count--;
+    g_favs[g_fav_count].active = false;
+    if (g_fav_hover >= g_fav_count) g_fav_hover = -1;
+}
 
 void gui_init(void) {
     uint64_t fb_w = console_fb_width();
@@ -416,8 +467,9 @@ void gui_init(void) {
      * other built-in) stays hidden until launched from the taskbar/launcher. */
 
 #ifdef __linux__
-    /* Restore user-added desktop shortcuts from persistent storage. */
+    /* Restore user-added desktop shortcuts + taskbar favorites from storage. */
     gui_desktop_load();
+    gui_fav_load();
 
     /* On a live USB (not yet installed to disk), show an "Install FiFi OS"
      * icon on the desktop. The installer creates /fifi-data/installed when
@@ -723,6 +775,15 @@ void gui_on_tick(void) {
         if (new_hover >= 0 && new_hover != g_launcher_hover) {
             g_launcher_hover = new_hover;
             launcher_draw();
+        }
+    }
+
+    /* ── Taskbar favorite hover tracking ── */
+    if (!g_launcher_open) {
+        int new_fhov = favbar_hit(mx, my);
+        if (new_fhov != g_fav_hover) {
+            g_fav_hover = new_fhov;
+            favbar_draw();
         }
     }
 
@@ -2548,6 +2609,16 @@ void gui_on_tick(void) {
         }
 
         {
+            /* ── Taskbar favorite clicked: launch it ── */
+            int fav_i = favbar_hit(mx, my);
+            if (fav_i >= 0) {
+                __attribute__((weak)) void gui_spawn_app(const char *path);
+                if (gui_spawn_app) gui_spawn_app(g_favs[fav_i].path);
+                full_redraw();
+                mouse_consume_click(&cx, &cy);
+                return;
+            }
+
             uint64_t tbw = taskbtn_w();
             for (int s = 0; s < MAX_WINS; s++) {
                 if (s == 3 && !g_wins[3].active) continue;
@@ -2820,15 +2891,28 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Right-click a launcher item: pin it as a desktop shortcut ── */
+    /* ── Right-click a launcher item: pin it to the taskbar favorites ── */
     if (rbtn_pressed && g_launcher_open) {
         int row = launcher_hit_row(mx, my);
-        if (row >= 0) launcher_add_desktop(row);
+        if (row >= 0) launcher_pin_taskbar(row);
         g_launcher_open  = false;
         g_launcher_hover = -1;
         full_redraw();
         int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
         return;
+    }
+
+    /* ── Right-click a taskbar favorite: unpin it ── */
+    if (rbtn_pressed && (uint64_t)my >= ty) {
+        int fi = favbar_hit(mx, my);
+        if (fi >= 0) {
+            gui_fav_remove_at(fi);
+            gui_fav_save();
+            gui_toast("Unpinned", 0x0060a0e0u);
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+            return;
+        }
     }
 
     /* ── Right-click: context menu on desktop ── */

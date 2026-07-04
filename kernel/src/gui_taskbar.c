@@ -1,4 +1,8 @@
 #include "gui_internal.h"
+#ifdef __linux__
+#include <string.h>
+#include <stdlib.h>
+#endif
 
 /* ── Taskbar ─────────────────────────────────────────────────────────── */
 
@@ -8,8 +12,16 @@ uint64_t logo_eff_w(void) {
     return (w > LOGO_W) ? w : LOGO_W;
 }
 
+/* ── Taskbar favorites (pinned app icons, left of the window buttons) ──── */
+uint64_t fav_btn_w(void)     { return TASKBAR_H; }                 /* square icon button */
+uint64_t favbar_start_x(void){ return LOGO_X + logo_eff_w() + 8u; }
+uint64_t favbar_w(void) {
+    if (g_fav_count <= 0) return 0;
+    return (uint64_t)g_fav_count * (fav_btn_w() + TASKBTN_GAP) + 8u;
+}
+
 uint64_t taskbtn_start_x(void) {
-    return LOGO_X + logo_eff_w() + 8u;
+    return favbar_start_x() + favbar_w();
 }
 
 uint64_t taskbtn_w(void) {
@@ -209,6 +221,87 @@ void taskbar_draw_tray(void) {
     }
 }
 
+/* Favorite app icons: sibling <stem>.png of the pinned path, decoded once and
+ * cached by path. Linux-only (weak PNG loader). Falls back to a lettered tile. */
+#ifdef __linux__
+__attribute__((weak)) uint32_t *fifi_load_png(const char *path, uint32_t *w, uint32_t *h);
+typedef struct { char path[192]; uint32_t *img; uint32_t w, h; bool tried; } favicon_t;
+static favicon_t g_favicon[FAV_MAX];
+static uint32_t *fav_icon(int i, uint32_t *ow, uint32_t *oh) {
+    if (!fifi_load_png || i < 0 || i >= g_fav_count) return NULL;
+    const char *p = g_favs[i].path;
+    favicon_t *c = &g_favicon[i];
+    if (strncmp(c->path, p, sizeof(c->path)) != 0) {
+        if (c->img) { free(c->img); c->img = NULL; }
+        c->tried = false;
+        strncpy(c->path, p, sizeof(c->path) - 1);
+        c->path[sizeof(c->path) - 1] = '\0';
+    }
+    if (!c->tried) {
+        c->tried = true;
+        char png[224];
+        size_t l = strlen(p);
+        const char *dot = strrchr(p, '.');
+        size_t stem = dot ? (size_t)(dot - p) : l;
+        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
+        memcpy(png, p, stem);
+        memcpy(png + stem, ".png", 5);
+        c->img = fifi_load_png(png, &c->w, &c->h);
+    }
+    if (c->img) { *ow = c->w; *oh = c->h; return c->img; }
+    return NULL;
+}
+#endif
+
+void favbar_draw(void) {
+    if (g_fav_count <= 0) return;
+    uint64_t fw  = console_font_width();
+    uint64_t fh  = console_font_height();
+    uint64_t ty  = console_fb_height() - TASKBAR_H;
+    uint64_t fbw = fav_btn_w();
+    uint64_t sx  = favbar_start_x();
+    for (int i = 0; i < g_fav_count; i++) {
+        if (!g_favs[i].active) continue;
+        uint64_t bx  = sx + (uint64_t)i * (fbw + TASKBTN_GAP);
+        bool     hov = (g_fav_hover == i);
+        uint32_t top = hov ? 0x002c3a52u : 0x00202a3cu;
+        uint32_t bot = hov ? 0x00202c40u : 0x00161d2cu;
+        console_fill_vgrad(bx, ty + 3u, fbw, TASKBAR_H - 6u, top, bot);
+        /* icon or lettered fallback */
+        uint64_t isz = (TASKBAR_H > 14u) ? TASKBAR_H - 12u : 8u;
+        uint64_t ix  = bx + (fbw > isz ? (fbw - isz) / 2u : 0u);
+        uint64_t iy  = ty + (TASKBAR_H > isz ? (TASKBAR_H - isz) / 2u : 0u);
+        bool drew = false;
+#ifdef __linux__
+        {
+            uint32_t iw = 0, ih = 0;
+            uint32_t *img = fav_icon(i, &iw, &ih);
+            if (img) { console_blit_scaled_alpha(img, iw, ih, ix, iy, isz, isz); drew = true; }
+        }
+#endif
+        if (!drew) {
+            char L[2] = { g_favs[i].label[0] ? g_favs[i].label[0] : '?', '\0' };
+            if (L[0] >= 'a' && L[0] <= 'z') L[0] = (char)(L[0] - 32);
+            uint64_t lx = bx + (fbw > fw ? (fbw - fw) / 2u : 0u);
+            uint64_t ly = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
+            gui_draw_str_fg(lx, ly, L, hov ? 0x00f0f6ffu : 0x0090b8e0u);
+        }
+    }
+}
+
+int favbar_hit(int32_t mx, int32_t my) {
+    if (g_fav_count <= 0) return -1;
+    uint64_t ty = console_fb_height() - TASKBAR_H;
+    if ((uint64_t)my < ty) return -1;
+    uint64_t fbw = fav_btn_w();
+    uint64_t sx  = favbar_start_x();
+    for (int i = 0; i < g_fav_count; i++) {
+        uint64_t bx = sx + (uint64_t)i * (fbw + TASKBTN_GAP);
+        if ((uint64_t)mx >= bx && (uint64_t)mx < bx + fbw) return i;
+    }
+    return -1;
+}
+
 void taskbar_draw(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t fb_h = console_fb_height();
@@ -242,6 +335,9 @@ void taskbar_draw(void) {
     uint64_t lpx  = LOGO_X + (lw - llen * fw) / 2u;
     uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
     gui_draw_str_fg(lpx, lpy, logo, 0x00f2f7ffu);
+
+    /* Pinned favorite apps, between the logo and the running-window buttons. */
+    favbar_draw();
 
     taskbar_draw_btn(0, "Terminal");
     taskbar_draw_btn(1, "Files");

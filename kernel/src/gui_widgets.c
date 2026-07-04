@@ -248,6 +248,20 @@ void launcher_add_desktop(int filt_row) {
     gui_toast("Added to Desktop", 0x0060a0e0u);
 }
 
+/* Right-clicking a launcher item pins it to the taskbar favorites strip. */
+void launcher_pin_taskbar(int filt_row) {
+    if (filt_row < 0 || filt_row >= g_launch_filt_n) return;
+    launch_entry_t *e = &g_launch[g_launch_filt[filt_row]];
+    const char *path = e->exec[0] ? e->exec : launch_builtin_path(e->builtin);
+    if (!path) { gui_toast("Can't pin that", 0x00e08060u); return; }
+    if (gui_fav_add(path, e->label)) {
+        gui_fav_save();
+        gui_toast("Pinned to Taskbar", 0x0060a0e0u);
+    } else {
+        gui_toast("Already pinned", 0x00708090u);
+    }
+}
+
 /* ── Draw ──────────────────────────────────────────────────────────────── */
 void launcher_draw(void) {
     uint64_t lx = launcher_lx(), ly = launcher_ly();
