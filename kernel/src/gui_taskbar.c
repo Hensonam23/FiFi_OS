@@ -493,6 +493,17 @@ void vol_popup_draw(void) {
 bool     g_cal_popup_open = false;
 uint64_t g_clk_x = 0, g_clk_w = 0;
 uint64_t g_cal_pop_x = 0, g_cal_pop_y = 0, g_cal_pop_w = 0, g_cal_pop_h = 0;
+int      g_cal_view_mon = 0, g_cal_view_year = 0;   /* 0 = uninitialized */
+bool     g_cal_pick_open = false;
+uint64_t g_cal_prev_bx = 0, g_cal_next_bx = 0, g_cal_arrow_by = 0, g_cal_arrow_bw = 0, g_cal_arrow_bh = 0;
+uint64_t g_cal_hdr_bx = 0, g_cal_hdr_bw = 0, g_cal_hdr_by = 0, g_cal_hdr_bh = 0;
+uint64_t g_cal_yr_prev_bx = 0, g_cal_yr_next_bx = 0, g_cal_yr_by = 0, g_cal_yr_bw = 0, g_cal_yr_bh = 0;
+uint64_t g_cal_mgrid_x = 0, g_cal_mgrid_y = 0, g_cal_mcell_w = 0, g_cal_mcell_h = 0;
+
+static const char *cal_month_names[] = { "January", "February", "March", "April",
+    "May", "June", "July", "August", "September", "October", "November", "December" };
+static const char *cal_month_abbr[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 /* Sakamoto's day-of-week: 0=Sunday .. 6=Saturday */
 static int cal_dow(int y, int m, int d) {
@@ -515,16 +526,20 @@ void cal_popup_draw(void) {
     uint64_t fh   = console_font_height();
     uint64_t ty   = fb_h - TASKBAR_H;
 
-    uint8_t d = 1, mon = 1; uint16_t yr = 2026;
-    rtc_get_date(&d, &mon, &yr);
-    if (mon < 1) mon = 1; if (mon > 12) mon = 12;
+    uint8_t td = 1, tmon = 1; uint16_t tyr = 2026;
+    rtc_get_date(&td, &tmon, &tyr);
+    if (tmon < 1) tmon = 1; if (tmon > 12) tmon = 12;
+    /* g_cal_view_* are seeded by the clock-click handler; guard anyway */
+    if (g_cal_view_mon < 1 || g_cal_view_mon > 12) g_cal_view_mon = tmon;
+    if (g_cal_view_year <= 0) g_cal_view_year = tyr;
+    int vmon = g_cal_view_mon, vyr = g_cal_view_year;
 
     uint64_t cell_w = fw * 3u + 2u;
     uint64_t cell_h = fh + 4u;
     uint64_t pad    = 8u;
     uint64_t grid_w = 7u * cell_w;
     uint64_t pop_w  = grid_w + 2u * pad;
-    uint64_t header_h = fh + 6u, wk_h = fh + 2u;
+    uint64_t header_h = fh + 8u, wk_h = fh + 2u;
     uint64_t pop_h  = pad + header_h + 4u + wk_h + 6u * cell_h + pad;
 
     uint64_t pop_right = (g_clk_w > 0u) ? (g_clk_x + g_clk_w) : (fb_w - 4u);
@@ -534,7 +549,6 @@ void cal_popup_draw(void) {
     g_cal_pop_x = px; g_cal_pop_y = py; g_cal_pop_w = pop_w; g_cal_pop_h = pop_h;
 
     /* Background + accent border */
-    uint32_t pbg = 0x00101828u;
     uint32_t pbo = g_theme.accent;
     console_fill_vgrad(px, py, pop_w, pop_h, 0x00141d30u, 0x000c1220u);
     console_fill_rect(px, py, pop_w, 1u, pbo);
@@ -542,23 +556,75 @@ void cal_popup_draw(void) {
     console_fill_rect(px, py, 1u, pop_h, pbo);
     console_fill_rect(px + pop_w - 1u, py, 1u, pop_h, pbo);
 
-    /* Header: "Month YYYY" */
-    static const char *mn[] = { "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December" };
+    /* ── Header row: [<]  Month YYYY  [>]  (month name is clickable) ── */
+    uint64_t hrow_y = py + pad;
+    uint64_t aw = fw + 10u, ah = header_h;
+    g_cal_prev_bx = px + pad;            g_cal_next_bx = px + pop_w - pad - aw;
+    g_cal_arrow_by = hrow_y;             g_cal_arrow_bw = aw; g_cal_arrow_bh = ah;
+    /* arrow buttons */
+    for (int a = 0; a < 2; a++) {
+        uint64_t abx = a ? g_cal_next_bx : g_cal_prev_bx;
+        console_fill_vgrad(abx, hrow_y, aw, ah, 0x0024344cu, 0x001a2638u);
+        const char *ac = a ? ">" : "<";
+        gui_draw_str_fg(abx + (aw > fw ? (aw - fw) / 2u : 0u),
+                        hrow_y + (ah > fh ? (ah - fh) / 2u : 0u), ac, 0x00b8d8f4u);
+    }
+    /* month + year label, centered and clickable */
     char hdr[24]; int hi = 0;
-    const char *ms = mn[mon - 1];
+    const char *ms = cal_month_names[vmon - 1];
     for (int k = 0; ms[k] && hi < 15; k++) hdr[hi++] = ms[k];
     hdr[hi++] = ' ';
-    hdr[hi++] = (char)('0' + (yr / 1000) % 10);
-    hdr[hi++] = (char)('0' + (yr / 100) % 10);
-    hdr[hi++] = (char)('0' + (yr / 10) % 10);
-    hdr[hi++] = (char)('0' + yr % 10);
+    hdr[hi++] = (char)('0' + (vyr / 1000) % 10);
+    hdr[hi++] = (char)('0' + (vyr / 100) % 10);
+    hdr[hi++] = (char)('0' + (vyr / 10) % 10);
+    hdr[hi++] = (char)('0' + vyr % 10);
     hdr[hi] = '\0';
     uint64_t hlen = (uint64_t)hi * fw;
     uint64_t hx = px + (pop_w > hlen ? (pop_w - hlen) / 2u : 0u);
-    gui_draw_str_fg(hx, py + pad, hdr, 0x00e6ecf7u);
+    g_cal_hdr_bx = g_cal_prev_bx + aw; g_cal_hdr_bw = g_cal_next_bx - (g_cal_prev_bx + aw);
+    g_cal_hdr_by = hrow_y;             g_cal_hdr_bh = ah;
+    gui_draw_str_fg(hx, hrow_y + (ah > fh ? (ah - fh) / 2u : 0u), hdr,
+                    g_cal_pick_open ? 0x0080b4ffu : 0x00e6ecf7u);
 
-    /* Weekday header row */
+    /* ── Month/year picker overlay ── */
+    if (g_cal_pick_open) {
+        uint64_t body_y = hrow_y + header_h + 4u;
+        /* Year stepper: [<] YYYY [>] */
+        uint64_t yb_w = fw + 10u, yb_h = fh + 6u;
+        uint64_t yrow_y = body_y;
+        char ys[5]; ys[0]=(char)('0'+(vyr/1000)%10); ys[1]=(char)('0'+(vyr/100)%10);
+        ys[2]=(char)('0'+(vyr/10)%10); ys[3]=(char)('0'+vyr%10); ys[4]='\0';
+        uint64_t ys_w = 4u * fw;
+        uint64_t grp_w = yb_w + 12u + ys_w + 12u + yb_w;
+        uint64_t grp_x = px + (pop_w > grp_w ? (pop_w - grp_w) / 2u : 0u);
+        g_cal_yr_prev_bx = grp_x; g_cal_yr_next_bx = grp_x + grp_w - yb_w;
+        g_cal_yr_by = yrow_y; g_cal_yr_bw = yb_w; g_cal_yr_bh = yb_h;
+        console_fill_vgrad(g_cal_yr_prev_bx, yrow_y, yb_w, yb_h, 0x0024344cu, 0x001a2638u);
+        gui_draw_str_fg(g_cal_yr_prev_bx + (yb_w-fw)/2u, yrow_y + (yb_h-fh)/2u, "<", 0x00b8d8f4u);
+        console_fill_vgrad(g_cal_yr_next_bx, yrow_y, yb_w, yb_h, 0x0024344cu, 0x001a2638u);
+        gui_draw_str_fg(g_cal_yr_next_bx + (yb_w-fw)/2u, yrow_y + (yb_h-fh)/2u, ">", 0x00b8d8f4u);
+        gui_draw_str_fg(grp_x + yb_w + 12u, yrow_y + (yb_h-fh)/2u, ys, 0x00e6ecf7u);
+
+        /* 3x4 month grid */
+        uint64_t mg_y = yrow_y + yb_h + 8u;
+        uint64_t mcell_w = grid_w / 3u, mcell_h = fh + 10u;
+        g_cal_mgrid_x = px + pad; g_cal_mgrid_y = mg_y; g_cal_mcell_w = mcell_w; g_cal_mcell_h = mcell_h;
+        for (int m = 0; m < 12; m++) {
+            int col = m % 3, row = m / 3;
+            uint64_t cx = g_cal_mgrid_x + (uint64_t)col * mcell_w;
+            uint64_t cy = mg_y + (uint64_t)row * mcell_h;
+            bool cur = ((m + 1) == vmon);
+            if (cur) console_fill_vgrad(cx + 2u, cy + 1u, mcell_w - 4u, mcell_h - 2u, 0x003a6cc8u, 0x002a4f9cu);
+            const char *ab = cal_month_abbr[m];
+            uint64_t al = (uint64_t)gui_strlen(ab) * fw;
+            gui_draw_str_fg(cx + (mcell_w > al ? (mcell_w - al) / 2u : 0u),
+                            cy + (mcell_h > fh ? (mcell_h - fh) / 2u : 0u), ab,
+                            cur ? 0x00f2f7ffu : 0x00c0d0e8u);
+        }
+        return;   /* picker replaces the day grid */
+    }
+
+    /* ── Weekday header row ── */
     static const char *wd[] = { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
     uint64_t gx = px + pad;
     uint64_t wy = py + pad + header_h + 4u;
@@ -569,9 +635,10 @@ void cal_popup_draw(void) {
         gui_draw_str_fg(twx, wy, wd[c], wfg);
     }
 
-    /* Day grid */
-    int fdow = cal_dow((int)yr, (int)mon, 1);
-    int dim  = cal_days_in_month((int)mon, (int)yr);
+    /* ── Day grid (highlight today only when viewing the current month) ── */
+    bool view_is_now = (vmon == (int)tmon && vyr == (int)tyr);
+    int fdow = cal_dow(vyr, vmon, 1);
+    int dim  = cal_days_in_month(vmon, vyr);
     uint64_t g0y = wy + wk_h;
     int day = 1;
     for (int row = 0; row < 6; row++) {
@@ -580,7 +647,7 @@ void cal_popup_draw(void) {
             if (cellidx < fdow || day > dim) continue;
             uint64_t cx = gx + (uint64_t)col * cell_w;
             uint64_t cy = g0y + (uint64_t)row * cell_h;
-            bool today = (day == (int)d);
+            bool today = (view_is_now && day == (int)td);
             if (today)
                 console_fill_vgrad(cx + 1u, cy + 1u, cell_w - 2u, cell_h - 2u,
                                    0x003a6cc8u, 0x002a4f9cu);

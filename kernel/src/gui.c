@@ -398,6 +398,10 @@ void gui_fav_load(void) {}
 fav_t g_favs[FAV_MAX];
 int   g_fav_count = 0;
 int   g_fav_hover = -1;
+/* drag-to-reorder state */
+static int     g_fav_drag_idx    = -1;    /* favorite pressed/dragged (-1 none) */
+static bool    g_fav_drag_active = false; /* moved past threshold = real drag */
+static int32_t g_fav_press_x     = 0;
 
 bool gui_fav_add(const char *path, const char *label) {
     if (!path || !path[0]) return false;
@@ -589,6 +593,50 @@ void gui_on_tick(void) {
     uint64_t fb_h = console_fb_height();
     uint64_t fb_w = console_fb_width();
     uint64_t ty   = fb_h - TASKBAR_H;
+
+    /* ── Taskbar favorite drag-to-reorder / click-to-launch ──────────────
+     * A left-press on a favorite records it (g_fav_drag_idx) and defers the
+     * action to release: past a small threshold it becomes a drag that
+     * reorders the strip live; otherwise release launches the app. */
+    if (g_fav_drag_idx >= 0) {
+        if (lbtn) {
+            if (!g_fav_drag_active && (mx > g_fav_press_x + 8 || mx < g_fav_press_x - 8))
+                g_fav_drag_active = true;
+            if (g_fav_drag_active && g_fav_count > 1) {
+                uint64_t sx  = favbar_start_x();
+                uint64_t fbw = fav_btn_w() + TASKBTN_GAP;
+                int tgt = ((uint64_t)mx >= sx) ? (int)(((uint64_t)mx - sx) / fbw) : 0;
+                if (tgt < 0) tgt = 0;
+                if (tgt >= g_fav_count) tgt = g_fav_count - 1;
+                if (tgt != g_fav_drag_idx) {
+                    fav_t tmp = g_favs[g_fav_drag_idx];
+                    if (tgt > g_fav_drag_idx)
+                        for (int i = g_fav_drag_idx; i < tgt; i++) g_favs[i] = g_favs[i + 1];
+                    else
+                        for (int i = g_fav_drag_idx; i > tgt; i--) g_favs[i] = g_favs[i - 1];
+                    g_favs[tgt] = tmp;
+                    g_fav_drag_idx = tgt;
+                    g_fav_hover = tgt;
+                    taskbar_draw();
+                }
+            }
+            return;   /* hold the drag; ignore other handlers this tick */
+        } else {
+            int  idx      = g_fav_drag_idx;
+            bool was_drag = g_fav_drag_active;
+            g_fav_drag_idx = -1;
+            g_fav_drag_active = false;
+            if (was_drag) {
+                gui_fav_save();
+                gui_toast("Favorites reordered", 0x0060a0e0u);
+            } else if (idx >= 0 && idx < g_fav_count) {
+                __attribute__((weak)) void gui_spawn_app(const char *path);
+                if (gui_spawn_app) gui_spawn_app(g_favs[idx].path);
+            }
+            full_redraw();
+            return;
+        }
+    }
 
     /* ── Hover tracking for file browser (z-order top-to-bottom) ── */
     /* Only call fb_on_motion for the files window if it is the topmost window
@@ -2619,6 +2667,12 @@ void gui_on_tick(void) {
             g_vol_popup_open = false;
             g_cal_popup_open = !g_cal_popup_open;
             if (g_cal_popup_open) {
+                /* Seed the view to the current month and start on the day grid. */
+                uint8_t _cd = 1, _cm = 1; uint16_t _cy16 = 2026;
+                rtc_get_date(&_cd, &_cm, &_cy16);
+                g_cal_view_mon  = (_cm >= 1 && _cm <= 12) ? _cm : 1;
+                g_cal_view_year = _cy16 ? _cy16 : 2026;
+                g_cal_pick_open = false;
                 taskbar_draw_tray();
                 cal_popup_draw();
             } else {
@@ -2629,12 +2683,12 @@ void gui_on_tick(void) {
         }
 
         {
-            /* ── Taskbar favorite clicked: launch it ── */
+            /* ── Taskbar favorite pressed: begin drag (launch on release) ── */
             int fav_i = favbar_hit(mx, my);
             if (fav_i >= 0) {
-                __attribute__((weak)) void gui_spawn_app(const char *path);
-                if (gui_spawn_app) gui_spawn_app(g_favs[fav_i].path);
-                full_redraw();
+                g_fav_drag_idx    = fav_i;
+                g_fav_press_x     = mx;
+                g_fav_drag_active = false;
                 mouse_consume_click(&cx, &cy);
                 return;
             }
@@ -3067,18 +3121,56 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Calendar popup clicks: consume inside, close outside ── */
+    /* ── Calendar popup clicks: nav arrows, header picker, month/year cells ── */
     if (btn_pressed && g_cal_popup_open) {
         int32_t cx, cy;
         bool inside = ((uint64_t)mx >= g_cal_pop_x && (uint64_t)mx < g_cal_pop_x + g_cal_pop_w &&
                        (uint64_t)my >= g_cal_pop_y && (uint64_t)my < g_cal_pop_y + g_cal_pop_h);
-        if (inside) {
+        if (!inside) {
+            g_cal_popup_open = false;
             mouse_consume_click(&cx, &cy);
+            full_redraw();
             return;
         }
-        g_cal_popup_open = false;
+        bool in_arrow_row = ((uint64_t)my >= g_cal_arrow_by && (uint64_t)my < g_cal_arrow_by + g_cal_arrow_bh);
+        /* prev / next month arrows (header row) */
+        if (in_arrow_row && (uint64_t)mx >= g_cal_prev_bx && (uint64_t)mx < g_cal_prev_bx + g_cal_arrow_bw) {
+            if (--g_cal_view_mon < 1) { g_cal_view_mon = 12; g_cal_view_year--; }
+            cal_popup_draw(); mouse_consume_click(&cx, &cy); return;
+        }
+        if (in_arrow_row && (uint64_t)mx >= g_cal_next_bx && (uint64_t)mx < g_cal_next_bx + g_cal_arrow_bw) {
+            if (++g_cal_view_mon > 12) { g_cal_view_mon = 1; g_cal_view_year++; }
+            cal_popup_draw(); mouse_consume_click(&cx, &cy); return;
+        }
+        /* click month/year label → toggle picker */
+        if (in_arrow_row && (uint64_t)mx >= g_cal_hdr_bx && (uint64_t)mx < g_cal_hdr_bx + g_cal_hdr_bw) {
+            g_cal_pick_open = !g_cal_pick_open;
+            full_redraw(); cal_popup_draw(); mouse_consume_click(&cx, &cy); return;
+        }
+        /* picker: year steppers + month grid */
+        if (g_cal_pick_open) {
+            bool in_yr_row = ((uint64_t)my >= g_cal_yr_by && (uint64_t)my < g_cal_yr_by + g_cal_yr_bh);
+            if (in_yr_row && (uint64_t)mx >= g_cal_yr_prev_bx && (uint64_t)mx < g_cal_yr_prev_bx + g_cal_yr_bw) {
+                g_cal_view_year--; cal_popup_draw(); mouse_consume_click(&cx, &cy); return;
+            }
+            if (in_yr_row && (uint64_t)mx >= g_cal_yr_next_bx && (uint64_t)mx < g_cal_yr_next_bx + g_cal_yr_bw) {
+                g_cal_view_year++; cal_popup_draw(); mouse_consume_click(&cx, &cy); return;
+            }
+            if (g_cal_mcell_w > 0u && g_cal_mcell_h > 0u &&
+                (uint64_t)mx >= g_cal_mgrid_x && (uint64_t)mx < g_cal_mgrid_x + 3u * g_cal_mcell_w &&
+                (uint64_t)my >= g_cal_mgrid_y && (uint64_t)my < g_cal_mgrid_y + 4u * g_cal_mcell_h) {
+                int col = (int)(((uint64_t)mx - g_cal_mgrid_x) / g_cal_mcell_w);
+                int row = (int)(((uint64_t)my - g_cal_mgrid_y) / g_cal_mcell_h);
+                int m = row * 3 + col + 1;
+                if (m >= 1 && m <= 12) {
+                    g_cal_view_mon = m;
+                    g_cal_pick_open = false;
+                    full_redraw(); cal_popup_draw();
+                }
+                mouse_consume_click(&cx, &cy); return;
+            }
+        }
         mouse_consume_click(&cx, &cy);
-        full_redraw();
         return;
     }
 

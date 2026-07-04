@@ -102,7 +102,6 @@ void launcher_open_reset(void) {
     launch_add("Settings",        NULL, 2, 0);
     launch_add("Image Viewer",    NULL, 3, 0);
     launch_add("App Store",       "/fifi-data/apps/fifi-appstore", -1, 0);
-    launch_add("Browser",         "/bin/fifi-browser",   -1, 0);
     launch_add("Text Editor",     "/bin/fifi-editor",    -1, 0);
     launch_add("Calculator",      "/bin/fifi-calc",      -1, 0);
     launch_add("System Monitor",  "/bin/fifi-sysmon",    -1, 0);
@@ -110,7 +109,6 @@ void launcher_open_reset(void) {
     launch_add("Security",        "/bin/fifi-security",  -1, 0);
     launch_add("WiFi",            "/bin/fifi-wifi",      -1, 0);
     launch_add("Gamepad",         "/bin/fifi-gamepad",   -1, 0);
-    launch_add("Steam",           "/usr/bin/steam",      -1, 0);
     launch_add("Proton Config",   "/bin/fifi-proton",    -1, 0);
 
 #ifdef __linux__

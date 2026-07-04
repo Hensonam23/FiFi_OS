@@ -409,6 +409,13 @@ extern bool         g_cal_popup_open;   /* clock/calendar popup */
 extern uint64_t     g_clk_x;            /* clock hit region on the taskbar */
 extern uint64_t     g_clk_w;
 extern uint64_t     g_cal_pop_x, g_cal_pop_y, g_cal_pop_w, g_cal_pop_h;
+extern int          g_cal_view_mon, g_cal_view_year;   /* month being displayed */
+extern bool         g_cal_pick_open;    /* month/year picker overlay */
+/* header nav + picker hit regions (set by cal_popup_draw) */
+extern uint64_t     g_cal_prev_bx, g_cal_next_bx, g_cal_arrow_by, g_cal_arrow_bw, g_cal_arrow_bh;
+extern uint64_t     g_cal_hdr_bx, g_cal_hdr_bw, g_cal_hdr_by, g_cal_hdr_bh;
+extern uint64_t     g_cal_yr_prev_bx, g_cal_yr_next_bx, g_cal_yr_by, g_cal_yr_bw, g_cal_yr_bh;
+extern uint64_t     g_cal_mgrid_x, g_cal_mgrid_y, g_cal_mcell_w, g_cal_mcell_h;
 void     cal_popup_draw(void);
 extern uint64_t     g_vol_pop_x;
 extern uint64_t     g_vol_pop_y;
