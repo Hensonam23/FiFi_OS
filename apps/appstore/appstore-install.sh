@@ -50,13 +50,19 @@ curl -sL --max-time 600 "$url" -o "$dest.part" || { echo error > "$status"; exit
 mv "$dest.part" "$dest"
 chmod +x "$dest"
 
-# Pre-extract now (no FUSE on FiFi OS) so first launch is instant.
+# Record the source spec + resolved URL for update checking, and clear any
+# pending-update marker (we just installed the latest we could resolve).
+printf '%s' "$repo" > "$APPS/$name.src"
+printf '%s' "$url"  > "$APPS/$name.url"
+rm -f "$APPS/$name.update"
+
+# Pre-extract now (no FUSE on FiFi OS) so first launch is instant. Re-extract
+# fresh every time (rm old dir) so an update replaces the previous version.
 echo extracting > "$status"
 ext="$APPS/$name.d"
-if [ ! -d "$ext/squashfs-root" ]; then
-    mkdir -p "$ext"
-    ( cd "$ext" && "$dest" --appimage-extract >/dev/null 2>&1 ) || true
-fi
+rm -rf "$ext"
+mkdir -p "$ext"
+( cd "$ext" && "$dest" --appimage-extract >/dev/null 2>&1 ) || true
 
 # App icon: AppImages carry their logo as squashfs-root/.DirIcon (or a top-level
 # .png). Copy it next to the launcher as <Name>.png — the desktop draws it.

@@ -64,6 +64,7 @@
 #define C_ROWSEL  0x001b2740u
 #define C_RUN     0x0040b060u   /* running badge */
 #define C_HDR     0x005890c8u   /* section header text */
+#define C_UPDATE  0x00c07820u   /* update-available button (orange) */
 
 /* ── PSF1 font (loaded from compositor fonts) ────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -239,6 +240,7 @@ typedef struct {
     char path[192];      /* .AppImage path */
     long size_mb;
     bool running;
+    bool has_update;     /* <Name>.update marker present */
 } Inst;
 static Inst g_inst[MAX_INST];
 static int  g_ninst = 0;
@@ -254,6 +256,7 @@ static bool g_installed_mode = false;
 typedef struct { int kind; int idx; } IRow;   /* kind: 0=header-apps 1=app 2=header-svc 3=svc */
 static IRow g_irows[2 + MAX_INST + MAX_SVC];
 static int  g_nirows = 0;
+static int  g_chkupd_x = 0, g_chkupd_y = 0, g_chkupd_w = 0;  /* Check Updates button rect */
 
 /* True if some process was launched from this AppImage's extracted dir. */
 static bool proc_scan(const char *needle) {
@@ -290,6 +293,8 @@ static void scan_installed(void) {
             in->size_mb = (stat(in->path, &st) == 0) ? (long)(st.st_size >> 20) : 0;
             char needle[224]; snprintf(needle, sizeof needle, "/fifi-data/apps/%s.d/", in->name);
             in->running = proc_scan(needle);
+            char up[224]; snprintf(up, sizeof up, "/fifi-data/apps/%s.update", in->name);
+            struct stat ust; in->has_update = (stat(up, &ust) == 0);
             g_ninst++;
         }
         closedir(d);
@@ -352,6 +357,39 @@ static void start_uninstall(int fd, int i) {
         _exit(127);
     }
     uint32_t nl = (uint32_t)snprintf(note, sizeof note, "Removing %s...", g_inst[i].name);
+    send_msg(fd, IPC_NOTIFY, note, nl);
+}
+
+/* Check all installed apps for updates (fork appstore-update-check.sh). */
+static void start_check_updates(int fd) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
+        execl("/bin/sh", "sh", "/fifi-data/apps/appstore-update-check.sh", (char*)NULL);
+        _exit(127);
+    }
+    const char *m = "Checking for updates...";
+    send_msg(fd, IPC_NOTIFY, m, (uint32_t)strlen(m));
+}
+
+/* Update an installed app: re-run the installer with its recorded source. */
+static void start_update(int fd, int i) {
+    char cmd[256];
+    snprintf(cmd, sizeof cmd,
+             "sh /fifi-data/apps/appstore-install.sh \"$(cat /fifi-data/apps/%s.src)\" \"%s\"",
+             g_inst[i].name, g_inst[i].name);
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
+        execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
+        _exit(127);
+    }
+    char note[96];
+    uint32_t nl = (uint32_t)snprintf(note, sizeof note, "Updating %s...", g_inst[i].name);
     send_msg(fd, IPC_NOTIFY, note, nl);
 }
 
@@ -432,6 +470,17 @@ static void render(uint32_t *fb) {
                 if (ir->kind == 0 && g_ninst == 0)
                     draw_str(fb, "(none yet - install from the store tabs)",
                              PAD_X + 16*9, ry + (ITEM_H - g_glyph_h)/2, C_GREY);
+                /* "Check Updates" button on the INSTALLED APPS header */
+                if (ir->kind == 0 && g_ninst > 0) {
+                    g_chkupd_w = 13*9 + 14;
+                    g_chkupd_x = WIN_W - g_chkupd_w - PAD_X;
+                    g_chkupd_y = ry + 3;
+                    fill(fb, g_chkupd_x, g_chkupd_y, g_chkupd_w, ITEM_H - 6, C_BTN);
+                    draw_str(fb, "Check Updates", g_chkupd_x + 7,
+                             ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
+                } else if (ir->kind == 0) {
+                    g_chkupd_w = 0;
+                }
             } else if (ir->kind == 1) {
                 Inst *in = &g_inst[ir->idx];
                 if (r & 1) fill(fb, 0, ry, WIN_W, ITEM_H, 0x00161e28u);
@@ -444,8 +493,11 @@ static void render(uint32_t *fb) {
                     draw_str(fb, "RUNNING", WIN_W - BTN_W - 24 - 220,
                              ry + (ITEM_H - g_glyph_h)/2, C_RUN);
                 int bx = WIN_W - BTN_W - PAD_X, by = ry + 3, bh = ITEM_H - 6;
-                fill(fb, bx, by, BTN_W, bh, in->running ? C_BTN_DIS : C_ACCENT);
-                const char *lbl = in->running ? "Running" : "Launch";
+                uint32_t bcol = in->has_update ? C_UPDATE
+                              : in->running    ? C_BTN_DIS : C_ACCENT;
+                const char *lbl = in->has_update ? "Update"
+                                : in->running    ? "Running" : "Launch";
+                fill(fb, bx, by, BTN_W, bh, bcol);
                 draw_str(fb, lbl, bx + (BTN_W - (int)strlen(lbl)*9)/2,
                          ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
                 /* Remove (uninstall) button to the left of Launch */
@@ -668,16 +720,28 @@ int main(void) {
                                     int r = (my - list_top()) / ITEM_H;
                                     int vi = g_scroll + r;
                                     if (g_installed_mode) {
-                                        if (vi < g_nirows && g_irows[vi].kind == 1) {
+                                        /* Check Updates button (on the INSTALLED APPS header row) */
+                                        if (g_chkupd_w && mx >= g_chkupd_x &&
+                                            mx < g_chkupd_x + g_chkupd_w &&
+                                            my >= g_chkupd_y && my < g_chkupd_y + ITEM_H - 6) {
+                                            start_check_updates(sock);
+                                            dirty = true;
+                                        } else if (vi < g_nirows && g_irows[vi].kind == 1) {
                                             int bx = WIN_W - BTN_W - PAD_X;
                                             int rmx = bx - 76 - 6;
-                                            Inst *in = &g_inst[g_irows[vi].idx];
-                                            if (mx >= bx && mx < bx + BTN_W && !in->running) {
-                                                launch_app(sock, g_irows[vi].idx);
-                                                in->running = true;   /* optimistic; rescan confirms */
+                                            int ai = g_irows[vi].idx;
+                                            Inst *in = &g_inst[ai];
+                                            if (mx >= bx && mx < bx + BTN_W) {
+                                                if (in->has_update) {
+                                                    start_update(sock, ai);
+                                                    in->has_update = false;  /* optimistic */
+                                                } else if (!in->running) {
+                                                    launch_app(sock, ai);
+                                                    in->running = true;      /* optimistic */
+                                                }
                                                 dirty = true;
                                             } else if (mx >= rmx && mx < rmx + 76) {
-                                                start_uninstall(sock, g_irows[vi].idx);
+                                                start_uninstall(sock, ai);
                                                 scan_installed(); clamp_scroll(); dirty = true;
                                             }
                                         }
