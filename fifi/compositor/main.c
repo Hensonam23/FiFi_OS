@@ -462,8 +462,14 @@ int main(void) {
      * PTY matches what is rendered — a geometry-derived guess gave fewer rows than
      * the console actually rendered, causing Ink TUI ghost text. */
     {
-        uint16_t cols = (uint16_t)console_cols();
-        uint16_t rows = (uint16_t)console_rows();
+        /* The terminal boots hidden, so the console viewport (and console_cols())
+         * is 0 here — derive the initial grid from the full framebuffer instead,
+         * giving the shell a sensible full-width size. term_set_viewport then
+         * re-syncs the PTY to the actual window size when the terminal opens. */
+        uint16_t fwq = (uint16_t)console_font_width();
+        uint16_t fhq = (uint16_t)console_font_height();
+        uint16_t cols = fwq ? (uint16_t)(console_fb_width()  / fwq) : 80;
+        uint16_t rows = fhq ? (uint16_t)(console_fb_height() / fhq) : 25;
         /* Reserve 2 rows for the taskbar at the bottom */
         if (rows > 2) rows -= 2;
         if (cols < 20) cols = 20;

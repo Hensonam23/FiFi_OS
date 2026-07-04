@@ -200,6 +200,24 @@ void term_set_viewport(window_t *w) {
         console_set_suppress_draw(true);
     else
         console_set_suppress_draw(false);
+
+    /* Keep the shell's PTY grid matched to the window so text wraps at the window
+     * border and re-flows on resize. The console cols/rows now reflect this
+     * window's viewport (set just above). Change-guarded so we only send a
+     * SIGWINCH when the size actually changes. pty_set_winsize is Linux-only. */
+    __attribute__((weak)) void pty_set_winsize(uint16_t cols, uint16_t rows);
+    if (pty_set_winsize) {
+        uint16_t cols = (uint16_t)console_cols();
+        uint16_t rows = (uint16_t)console_rows();
+        if (cols >= 20u && rows >= 4u) {
+            static uint16_t last_cols = 0, last_rows = 0;
+            if (cols != last_cols || rows != last_rows) {
+                last_cols = cols;
+                last_rows = rows;
+                pty_set_winsize(cols, rows);
+            }
+        }
+    }
 }
 
 /* Render scrollback content into the terminal window when g_term_scroll > 0. */
