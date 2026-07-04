@@ -310,8 +310,8 @@ void draw_desktop_icons(void) {
         if (llx + lwpx > console_fb_width())            /* clamp to right edge */
             llx = console_fb_width() > lwpx ? console_fb_width() - lwpx : 0u;
         uint64_t lly  = icon_y + isz + 8u;
-        uint32_t lbg  = (bg && g_theme.wallpaper != WALLPAPER_IMAGE) ? bg : 0x00000000u;
-        gui_draw_str(llx, lly, lbuf, hov ? 0x00e0efffU : 0x00c0d8f0u, lbg);
+        /* Plain label text — no background box or shadow behind it. */
+        gui_draw_str_fg(llx, lly, lbuf, hov ? 0x00e0efffU : 0x00c0d8f0u);
 
         g_desk_icons[i].active = g_desk_icons[i].active; /* touch to suppress warn */
         icon_y += DESK_ICON_H + DESK_ICON_PAD;
@@ -523,26 +523,21 @@ void draw_desktop_bg(void) {
         }
         break;
 
-    default: {  /* WALLPAPER_GRADIENT — polished deep-blue desktop */
-        /* Smooth three-stop vertical gradient: near-black top → steel blue →
-         * deep teal-navy bottom. Row-based, so it's cheap. */
-        uint64_t h1 = dav * 46u / 100u;
-        console_fill_vgrad(0, dt,          fb_w, h1,         0x00070a15u, 0x001a2b4c);
-        console_fill_vgrad(0, dt + h1,     fb_w, dav - h1,   0x001a2b4c,  0x00091422u);
-        /* Soft glow bloom, brightest at upper-centre — a few wide blended bands
+    default: {  /* WALLPAPER_GRADIENT — full-screen deep-blue desktop */
+        /* Even top→bottom blue gradient that reaches both edges — no vignette or
+         * dark bands. Endpoints are close in brightness so it reads as one field. */
+        console_fill_vgrad(0, dt, fb_w, dav, 0x001e3c62u, 0x00162c48u);
+        /* Soft glow bloom, brightest upper-centre — a few wide blended bands
          * (cheap approximation of a radial light). */
         {
-            uint64_t cy = dt + dav * 36u / 100u;
-            uint32_t soft = 0x00325fb0u;
+            uint64_t cy = dt + dav * 34u / 100u;
+            uint32_t soft = 0x003b72c8u;
             for (int s = 0; s < 5; s++) {
-                uint64_t bh = dav * (uint64_t)(7 - s) / 44u; if (bh < 2u) bh = 2u;
+                uint64_t bh = dav * (uint64_t)(9 - s) / 38u; if (bh < 2u) bh = 2u;
                 uint64_t by = cy > bh / 2u ? cy - bh / 2u : dt;
-                console_blend_rect(0, by, fb_w, bh, soft, (uint8_t)(4 + s * 3));
+                console_blend_rect(0, by, fb_w, bh, soft, (uint8_t)(5 + s * 3));
             }
         }
-        /* Subtle vignette top + bottom for depth. */
-        console_blend_rect(0, dt,                fb_w, dav / 12u, 0x00000000u, 45);
-        console_blend_rect(0, dbot - dav / 12u,  fb_w, dav / 12u, 0x00000000u, 60);
         break;
     }
     }
