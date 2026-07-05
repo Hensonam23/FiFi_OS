@@ -1819,6 +1819,28 @@ static bool surface_in_popup_tree(wl_surface_t *s) {
     return false;
 }
 
+/* Resolve the surface that should RECEIVE input for a hit surface. GTK/GDK (and
+ * Chromium) root a window's input on its xdg_toplevel; a subsurface created only
+ * for rendering (Firefox web content) isn't wired to the toolkit's input, so a
+ * click delivered there is ignored. Walk a non-popup subsurface up to its
+ * toplevel ancestor and return that (with its object id). Popups keep their own
+ * surface (they hold the seat grab). */
+static wl_surface_t *surface_input_target(int ci, wl_surface_t *s, uint32_t in_id, uint32_t *out_id) {
+    *out_id = in_id;
+    if (!s || !s->is_subsurface || surface_in_popup_tree(s)) return s;
+    int guard = 0;
+    while (s && s->is_subsurface && guard++ < 8) {
+        uint32_t pid = s->parent_surface_id;
+        wl_obj_t *po = wl_find_obj_any(pid);
+        wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+        if (!p) break;
+        *out_id = pid;   /* parent_surface_id IS the parent's object id */
+        s = p;
+    }
+    (void)ci;
+    return s;
+}
+
 static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
     if (!s || !s->mapped || s->minimized || g_wl_minimized || !s->own_pix) return false;
     /* Composed screen origin for ALL surfaces: a subsurface's own s->x is 0 (its
@@ -2039,13 +2061,16 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
             if (wl_surface_hit(s, mx, my)) {
+                /* Deliver input to the toolkit's real input surface: a non-popup
+                 * render subsurface (web content) resolves up to its toplevel. */
+                uint32_t tid;
+                wl_surface_t *tgt = surface_input_target(ci, s, c->objs[oi].id, &tid);
                 /* Only focus surfaces with an xdg_toplevel role (or non-xdg
-                 * subsurfaces like web content). Sending keyboard enter to a
-                 * toolbar/cursor/popup xdg_surface crashes Firefox. */
-                if (s->xdg_toplevel_id || !s->xdg_surface_id) {
+                 * surfaces). Sending keyboard enter to a popup xdg_surface crashes Firefox. */
+                if (tgt && (tgt->xdg_toplevel_id || !tgt->xdg_surface_id)) {
                     new_ci  = ci;
-                    new_sid = c->objs[oi].id;
-                    new_s   = s;
+                    new_sid = tid;
+                    new_s   = tgt;
                 }
                 /* keep searching — last (topmost draw order) wins */
             }
