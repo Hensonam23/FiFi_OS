@@ -1821,6 +1821,9 @@ static bool surface_in_popup_tree(wl_surface_t *s) {
 
 static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
     if (!s || !s->mapped || s->minimized || g_wl_minimized || !s->own_pix) return false;
+    /* Composed screen origin for ALL surfaces: a subsurface's own s->x is 0 (its
+     * real position is parent origin + sub_x/y), so hit-testing MUST use the
+     * composed origin or clicks map to the wrong content coordinates. */
     int32_t ox, oy;
     surface_screen_origin(s, &ox, &oy);
     /* Hit-test against the ACTUAL committed buffer, not the configured size — a
@@ -1836,6 +1839,15 @@ static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
 
 /* Wl-fixed is 24.8 fixed-point (value * 256) */
 static uint32_t wl_fixed(int32_t v) { return (uint32_t)(v * 256); }
+
+/* Monotonic millisecond timestamp for input events. Wall-clock seconds*1000
+ * gave coarse, non-monotonic, often-duplicate stamps (motion and button sharing
+ * one value) which Firefox/GTK can drop or mis-sequence. */
+static uint32_t wl_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull);
+}
 
 /* Send pointer enter/leave events when focus changes */
 static void wl_send_ptr_enter(wl_client_t *c, uint32_t surf_id,
@@ -2055,11 +2067,13 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         if (new_ci >= 0 && new_sid) {
             wl_client_t *nc = &g_wl_clients[new_ci];
             wl_surface_t *s_loc = new_s;
-            int32_t sox, soy; surface_screen_origin(s_loc, &sox, &soy);
+            bool in_popup = surface_in_popup_tree(s_loc);
+            int32_t sox, soy;
+            surface_screen_origin(s_loc, &sox, &soy);
             wl_send_ptr_enter(nc, new_sid, mx - sox, my - soy);
             /* Popup-tree surfaces (menus) get pointer but NOT keyboard enter —
              * kbd on a popup drives Firefox a11y and can crash it. */
-            if (!surface_in_popup_tree(s_loc))
+            if (!in_popup)
                 wl_send_kbd_enter(nc, new_sid);
             wl_client_flush(nc);
         }
@@ -2105,7 +2119,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
     /* Motion */
     if (mx != g_prev_mx || my != g_prev_my) {
         int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_MOTION);
-        wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));  /* time ms */
+        wl_push_u32(fc, wl_now_ms());  /* time ms */
         wl_push_u32(fc, wl_fixed(lx));
         wl_push_u32(fc, wl_fixed(ly));
         wl_end_msg(fc, h);
@@ -2122,7 +2136,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
             uint32_t ser = next_serial(fc);
             int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_BUTTON);
             wl_push_u32(fc, ser);
-            wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+            wl_push_u32(fc, wl_now_ms());
             wl_push_u32(fc, btn_codes[b]);
             wl_push_u32(fc, state);
             wl_end_msg(fc, h);
@@ -2148,7 +2162,7 @@ void wayland_send_scroll(int8_t dir) {
     /* wl_pointer.axis(time, axis=0 vertical, value). Positive value scrolls the
      * content down; wheel-up (dir>0) is a negative value. ~15 units per notch. */
     int h = wl_begin_msg(fc, fc->pointer_id, WL_PTR_AXIS);
-    wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+    wl_push_u32(fc, wl_now_ms());
     wl_push_u32(fc, 0);                       /* axis 0 = vertical scroll */
     wl_push_u32(fc, wl_fixed(dir > 0 ? -15 : 15));
     wl_end_msg(fc, h);
@@ -2188,7 +2202,7 @@ void wayland_send_key(uint32_t evdev_key, uint32_t state) {
     wl_end_msg(fc, h);
     h = wl_begin_msg(fc, fc->keyboard_id, WL_KBD_KEY);
     wl_push_u32(fc, next_serial(fc));
-    wl_push_u32(fc, (uint32_t)(time(NULL) * 1000));
+    wl_push_u32(fc, wl_now_ms());
     wl_push_u32(fc, evdev_key);
     wl_push_u32(fc, state);
     wl_end_msg(fc, h);
