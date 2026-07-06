@@ -242,6 +242,8 @@ typedef enum {
     OBJ_XDG_POPUP,
     OBJ_DECO_MGR,
     OBJ_TL_DECO,        /* data ALIASES a wl_surface_t — never freed here */
+    OBJ_KDE_DECO_MGR,   /* org_kde_kwin_server_decoration_manager (GTK3/Firefox) */
+    OBJ_KDE_DECO,       /* org_kde_kwin_server_decoration; data ALIASES a wl_surface_t */
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -508,10 +510,11 @@ static void free_obj_data(wl_obj_t *o) {
             free(b);
         }
         /* else: already freed via another reference — skip silently (no abort). */
-    } else if (o->type == OBJ_SUBSURFACE || o->type == OBJ_TL_DECO) {
-        /* A subsurface / toplevel-decoration is only a ROLE handle aliasing a
-         * wl_surface_t owned by that surface's OBJ_SURFACE slot. It does NOT own
-         * the pointer — freeing it here double-frees the surface. Drop the alias. */
+    } else if (o->type == OBJ_SUBSURFACE || o->type == OBJ_TL_DECO ||
+               o->type == OBJ_KDE_DECO) {
+        /* A subsurface / decoration is only a ROLE handle aliasing a wl_surface_t
+         * owned by that surface's OBJ_SURFACE slot. It does NOT own the pointer —
+         * freeing it here double-frees the surface. Drop the alias. */
     } else if (o->data) {
         free(o->data);
     }
@@ -634,6 +637,7 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
     send_registry_global(c, reg_id,  6, "wl_data_device_manager", 3);
     send_registry_global(c, reg_id,  7, "wl_subcompositor",       1);
     send_registry_global(c, reg_id,  8, "zxdg_decoration_manager_v1", 1);
+    send_registry_global(c, reg_id,  9, "org_kde_kwin_server_decoration_manager", 1);
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -737,16 +741,22 @@ static void deco_grant_ssd(wl_client_t *c, wl_surface_t *s) {
     wl_client_flush(c);
 }
 
-/* A toplevel we should draw FiFi chrome on: an SSD toplevel with a real, opaque
- * buffer. Electron spawns a transparent full-screen "host" surface that must NOT
- * get a titlebar or intercept titlebar input — its center pixel is transparent. */
+/* A toplevel we should draw FiFi chrome on: an SSD toplevel with a real window
+ * buffer. Two transparent-center cases must be told apart:
+ *   - Electron's phantom "host": a FULL-SCREEN transparent surface → must NOT be
+ *     decorated (would put a titlebar over the whole screen and steal clicks).
+ *   - Firefox/LibreWolf: a normal window-sized toplevel that's transparent in the
+ *     center because its content lives on a subsurface → SHOULD be decorated.
+ * So: decorate if the center is opaque, OR it's transparent but smaller than the
+ * full display (a real window, not the phantom host). */
 static bool ssd_decorated(const wl_surface_t *s) {
     if (!s || !s->ssd || s->is_popup || s->is_subsurface || !s->xdg_toplevel_id)
         return false;
     if (!s->mapped || s->minimized || !s->own_pix || s->own_w < 8 || s->own_h < 8)
         return false;
     uint32_t px = s->own_pix[(int64_t)(s->own_h / 2) * (int64_t)s->own_w + s->own_w / 2];
-    return (px >> 24) != 0;
+    if ((px >> 24) != 0) return true;                 /* opaque center → real window */
+    return (s->own_w < g_w || s->own_h < g_h);        /* transparent but not full-screen → real window */
 }
 
 /* Decoration objects can be created BEFORE xdg_surface.get_toplevel links the
@@ -925,8 +935,14 @@ static void wl_release_buffer(uint32_t buffer_id) {
 }
 
 /* ── Focus + interactive-op state (used by dispatch and the mouse handler) ──── */
-static int      g_focus_ci  = -1;  /* client index with keyboard focus */
-static uint32_t g_focus_sid = 0;   /* surface obj id with keyboard focus */
+static int      g_focus_ci  = -1;  /* client index with POINTER focus */
+static uint32_t g_focus_sid = 0;   /* surface obj id with POINTER focus */
+/* Keyboard focus is tracked separately: it follows only real toplevels, never a
+ * popup/menu. Moving the pointer onto a menu must NOT send the toplevel a
+ * keyboard-leave — Firefox reads that as the window deactivating and instantly
+ * dismisses its (non-grabbing) menu. */
+static int      g_kbd_ci    = -1;
+static uint32_t g_kbd_sid   = 0;
 static int32_t  g_prev_mx = -1, g_prev_my = -1;
 static uint8_t  g_prev_btns = 0;
 
@@ -1040,6 +1056,13 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 wl_new_obj(c, new_id, OBJ_SUBCOMPOSITOR, NULL);
             } else if (name == 8 && strncmp(iface, "zxdg_decoration_manager_v1", iface_len) == 0) {
                 wl_new_obj(c, new_id, OBJ_DECO_MGR, NULL);
+            } else if (name == 9 && strncmp(iface, "org_kde_kwin_server_decoration_manager", iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_KDE_DECO_MGR, NULL);
+                /* default_mode(Server=2): hint SSD so GTK3/Firefox drops its CSD. */
+                int dh = wl_begin_msg(c, new_id, 0 /* default_mode */);
+                wl_push_u32(c, 2 /* Server */);
+                wl_end_msg(c, dh);
+                wl_client_flush(c);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -1573,6 +1596,41 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         break;
     }
 
+    /* ── org_kde_kwin_server_decoration_manager (GTK3/Firefox use this) ──── */
+    case OBJ_KDE_DECO_MGR:
+        if (opcode == 0 /* create(new_id, surface) */ && args_len >= 8) {
+            uint32_t kdeco_id, surf_id;
+            memcpy(&kdeco_id, args,     4);
+            memcpy(&surf_id,  args + 4, 4);
+            wl_obj_t *so = wl_find_obj(c, surf_id);
+            wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
+            wl_new_obj(c, kdeco_id, OBJ_KDE_DECO, s);
+            /* Impose Server mode so the toolkit hides its own titlebar and we
+             * draw the FiFi chrome (ssd_decorated keys off s->ssd). */
+            if (s) s->ssd = true;
+            int mh = wl_begin_msg(c, kdeco_id, 0 /* mode */);
+            wl_push_u32(c, 2 /* Server */);
+            wl_end_msg(c, mh);
+            wl_client_flush(c);
+        }
+        break;
+
+    /* ── org_kde_kwin_server_decoration ──────────────────────────────────── */
+    case OBJ_KDE_DECO: {
+        wl_surface_t *ks = obj ? obj->data : NULL;
+        if (opcode == 1 /* request_mode(mode) */) {
+            if (ks) ks->ssd = true;   /* whatever it asks, impose Server */
+            int mh = wl_begin_msg(c, obj_id, 0 /* mode */);
+            wl_push_u32(c, 2 /* Server */);
+            wl_end_msg(c, mh);
+            wl_client_flush(c);
+        } else if (opcode == 0 /* release */) {
+            if (ks) ks->ssd = false;
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+    }
+
     case OBJ_SUBCOMPOSITOR:
         if (opcode == WL_SUBCOMP_GET_SUBSURFACE && args_len >= 12) {
             /* get_subsurface(new id sub, surface, parent): assign the subsurface
@@ -1827,7 +1885,10 @@ static bool surface_in_popup_tree(wl_surface_t *s) {
  * surface (they hold the seat grab). */
 static wl_surface_t *surface_input_target(int ci, wl_surface_t *s, uint32_t in_id, uint32_t *out_id) {
     *out_id = in_id;
-    if (!s || !s->is_subsurface || surface_in_popup_tree(s)) return s;
+    if (!s || !s->is_subsurface) return s;   /* a toplevel or popup: use as-is */
+    /* Walk a render subsurface up to its nearest xdg ancestor — a toplevel (web
+     * content → the window) OR a popup (menu content → the popup surface). GTK
+     * roots input on the xdg surface, not the render subsurface. */
     int guard = 0;
     while (s && s->is_subsurface && guard++ < 8) {
         uint32_t pid = s->parent_surface_id;
@@ -2065,9 +2126,10 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                  * render subsurface (web content) resolves up to its toplevel. */
                 uint32_t tid;
                 wl_surface_t *tgt = surface_input_target(ci, s, c->objs[oi].id, &tid);
-                /* Only focus surfaces with an xdg_toplevel role (or non-xdg
-                 * surfaces). Sending keyboard enter to a popup xdg_surface crashes Firefox. */
-                if (tgt && (tgt->xdg_toplevel_id || !tgt->xdg_surface_id)) {
+                /* Focus toplevels, popups (menus), and non-xdg surfaces. Popups
+                 * get POINTER focus so menu items are clickable; keyboard enter is
+                 * gated separately (surface_in_popup_tree) so Firefox a11y is safe. */
+                if (tgt && (tgt->xdg_toplevel_id || tgt->is_popup || !tgt->xdg_surface_id)) {
                     new_ci  = ci;
                     new_sid = tid;
                     new_s   = tgt;
@@ -2077,33 +2139,40 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         }
     }
 
-    /* Handle focus changes */
+    bool new_in_popup = new_s && surface_in_popup_tree(new_s);
+
+    /* ── Pointer focus (follows whatever surface is under the cursor) ── */
     if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
-        /* Leave old surface */
         if (g_focus_ci >= 0 && g_focus_sid) {
             wl_client_t *oc = &g_wl_clients[g_focus_ci];
-            if (oc->active) {
-                wl_send_ptr_leave(oc, g_focus_sid);
-                wl_send_kbd_leave(oc, g_focus_sid);
-                wl_client_flush(oc);
-            }
+            if (oc->active) { wl_send_ptr_leave(oc, g_focus_sid); wl_client_flush(oc); }
         }
-        /* Enter new surface */
         if (new_ci >= 0 && new_sid) {
             wl_client_t *nc = &g_wl_clients[new_ci];
-            wl_surface_t *s_loc = new_s;
-            bool in_popup = surface_in_popup_tree(s_loc);
             int32_t sox, soy;
-            surface_screen_origin(s_loc, &sox, &soy);
+            surface_screen_origin(new_s, &sox, &soy);
             wl_send_ptr_enter(nc, new_sid, mx - sox, my - soy);
-            /* Popup-tree surfaces (menus) get pointer but NOT keyboard enter —
-             * kbd on a popup drives Firefox a11y and can crash it. */
-            if (!in_popup)
-                wl_send_kbd_enter(nc, new_sid);
             wl_client_flush(nc);
         }
         g_focus_ci  = new_ci;
         g_focus_sid = new_sid;
+    }
+
+    /* ── Keyboard focus (follows ONLY real toplevels, never a popup/menu) ──
+     * Moving the pointer onto a menu leaves the keyboard on the toplevel, so
+     * Firefox doesn't see the window deactivate and keep its menu open. */
+    if (new_ci >= 0 && new_sid && !new_in_popup) {
+        if (new_ci != g_kbd_ci || new_sid != g_kbd_sid) {
+            if (g_kbd_ci >= 0 && g_kbd_sid) {
+                wl_client_t *ko = &g_wl_clients[g_kbd_ci];
+                if (ko->active) { wl_send_kbd_leave(ko, g_kbd_sid); wl_client_flush(ko); }
+            }
+            wl_client_t *nc = &g_wl_clients[new_ci];
+            wl_send_kbd_enter(nc, new_sid);
+            wl_client_flush(nc);
+            g_kbd_ci  = new_ci;
+            g_kbd_sid = new_sid;
+        }
     }
 
     if (g_focus_ci < 0 || !g_focus_sid) { g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns; return; }
@@ -2213,8 +2282,10 @@ void wayland_send_key(uint32_t evdev_key, uint32_t state) {
     if (bit) { if (state) s_depressed |= bit; else s_depressed &= ~bit; }
     if (evdev_key == 58 && state) s_locked ^= 2u;    /* capslock toggles Lock */
 
-    if (g_focus_ci < 0 || !g_focus_sid) return;
-    wl_client_t *fc = &g_wl_clients[g_focus_ci];
+    /* Keys go to the KEYBOARD-focused surface (a real toplevel), which stays put
+     * while the pointer is over a menu — not the pointer-focused popup. */
+    if (g_kbd_ci < 0 || !g_kbd_sid) return;
+    wl_client_t *fc = &g_wl_clients[g_kbd_ci];
     if (!fc->active || !fc->keyboard_id) return;
     uint32_t ser = next_serial(fc);
     /* modifiers first so the key is interpreted with the current state */
@@ -2333,10 +2404,11 @@ bool wayland_covers(int32_t x, int32_t y) {
  * user clicks a built-in/IPC window so keys stop being stolen from e.g. the App
  * Store while a Wayland app stays open behind it). */
 void wayland_clear_kbd_focus(void) {
-    if (g_focus_ci >= 0 && g_focus_sid) {
-        wl_client_t *oc = &g_wl_clients[g_focus_ci];
-        if (oc->active) { wl_send_kbd_leave(oc, g_focus_sid); wl_client_flush(oc); }
+    if (g_kbd_ci >= 0 && g_kbd_sid) {
+        wl_client_t *ko = &g_wl_clients[g_kbd_ci];
+        if (ko->active) { wl_send_kbd_leave(ko, g_kbd_sid); wl_client_flush(ko); }
     }
+    g_kbd_ci = -1; g_kbd_sid = 0;
     g_focus_ci = -1; g_focus_sid = 0;
 }
 
@@ -2376,6 +2448,37 @@ static void ssd_circle(uint64_t cx, uint64_t cy, uint32_t col) {
     }
 }
 
+/* Decode a UTF-8 title into ASCII so the bitmap font never renders raw
+ * multibyte bytes as mojibake (Firefox uses an em-dash: "Page — LibreWolf").
+ * Mirrors taskbar_ascii_label() in gui_taskbar.c. */
+static void ssd_title_ascii(const char *in, char *out, size_t n) {
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)in;
+    while (*p && o + 1 < n) {
+        unsigned char c = *p;
+        if (c < 0x80u) { out[o++] = (char)c; p++; continue; }
+        uint32_t cp = 0; int cont = 0;
+        if      ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu; cont = 1; }
+        else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu; cont = 2; }
+        else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u; cont = 3; }
+        else { p++; continue; }
+        p++;
+        for (int i = 0; i < cont && (*p & 0xC0u) == 0x80u; i++) { cp = (cp << 6) | (*p & 0x3Fu); p++; }
+        char r;
+        switch (cp) {
+            case 0x2012: case 0x2013: case 0x2014: case 0x2015: r = '-'; break;
+            case 0x2018: case 0x2019: case 0x201A: case 0x2032: r = '\''; break;
+            case 0x201C: case 0x201D: case 0x201E: case 0x2033: r = '"'; break;
+            case 0x2026: r = '.'; break;
+            case 0x00B7: case 0x2022: case 0x2027: r = '-'; break;
+            case 0x00A0: case 0x2009: case 0x202F: r = ' '; break;
+            default: r = (cp < 0x80u) ? (char)cp : '?'; break;
+        }
+        out[o++] = r;
+    }
+    out[o] = '\0';
+}
+
 static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
     extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
     extern void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c0, uint32_t c1);
@@ -2394,13 +2497,21 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
     /* title text, centered */
     uint64_t fw = console_font_width(), fh = console_font_height();
     if (fw && fh && s->title[0]) {
-        size_t tlen = 0; while (tlen < sizeof(s->title) && s->title[tlen]) tlen++;
+        char tbuf[128];
+        ssd_title_ascii(s->title, tbuf, sizeof tbuf);
+        /* Apps title as "<page/doc> - <App>" (browsers, editors); show just the
+         * app name — keep only the segment after the last " - " separator. */
+        const char *ttl = tbuf;
+        for (size_t j = 1; tbuf[j] && tbuf[j + 1]; j++)
+            if (tbuf[j] == '-' && tbuf[j - 1] == ' ' && tbuf[j + 1] == ' ')
+                ttl = &tbuf[j + 2];
+        size_t tlen = 0; while (ttl[tlen]) tlen++;
         uint64_t max_px = w > 84u ? w - 84u : 0u;   /* keep clear of buttons */
         if (tlen * fw > max_px) tlen = max_px / fw;
         uint64_t tx = x + (w > tlen * fw ? (w - tlen * fw) / 2u : 8u);
         uint64_t gy = ty + (SSD_TITLE_H > fh ? (SSD_TITLE_H - fh) / 2u : 0u);
         for (size_t j = 0; j < tlen; j++, tx += fw)
-            console_render_glyph_fg(tx, gy, (unsigned char)s->title[j], 0x00e8eeffu);
+            console_render_glyph_fg(tx, gy, (unsigned char)ttl[j], 0x00e8eeffu);
     }
     /* traffic lights: min grey, max green, close red */
     uint64_t cyc = ty + SSD_TITLE_H / 2u;

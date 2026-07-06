@@ -45,10 +45,50 @@ uint64_t taskbtn_w(void) {
     return w > (uint64_t)TASKBTN_W ? w : (uint64_t)TASKBTN_W;
 }
 
+/* Window titles (e.g. "Google — LibreWolf") contain UTF-8 punctuation the PSF
+ * console font can't render byte-by-byte, producing mojibake ("Google ė¢Â Li").
+ * Decode to a display-safe ASCII copy: common punctuation → sane equivalents,
+ * anything else non-ASCII → '?'. */
+static void taskbar_ascii_label(const char *in, char *out, size_t n) {
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)in;
+    while (*p && o + 1 < n) {
+        unsigned char c = *p;
+        if (c < 0x80u) { out[o++] = (char)c; p++; continue; }
+        uint32_t cp = 0; int cont = 0;
+        if      ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu; cont = 1; }
+        else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu; cont = 2; }
+        else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u; cont = 3; }
+        else { p++; continue; }               /* stray continuation byte */
+        p++;
+        for (int i = 0; i < cont && (*p & 0xC0u) == 0x80u; i++) { cp = (cp << 6) | (*p & 0x3Fu); p++; }
+        char r;
+        switch (cp) {
+            case 0x2012: case 0x2013: case 0x2014: case 0x2015: r = '-'; break;  /* dashes */
+            case 0x2018: case 0x2019: case 0x201A: case 0x2032: r = '\''; break; /* quotes */
+            case 0x201C: case 0x201D: case 0x201E: case 0x2033: r = '"'; break;
+            case 0x2026: r = '.'; break;                                          /* ellipsis */
+            case 0x00B7: case 0x2022: case 0x2027: r = '-'; break;                /* bullets */
+            case 0x00A0: case 0x2009: case 0x202F: r = ' '; break;                /* spaces */
+            default: r = (cp < 0x80u) ? (char)cp : '?'; break;
+        }
+        out[o++] = r;
+    }
+    out[o] = '\0';
+}
+
 /* Rounded-pill task button: gradient fill + 2px corner softening + underline
  * running/focused indicator (KDE Plasma style). */
-void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label,
+void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
                   bool vis, bool focused, bool hov) {
+    char label[64];
+    taskbar_ascii_label(label_raw ? label_raw : "", label, sizeof label);
+    /* Apps title as "<page/doc> - <App>"; show just the app name (matches the
+     * SSD titlebar) — keep only the segment after the last " - " separator. */
+    const char *lbl = label;
+    for (size_t j = 1; label[j] && label[j + 1]; j++)
+        if (label[j] == '-' && label[j - 1] == ' ' && label[j + 1] == ' ')
+            lbl = &label[j + 2];
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t ph = TASKBAR_H - 6u;
@@ -72,12 +112,12 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label,
         console_fill_rect(ux, ty + TASKBAR_H - 3u, uw, 2u,
                           focused ? 0x0078b4ffu : 0x00446a9cu);
     }
-    uint64_t llen     = (uint64_t)gui_strlen(label);
+    uint64_t llen     = (uint64_t)gui_strlen(lbl);
     uint64_t max_ch   = tbw / fw;
     uint64_t disp_len = llen < max_ch ? llen : max_ch;
     uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
     uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
-    gui_draw_str_clip_fg(lpx, lpy, label,
+    gui_draw_str_clip_fg(lpx, lpy, lbl,
                          focused ? 0x00f0f6ffu : COL_TASKBTN_FG, max_ch);
 }
 
