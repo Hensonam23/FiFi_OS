@@ -110,12 +110,16 @@ done
 # ── App platform: seed fifi-run / App Store / keymap into /fifi-data ─────────
 # First-boot only (never overwrites newer copies already on the data partition).
 mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
-for f in fifi-run appstore-install.sh appstore-sync.sh; do
+for f in fifi-run appstore-install.sh appstore-sync.sh \
+         appstore-uninstall.sh appstore-update-check.sh; do
     if [ ! -f "/fifi-data/apps/$f" ] && [ -f "/usr/share/fifi/$f" ]; then
         cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"
         chmod +x "/fifi-data/apps/$f"
     fi
 done
+# App Store binary ships in the image; older data partitions expect it at
+# /fifi-data/apps too (launcher fallback path), so mirror it there.
+[ -f /fifi-data/apps/fifi-appstore ] || cp /bin/fifi-appstore /fifi-data/apps/fifi-appstore 2>/dev/null || true
 [ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
 [ -f /fifi-data/runtime/etc/fonts/fonts.conf ] || cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
 

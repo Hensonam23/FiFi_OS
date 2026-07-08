@@ -211,6 +211,12 @@ echo "[initramfs] building fifi-installer..."
     echo "[initramfs] included fifi-installer"
 } || echo "[initramfs] WARNING: fifi-installer build failed"
 
+echo "[initramfs] building fifi-appstore..."
+(cd "$REPO_ROOT/fifi/apps/appstore" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/appstore/fifi-appstore" "$STAGE/bin/"
+    echo "[initramfs] included fifi-appstore"
+} || echo "[initramfs] WARNING: fifi-appstore build failed"
+
 # ── Disk installer tools (parted, mkfs.ext4, mkfs.fat, blkid, grub-install) ──
 echo "[initramfs] bundling disk installer tools..."
 cp "$STAGE/bin/fifi-install.sh" "$STAGE/bin/fifi-install.sh" 2>/dev/null || true  # already staged above

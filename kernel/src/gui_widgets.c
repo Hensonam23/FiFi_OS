@@ -127,7 +127,15 @@ void launcher_open_reset(void) {
     launch_add("Files",           "/bin/fifi-filebrowser", 1, 0);
     launch_add("Settings",        "/bin/fifi-settings",    2, 0);
     launch_add("Image Viewer",    "/bin/fifi-imageviewer", 3, 0);
-    launch_add("App Store",       "/fifi-data/apps/fifi-appstore", -1, 0);
+    /* App Store ships in the OS image at /bin; older deploys have it on the
+     * data partition only, so keep that as a fallback. */
+    {
+        FILE *asf = fopen("/bin/fifi-appstore", "rb");
+        if (asf) fclose(asf);
+        launch_add("App Store",
+                   asf ? "/bin/fifi-appstore" : "/fifi-data/apps/fifi-appstore",
+                   -1, 0);
+    }
     launch_add("Text Editor",     "/bin/fifi-editor",    -1, 0);
     launch_add("Calculator",      "/bin/fifi-calc",      -1, 0);
     launch_add("System Monitor",  "/bin/fifi-sysmon",    -1, 0);
