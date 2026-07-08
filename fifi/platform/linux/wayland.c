@@ -2067,8 +2067,13 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     if (nw < 200) nw = 200;
                     if (nh < 150) nh = 150;
                     s->x = nx; s->y = ny;
+                    /* Send RESIZING + MAXIMIZED: Electron (Bitwarden) ignores
+                     * plain/floating configure sizes and snaps back, but honors
+                     * a maximized-flagged size exactly — so this lets the user
+                     * drag it to any size, not just full-screen or a half-snap. */
                     send_toplevel_configure(c, s, nw, nh,
-                                            XDG_TOPLEVEL_STATE_RESIZING, 0);
+                                            XDG_TOPLEVEL_STATE_RESIZING,
+                                            XDG_TOPLEVEL_STATE_MAXIMIZED);
                     wl_client_flush(c);
                 }
             } else { g_iop = 0; }
