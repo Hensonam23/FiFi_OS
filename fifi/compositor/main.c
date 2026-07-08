@@ -614,7 +614,10 @@ int main(void) {
                 }
             }
 
-            if (ipc_keyboard_active() && !dragging && !resizing)
+            /* ipc_resize_active() re-check: a resize may have just STARTED on this
+             * press (ipc_resize_begin above) after `resizing` was computed — the
+             * grab click must not leak into the app as a content click. */
+            if (ipc_keyboard_active() && !dragging && !resizing && !ipc_resize_active())
                 ipc_send_focused_mouse(mcx, mcy, btns);
             mouse_done:;
 
