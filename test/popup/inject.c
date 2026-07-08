@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
     int kfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (kfd < 0) { perror("open /dev/uinput kbd"); return 1; }
     ioctl(kfd, UI_SET_EVBIT, EV_KEY);
-    for (int kc = 1; kc <= 120; kc++) ioctl(kfd, UI_SET_KEYBIT, kc);
+    for (int kc = 1; kc <= 248; kc++) ioctl(kfd, UI_SET_KEYBIT, kc);  /* incl. KEY_LEFTMETA 125 */
     struct uinput_setup uk; memset(&uk, 0, sizeof(uk));
     uk.id.bustype = BUS_USB; uk.id.vendor = 0x1234; uk.id.product = 0x5679;
     strcpy(uk.name, "fifi-test-kbd");
@@ -84,6 +84,14 @@ int main(int argc, char **argv) {
             emit_fd(kfd, EV_KEY, kc, 1); syn_fd(kfd); msleep(30);
             emit_fd(kfd, EV_KEY, kc, 0); syn_fd(kfd); msleep(50);
             fprintf(stderr, "inject: key %d\n", kc);
+        } else if (!strcmp(argv[i], "h") && i+1 < argc) {   /* hold key down */
+            int kc = atoi(argv[i+1]); i += 1;
+            emit_fd(kfd, EV_KEY, kc, 1); syn_fd(kfd); msleep(30);
+            fprintf(stderr, "inject: hold %d\n", kc);
+        } else if (!strcmp(argv[i], "r") && i+1 < argc) {   /* release held key */
+            int kc = atoi(argv[i+1]); i += 1;
+            emit_fd(kfd, EV_KEY, kc, 0); syn_fd(kfd); msleep(30);
+            fprintf(stderr, "inject: release %d\n", kc);
         } else if (!strcmp(argv[i], "t") && i+1 < argc) {
             static const char *l = "abcdefghijklmnopqrstuvwxyz";
             static const int  lc[26] = {30,48,46,32,18,33,34,35,23,36,37,38,50,

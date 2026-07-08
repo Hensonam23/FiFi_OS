@@ -79,6 +79,7 @@ void ipc_clear_focus(void);
 void ipc_close_focused(void);
 void ipc_cycle_focus(void);
 void ipc_snap_focused(int zone);
+bool wayland_snap_focused(int zone);
 bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
@@ -700,6 +701,7 @@ int main(void) {
                     if (uc == 0x9Bu) { ipc_snap_focused(0); continue; }
                     if (uc == 0x9Cu) { compositor_lock(); continue; }
                     if (uc == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
+                    if (uc == 0x9Eu) { continue; }  /* Super tap — GUI ring opens the launcher */
                     if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                     if (uc >= 0x8Au && uc <= 0x90u) {
                         /* F1-F7: already in GUI ring via kb_push_internal — just consume */
@@ -719,14 +721,18 @@ int main(void) {
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
-                    if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
-                    if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
-                    if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
-                    if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
+                    /* Snap keys: a Wayland app can still be the active window
+                     * (sticky kbd focus) with the pointer elsewhere — try it
+                     * first, then fall through to IPC/built-in windows. */
+                    if ((uint8_t)c == 0x98u) { if (!wayland_snap_focused(1)) ipc_snap_focused(1); continue; }
+                    if ((uint8_t)c == 0x99u) { if (!wayland_snap_focused(2)) ipc_snap_focused(2); continue; }
+                    if ((uint8_t)c == 0x9Au) { if (!wayland_snap_focused(3)) ipc_snap_focused(3); continue; }
+                    if ((uint8_t)c == 0x9Bu) { if (!wayland_snap_focused(0)) ipc_snap_focused(0); continue; }
                     if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
                     if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
                     if ((uint8_t)c == 0x87u) { gui_term_scroll_page(+1); continue; }
                     if ((uint8_t)c == 0x88u) { gui_term_scroll_page(-1); continue; }
+                    if ((uint8_t)c == 0x9Eu) { continue; }  /* Super tap — GUI ring opens the launcher; keep it out of the PTY */
                     pty_write_input((uint8_t)c);
                 }
             } else if (!keyboard_gui_capture_active() && wayland_has_focus()) {
@@ -735,9 +741,14 @@ int main(void) {
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                     if (g_blanked) { g_blanked = false; break; }
-                    /* Only allow screenshot and lock shortcuts, not app launchers */
+                    /* Only allow screenshot/lock/snap shortcuts, not app launchers */
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
+                    if ((uint8_t)c == 0x98u) { if (!wayland_snap_focused(1)) ipc_snap_focused(1); continue; }
+                    if ((uint8_t)c == 0x99u) { if (!wayland_snap_focused(2)) ipc_snap_focused(2); continue; }
+                    if ((uint8_t)c == 0x9Au) { if (!wayland_snap_focused(3)) ipc_snap_focused(3); continue; }
+                    if ((uint8_t)c == 0x9Bu) { if (!wayland_snap_focused(0)) ipc_snap_focused(0); continue; }
+                    if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
                     /* Discard everything else — raw keys already forwarded to Wayland */
                 }
             } else {
@@ -748,10 +759,10 @@ int main(void) {
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
-                    if ((uint8_t)c == 0x98u) { ipc_snap_focused(1); continue; }
-                    if ((uint8_t)c == 0x99u) { ipc_snap_focused(2); continue; }
-                    if ((uint8_t)c == 0x9Au) { ipc_snap_focused(3); continue; }
-                    if ((uint8_t)c == 0x9Bu) { ipc_snap_focused(0); continue; }
+                    if ((uint8_t)c == 0x98u) { if (!wayland_snap_focused(1)) ipc_snap_focused(1); continue; }
+                    if ((uint8_t)c == 0x99u) { if (!wayland_snap_focused(2)) ipc_snap_focused(2); continue; }
+                    if ((uint8_t)c == 0x9Au) { if (!wayland_snap_focused(3)) ipc_snap_focused(3); continue; }
+                    if ((uint8_t)c == 0x9Bu) { if (!wayland_snap_focused(0)) ipc_snap_focused(0); continue; }
                     if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
                     if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
                 }

@@ -316,6 +316,7 @@ typedef struct {
     bool         popup_has_grab;
     /* Toplevel window state (interactive move/resize + maximize/fullscreen/minimize) */
     bool         maximized, fullscreen, minimized;
+    bool         half_snapped;   /* Super+Left/Right half-screen snap */
     bool         ssd;               /* server-side decorations granted (FiFi chrome) */
     uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
     bool         placed;            /* initial window placement done */
@@ -2433,6 +2434,71 @@ bool wayland_close_active(void) {
         }
     }
     return sent;
+}
+
+/* Super+arrow snapping for the focused Wayland client's toplevel.
+ * zone: 0=restore 1=left-half 2=right-half 3=maximize.
+ * Returns false when no usable focused toplevel (caller tries other layers).
+ *
+ * Target selection: the KEYBOARD-focused client wins — it is sticky (last
+ * toplevel the user was in) and is cleared when a built-in/IPC window is
+ * clicked, so snapping works with the pointer anywhere on screen. Pointer
+ * focus is the fallback. Within the client, prefer the ssd_decorated()
+ * toplevel: Electron apps keep a phantom transparent full-screen host
+ * surface that must never be the snap target. */
+bool wayland_snap_focused(int zone) {
+    if (g_wl_minimized) return false;
+    int ci = -1;
+    if (g_kbd_ci >= 0 && g_wl_clients[g_kbd_ci].active)        ci = g_kbd_ci;
+    else if (g_focus_ci >= 0 && g_wl_clients[g_focus_ci].active) ci = g_focus_ci;
+    if (ci < 0) return false;
+    wl_client_t *c = &g_wl_clients[ci];
+    wl_surface_t *s = NULL, *first = NULL;
+    for (int oi = 0; oi < c->n_objs; oi++) {
+        if (c->objs[oi].type != OBJ_SURFACE) continue;
+        wl_surface_t *t = c->objs[oi].data;
+        if (!t || !t->xdg_toplevel_id || t->is_popup || t->is_subsurface || !t->mapped) continue;
+        if (!first) first = t;
+        if (ssd_decorated(t)) { s = t; break; }
+    }
+    if (!s) s = first;
+    if (!s || s->fullscreen) return false;
+    extern uint32_t console_font_height(void);
+    int32_t fh      = (int32_t)console_font_height();
+    int32_t top     = fh + 6 + SSD_TITLE_H;
+    int32_t taskbar = fh + 10;
+    int32_t avail_h = g_h - top - taskbar;
+    if (zone == 0) {
+        if (s->maximized || s->half_snapped) {
+            s->maximized = false; s->half_snapped = false;
+            s->x = s->restore_x;
+            s->y = s->restore_y < top ? top : s->restore_y;
+            send_toplevel_configure(c, s, s->restore_w, s->restore_h, 0, 0);
+            wl_client_flush(c);
+        }
+        return true;
+    }
+    if (!s->maximized && !s->half_snapped) {
+        s->restore_x = s->x;     s->restore_y = s->y;
+        s->restore_w = s->own_w; s->restore_h = s->own_h;
+    }
+    if (zone == 3) {
+        s->maximized = true; s->half_snapped = false;
+        s->x = 0; s->y = top;
+        send_toplevel_configure(c, s, g_w, avail_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+    } else {
+        /* halves are sent with the MAXIMIZED state too: toolkits honor
+         * maximized configure sizes EXACTLY, while Electron ignores plain
+         * floating sizes entirely. Compositor-side we track it as
+         * half_snapped, not maximized. */
+        s->maximized = false; s->half_snapped = true;
+        s->x = (zone == 1) ? 0 : g_w / 2;
+        s->y = top;
+        send_toplevel_configure(c, s, (zone == 1) ? g_w / 2 : g_w - g_w / 2, avail_h,
+                                XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+    }
+    wl_client_flush(c);
+    return true;
 }
 
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */

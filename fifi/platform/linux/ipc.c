@@ -1240,12 +1240,9 @@ void ipc_snap_focused(int zone) {
     int idx = g_focused_idx;
     if (idx < 0 || idx >= IPC_MAX_APPS ||
         !g_clients[idx].active || g_clients[idx].fd < 0) {
-        idx = -1;
-        for (int i = IPC_MAX_APPS - 1; i >= 0; i--) {
-            if (g_clients[i].active && g_clients[i].fd >= 0) { idx = i; break; }
-        }
-    }
-    if (idx < 0) {
+        /* No FOCUSED IPC window: snap the topmost built-in window instead.
+         * (Never grab an arbitrary unfocused IPC window — snapping a window
+         * the user isn't working in reads as the wrong window moving.) */
         if (gui_snap_focused) gui_snap_focused(zone);
         return;
     }
