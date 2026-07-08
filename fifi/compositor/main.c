@@ -18,6 +18,7 @@
 /* FiFi kernel includes (via shadow headers + kernel/include) */
 #include "console.h"
 #include "gui.h"
+#include "../platform/linux/vendor/lodepng.h"
 #include "limine.h"
 #include "mouse.h"
 
@@ -80,6 +81,16 @@ void ipc_close_focused(void);
 void ipc_cycle_focus(void);
 void ipc_snap_focused(int zone);
 bool wayland_snap_focused(int zone);
+bool wayland_close_focused(void);
+void gui_close_focused_win(void);
+
+/* Alt+F4: close whatever the user considers the active window, trying the
+ * layers in the same priority order as key routing and snapping. */
+static void close_focused_window(void) {
+    if (ipc_keyboard_active()) { ipc_close_focused(); return; }
+    if (wayland_close_focused()) return;
+    gui_close_focused_win();
+}
 bool ipc_resize_begin(int32_t mx, int32_t my);
 bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn);
 bool ipc_resize_active(void);
@@ -235,26 +246,37 @@ static void take_screenshot(void) {
     static int s_idx = 0;
     mkdir("/fifi-data/screenshots", 0755);
     char path[64];
-    snprintf(path, sizeof(path), "/fifi-data/screenshots/shot%03d.ppm", ++s_idx);
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "[screenshot] cannot open %s\n", path);
-        return;
-    }
+    snprintf(path, sizeof(path), "/fifi-data/screenshots/shot%03d.png", ++s_idx);
     uint32_t w = g_lmfb.width, h = g_lmfb.height;
     uint32_t pitch32 = g_lmfb.pitch / 4;
     const uint32_t *fb = (const uint32_t *)g_lmfb.address;
-    fprintf(f, "P6\n%u %u\n255\n", w, h);
-    for (uint32_t y = 0; y < h; y++) {
+    unsigned char *rgba = malloc((size_t)w * h * 4u);
+    if (!rgba) return;
+    for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++) {
             uint32_t px = fb[y * pitch32 + x];
-            uint8_t rgb[3] = { (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF };
-            fwrite(rgb, 1, 3, f);
+            unsigned char *d = rgba + ((size_t)y * w + x) * 4u;
+            d[0] = (px >> 16) & 0xFF; d[1] = (px >> 8) & 0xFF;
+            d[2] = px & 0xFF;         d[3] = 0xFF;
         }
+    unsigned char *png = NULL; size_t png_size = 0;
+    unsigned err = lodepng_encode32(&png, &png_size, rgba, w, h);
+    free(rgba);
+    if (err || !png) {
+        fprintf(stderr, "[screenshot] png encode failed (%u)\n", err);
+        free(png);
+        return;
     }
-    fclose(f);
-    fprintf(stderr, "[screenshot] saved %s\n", path);
-    gui_toast_extern("Screenshot saved", 0x0080c8a0u);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(png, 1, png_size, f);
+        fclose(f);
+        fprintf(stderr, "[screenshot] saved %s (%zu bytes)\n", path, png_size);
+        gui_toast_extern("Screenshot saved", 0x0080c8a0u);
+    } else {
+        fprintf(stderr, "[screenshot] cannot open %s\n", path);
+    }
+    free(png);
 }
 
 /* DEV: kill -USR1 <pid> requests a screenshot (handled in the event loop). */
@@ -617,9 +639,14 @@ int main(void) {
 
             /* ipc_resize_active() re-check: a resize may have just STARTED on this
              * press (ipc_resize_begin above) after `resizing` was computed — the
-             * grab click must not leak into the app as a content click. */
-            if (ipc_keyboard_active() && !dragging && !resizing && !ipc_resize_active())
-                ipc_send_focused_mouse(mcx, mcy, btns);
+             * grab click must not leak into the app as a content click. Same for
+             * titlebar presses (drag start / double-click maximize): consumed. */
+            {
+                extern bool ipc_press_suppressed(bool lbtn_down);
+                if (ipc_keyboard_active() && !dragging && !resizing &&
+                    !ipc_resize_active() && !ipc_press_suppressed(mlb))
+                    ipc_send_focused_mouse(mcx, mcy, btns);
+            }
             mouse_done:;
 
             /* Feed the browser input only when it is the topmost layer under the
@@ -692,7 +719,7 @@ int main(void) {
                     if (g_blanked) { g_blanked = false; break; }
                     uint8_t uc = (uint8_t)c;
                     if (uc == 0x96u) { take_screenshot(); continue; }
-                    if (uc == 0x97u) { ipc_close_focused(); continue; }
+                    if (uc == 0x97u) { close_focused_window(); continue; }
                     if (uc == 0x89u) { ipc_cycle_focus(); continue; }
                     /* 0x17 (Ctrl+W) passes through to IPC app — terminals handle tab/window close */
                     if (uc == 0x98u) { ipc_snap_focused(1); continue; }
@@ -701,7 +728,7 @@ int main(void) {
                     if (uc == 0x9Bu) { ipc_snap_focused(0); continue; }
                     if (uc == 0x9Cu) { compositor_lock(); continue; }
                     if (uc == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
-                    if (uc == 0x9Eu) { continue; }  /* Super tap — GUI ring opens the launcher */
+                    if (uc == 0x9Eu || uc == 0x9Fu) { continue; }  /* Super tap/help — handled in the GUI ring */
                     if (uc == 0x1Bu && ipc_file_drag_active()) { ipc_file_drag_cancel(); continue; }
                     if (uc >= 0x8Au && uc <= 0x90u) {
                         /* F1-F7: already in GUI ring via kb_push_internal — just consume */
@@ -719,7 +746,7 @@ int main(void) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                     if (g_blanked) { g_blanked = false; break; }
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
-                    if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                    if ((uint8_t)c == 0x97u) { close_focused_window(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
                     /* Snap keys: a Wayland app can still be the active window
                      * (sticky kbd focus) with the pointer elsewhere — try it
@@ -732,7 +759,7 @@ int main(void) {
                     if ((uint8_t)c == 0x9Du) { if (gui_show_desktop) gui_show_desktop(); continue; }
                     if ((uint8_t)c == 0x87u) { gui_term_scroll_page(+1); continue; }
                     if ((uint8_t)c == 0x88u) { gui_term_scroll_page(-1); continue; }
-                    if ((uint8_t)c == 0x9Eu) { continue; }  /* Super tap — GUI ring opens the launcher; keep it out of the PTY */
+                    if ((uint8_t)c == 0x9Eu || (uint8_t)c == 0x9Fu) { continue; }  /* Super tap/help — GUI ring handles; keep out of the PTY */
                     pty_write_input((uint8_t)c);
                 }
             } else if (!keyboard_gui_capture_active() && wayland_has_focus()) {
@@ -757,7 +784,7 @@ int main(void) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
                     if (g_blanked) { g_blanked = false; break; }
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
-                    if ((uint8_t)c == 0x97u) { ipc_close_focused(); continue; }
+                    if ((uint8_t)c == 0x97u) { close_focused_window(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
                     if ((uint8_t)c == 0x98u) { if (!wayland_snap_focused(1)) ipc_snap_focused(1); continue; }
                     if ((uint8_t)c == 0x99u) { if (!wayland_snap_focused(2)) ipc_snap_focused(2); continue; }

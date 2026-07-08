@@ -92,6 +92,16 @@ static int          g_focused_idx = -1;  /* which client has keyboard focus */
 /* gui_next_z defined in gui.c -- shared counter so IPC and built-in windows compare correctly */
 extern uint32_t gui_next_z(void);
 static bool         g_ipc_needs_redraw = false;  /* set when a window closes; cleared by gui_on_tick */
+static bool         g_press_consumed   = false;  /* titlebar press eaten by drag/double-click */
+
+/* Suppress app mouse forwarding for the WHOLE press that a titlebar action
+ * consumed (apps edge-detect from button state, so skipping only the press
+ * event would just delay the phantom click to the next motion event).
+ * Cleared when the button is released. */
+bool ipc_press_suppressed(bool lbtn_down) {
+    if (!lbtn_down) { g_press_consumed = false; return false; }
+    return g_press_consumed;
+}
 /* Cascading spawn position: new windows offset by 28px from each other */
 static uint32_t     g_cascade_x   = 0;
 static uint32_t     g_cascade_y   = 0;
@@ -862,6 +872,23 @@ bool ipc_hit_test(int32_t mx, int32_t my) {
         !close_btn_hit(&g_clients[best_i], mx, my) &&
         !min_btn_hit(&g_clients[best_i], mx, my) &&
         !max_btn_hit(&g_clients[best_i], mx, my)) {
+        /* Double-click on the titlebar toggles maximize/restore (like the
+         * built-in windows) instead of starting a drag. */
+        static struct timespec s_dc_ts;
+        static int s_dc_idx = -1;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long ms = (now.tv_sec - s_dc_ts.tv_sec) * 1000L +
+                  (now.tv_nsec - s_dc_ts.tv_nsec) / 1000000L;
+        bool dbl = (s_dc_idx == best_i && ms > 0 && ms < 400);
+        s_dc_ts = now; s_dc_idx = best_i;
+        g_press_consumed = true;   /* titlebar press: never a content click */
+        if (dbl) {
+            if (g_clients[best_i].snapped) ipc_unsnap(best_i);
+            else                           ipc_apply_snap(best_i, 3);
+            g_ipc_needs_redraw = true;
+            return true;
+        }
         /* If snapped, unsnap first so we drag the native-size window */
         if (g_clients[best_i].snapped) ipc_unsnap(best_i);
         g_drag_idx = best_i;

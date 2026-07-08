@@ -97,6 +97,7 @@ uint64_t     g_resize_ww0 = 0;
 uint64_t     g_resize_wh0 = 0;
 
 bool g_launcher_open = false;
+bool g_help_open     = false;   /* Super+/ keyboard-shortcuts overlay */
 
 int      g_settings_scroll    = 0;
 uint32_t g_gui_raise_z        = 2;
@@ -1026,6 +1027,17 @@ void gui_on_tick(void) {
                  * Linux main loop (main.c key drains) before reaching this ring —
                  * ipc_snap_focused / wayland_snap_focused / gui_show_desktop /
                  * compositor_lock. Only the bare Super tap is handled here. */
+                /* ── Super+/: keyboard shortcuts overlay; any key closes it ── */
+                if ((uint8_t)ch == KEY_SUPER_HELP) {
+                    g_help_open = !g_help_open;
+                    full_redraw();
+                    continue;
+                }
+                if (g_help_open) {
+                    g_help_open = false;
+                    full_redraw();
+                    continue;
+                }
                 /* ── Super tap: toggle the app launcher (like other desktops) ── */
                 if ((uint8_t)ch == KEY_SUPER) {
                     g_vol_popup_open = false;
@@ -3061,6 +3073,15 @@ void gui_on_tick(void) {
         }
     }
 
+    /* ── Any click dismisses the shortcuts overlay ── */
+    if (btn_pressed && g_help_open) {
+        int32_t hcx, hcy;
+        g_help_open = false;
+        full_redraw();
+        mouse_consume_click(&hcx, &hcy);
+        return;
+    }
+
     /* ── Launcher item context menu clicks (before normal launcher clicks) ── */
     if (btn_pressed && g_launcher_open && g_launchctx_row >= 0) {
         int32_t cx, cy;
@@ -4500,6 +4521,19 @@ void gui_show_desktop(void) {
     /* No full_redraw() here -- called from event thread, would race with
      * drm_flush() running outside g_mx in the render thread.
      * ipc_hide_all/ipc_show_all set g_ipc_needs_redraw so render picks it up. */
+}
+
+/* Alt+F4 fallback: hide the topmost visible built-in window (same effect as
+ * its close button — built-in windows are persistent, close = hide). */
+void gui_close_focused_win(void) {
+    for (int i = MAX_WINS - 1; i >= 0; i--) {
+        int wi = g_z[i];
+        if (g_wins[wi].active && g_wins[wi].state != WIN_HIDDEN) {
+            g_wins[wi].state = WIN_HIDDEN;
+            full_redraw();
+            return;
+        }
+    }
 }
 
 void gui_snap_focused(int zone) {

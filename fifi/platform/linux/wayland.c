@@ -2100,10 +2100,40 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     wl_client_flush(bc);
                 } else if (rel >= bw - 72) {              /* minimize (taskbar restores) */
                     g_wl_minimized = true;
-                } else {                                   /* drag-move */
-                    g_iop = 1; g_iop_ci = bar_ci; g_iop_sid = bar_sid;
-                    g_iop_sx = mx; g_iop_sy = my;
-                    g_iop_ox = bar_s->x; g_iop_oy = bar_s->y;
+                } else {
+                    /* Double-click on the titlebar = maximize/restore toggle
+                     * (single press starts a drag-move as before). */
+                    static struct timespec s_dc_ts;
+                    static uint32_t s_dc_sid = 0;
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    long dms = (now.tv_sec - s_dc_ts.tv_sec) * 1000L +
+                               (now.tv_nsec - s_dc_ts.tv_nsec) / 1000000L;
+                    bool dbl = (s_dc_sid == bar_sid && dms > 0 && dms < 400);
+                    s_dc_ts = now; s_dc_sid = bar_sid;
+                    if (dbl) {
+                        int32_t taskbar2 = fh2 + 10;
+                        if (!bar_s->maximized) {
+                            if (!bar_s->half_snapped) {
+                                bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
+                                bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
+                            }
+                            bar_s->maximized = true; bar_s->half_snapped = false;
+                            bar_s->x = 0; bar_s->y = top;
+                            send_toplevel_configure(bc, bar_s, g_w, g_h - top - taskbar2,
+                                                    XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                        } else {
+                            bar_s->maximized = false;
+                            bar_s->x = bar_s->restore_x;
+                            bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
+                            send_toplevel_configure(bc, bar_s, bar_s->restore_w, bar_s->restore_h, 0, 0);
+                        }
+                        wl_client_flush(bc);
+                    } else {                               /* drag-move */
+                        g_iop = 1; g_iop_ci = bar_ci; g_iop_sid = bar_sid;
+                        g_iop_sx = mx; g_iop_sy = my;
+                        g_iop_ox = bar_s->x; g_iop_oy = bar_s->y;
+                    }
                 }
             }
             g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
@@ -2497,6 +2527,31 @@ bool wayland_snap_focused(int zone) {
         send_toplevel_configure(c, s, (zone == 1) ? g_w / 2 : g_w - g_w / 2, avail_h,
                                 XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
     }
+    wl_client_flush(c);
+    return true;
+}
+
+/* Alt+F4: politely close the FOCUSED Wayland client's toplevel (same target
+ * selection as wayland_snap_focused). Returns false when no focused toplevel. */
+bool wayland_close_focused(void) {
+    if (g_wl_minimized) return false;
+    int ci = -1;
+    if (g_kbd_ci >= 0 && g_wl_clients[g_kbd_ci].active)          ci = g_kbd_ci;
+    else if (g_focus_ci >= 0 && g_wl_clients[g_focus_ci].active) ci = g_focus_ci;
+    if (ci < 0) return false;
+    wl_client_t *c = &g_wl_clients[ci];
+    wl_surface_t *s = NULL, *first = NULL;
+    for (int oi = 0; oi < c->n_objs; oi++) {
+        if (c->objs[oi].type != OBJ_SURFACE) continue;
+        wl_surface_t *t = c->objs[oi].data;
+        if (!t || !t->xdg_toplevel_id || t->is_popup || t->is_subsurface || !t->mapped) continue;
+        if (!first) first = t;
+        if (ssd_decorated(t)) { s = t; break; }
+    }
+    if (!s) s = first;
+    if (!s) return false;
+    int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
+    wl_end_msg(c, h);
     wl_client_flush(c);
     return true;
 }
