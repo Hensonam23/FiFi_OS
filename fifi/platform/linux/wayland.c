@@ -1971,6 +1971,9 @@ static bool wl_surface_hit(wl_surface_t *s, int32_t mx, int32_t my) {
      * client (e.g. Electron) may configure huge but commit a small window. */
     int32_t lx = mx - ox, ly = my - oy;
     if (lx < 0 || ly < 0 || lx >= s->own_w || ly >= s->own_h) return false;
+    /* X11 (XWayland) surfaces are opaque everywhere (no meaningful alpha), so the
+     * whole committed area owns the pointer. */
+    if (s->force_opaque) return true;
     /* Click-through fully-transparent pixels: Electron apps create a transparent
      * full-screen "host" surface that would otherwise steal every click, and CSD
      * apps have transparent shadow margins. Only opaque pixels own the pointer. */
@@ -2508,6 +2511,7 @@ void wayland_toplevel_activate(int idx) {
     int ci = -1;
     wl_surface_t *s = wl_nth_toplevel(idx, &ci);
     if (!s || ci < 0) return;
+    s->minimized = false;
     g_wl_minimized = false;
     wl_toplevel_raise(s);
     extern void gui_wl_raise(void);

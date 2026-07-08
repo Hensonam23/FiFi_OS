@@ -375,6 +375,20 @@ static void *render_thread_fn(void *arg)
             gui_overdraw_top();           /* render built-in windows (Settings/Files/Viewer) above IPC */
             gui_draw_popups();
 
+            /* When Wayland windows are composited we full_redraw() + blit the
+             * whole desktop each frame; the per-rect dirty tracking can miss
+             * rows a moved/minimized window vacated, leaving stale trails in
+             * VRAM. Force the whole screen dirty so the flip always mirrors the
+             * backbuffer exactly. (Also covers the frame right after the last
+             * Wayland window closes, clearing its final footprint.) */
+            {
+                extern bool wayland_any_mapped(void);
+                static bool s_wl_prev = false;
+                bool wl_now = wayland_any_mapped();
+                if (wl_now || s_wl_prev)
+                    console_mark_dirty_rows(0, (uint32_t)g_lmfb.height);
+                s_wl_prev = wl_now;
+            }
             clock_gettime(CLOCK_MONOTONIC, &t2);
             bool flipped = console_flip_if_dirty();
             clock_gettime(CLOCK_MONOTONIC, &t3);
