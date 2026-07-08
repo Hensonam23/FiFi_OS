@@ -318,6 +318,7 @@ typedef struct {
     bool         maximized, fullscreen, minimized;
     bool         half_snapped;   /* Super+Left/Right half-screen snap */
     bool         force_opaque;   /* X11/XWayland surface: alpha is meaningless, blit opaque */
+    uint32_t     z;              /* stacking order among Wayland toplevels (higher = front) */
     bool         ssd;               /* server-side decorations granted (FiFi chrome) */
     uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
     bool         placed;            /* initial window placement done */
@@ -956,6 +957,15 @@ static uint32_t g_focus_sid = 0;   /* surface obj id with POINTER focus */
  * dismisses its (non-grabbing) menu. */
 static int      g_kbd_ci    = -1;
 static uint32_t g_kbd_sid   = 0;
+
+/* Stacking order among Wayland toplevels (browser, XWayland/LibreOffice, ...).
+ * Each toplevel gets a z; higher draws in front. Assigned on first map and
+ * bumped when a window is focused/clicked so the active window comes forward. */
+static uint32_t g_wl_z_next = 1;
+static void wl_toplevel_raise(wl_surface_t *s) {
+    if (s && !s->is_popup && !s->is_subsurface && s->xdg_toplevel_id)
+        s->z = g_wl_z_next++;
+}
 static int32_t  g_prev_mx = -1, g_prev_my = -1;
 static uint8_t  g_prev_btns = 0;
 
@@ -2113,12 +2123,16 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 if (g_wl_minimized || !ssd_decorated(bs)) continue;
                 if (mx >= bs->x && mx < bs->x + bs->own_w &&
                     my >= bs->y - SSD_TITLE_H && my < bs->y) {
-                    bar_ci = ci; bar_sid = cc->objs[oi].id; bar_s = bs;
+                    /* topmost titlebar wins when windows overlap */
+                    if (!bar_s || bs->z >= bar_s->z) {
+                        bar_ci = ci; bar_sid = cc->objs[oi].id; bar_s = bs;
+                    }
                 }
             }
         }
         if (bar_s) {
             if ((btns & 1) && !(g_prev_btns & 1)) {
+                wl_toplevel_raise(bar_s);   /* clicking the titlebar brings it forward */
                 int32_t rel = mx - bar_s->x;
                 int32_t bw  = bar_s->own_w;
                 wl_client_t *bc = &g_wl_clients[bar_ci];
@@ -2193,6 +2207,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
     uint32_t new_sid = 0;
     wl_surface_t *new_s = NULL;
 
+    uint32_t best_rank = 0; bool best_is_popup = false;
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         wl_client_t *c = &g_wl_clients[ci];
         if (!c->active) continue;
@@ -2208,16 +2223,26 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                  * get POINTER focus so menu items are clickable; keyboard enter is
                  * gated separately (surface_in_popup_tree) so Firefox a11y is safe. */
                 if (tgt && (tgt->xdg_toplevel_id || tgt->is_popup || !tgt->xdg_surface_id)) {
-                    new_ci  = ci;
-                    new_sid = tid;
-                    new_s   = tgt;
+                    /* Pick by stacking: popups always beat toplevels; among
+                     * toplevels the highest z (frontmost) wins, so a click on an
+                     * overlapped window's exposed area doesn't route to the one
+                     * behind it. */
+                    bool is_popup = surface_in_popup_tree(tgt);
+                    uint32_t rank = is_popup ? 0xFFFFFFFFu : tgt->z;
+                    if (!new_s || (is_popup && !best_is_popup) ||
+                        (is_popup == best_is_popup && rank >= best_rank)) {
+                        new_ci = ci; new_sid = tid; new_s = tgt;
+                        best_rank = rank; best_is_popup = is_popup;
+                    }
                 }
-                /* keep searching — last (topmost draw order) wins */
             }
         }
     }
 
     bool new_in_popup = new_s && surface_in_popup_tree(new_s);
+    /* A press on a Wayland window raises it above the other Wayland windows. */
+    if (new_s && !new_in_popup && (btns & 1) && !(g_prev_btns & 1))
+        wl_toplevel_raise(new_s);
 
     /* ── Pointer focus (follows whatever surface is under the cursor) ── */
     if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
@@ -2783,21 +2808,60 @@ void wayland_blit_surfaces(void) {
     int do_log = (++blit_log_ticker % 600 == 0);
     int blitted = 0;
 
-    /* Three-pass: non-subsurface non-popup first, then subsurfaces, then popups on top. */
-    for (int pass = 0; pass < 3; pass++) {
-        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
-            wl_client_t *c = &g_wl_clients[ci];
-            if (!c->active) continue;
-            for (int oi = 0; oi < c->n_objs; oi++) {
-                if (c->objs[oi].type != OBJ_SURFACE) continue;
-                wl_surface_t *s = c->objs[oi].data;
-                if (!s) continue;
-                /* pass 0 = non-subsurfaces, pass 1 = subsurfaces */
-                if (pass == 0 && (s->is_subsurface || s->is_popup)) continue;
-                if (pass == 1 && (!s->is_subsurface || s->is_popup)) continue;
-                if (pass == 2 && !s->is_popup) continue;
-                blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
+    /* Collect mapped toplevels (non-subsurface, non-popup) and draw them in
+     * z-order (back to front) so the focused window and its titlebar sit above
+     * the others. Newly-mapped toplevels (z==0) get the next z now, so a window
+     * opened later appears on top. Each toplevel is followed immediately by its
+     * own subsurfaces; popups (menus) are drawn last, above everything. */
+    typedef struct { int ci; wl_surface_t *s; uint32_t oid; } top_ent_t;
+    top_ent_t tops[MAX_WL_CLIENTS * 8];
+    int ntop = 0;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            if (c->objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = c->objs[oi].data;
+            if (!s || s->is_subsurface || s->is_popup) continue;
+            if (s->z == 0) s->z = g_wl_z_next++;
+            if (ntop < (int)(sizeof tops / sizeof tops[0]))
+                tops[ntop].ci = ci, tops[ntop].s = s, tops[ntop].oid = c->objs[oi].id, ntop++;
+        }
+    }
+    /* selection sort by z ascending (few windows) */
+    for (int i = 0; i < ntop; i++) {
+        int lo = i;
+        for (int j = i + 1; j < ntop; j++)
+            if (tops[j].s->z < tops[lo].s->z) lo = j;
+        if (lo != i) { top_ent_t t = tops[i]; tops[i] = tops[lo]; tops[lo] = t; }
+    }
+    for (int i = 0; i < ntop; i++) {
+        blitted += blit_one_surface(tops[i].ci, tops[i].s, tops[i].oid, do_log);
+        /* draw this toplevel's subsurfaces right on top of it */
+        wl_client_t *c = &g_wl_clients[tops[i].ci];
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            if (c->objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *sub = c->objs[oi].data;
+            if (!sub || !sub->is_subsurface || sub->is_popup) continue;
+            /* subsurface belongs to this toplevel if its ancestor chain leads here */
+            wl_surface_t *anc = sub; int guard = 0;
+            while (anc && anc->is_subsurface && guard++ < 8) {
+                wl_obj_t *po = wl_find_obj_any(anc->parent_surface_id);
+                anc = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
             }
+            if (anc == tops[i].s)
+                blitted += blit_one_surface(tops[i].ci, sub, c->objs[oi].id, do_log);
+        }
+    }
+    /* popups (menus/dropdowns) on top of all windows */
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            if (c->objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = c->objs[oi].data;
+            if (s && s->is_popup)
+                blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
         }
     }
     (void)blitted;
