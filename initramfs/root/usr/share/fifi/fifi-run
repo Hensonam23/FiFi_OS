@@ -41,12 +41,12 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # The X client libs, libEGL, and xkbcomp live in the persistent runtime; only
 # /usr resets each boot, so xkbcomp is re-seeded there (Xwayland execs it by
 # absolute path).
-# True if a live Xwayland process exists (not just a leftover socket).
-xwayland_alive() {
+# True if a process whose comm matches $1 is running.
+proc_running() {
     for _d in /proc/[0-9]*; do
         [ -r "$_d/comm" ] || continue
         read -r _c < "$_d/comm" 2>/dev/null || continue
-        [ "$_c" = Xwayland ] && return 0
+        [ "$_c" = "$1" ] && return 0
     done
     return 1
 }
@@ -55,11 +55,15 @@ ensure_xwayland() {
     # hint the compositor with a friendly window title (XWayland reports only
     # "Xwayland on :0"); the compositor relabels its window to this.
     printf '%s' "${APP_NAME:-App}" > /tmp/xwayland-title 2>/dev/null || true
-    # Reuse the X server ONLY if it is actually running. A stale socket from a
-    # prior XWayland that already exited makes a new X app connect to nothing
-    # and render a black window — so if no Xwayland is alive, clear the socket
-    # and start fresh.
-    if [ -S /tmp/.X11-unix/X0 ] && xwayland_alive; then return 0; fi
+    # Rootful XWayland presents the whole X screen as ONE FiFi window = one app.
+    # Reuse the running X server ONLY while an X app (soffice) is still attached
+    # to it. An XWayland left alive after its app closed has a stale/black X root
+    # that a new app won't repaint into — so tear that orphan down and start a
+    # fresh server. (A dead XWayland leaving only a socket is handled the same.)
+    if [ -S /tmp/.X11-unix/X0 ] && proc_running Xwayland && proc_running soffice.bin; then
+        return 0
+    fi
+    proc_running Xwayland && { busybox pkill -9 Xwayland 2>/dev/null; sleep 1; }
     rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock 2>/dev/null || true
     # xkbcomp: image ships it at /usr/bin; older boxes only have it in the runtime.
     [ -x /usr/bin/xkbcomp ] || cp "$RT/bin/xkbcomp" /usr/bin/xkbcomp 2>/dev/null || true
