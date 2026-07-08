@@ -824,10 +824,16 @@ void gui_on_tick(void) {
 
     /* ── Launcher hover tracking (mouse moves the selection) ── */
     if (g_launcher_open) {
-        int new_hover = launcher_hit_row(mx, my);
-        if (new_hover >= 0 && new_hover != g_launcher_hover) {
-            g_launcher_hover = new_hover;
-            launcher_draw();
+        if (g_launchctx_row >= 0) {
+            /* context menu open: track its hover instead of the row hover */
+            int h = launchctx_hit(mx, my);
+            if (h != g_launchctx_hover) { g_launchctx_hover = h; full_redraw(); }
+        } else {
+            int new_hover = launcher_hit_row(mx, my);
+            if (new_hover >= 0 && new_hover != g_launcher_hover) {
+                g_launcher_hover = new_hover;
+                launcher_draw();
+            }
         }
     }
 
@@ -1014,6 +1020,25 @@ void gui_on_tick(void) {
                     char _vm[24]; snprintf(_vm, sizeof(_vm), "Volume: %d%%", v);
                     gui_toast_extern(_vm, 0x0060a0e0u);
                     if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
+                    continue;
+                }
+                /* NOTE: Super+arrow snapping and Super+D/+L are consumed by the
+                 * Linux main loop (main.c key drains) before reaching this ring —
+                 * ipc_snap_focused / wayland_snap_focused / gui_show_desktop /
+                 * compositor_lock. Only the bare Super tap is handled here. */
+                /* ── Super tap: toggle the app launcher (like other desktops) ── */
+                if ((uint8_t)ch == KEY_SUPER) {
+                    g_vol_popup_open = false;
+                    g_cal_popup_open = false;
+                    g_launcher_open = !g_launcher_open;
+                    g_launcher_hover = -1;
+                    if (g_launcher_open) {
+                        launcher_open_reset();
+                        taskbar_draw();
+                        launcher_draw();
+                    } else {
+                        full_redraw();
+                    }
                     continue;
                 }
                 /* ── Launcher: type to search, arrows to move, Enter to launch ── */
@@ -2950,12 +2975,16 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Right-click a launcher item: pin it to the taskbar favorites ── */
+    /* ── Right-click a launcher item: open its context menu (pin / desktop) ── */
     if (rbtn_pressed && g_launcher_open) {
         int row = launcher_hit_row(mx, my);
-        if (row >= 0) launcher_pin_taskbar(row);
-        g_launcher_open  = false;
-        g_launcher_hover = -1;
+        if (row >= 0) {
+            launchctx_open(row, mx, my);
+        } else {
+            g_launchctx_row  = -1;
+            g_launcher_open  = false;
+            g_launcher_hover = -1;
+        }
         full_redraw();
         int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
         return;
@@ -3030,6 +3059,19 @@ void gui_on_tick(void) {
             ctx_draw();
             return;
         }
+    }
+
+    /* ── Launcher item context menu clicks (before normal launcher clicks) ── */
+    if (btn_pressed && g_launcher_open && g_launchctx_row >= 0) {
+        int32_t cx, cy;
+        int it = launchctx_hit(mx, my);
+        if (it == 0)      launcher_pin_taskbar(g_launchctx_row);
+        else if (it == 1) launcher_add_desktop(g_launchctx_row);
+        g_launchctx_row = -1; g_launchctx_hover = -1;
+        if (it >= 0) { g_launcher_open = false; g_launcher_hover = -1; }
+        full_redraw();
+        mouse_consume_click(&cx, &cy);
+        return;
     }
 
     /* ── Launcher popup clicks ── */

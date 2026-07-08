@@ -47,6 +47,7 @@
 #define FIFI_KEY_SUPER_DOWN  0x9Bu
 #define FIFI_KEY_SUPER_L     0x9Cu  /* Win+L = lock screen */
 #define FIFI_KEY_SUPER_D     0x9Du  /* Win+D = show/hide desktop */
+#define FIFI_KEY_SUPER       0x9Eu  /* bare Super tap (no combo) = toggle launcher */
 #define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
 #define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
@@ -123,6 +124,7 @@ static bool g_caps  = false;
 static bool g_ctrl  = false;
 static bool g_alt   = false;
 static bool g_super = false;
+static bool g_super_used = false;  /* a combo key was pressed during the Super hold */
 
 /* Raw evdev key queue for Wayland clients (evdev code + press/release) */
 #define RAW_KEY_RING 64
@@ -659,10 +661,18 @@ void input_poll(void) {
                 g_ctrl = pressed;
             else if (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT)
                 g_alt = pressed;
-            else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA)
+            else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA) {
+                /* a bare tap (press+release, no other key in between) toggles
+                 * the launcher — combos (Super+arrow etc.) suppress it */
+                if (pressed && !g_super) g_super_used = false;
+                if (!pressed && g_super && !g_super_used)
+                    kb_push_internal(FIFI_KEY_SUPER);
                 g_super = pressed;
+            }
             else if (ev.code == KEY_CAPSLOCK && pressed)
                 g_caps = !g_caps;   /* toggle on each key-down */
+            else if (pressed && g_super)
+                g_super_used = true;
 
             if (!pressed) continue;
 

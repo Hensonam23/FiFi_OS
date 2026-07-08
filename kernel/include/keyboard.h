@@ -27,6 +27,12 @@
 #define KEY_F10     0x93
 #define KEY_F11     0x94
 #define KEY_F12     0x95
+#define KEY_SUPER_LEFT  0x98   /* Super+Left  = snap window left half  */
+#define KEY_SUPER_RIGHT 0x99   /* Super+Right = snap window right half */
+#define KEY_SUPER_UP    0x9A   /* Super+Up    = maximize window        */
+#define KEY_SUPER_DOWN  0x9B   /* Super+Down  = restore window         */
+#define KEY_SUPER_D     0x9D   /* Super+D     = show/hide desktop      */
+#define KEY_SUPER   0x9E   /* bare Super/Win tap (no combo) — opens the launcher */
 
 // IRQ handler calls this with raw Set 1 scancodes
 void keyboard_on_scancode(uint8_t sc);
