@@ -2101,6 +2101,15 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 if (mx >= wx1 - M) e |= 8;
                 if (my <= wy0 + M) e |= 1;
                 if (my >= wy1 - M) e |= 2;
+                /* Corners: a 6px box is too small to grab, so widen each corner
+                 * to a CN-px reach that forces BOTH edges (diagonal resize). */
+                const int32_t CN = 18;
+                bool nL = mx <= wx0 + CN, nR = mx >= wx1 - CN;
+                bool nT = my <= wy0 + CN, nB = my >= wy1 - CN;
+                if      (nT && nL) e = 1u | 4u;
+                else if (nT && nR) e = 1u | 8u;
+                else if (nB && nL) e = 2u | 4u;
+                else if (nB && nR) e = 2u | 8u;
                 if (e) { rs = es; rs_ci = ci; rs_sid = cc->objs[oi].id; g_iop_edges = (int)e; }
             }
         }
