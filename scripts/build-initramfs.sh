@@ -515,6 +515,44 @@ if [ -x /usr/bin/Xwayland ]; then
         [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
     done
     echo "[initramfs] XWayland bundled ($(du -sh /usr/bin/Xwayland | cut -f1))"
+
+    # Helper: copy a lib + resolve its symlink chain into $STAGE/usr/lib.
+    stage_lib() {
+        for _l in "$@"; do
+            for _p in /usr/lib/"$_l" /usr/lib64/"$_l"; do
+                [ -e "$_p" ] || continue
+                _r=$(realpath "$_p" 2>/dev/null) || continue
+                [ -f "$_r" ] || continue
+                [ -f "$STAGE/usr/lib/$(basename "$_r")" ] || cp "$_r" "$STAGE/usr/lib/"
+                [ -e "$STAGE/usr/lib/$_l" ] || ln -sf "$(basename "$_r")" "$STAGE/usr/lib/$_l"
+                break
+            done
+        done
+    }
+
+    # xkbcomp: Xwayland EXECs it by absolute path to build the keymap (it is not
+    # a linked dependency, so ldd above missed it). Without it Xwayland aborts
+    # with "Failed to activate virtual core keyboard".
+    if [ -x /usr/bin/xkbcomp ]; then
+        cp /usr/bin/xkbcomp "$STAGE/usr/bin/xkbcomp"
+        for lib in $(ldd /usr/bin/xkbcomp 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/"); do
+            stage_lib "$(basename "$lib")"
+        done
+    fi
+    # xkeyboard-config data (Xwayland -xkbdir) — copy the real dir X11/xkb points to.
+    if [ -d /usr/share/X11/xkb ]; then
+        mkdir -p "$STAGE/usr/share/X11"
+        cp -aL /usr/share/X11/xkb "$STAGE/usr/share/X11/xkb" 2>/dev/null || true
+    fi
+    # glamor dlopen()s libEGL/libGLdispatch at startup (also not in ldd); without
+    # them Xwayland aborts before falling back to software rendering.
+    stage_lib libEGL.so.1 libGLdispatch.so.0 libgbm.so.1
+    # X11 client libraries used by X11-only apps (LibreOffice's "gen" VCL).
+    stage_lib libXext.so.6 libSM.so.6 libICE.so.6 libXrender.so.1 libXrandr.so.2 \
+              libXi.so.6 libXinerama.so.1 libXcursor.so.1 libXfixes.so.3 \
+              libXdamage.so.1 libXcomposite.so.1 libXtst.so.6 libX11.so.6 \
+              libxcb.so.1 libXau.so.6 libXdmcp.so.6 libxkbfile.so.1
+    echo "[initramfs] X11 support: xkbcomp + xkb data + EGL/X client libs bundled"
 else
     echo "[initramfs] WARNING: Xwayland not found — X11 app support disabled"
 fi

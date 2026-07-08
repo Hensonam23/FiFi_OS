@@ -35,10 +35,45 @@ export ELECTRON_OZONE_PLATFORM_HINT=wayland
 export ELECTRON_DISABLE_SANDBOX=1
 export APPIMAGE_EXTRACT_AND_RUN=1
 
+# Start a rootful XWayland (:0) on demand for apps that only speak X11 (e.g.
+# LibreOffice's "gen" VCL). Rootful = the whole X screen is ONE FiFi window
+# (the compositor has no X11 window-manager, so rootless can't map windows).
+# The X client libs, libEGL, and xkbcomp live in the persistent runtime; only
+# /usr resets each boot, so xkbcomp is re-seeded there (Xwayland execs it by
+# absolute path).
+ensure_xwayland() {
+    # hint the compositor with a friendly window title (XWayland reports only
+    # "Xwayland on :0"); the compositor relabels its window to this.
+    printf '%s' "${APP_NAME:-App}" > /tmp/xwayland-title 2>/dev/null || true
+    [ -S /tmp/.X11-unix/X0 ] && return 0
+    # xkbcomp: image ships it at /usr/bin; older boxes only have it in the runtime.
+    [ -x /usr/bin/xkbcomp ] || cp "$RT/bin/xkbcomp" /usr/bin/xkbcomp 2>/dev/null || true
+    # xkb data: prefer the image copy, fall back to the runtime one.
+    xkbdir=/usr/share/X11/xkb
+    [ -d "$xkbdir" ] || xkbdir="$RT/share/X11/xkb"
+    # windowed (NOT -fullscreen) so the FiFi compositor can decorate it with a
+    # titlebar + traffic-lights and the user can move/resize it
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    LD_LIBRARY_PATH="$RT/lib" \
+        busybox setsid /usr/bin/Xwayland :0 -geometry 1800x1050 \
+        -xkbdir "$xkbdir" </dev/null >/tmp/xwayland.log 2>&1 &
+    for _i in $(seq 1 40); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 0.25; done
+}
+
 launch_dir() {
     # $1 = extracted squashfs-root dir. Detect Electron/Chromium and add the
     # flags they need on this box (root -> no sandbox, force wayland+swgl).
     dir="$1"; shift
+    # X11-only apps (LibreOffice): no Wayland backend, so run them under a
+    # rootful XWayland presented as a single FiFi window.
+    if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
+        ensure_xwayland
+        export DISPLAY=:0
+        export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL (no GTK/Wayland)
+        unset GDK_BACKEND QT_QPA_PLATFORM       # don't steer it to Wayland
+        export APPDIR="$dir"; cd "$dir"
+        [ -x "$dir/AppRun" ] && exec "$dir/AppRun" "$@"
+    fi
     # Archimage/JuNest packages (ivan-hc builds) run a containerized Arch inside
     # proot and refuse to start as root. Give them a fake non-root identity via
     # an unprivileged user namespace, a persistent bound home, and a clean env
@@ -91,6 +126,7 @@ case "$target" in
             mkdir -p "$ext"
             ( cd "$ext" && "$target" --appimage-extract >/dev/null 2>&1 )
         fi
+        export APP_NAME="$base"
         launch_dir "$ext/squashfs-root" "$@"
         ;;
     *)
