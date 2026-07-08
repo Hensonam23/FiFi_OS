@@ -922,9 +922,20 @@ static void send_keymap(wl_client_t *c) {
     wl_end_msg(c, h);
 }
 
-/* Send wl_buffer.release for buffer_id to whichever client owns it. */
-static void wl_release_buffer(uint32_t buffer_id) {
+/* Send wl_buffer.release for buffer_id. Wayland object IDs are PER-CLIENT, so
+ * the release MUST go to the client that committed the surface — never a
+ * different client that happens to have re-used the same numeric id (that
+ * cross-client mismatch releases the wrong buffer and desyncs both clients,
+ * the "channel error" cascade when Firefox + an Electron app coexist).
+ * `owner` is the committing client; fall back to a scan only when the id
+ * genuinely isn't in that client (Firefox's cross-process buffers). */
+static void wl_release_buffer_owned(wl_client_t *owner, uint32_t buffer_id) {
     if (!buffer_id) return;
+    if (owner && owner->active && wl_find_obj(owner, buffer_id)) {
+        int h = wl_begin_msg(owner, buffer_id, WL_BUFFER_RELEASE);
+        wl_end_msg(owner, h);
+        return;
+    }
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         if (!g_wl_clients[ci].active) continue;
         if (wl_find_obj(&g_wl_clients[ci], buffer_id)) {
@@ -1094,7 +1105,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         } else if (opcode == WL_SURFACE_COMMIT) {
             /* Tab-close fix: DESTROY set pending_destroy; clean up on commit. */
             if (s->pending_destroy) {
-                if (s->buffer_id) wl_release_buffer(s->buffer_id);
+                if (s->buffer_id) wl_release_buffer_owned(c, s->buffer_id);
                 wl_delete_obj(c, obj_id);
                 break;
             }
@@ -1108,7 +1119,12 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             if (s->has_new_buffer) {
                 s->has_new_buffer = false;
                 if (s->buffer_id) {
-                    wl_obj_t *bobj = wl_find_obj_any(s->buffer_id);
+                    /* Resolve the buffer in the COMMITTING client first. IDs are
+                     * per-client, so a same-id object in another client is a
+                     * different buffer — only fall back cross-client (then the
+                     * orphan pool) for Firefox's genuine cross-process buffers. */
+                    wl_obj_t *bobj = wl_find_obj(c, s->buffer_id);
+                    if (!bobj || bobj->type != OBJ_BUFFER) bobj = wl_find_obj_any(s->buffer_id);
                     wl_shm_buf_t *src = (bobj && bobj->type == OBJ_BUFFER) ? bobj->data : NULL;
                     if (!src) src = orphan_find(s->buffer_id);
                     if (src && src->data) {
@@ -1130,7 +1146,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             s->w = src->width; s->h = src->height;
                         }
                     }
-                    wl_release_buffer(s->buffer_id);  /* exactly once per attach */
+                    wl_release_buffer_owned(c, s->buffer_id);  /* to the committing client */
                 } else {
                     s->mapped = false;  /* NULL attach = unmap */
                 }
@@ -1426,6 +1442,30 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             memcpy(s->title, args + 4, copy);
                             s->title[copy] = '\0';
                             fprintf(stderr, "[wayland] toplevel title: %s\n", s->title);
+                            /* XWayland (rootful X screen for LibreOffice etc.)
+                             * never binds a decoration protocol, so force FiFi
+                             * chrome on it and place it below the status bar so
+                             * the titlebar is on-screen and it can be moved. */
+                            if (!strncmp(s->title, "Xwayland", 8)) {
+                                extern uint32_t console_font_height(void);
+                                s->ssd = true;
+                                if (s->x == 0 && s->y == 0) {
+                                    s->x = 120;
+                                    s->y = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
+                                }
+                                /* relabel to the app fifi-run launched (XWayland
+                                 * only ever reports "Xwayland on :N") */
+                                FILE *tf = fopen("/tmp/xwayland-title", "r");
+                                if (tf) {
+                                    char nm[64];
+                                    if (fgets(nm, sizeof nm, tf)) {
+                                        nm[strcspn(nm, "\n")] = '\0';
+                                        if (nm[0]) { strncpy(s->title, nm, sizeof s->title - 1);
+                                                     s->title[sizeof s->title - 1] = '\0'; }
+                                    }
+                                    fclose(tf);
+                                }
+                            }
                             break;
                         }
                     }
@@ -1705,21 +1745,23 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 /* Remember the buffer being attached to this unknown surface */
                 memcpy(&s_pending_buf, args, 4);
             } else if (opcode == WL_SURFACE_COMMIT) {
-                /* Send buffer_release so Firefox doesn't wait forever */
+                /* Send buffer_release so Firefox doesn't wait forever. The buffer
+                 * was attached on THIS client (c), so release it to c — never a
+                 * different client with a colliding id. */
                 if (s_pending_buf) {
-                    wl_obj_t *bobj = wl_find_obj_any(s_pending_buf);
-                    if (bobj) {
-                        wl_client_t *bowner = NULL;
+                    wl_client_t *bowner = wl_find_obj(c, s_pending_buf) ? c : NULL;
+                    if (!bowner) {
                         for (int _ci = 0; _ci < MAX_WL_CLIENTS; _ci++) {
-                            if (wl_find_obj(&g_wl_clients[_ci], s_pending_buf)) {
+                            if (g_wl_clients[_ci].active &&
+                                wl_find_obj(&g_wl_clients[_ci], s_pending_buf)) {
                                 bowner = &g_wl_clients[_ci]; break;
                             }
                         }
-                        if (bowner && bowner->fd >= 0) {
-                            int h = wl_begin_msg(bowner, s_pending_buf, WL_BUFFER_RELEASE);
-                            wl_end_msg(bowner, h);
-                            wl_client_flush(bowner);
-                        }
+                    }
+                    if (bowner && bowner->fd >= 0) {
+                        int h = wl_begin_msg(bowner, s_pending_buf, WL_BUFFER_RELEASE);
+                        wl_end_msg(bowner, h);
+                        wl_client_flush(bowner);
                     }
                     s_pending_buf = 0;
                 }
