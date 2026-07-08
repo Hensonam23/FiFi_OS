@@ -606,22 +606,22 @@ void taskbar_draw(void) {
         }
     }
 
-    /* ── Wayland browser task button (after the IPC buttons) ──────────────── */
+    /* ── Wayland windows: one task button per toplevel (after IPC buttons) ── */
 #ifdef __linux__
     {
-        __attribute__((weak)) bool wayland_browser_present(void);
-        __attribute__((weak)) bool wayland_browser_minimized(void);
-        __attribute__((weak)) const char *wayland_browser_title(void);
-        if (wayland_browser_present && wayland_browser_present()) {
+        __attribute__((weak)) int  wayland_toplevel_count(void);
+        __attribute__((weak)) bool wayland_toplevel_info(int, char *, int, bool *);
+        if (wayland_toplevel_count && wayland_toplevel_info) {
             int nipc = (ipc_window_count) ? ipc_window_count() : 0;
-            int bslot = (nipc < 8 ? nipc : 8);
+            int base = (nipc < 8 ? nipc : 8);
             uint64_t ibtw = taskbtn_w();
-            uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (ibtw + TASKBTN_GAP);
-            bool minimized = wayland_browser_minimized && wayland_browser_minimized();
-            bool focused = !minimized;   /* visible browser is the active window */
-            const char *wl_lbl = (wayland_browser_title && wayland_browser_title())
-                                 ? wayland_browser_title() : "Browser";
-            taskbar_pill(bx, ty, ibtw, wl_lbl, true, focused, false);
+            int nwl = wayland_toplevel_count();
+            for (int wi = 0; wi < nwl && base + wi < 12; wi++) {
+                char t[24] = "App"; bool f = false;
+                wayland_toplevel_info(wi, t, (int)sizeof(t), &f);
+                uint64_t bx = taskbtn_start_x() + (uint64_t)(base + wi) * (ibtw + TASKBTN_GAP);
+                taskbar_pill(bx, ty, ibtw, t, true, f, false);
+            }
         }
     }
 #endif

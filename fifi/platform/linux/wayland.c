@@ -2459,6 +2459,69 @@ bool wayland_browser_present(void) {
 bool wayland_browser_minimized(void)      { return g_wl_minimized; }
 void wayland_browser_set_minimized(bool m){ g_wl_minimized = m; }
 
+/* ── Per-toplevel taskbar support ────────────────────────────────────────
+ * Each mapped Wayland toplevel gets its own taskbar button. Buttons are
+ * enumerated in stable array order (ci, object index) so a button doesn't
+ * jump when its window's z changes on focus. */
+static wl_surface_t *wl_nth_toplevel(int idx, int *out_ci) {
+    int n = 0;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (!s || !s->mapped || !s->own_pix || !s->xdg_toplevel_id ||
+                s->is_popup || s->is_subsurface) continue;
+            if (n == idx) { if (out_ci) *out_ci = ci; return s; }
+            n++;
+        }
+    }
+    return NULL;
+}
+
+int wayland_toplevel_count(void) {
+    int n = 0;
+    while (wl_nth_toplevel(n, NULL)) n++;
+    return n;
+}
+
+/* Fill title (ASCII, app-name only handled taskbar-side) + focused flag for the
+ * idx-th toplevel. focused = it is the frontmost Wayland window and not minimized. */
+bool wayland_toplevel_info(int idx, char *title, int max, bool *focused) {
+    wl_surface_t *s = wl_nth_toplevel(idx, NULL);
+    if (!s) return false;
+    if (title && max > 0) {
+        const char *t = s->title[0] ? s->title : "App";
+        int i = 0; for (; t[i] && i < max - 1; i++) title[i] = t[i]; title[i] = '\0';
+    }
+    if (focused) {
+        uint32_t maxz = 0;
+        for (int i = 0; ; i++) { wl_surface_t *o = wl_nth_toplevel(i, NULL);
+                                 if (!o) break; if (o->z > maxz) maxz = o->z; }
+        *focused = !g_wl_minimized && s->z == maxz;
+    }
+    return true;
+}
+
+/* Taskbar click: raise the idx-th toplevel to the front and give it focus. */
+void wayland_toplevel_activate(int idx) {
+    int ci = -1;
+    wl_surface_t *s = wl_nth_toplevel(idx, &ci);
+    if (!s || ci < 0) return;
+    g_wl_minimized = false;
+    wl_toplevel_raise(s);
+    extern void gui_wl_raise(void);
+    gui_wl_raise();                 /* raise the Wayland layer above built-ins/IPC */
+    /* move keyboard focus to this toplevel */
+    if (g_kbd_ci >= 0 && g_kbd_sid && (g_kbd_ci != ci || g_kbd_sid != s->surface_id)) {
+        wl_client_t *ko = &g_wl_clients[g_kbd_ci];
+        if (ko->active) { wl_send_kbd_leave(ko, g_kbd_sid); wl_client_flush(ko); }
+    }
+    wl_send_kbd_enter(&g_wl_clients[ci], s->surface_id);
+    wl_client_flush(&g_wl_clients[ci]);
+    g_kbd_ci = ci; g_kbd_sid = s->surface_id;
+}
+
 /* Title of the topmost mapped Wayland toplevel (for the taskbar button).
  * Returns NULL when no client has set a title. */
 const char *wayland_browser_title(void) {

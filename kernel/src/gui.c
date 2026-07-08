@@ -2750,32 +2750,22 @@ void gui_on_tick(void) {
                 }
             }
 
-            /* ── Wayland browser task button (after the IPC buttons) ── */
+            /* ── Wayland window task buttons (one per toplevel, after IPC) ── */
 #ifdef __linux__
             {
-                extern bool wayland_browser_present(void);
-                extern bool wayland_browser_minimized(void);
-                extern void wayland_browser_set_minimized(bool);
-                extern uint32_t ipc_topmost_z(void);
-                if (wayland_browser_present()) {
+                extern int  wayland_toplevel_count(void);
+                extern void wayland_toplevel_activate(int);
+                int nwl = wayland_toplevel_count();
+                if (nwl > 0) {
                     int nipc2 = (ipc_window_count) ? ipc_window_count() : 0;
-                    int bslot = (nipc2 < 8 ? nipc2 : 8);
-                    uint64_t bx = taskbtn_start_x() + (uint64_t)bslot * (tbw + TASKBTN_GAP);
-                    if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
-                        if (wayland_browser_minimized()) {
-                            wayland_browser_set_minimized(false);
-                            gui_wl_raise();            /* restore + bring to front */
-                        } else {
-                            /* Visible: minimize if it's on top, else raise it. */
-                            uint32_t top = ipc_topmost_z();
-                            for (int _j = 0; _j < MAX_WINS; _j++) {
-                                window_t *_w = &g_wins[_j];
-                                if (_w->active && _w->state != WIN_HIDDEN && _w->raise_z > top) top = _w->raise_z;
-                            }
-                            if (g_wl_raise_z >= top) wayland_browser_set_minimized(true);
-                            else                     gui_wl_raise();
+                    int base = (nipc2 < 8 ? nipc2 : 8);
+                    for (int wi = 0; wi < nwl && base + wi < 12; wi++) {
+                        uint64_t bx = taskbtn_start_x() + (uint64_t)(base + wi) * (tbw + TASKBTN_GAP);
+                        if (mx >= (int32_t)bx && mx < (int32_t)(bx + tbw)) {
+                            wayland_toplevel_activate(wi);   /* raise + focus that window */
+                            full_redraw();
+                            break;
                         }
-                        full_redraw();
                     }
                 }
             }
