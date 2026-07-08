@@ -120,6 +120,13 @@ done
 # App Store binary ships in the image; older data partitions expect it at
 # /fifi-data/apps too (launcher fallback path), so mirror it there.
 [ -f /fifi-data/apps/fifi-appstore ] || cp /bin/fifi-appstore /fifi-data/apps/fifi-appstore 2>/dev/null || true
+
+# Check installed apps for updates once the network has had time to come up —
+# the App Store then shows Update buttons without a manual "Check Updates".
+# Offline-safe: the check just fails quietly and retries next boot.
+( sleep 25
+  [ -f /fifi-data/apps/appstore-update-check.sh ] && \
+      sh /fifi-data/apps/appstore-update-check.sh >/dev/null 2>&1 ) &
 [ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
 [ -f /fifi-data/runtime/etc/fonts/fonts.conf ] || cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
 
