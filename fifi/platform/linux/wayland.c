@@ -317,6 +317,7 @@ typedef struct {
     /* Toplevel window state (interactive move/resize + maximize/fullscreen/minimize) */
     bool         maximized, fullscreen, minimized;
     bool         half_snapped;   /* Super+Left/Right half-screen snap */
+    bool         force_opaque;   /* X11/XWayland surface: alpha is meaningless, blit opaque */
     bool         ssd;               /* server-side decorations granted (FiFi chrome) */
     uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
     bool         placed;            /* initial window placement done */
@@ -1449,6 +1450,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             if (!strncmp(s->title, "Xwayland", 8)) {
                                 extern uint32_t console_font_height(void);
                                 s->ssd = true;
+                                /* X11 buffers carry no meaningful alpha (X is
+                                 * XRGB); blend would render the whole X screen
+                                 * transparent. Blit it opaque instead. */
+                                s->force_opaque = true;
                                 if (s->x == 0 && s->y == 0) {
                                     s->x = 120;
                                     s->y = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
@@ -2418,17 +2423,23 @@ void wayland_browser_set_minimized(bool m){ g_wl_minimized = m; }
 /* Title of the topmost mapped Wayland toplevel (for the taskbar button).
  * Returns NULL when no client has set a title. */
 const char *wayland_browser_title(void) {
-    const char *best = NULL;
+    /* Prefer the KEYBOARD-focused client's toplevel so the label tracks the
+     * window the user is actually in (multiple Wayland toplevels can now be
+     * mapped at once — the browser AND a rootful XWayland app). Fall back to
+     * the last mapped toplevel. */
+    const char *best = NULL, *focused = NULL;
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         if (!g_wl_clients[ci].active) continue;
         for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
             if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
-            if (s && s->mapped && s->own_pix && s->xdg_toplevel_id && s->title[0])
+            if (s && s->mapped && s->own_pix && s->xdg_toplevel_id && s->title[0]) {
                 best = s->title;
+                if (ci == g_kbd_ci) focused = s->title;
+            }
         }
     }
-    return best;
+    return focused ? focused : best;
 }
 
 /* Returns true if the browser is showing (mapped and not minimized). */
@@ -2747,11 +2758,20 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
                                           uint64_t w, uint64_t h);
     extern void console_paste_rect_blend(const uint32_t *src, uint64_t dx, uint64_t dy,
                                          uint64_t w, uint64_t h);
-    /* All Wayland surfaces are ARGB. Alpha-blend over the wallpaper (repainted under
-     * the window each frame) so the browser's semi-transparent CSD shadow margin
-     * composites away instead of being stamped as a black ring. */
-    console_paste_rect_blend(s->own_pix, (uint64_t)bx, (uint64_t)by,
-                             (uint64_t)s->own_w, (uint64_t)s->own_h);
+    extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
+                                   uint64_t w, uint64_t h);
+    if (s->force_opaque) {
+        /* X11 (XWayland) surface: alpha is garbage, so a plain opaque copy —
+         * blending it would make the whole X screen see-through. */
+        console_paste_rect(s->own_pix, (uint64_t)bx, (uint64_t)by,
+                           (uint64_t)s->own_w, (uint64_t)s->own_h);
+    } else {
+        /* All other Wayland surfaces are ARGB. Alpha-blend over the wallpaper
+         * (repainted under the window each frame) so the browser's semi-
+         * transparent CSD shadow margin composites away instead of a black ring. */
+        console_paste_rect_blend(s->own_pix, (uint64_t)bx, (uint64_t)by,
+                                 (uint64_t)s->own_w, (uint64_t)s->own_h);
+    }
     if (ssd_decorated(s))
         ssd_draw_chrome(ci, s, bx, by);
     return 1;
