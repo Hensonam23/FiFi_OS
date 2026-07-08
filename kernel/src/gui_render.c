@@ -696,6 +696,53 @@ void full_redraw(void) {
         console_fill_rect(tx+1u, ty+1u, 3u, th-2u, g_toast_color);
         gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
     }
+
+    if (g_help_open)
+        help_draw();
+}
+
+/* ── Keyboard-shortcuts overlay (Super+/) ─────────────────────────────── */
+void help_draw(void) {
+    static const struct { const char *key, *desc; } rows[] = {
+        { "Super",         "Open the app launcher" },
+        { "Super + Left",  "Snap window left" },
+        { "Super + Right", "Snap window right" },
+        { "Super + Up",    "Maximize window" },
+        { "Super + Down",  "Restore window" },
+        { "Super + D",     "Show desktop" },
+        { "Super + L",     "Lock screen" },
+        { "Alt + Tab",     "Switch windows" },
+        { "Alt + F4",      "Close window" },
+        { "Print Screen",  "Save a screenshot" },
+        { "F11 / F12",     "Volume down / up" },
+        { "Super + /",     "Show this overlay" },
+    };
+    const int nrows = (int)(sizeof(rows) / sizeof(rows[0]));
+    uint64_t fw = console_font_width(), fh = console_font_height();
+    uint64_t fb_w = console_fb_width(), fb_h = console_fb_height();
+    uint64_t line_h = fh + 8u;
+    uint64_t key_w  = 14u * fw;                       /* key column */
+    uint64_t w = key_w + 24u * fw + 64u;              /* + desc column + padding */
+    uint64_t h = (uint64_t)nrows * line_h + fh + 46u; /* + title + padding */
+    uint64_t x = (fb_w > w) ? (fb_w - w) / 2u : 0u;
+    uint64_t y = (fb_h > h) ? (fb_h - h) / 2u : 0u;
+
+    console_fill_vgrad(x, y, w, h, 0x00182238u, 0x000c111du);
+    console_fill_rect(x, y, w, 1u, 0x003a5688u);
+    console_fill_rect(x, y + h - 1u, w, 1u, 0x00223048u);
+    console_fill_rect(x, y, 1u, h, 0x00223048u);
+    console_fill_rect(x + w - 1u, y, 1u, h, 0x00223048u);
+
+    const char *title = "Keyboard Shortcuts";
+    uint64_t tlen = (uint64_t)gui_strlen(title) * fw;
+    gui_draw_str_fg(x + (w - tlen) / 2u, y + 14u, title, 0x006aaddcu);
+    console_fill_rect(x + 24u, y + fh + 24u, w - 48u, 1u, 0x00223048u);
+
+    uint64_t ry = y + fh + 34u;
+    for (int i = 0; i < nrows; i++, ry += line_h) {
+        gui_draw_str_fg(x + 32u,          ry, rows[i].key,  0x0090c8f0u);
+        gui_draw_str_fg(x + 32u + key_w,  ry, rows[i].desc, 0x00d0dcecu);
+    }
 }
 
 /* Draw all popup overlays that must appear on top of IPC windows.
@@ -727,4 +774,7 @@ void gui_draw_popups(void) {
         console_fill_rect(tx+1u, ty+1u, 3u, th-2u, g_toast_color);
         gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
     }
+
+    if (g_help_open)
+        help_draw();
 }

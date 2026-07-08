@@ -48,6 +48,7 @@
 #define FIFI_KEY_SUPER_L     0x9Cu  /* Win+L = lock screen */
 #define FIFI_KEY_SUPER_D     0x9Du  /* Win+D = show/hide desktop */
 #define FIFI_KEY_SUPER       0x9Eu  /* bare Super tap (no combo) = toggle launcher */
+#define FIFI_KEY_SUPER_HELP  0x9Fu  /* Super+/ = keyboard shortcuts overlay */
 #define FIFI_KEY_PRTSC  0x96u  /* PrintScreen / SysRq */
 #define FIFI_KEY_ALT_F4 0x97u  /* Alt+F4 — close focused window */
 
@@ -185,6 +186,7 @@ static uint8_t evkey_to_fifi(uint16_t code, bool shift, bool ctrl) {
         case KEY_DOWN:  return FIFI_KEY_SUPER_DOWN;
         case KEY_L:     return FIFI_KEY_SUPER_L;
         case KEY_D:     return FIFI_KEY_SUPER_D;
+        case KEY_SLASH: return FIFI_KEY_SUPER_HELP;
         default: break;
         }
     }

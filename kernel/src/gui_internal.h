@@ -361,6 +361,8 @@ extern uint64_t     g_resize_ww0;
 extern uint64_t     g_resize_wh0;
 
 extern bool         g_launcher_open;
+extern bool         g_help_open;     /* Super+/ shortcuts overlay */
+void     help_draw(void);            /* gui_render.c */
 
 extern int          g_settings_scroll;
 extern uint32_t     g_gui_raise_z;

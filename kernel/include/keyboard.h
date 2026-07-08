@@ -33,6 +33,7 @@
 #define KEY_SUPER_DOWN  0x9B   /* Super+Down  = restore window         */
 #define KEY_SUPER_D     0x9D   /* Super+D     = show/hide desktop      */
 #define KEY_SUPER   0x9E   /* bare Super/Win tap (no combo) — opens the launcher */
+#define KEY_SUPER_HELP  0x9F   /* Super+/ — keyboard shortcuts overlay */
 
 // IRQ handler calls this with raw Set 1 scancodes
 void keyboard_on_scancode(uint8_t sc);
