@@ -120,6 +120,7 @@ void launcher_open_reset(void) {
     g_launch_n = 0;
     g_launch_q[0] = '\0'; g_launch_qlen = 0;
     g_launcher_hover = 0; g_launcher_scroll = 0;
+    g_launchctx_row = -1; g_launchctx_hover = -1;
 
     /* Built-in windows: exec is set only so the icon resolver finds a logo;
      * launcher_do_launch checks .builtin first, so these still open the window. */
@@ -294,6 +295,53 @@ void launcher_pin_taskbar(int filt_row) {
     }
 }
 
+/* ── Launcher item context menu (right-click: pin / add to desktop) ────── */
+int g_launchctx_row   = -1;   /* filtered row the menu targets; -1 = closed */
+int g_launchctx_hover = -1;
+static int32_t g_lcx = 0, g_lcy = 0;
+
+static uint64_t launchctx_w(void)      { return 16u * console_font_width() + 24u; }
+static uint64_t launchctx_item_h(void) { return console_font_height() + 12u; }
+
+void launchctx_open(int filt_row, int32_t mx, int32_t my) {
+    g_launchctx_row = filt_row;
+    g_launchctx_hover = -1;
+    uint64_t w = launchctx_w(), h = 2u * launchctx_item_h() + 8u;
+    uint64_t fbw = console_fb_width(), fbh = console_fb_height();
+    g_lcx = mx; g_lcy = my;
+    if ((uint64_t)g_lcx + w >= fbw) g_lcx = (int32_t)(fbw - w - 2u);
+    if ((uint64_t)g_lcy + h >= fbh) g_lcy = (int32_t)(fbh - h - 2u);
+}
+
+/* -1 = outside, 0 = Pin to Taskbar, 1 = Add to Desktop */
+int launchctx_hit(int32_t mx, int32_t my) {
+    if (g_launchctx_row < 0) return -1;
+    uint64_t w = launchctx_w(), ih = launchctx_item_h();
+    if ((uint64_t)mx < (uint64_t)g_lcx || (uint64_t)mx >= (uint64_t)g_lcx + w) return -1;
+    if ((uint64_t)my < (uint64_t)g_lcy + 4u ||
+        (uint64_t)my >= (uint64_t)g_lcy + 4u + 2u * ih) return -1;
+    return (int)(((uint64_t)my - (uint64_t)g_lcy - 4u) / ih);
+}
+
+void launchctx_draw(void) {
+    if (g_launchctx_row < 0) return;
+    uint64_t fh = console_font_height();
+    uint64_t w = launchctx_w(), ih = launchctx_item_h(), h = 2u * ih + 8u;
+    uint64_t x = (uint64_t)g_lcx, y = (uint64_t)g_lcy;
+    console_fill_vgrad(x, y, w, h, 0x001a2338u, 0x000e1220u);
+    console_fill_rect(x, y, w, 1u, 0x003a5688u);
+    console_fill_rect(x, y + h - 1u, w, 1u, 0x00223048u);
+    console_fill_rect(x, y, 1u, h, 0x00223048u);
+    console_fill_rect(x + w - 1u, y, 1u, h, 0x00223048u);
+    static const char *items[2] = { "Pin to Taskbar", "Add to Desktop" };
+    for (int i = 0; i < 2; i++) {
+        uint64_t iy = y + 4u + (uint64_t)i * ih;
+        if (i == g_launchctx_hover)
+            console_fill_rect(x + 4u, iy, w - 8u, ih, 0x002a4a80u);
+        gui_draw_str_fg(x + 12u, iy + (ih - fh) / 2u, items[i], 0x00dce8f8u);
+    }
+}
+
 /* ── Draw ──────────────────────────────────────────────────────────────── */
 void launcher_draw(void) {
     uint64_t lx = launcher_lx(), ly = launcher_ly();
@@ -384,6 +432,9 @@ void launcher_draw(void) {
         console_fill_rect(lx + w - 5u, by,  2u, trh, 0x0018202eu);
         console_fill_rect(lx + w - 5u, ty2, 2u, th,  0x003a5c90u);
     }
+
+    /* Item context menu on top of everything */
+    launchctx_draw();
 }
 
 /* ── Context menu ────────────────────────────────────────────────────── */

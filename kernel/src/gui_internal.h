@@ -538,6 +538,12 @@ void     launcher_filter(void);          /* rebuild filtered view from query */
 void     launcher_do_launch(int filt_row);
 void     launcher_add_desktop(int filt_row);
 void     launcher_pin_taskbar(int filt_row);
+/* launcher item context menu (right-click) */
+extern int g_launchctx_row;
+extern int g_launchctx_hover;
+void     launchctx_open(int filt_row, int32_t mx, int32_t my);
+int      launchctx_hit(int32_t mx, int32_t my);   /* -1 / 0=pin / 1=desktop */
+void     launchctx_draw(void);
 
 /* ── Taskbar favorites (pinned apps) ─────────────────────────────────── */
 #define FAV_MAX 10

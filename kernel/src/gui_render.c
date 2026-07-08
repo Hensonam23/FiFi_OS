@@ -198,14 +198,9 @@ static icon_img_t *desk_icon_logo(int i) {
     }
     if (!c->tried) {
         c->tried = true;
-        char png[224];
-        size_t l = strlen(p);
-        const char *dot = strrchr(p, '.');
-        size_t stem = dot ? (size_t)(dot - p) : l;
-        if (stem > sizeof(png) - 5) stem = sizeof(png) - 5;
-        memcpy(png, p, stem);
-        memcpy(png + stem, ".png", 5);
-        c->img = fifi_load_png(png, &c->w, &c->h);
+        /* shared resolver: sibling <stem>.png, then /fifi-data/icons/<base>.png
+         * — same lookup the launcher and taskbar favorites use */
+        c->img = app_load_icon_png(p, &c->w, &c->h);
     }
     return c->img ? c : NULL;
 }
