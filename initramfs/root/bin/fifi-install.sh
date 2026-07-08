@@ -55,7 +55,7 @@ _save_debug_log() {
     USB_DEV=""
     for _dev in /dev/sd?1 /dev/sd?? /dev/sd? /dev/mmcblk?p1 /dev/vd?1; do
         [ -b "$_dev" ] || continue
-        _lbl="$(blkid -s LABEL -o value "$_dev" 2>/dev/null)"
+        _lbl="$(blkid -s LABEL -o value "$_dev" 2>/dev/null || true)"
         if [ "$_lbl" = "FIFIOS" ]; then USB_DEV="$_dev"; break; fi
     done
     if [ -n "$USB_DEV" ]; then
@@ -212,7 +212,7 @@ if [ "$IS_PART" = "1" ]; then
 
     # Find the parent disk (strip partition number)
     # e.g. sda3 -> sda, nvme0n1p3 -> nvme0n1
-    PARENT_DISK="$(cat "/sys/class/block/$DEV_NAME/../uevent" 2>/dev/null | grep DEVNAME | cut -d= -f2)"
+    PARENT_DISK="$(cat "/sys/class/block/$DEV_NAME/../uevent" 2>/dev/null | grep DEVNAME | cut -d= -f2 || true)"
     if [ -z "$PARENT_DISK" ]; then
         # Fallback: strip trailing digits (and optional 'p' prefix for nvme)
         PARENT_DISK="$(echo "$DEV_NAME" | sed 's/p\?[0-9]*$//')"
@@ -275,11 +275,8 @@ cp "$KERNEL_SRC" "$MNT_EFI/boot/bzImage"
 cp "$INITRD_SRC" "$MNT_EFI/boot/initramfs.cpio.gz"
 log "Kernel:    $(du -sh "$MNT_EFI/boot/bzImage" 2>/dev/null | cut -f1)"
 log "Initramfs: $(du -sh "$MNT_EFI/boot/initramfs.cpio.gz" 2>/dev/null | cut -f1)"
-# Unmount the USB source now that we've copied what we need
-if [ -n "$USB_MNT_SRC" ]; then
-    umount "$USB_MNT_SRC" 2>/dev/null && rmdir "$USB_MNT_SRC" 2>/dev/null || true
-    USB_MNT_SRC=""
-fi
+# Keep the USB mounted — the offline app bundle (apps-bundle/) may be needed
+# in the software step; it is unmounted in section 10.
 prog 22
 
 log "Installing GRUB EFI bootloader..."
@@ -287,14 +284,16 @@ log "EFI partition: $EFI_PART  mounted at: $MNT_EFI"
 log "EFI contents before:"
 ls "$MNT_EFI/EFI/" 2>&1 | while IFS= read -r l; do log "  $l"; done
 
-# Run grub-install and capture all output for the debug log
+# Run grub-install and capture all output for the debug log.
+# (|| true so a failure reaches the grub-mkimage fallback instead of
+# killing the script via set -e.)
+GRUB_EXIT=0
 GRUB_OUT="$(grub-install \
     --target=x86_64-efi \
     --efi-directory="$MNT_EFI" \
     --boot-directory="$MNT_EFI/boot" \
     --bootloader-id="FiFiOS" \
-    --no-nvram 2>&1)"
-GRUB_EXIT=$?
+    --no-nvram 2>&1)" || GRUB_EXIT=$?
 log "grub-install exit=$GRUB_EXIT  output: $GRUB_OUT"
 
 # Hard check: did grub-install actually create the binary?
@@ -305,6 +304,7 @@ if [ ! -f "$GRUB_EFI" ]; then
     # Embed a config that searches for grub.cfg by file path (finds NVMe EFI partition)
     printf 'search --file --no-floppy --set=root /boot/grub/grub.cfg\nset prefix=($root)/boot/grub\n' \
         > /tmp/grub_early.cfg
+    MKIMG_EXIT=0
     MKIMG_OUT="$(grub-mkimage \
         -c /tmp/grub_early.cfg \
         -O x86_64-efi \
@@ -312,8 +312,7 @@ if [ ! -f "$GRUB_EFI" ]; then
         -p /boot/grub \
         part_gpt part_msdos fat ext2 normal boot linux configfile \
         loopback search search_fs_uuid search_fs_file chain efifwsetup \
-        gfxterm gfxterm_menu all_video 2>&1)"
-    MKIMG_EXIT=$?
+        gfxterm gfxterm_menu all_video 2>&1)" || MKIMG_EXIT=$?
     log "grub-mkimage exit=$MKIMG_EXIT  output: $MKIMG_OUT"
 fi
 
@@ -343,19 +342,22 @@ else
     cp "$GRUB_EFI" "$MNT_EFI/EFI/BOOT/BOOTX64.EFI"
 fi
 
-# Also try NVRAM registration
+# Also try NVRAM registration (best-effort: fails harmlessly on BIOS boots
+# or when efivars are unavailable — the BOOTX64.EFI fallback still boots)
 mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 EFI_DISK="$(echo "$EFI_PART" | sed 's/p\?[0-9]*$//')"
-EFI_PARTNUM="$(cat "/sys/class/block/$(basename "$EFI_PART")/partition" 2>/dev/null)"
+EFI_PARTNUM="$(cat "/sys/class/block/$(basename "$EFI_PART")/partition" 2>/dev/null || true)"
 if [ -n "$EFI_PARTNUM" ] && command -v efibootmgr >/dev/null 2>&1; then
-    OLD="$(efibootmgr 2>/dev/null | grep -i 'FiFi OS' | grep -oE '[0-9A-F]{4}' | head -1)"
+    OLD="$(efibootmgr 2>/dev/null | grep -i 'FiFi OS' | grep -oE '[0-9A-F]{4}' | head -1 || true)"
     [ -n "$OLD" ] && efibootmgr -b "$OLD" -B 2>/dev/null || true
     EFIBM_OUT="$(efibootmgr --create --disk "$EFI_DISK" --part "$EFI_PARTNUM" \
-        --label "FiFi OS" --loader '\EFI\FiFiOS\grubx64.efi' 2>&1)"
+        --label "FiFi OS" --loader '\EFI\FiFiOS\grubx64.efi' 2>&1 || true)"
     log "efibootmgr: $EFIBM_OUT"
 fi
 
-DATA_UUID="$(blkid -s UUID -o value "$DATA_PART" 2>/dev/null)"
+# busybox blkid ignores -s/-o and prints the whole line — extract the UUID
+# from the standard KEY="value" output instead (works with util-linux too).
+DATA_UUID="$(blkid "$DATA_PART" 2>/dev/null | sed -n 's/.* UUID="\([^"]*\)".*/\1/p' || true)"
 [ -n "$DATA_UUID" ] || fail "Could not read UUID of data partition"
 log "Data UUID: $DATA_UUID"
 prog 30
@@ -395,82 +397,69 @@ fi
 log "Bootloader installed"
 prog 34
 
-# ── 8. Browser download ────────────────────────────────────────────────────────
+# ── 8. Software install (browser + office suite) ─────────────────────────────
+# Every chosen app goes through the App Store pipeline (appstore-install.sh
+# with FIFI_APPS_DIR pointed at the new data partition), so it lands exactly
+# like a store install: real upstream AppImage, pre-extracted, icon, launcher,
+# desktop icon, update tracking.
+#   Online:  the LATEST version is downloaded from the official source.
+#   Offline: falls back to the AppImages bundled on the USB (apps-bundle/);
+#            the App Store's "Check Updates" upgrades them once online.
 
-BROWSER_DIR="$MNT_DATA/browser"
-mkdir -p "$BROWSER_DIR"
-BROWSER_URL=""
-BROWSER_DEST=""
+APPSTORE_SH=""
+for _s in /usr/share/fifi/appstore-install.sh /fifi-data/apps/appstore-install.sh; do
+    [ -f "$_s" ] && APPSTORE_SH="$_s" && break
+done
+BUNDLE_DIR=""
+[ -n "$USB_MNT_SRC" ] && [ -d "$USB_MNT_SRC/apps-bundle" ] && BUNDLE_DIR="$USB_MNT_SRC/apps-bundle"
 
-if [ "$BROWSER" = "librewolf" ]; then
-    log "Downloading LibreWolf (latest)..."
-    # Get latest version from GitLab API
-    LW_VER="$(curl -sf 'https://gitlab.com/api/v4/projects/24386000/releases' 2>/dev/null | \
-        grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)"
-    if [ -n "$LW_VER" ]; then
-        BROWSER_URL="https://gitlab.com/api/v4/projects/24386000/packages/generic/librewolf/${LW_VER}/LibreWolf.x86_64.AppImage"
-    else
-        BROWSER_URL="https://github.com/librewolf-community/browser-linux/releases/latest/download/librewolf.AppImage"
+ONLINE=0
+curl -sf --max-time 8 https://api.github.com >/dev/null 2>&1 && ONLINE=1
+if [ "$ONLINE" = 1 ]; then log "Network: online - fetching latest versions"
+else log "Network: offline - using apps bundled on the USB"; fi
+
+install_app() {   # $1 = App Store source spec   $2 = Name
+    _spec="$1"; _name="$2"; _ok=0
+    if [ -z "$APPSTORE_SH" ]; then
+        log "WARNING: appstore-install.sh not found - skipping $_name"
+        return 0
     fi
-    BROWSER_DEST="$BROWSER_DIR/browser.AppImage"
-elif [ "$BROWSER" = "firefox" ]; then
-    log "Downloading Firefox (latest)..."
-    BROWSER_URL="https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US"
-    BROWSER_DEST="$BROWSER_DIR/firefox.tar.bz2"
-fi
-
-if [ -n "$BROWSER_URL" ]; then
-    curl -L --progress-bar --output "$BROWSER_DEST" "$BROWSER_URL" 2>&1 | \
-    while IFS= read -r line; do
-        pct="$(echo "$line" | grep -oE '[0-9]+\.[0-9]+%' | head -1 | tr -d '%.')"
-        [ -n "$pct" ] && echo "PROGRESS:$(( 34 + pct*28/100 ))" || echo "$line"
-    done || { log "WARNING: Browser download failed"; rm -f "$BROWSER_DEST"; }
-
-    if [ "$BROWSER" = "firefox" ] && [ -f "$BROWSER_DEST" ]; then
-        log "Extracting Firefox..."
-        mkdir -p "$BROWSER_DIR/firefox"
-        tar -xjf "$BROWSER_DEST" -C "$BROWSER_DIR/firefox" --strip-components=1 2>/dev/null || true
-        rm -f "$BROWSER_DEST"
-        BROWSER_DEST="$BROWSER_DIR/firefox/firefox"
+    if [ "$ONLINE" = 1 ]; then
+        log "Installing $_name (latest, from the source)..."
+        FIFI_APPS_DIR="$MNT_DATA/apps" FIFI_DESKTOP_CONF="$MNT_DATA/fifi-desktop.conf" \
+            sh "$APPSTORE_SH" "$_spec" "$_name" >> "$DEBUGLOG" 2>&1 && _ok=1
     fi
+    if [ "$_ok" = 0 ] && [ -n "$BUNDLE_DIR" ] && [ -f "$BUNDLE_DIR/$_name.AppImage" ]; then
+        log "Installing $_name from the USB app bundle..."
+        FIFI_APPS_DIR="$MNT_DATA/apps" FIFI_DESKTOP_CONF="$MNT_DATA/fifi-desktop.conf" \
+            sh "$APPSTORE_SH" "file:$BUNDLE_DIR/$_name.AppImage" "$_name" >> "$DEBUGLOG" 2>&1 && _ok=1
+        # record the real source so Check Updates can upgrade it once online
+        [ "$_ok" = 1 ] && printf '%s' "$_spec" > "$MNT_DATA/apps/$_name.src"
+    fi
+    if [ "$_ok" = 1 ]; then log "$_name installed"
+    else log "WARNING: $_name could not be installed - get it from the App Store later"; fi
+    return 0
+}
 
-    [ -f "$BROWSER_DEST" ] && chmod +x "$BROWSER_DEST" || true
-    echo "$BROWSER" > "$BROWSER_DIR/choice"
-    log "Browser downloaded"
-fi
+mkdir -p "$MNT_DATA/apps"
+case "$BROWSER" in
+    librewolf) install_app "gitlab:librewolf-community%2Fbrowser%2Fappimage" "LibreWolf" ;;
+    firefox)   install_app "ivan-hc/Firefox-appimage" "Firefox" ;;
+esac
 prog 62
 
-# ── 9. LibreOffice download ────────────────────────────────────────────────────
-
 if echo "$SOFTWARE" | grep -q "libreoffice"; then
-    log "Downloading LibreOffice (latest AppImage)..."
-    LO_DIR="$MNT_DATA/libreoffice"
-    mkdir -p "$LO_DIR"
-    LO_DEST="$LO_DIR/libreoffice.AppImage"
-
-    # Try to get the latest version number from LibreOffice website
-    LO_VER="$(curl -sf 'https://www.libreoffice.org/download/download-libreoffice/' 2>/dev/null | \
-        grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
-
-    LO_URL=""
-    if [ -n "$LO_VER" ]; then
-        LO_URL="https://downloadarchive.documentfoundation.org/libreoffice/old/${LO_VER}/AppImage/LibreOffice_${LO_VER}_Linux_x86-64_compatible_AppImage.AppImage"
-    fi
-    # Fallback
-    LO_FALLBACK="https://downloadarchive.documentfoundation.org/libreoffice/old/latest/AppImage/LibreOffice_latest_Linux_x86-64_compatible_AppImage.AppImage"
-
-    curl -L --progress-bar --output "$LO_DEST" "${LO_URL:-$LO_FALLBACK}" 2>&1 | \
-    while IFS= read -r line; do
-        pct="$(echo "$line" | grep -oE '[0-9]+\.[0-9]+%' | head -1 | tr -d '%.')"
-        [ -n "$pct" ] && echo "PROGRESS:$(( 62 + pct*28/100 ))" || echo "$line"
-    done || { log "WARNING: LibreOffice download failed — install manually later"; rm -f "$LO_DEST"; }
-
-    [ -f "$LO_DEST" ] && [ -s "$LO_DEST" ] && chmod +x "$LO_DEST" && \
-        log "LibreOffice downloaded ($(du -sh "$LO_DEST" | cut -f1))" || true
+    install_app "url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage" "LibreOffice"
 fi
 prog 92
 
 # ── 10. Cleanup and finish ─────────────────────────────────────────────────────
+
+# Release the USB source (kept mounted for the offline app bundle)
+if [ -n "$USB_MNT_SRC" ]; then
+    umount "$USB_MNT_SRC" 2>/dev/null && rmdir "$USB_MNT_SRC" 2>/dev/null || true
+    USB_MNT_SRC=""
+fi
 
 log "Syncing to disk..."
 sync

@@ -434,7 +434,9 @@ static void render_welcome(app_t *a) {
         "4.  Install FiFi OS and download selected software",NULL};
     for (int i=0;steps[i];i++) { text(a,steps[i],m+8,y,C_TEXT_SUB,bw-8); y+=g_fh+5; }
     y+=8;
-    text(a,"Requires an internet connection to download browser and LibreOffice.",
+    text(a,"Online, the latest versions are downloaded. Offline, the copies on",
+         m,y,C_TEXT_DIM,bw); y+=g_fh+4;
+    text(a,"this USB are installed and can be updated later from the App Store.",
          m,y,C_TEXT_DIM,bw);
 
     hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);

@@ -37,6 +37,18 @@ mkdir -p "$STAGE/boot/grub"
 cp "$BZIMAGE"   "$STAGE/boot/bzImage"
 cp "$INITRAMFS" "$STAGE/boot/initramfs.cpio.gz"
 
+# Offline app bundle (optional): lets the guided installer set up the browser
+# and office suite with no internet. Populate with scripts/fetch-app-bundle.sh.
+BUNDLE="$REPO_ROOT/build-linux/apps-bundle"
+if ls "$BUNDLE"/*.AppImage >/dev/null 2>&1; then
+    echo "[usb] bundling offline apps: $(cd "$BUNDLE" && ls *.AppImage | tr '\n' ' ')"
+    mkdir -p "$STAGE/apps-bundle"
+    cp "$BUNDLE"/*.AppImage "$STAGE/apps-bundle/"
+else
+    echo "[usb] NOTE: no offline app bundle — run scripts/fetch-app-bundle.sh first"
+    echo "[usb]       to include browser/office AppImages for offline installs"
+fi
+
 cat > "$STAGE/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=8
 set default=0
