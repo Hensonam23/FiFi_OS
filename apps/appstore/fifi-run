@@ -33,6 +33,13 @@ export QT_QPA_PLATFORM=wayland
 export MOZ_ENABLE_WAYLAND=1
 export ELECTRON_OZONE_PLATFORM_HINT=wayland
 export ELECTRON_DISABLE_SANDBOX=1
+# Bitwarden's AppImage wrapper defaults to --ozone-platform=x11 (to dodge an
+# Electron 39 Wayland+hardware-accel crash) UNLESS USE_X11=false. On the box we
+# render in software, so that crash doesn't apply — and forcing X11 routed
+# Bitwarden through XWayland, which opened it full-screen and turned it
+# transparent when resized smaller. Opt back into Wayland so it's a normal,
+# resizable FiFi window. Harmless to apps that don't read USE_X11.
+export USE_X11=false
 export APPIMAGE_EXTRACT_AND_RUN=1
 
 # Start a rootful XWayland (:0) on demand for apps that only speak X11 (e.g.
