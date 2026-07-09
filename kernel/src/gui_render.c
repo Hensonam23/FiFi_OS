@@ -440,6 +440,33 @@ void draw_desktop_info(void) {
 
 /* ── Desktop background — wallpaper presets ──────────────────────────── */
 
+/* Gradient wallpaper endpoints (top → bottom). A richer, deeper field than the
+ * old flat blue: a touch brighter at the top and noticeably deeper at the
+ * bottom gives the desktop real depth. Shared so corner-rounding can sample the
+ * exact backdrop colour instead of guessing. */
+#define WALL_GRAD_TOP  0x00213f69u
+#define WALL_GRAD_BOT  0x000d1626u
+
+/* Wallpaper colour at absolute row y — used by window corner rounding so the
+ * punched-out corners reveal the true backdrop for any wallpaper/palette. For
+ * non-gradient wallpapers, return a representative deep tone. */
+uint32_t desktop_bg_at(uint64_t y) {
+    uint64_t dt = desk_top(), dav = desk_avail();
+    if (g_theme.wallpaper == WALLPAPER_GRADIENT) {
+        if (dav == 0) return WALL_GRAD_BOT;
+        int64_t f = (int64_t)(y >= dt ? y - dt : 0);
+        if (f > (int64_t)dav) f = (int64_t)dav;
+        uint32_t r0=(WALL_GRAD_TOP>>16)&0xff, g0=(WALL_GRAD_TOP>>8)&0xff, b0=WALL_GRAD_TOP&0xff;
+        uint32_t r1=(WALL_GRAD_BOT>>16)&0xff, g1=(WALL_GRAD_BOT>>8)&0xff, b1=WALL_GRAD_BOT&0xff;
+        uint32_t r=(uint32_t)(r0 + (int64_t)(r1-(int64_t)r0)*f/(int64_t)dav);
+        uint32_t g=(uint32_t)(g0 + (int64_t)(g1-(int64_t)g0)*f/(int64_t)dav);
+        uint32_t b=(uint32_t)(b0 + (int64_t)(b1-(int64_t)b0)*f/(int64_t)dav);
+        return (r<<16)|(g<<8)|b;
+    }
+    if (g_theme.wallpaper == WALLPAPER_SOLID) return 0x00111118u;
+    return 0x000a0c14u;
+}
+
 void draw_desktop_bg(void) {
     uint64_t fb_w  = console_fb_width();
     uint64_t dt    = desk_top();
@@ -519,14 +546,15 @@ void draw_desktop_bg(void) {
         break;
 
     default: {  /* WALLPAPER_GRADIENT — full-screen deep-blue desktop */
-        /* Even top→bottom blue gradient that reaches both edges — no vignette or
-         * dark bands. Endpoints are close in brightness so it reads as one field. */
-        console_fill_vgrad(0, dt, fb_w, dav, 0x001e3c62u, 0x00162c48u);
+        /* Even top→bottom gradient reaching both edges. Endpoints kept in the
+         * shared WALL_GRAD_* constants so win_round_corners() can sample the exact
+         * backdrop colour at a window's corner (no hardcoded punch colour). */
+        console_fill_vgrad(0, dt, fb_w, dav, WALL_GRAD_TOP, WALL_GRAD_BOT);
         /* Soft glow bloom, brightest upper-centre — a few wide blended bands
          * (cheap approximation of a radial light). */
         {
             uint64_t cy = dt + dav * 34u / 100u;
-            uint32_t soft = 0x003b72c8u;
+            uint32_t soft = 0x00437fd8u;
             for (int s = 0; s < 5; s++) {
                 uint64_t bh = dav * (uint64_t)(9 - s) / 38u; if (bh < 2u) bh = 2u;
                 uint64_t by = cy > bh / 2u ? cy - bh / 2u : dt;
