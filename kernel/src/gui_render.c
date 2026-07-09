@@ -636,7 +636,7 @@ void full_redraw(void) {
         if (w->anim_phase == ANIM_CLOSE && w->anim_step > ANIM_TICKS) continue;
         /* Soft drop shadow: blended bands under/right of the window. Drawn over
          * freshly-composited content beneath, so alpha never accumulates. */
-        if (w->anim_phase == ANIM_NONE && w->state == WIN_NORMAL) {
+        if (g_theme.fx_shadows && w->anim_phase == ANIM_NONE && w->state == WIN_NORMAL) {
             static const uint8_t sh_a[4] = { 44, 30, 18, 8 };
             for (uint64_t s = 1; s <= 4; s++) {
                 uint8_t a = sh_a[s - 1];

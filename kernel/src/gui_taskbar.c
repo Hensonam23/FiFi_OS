@@ -560,8 +560,18 @@ void taskbar_draw(void) {
     uint64_t fh   = console_font_height();
     uint64_t ty   = fb_h - TASKBAR_H;
 
-    /* Panel: subtle vertical gradient with a hairline accent on top */
-    console_fill_vgrad(0, ty, fb_w, TASKBAR_H, 0x00101624u, 0x00080b14u);
+    /* Panel fill. Frosted glass (fx_glass): repaint the wallpaper behind the
+     * strip, then blend a translucent dark panel so the desktop tone shows
+     * through — done backdrop-then-blend in one call so alpha never accumulates
+     * across frames. Otherwise a solid subtle gradient. Hairline accent on top. */
+    if (g_theme.fx_glass) {
+        for (uint64_t r = 0; r < TASKBAR_H; r++)
+            console_fill_rect(0, ty + r, fb_w, 1u, desktop_bg_at(ty + r));
+        console_blend_rect(0, ty, fb_w, TASKBAR_H, 0x00121b2eu, 202u);  /* ~79% */
+        console_blend_rect(0, ty + 1u, fb_w, 1u, 0x00ffffffu, 20u);     /* top sheen */
+    } else {
+        console_fill_vgrad(0, ty, fb_w, TASKBAR_H, 0x00101624u, 0x00080b14u);
+    }
     console_fill_rect(0, ty, fb_w, 1u, 0x00223350u);
 
     /* Launcher button: accent gradient pill */

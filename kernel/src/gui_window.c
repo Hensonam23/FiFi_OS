@@ -309,19 +309,24 @@ void win_render_content(window_t *w) {
  * quarter-circle reads as a modern KDE/macOS silhouette. */
 void win_round_corners(const window_t *w) {
     uint64_t x = w->x, y = w->y, W = w->w, H = w->h;
-    /* Horizontal inset per row of a 5px-radius quarter circle (rows 0..4 from the
-     * very corner): how many pixels to punch back to the backdrop. */
-    static const uint8_t R = 5u;
-    static const uint8_t inset[5] = { 5u, 3u, 2u, 1u, 1u };
-    for (uint8_t r = 0; r < R; r++) {
-        uint8_t n = inset[r];
-        if (n == 0) continue;
-        uint32_t ct = desktop_bg_at(y + r);              /* top rows   */
-        uint32_t cb = desktop_bg_at(y + H - 1u - r);     /* bottom rows */
-        console_fill_rect(x,          y + r,          n, 1u, ct);   /* top-left  */
-        console_fill_rect(x + W - n,  y + r,          n, 1u, ct);   /* top-right */
-        console_fill_rect(x,          y + H - 1u - r, n, 1u, cb);   /* bot-left  */
-        console_fill_rect(x + W - n,  y + H - 1u - r, n, 1u, cb);   /* bot-right */
+    int R = (int)g_theme.corner_radius;
+    if (R <= 0) return;
+    if (R > 12) R = 12;
+    /* Punch a quarter-circle of radius R at each corner, restoring the true
+     * backdrop (sampled per row) so it stays seamless for any wallpaper. */
+    for (int r = 0; r < R; r++) {
+        int dy = R - r;                         /* rows from the circle centre */
+        int rr = R * R - dy * dy; if (rr < 0) rr = 0;
+        int s = 0; while ((s + 1) * (s + 1) <= rr) s++;  /* isqrt(rr) */
+        int n = R - s;                          /* pixels to punch to backdrop */
+        if (n <= 0) continue;
+        if ((uint64_t)n > W) n = (int)W;
+        uint32_t ct = desktop_bg_at(y + (uint64_t)r);
+        uint32_t cb = desktop_bg_at(y + H - 1u - (uint64_t)r);
+        console_fill_rect(x,                    y + (uint64_t)r,         (uint64_t)n, 1u, ct);
+        console_fill_rect(x + W - (uint64_t)n,  y + (uint64_t)r,         (uint64_t)n, 1u, ct);
+        console_fill_rect(x,                    y + H - 1u - (uint64_t)r,(uint64_t)n, 1u, cb);
+        console_fill_rect(x + W - (uint64_t)n,  y + H - 1u - (uint64_t)r,(uint64_t)n, 1u, cb);
     }
 }
 

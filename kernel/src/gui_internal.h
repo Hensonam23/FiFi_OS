@@ -127,6 +127,10 @@
 #define WALLPAPER_IMAGE     5
 #define WALLPAPER_COUNT     6
 
+/* Panel edge + item-run alignment for the configurable taskbar/panel. */
+typedef enum { PANEL_BOTTOM = 0, PANEL_TOP = 1, PANEL_LEFT = 2, PANEL_RIGHT = 3 } panel_edge_t;
+typedef enum { PALIGN_START = 0, PALIGN_CENTER = 1, PALIGN_END = 2 } panel_align_t;
+
 typedef struct {
     uint32_t accent;        /* primary accent colour (borders, highlights) */
     int      wallpaper;     /* one of WALLPAPER_* */
@@ -135,6 +139,15 @@ typedef struct {
     bool     statusbar;     /* true = show top status bar */
     bool     desktop_info;  /* true = show neofetch-style info on desktop */
     int8_t   utc_offset;    /* UTC hour offset applied to RTC time, -12..+14 */
+    /* ── Panel customization (configurable taskbar) ── */
+    uint8_t  panel_edge;    /* panel_edge_t: which screen edge the panel lives on */
+    uint8_t  panel_align;   /* panel_align_t: how the item run is aligned */
+    bool     panel_autohide;/* reveal-on-edge-hover instead of always visible */
+    uint8_t  panel_size;    /* additive thickness over the base, 0..64 px */
+    /* ── Visual effects ── */
+    bool     fx_glass;      /* translucent (frosted) panels + menus */
+    bool     fx_shadows;    /* window drop shadows */
+    uint8_t  corner_radius; /* window corner rounding radius, 0..12 px */
 } gui_theme_t;
 
 #define DESK_ICON_MAX   12

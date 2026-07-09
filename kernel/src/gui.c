@@ -12,7 +12,13 @@ void gui_term_scroll_page(int dir);
 
 /* ── Global variable definitions ─────────────────────────────────────── */
 
-gui_theme_t g_theme = { 0x003060c0u, WALLPAPER_GRADIENT, true, true, true, true, 0 };
+gui_theme_t g_theme = {
+    0x003060c0u, WALLPAPER_GRADIENT, true, true, true, true, 0,
+    /* panel: bottom edge, left-aligned, always visible, base thickness */
+    PANEL_BOTTOM, PALIGN_START, false, 0,
+    /* effects: frosted glass panels ON, window shadows ON, 5px corners */
+    true, true, 5,
+};
 
 uint32_t *g_wall_img   = NULL;
 uint32_t  g_wall_img_w = 0;
@@ -306,10 +312,15 @@ void gui_settings_save(void) {
     FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
     if (!f) return;
     fprintf(f, "accent=%u\nwallpaper=%d\nclock_12h=%d\nanimations=%d\n"
-               "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n",
+               "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
+               "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
+               "fx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n",
             (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.clock_12h,
             (int)g_theme.animations, (int)g_theme.statusbar,
-            (int)g_theme.desktop_info, (int)g_theme.utc_offset);
+            (int)g_theme.desktop_info, (int)g_theme.utc_offset,
+            (int)g_theme.panel_edge, (int)g_theme.panel_align,
+            (int)g_theme.panel_autohide, (int)g_theme.panel_size,
+            (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius);
     fclose(f);
 }
 void gui_settings_load(void) {
@@ -325,6 +336,13 @@ void gui_settings_load(void) {
         else if (sscanf(line, "statusbar=%d", &v) == 1)     g_theme.statusbar = (v != 0);
         else if (sscanf(line, "desktop_info=%d", &v) == 1)  g_theme.desktop_info = (v != 0);
         else if (sscanf(line, "utc_offset=%d", &v) == 1)    { if (v >= -12 && v <= 14) g_theme.utc_offset = (int8_t)v; }
+        else if (sscanf(line, "panel_edge=%d", &v) == 1)    { if (v >= 0 && v <= 3) g_theme.panel_edge = (uint8_t)v; }
+        else if (sscanf(line, "panel_align=%d", &v) == 1)   { if (v >= 0 && v <= 2) g_theme.panel_align = (uint8_t)v; }
+        else if (sscanf(line, "panel_autohide=%d", &v) == 1) g_theme.panel_autohide = (v != 0);
+        else if (sscanf(line, "panel_size=%d", &v) == 1)    { if (v >= 0 && v <= 64) g_theme.panel_size = (uint8_t)v; }
+        else if (sscanf(line, "fx_glass=%d", &v) == 1)      g_theme.fx_glass = (v != 0);
+        else if (sscanf(line, "fx_shadows=%d", &v) == 1)    g_theme.fx_shadows = (v != 0);
+        else if (sscanf(line, "corner_radius=%d", &v) == 1) { if (v >= 0 && v <= 12) g_theme.corner_radius = (uint8_t)v; }
     }
     fclose(f);
 }
