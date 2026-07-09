@@ -4496,6 +4496,8 @@ void gui_show_desktop(void) {
         }
         __attribute__((weak)) void ipc_hide_all(void);
         if (ipc_hide_all) ipc_hide_all();
+        __attribute__((weak)) void wayland_set_all_minimized(bool m);
+        if (wayland_set_all_minimized) wayland_set_all_minimized(true);
         s_hidden = true;
         gui_toast("Desktop", 0x0060a0e0u);
     } else {
@@ -4505,6 +4507,8 @@ void gui_show_desktop(void) {
         }
         __attribute__((weak)) void ipc_show_all(void);
         if (ipc_show_all) ipc_show_all();
+        __attribute__((weak)) void wayland_set_all_minimized(bool m);
+        if (wayland_set_all_minimized) wayland_set_all_minimized(false);
         s_hidden = false;
         gui_toast("Restore", 0x0060a0e0u);
     }

@@ -617,7 +617,10 @@ void taskbar_draw(void) {
             uint64_t ibtw = taskbtn_w();
             int nwl = wayland_toplevel_count();
             for (int wi = 0; wi < nwl && base + wi < 12; wi++) {
-                char t[24] = "App"; bool f = false;
+                /* Big enough for a full window title: a 24-byte buffer truncated
+                 * "Restore Session — LibreWolf" mid-word to "…— Lib", and the
+                 * " - " app-name split then left just "Lib" on the pill. */
+                char t[96] = "App"; bool f = false;
                 wayland_toplevel_info(wi, t, (int)sizeof(t), &f);
                 uint64_t bx = taskbtn_start_x() + (uint64_t)(base + wi) * (ibtw + TASKBTN_GAP);
                 taskbar_pill(bx, ty, ibtw, t, true, f, false);

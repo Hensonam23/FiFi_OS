@@ -1346,9 +1346,16 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             int32_t rw = g_w * 78 / 100, rh = avail_h * 88 / 100;
                             if (rw > 1500) rw = 1500;
                             if (rh > 950)  rh = 950;
+                            /* Cascade successive windows so a second window
+                             * doesn't land exactly on the first — step down-right
+                             * by 40px, wrapping every 6 windows. */
+                            static int s_cascade = 0;
+                            int32_t casc = (s_cascade++ % 6) * 40;
                             s->restore_w = rw; s->restore_h = rh;
-                            s->restore_x = (g_w - rw) / 2;
-                            s->restore_y = top + (avail_h - rh) / 2;
+                            s->restore_x = (g_w - rw) / 2 + casc;
+                            s->restore_y = top + (avail_h - rh) / 2 + casc;
+                            if (s->restore_x + rw > g_w) s->restore_x = g_w - rw;
+                            if (s->restore_y + rh > g_h - taskbar) s->restore_y = g_h - taskbar - rh;
                             s->maximized = false;
                             s->x = s->restore_x; s->y = s->restore_y;
                             send_toplevel_configure(c, s, rw, rh, 0, 0);
@@ -2551,6 +2558,27 @@ void wayland_toplevel_activate(int idx) {
     g_kbd_ci = ci; g_kbd_sid = s->surface_id;
 }
 
+/* Show-desktop: minimize (m=true) or restore (m=false) every Wayland toplevel
+ * at once, so Super+D also clears/returns browser and XWayland windows (not just
+ * the built-in and IPC layers). */
+void wayland_set_all_minimized(bool m) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        bool has_top = false;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            wl_obj_t *o = &g_wl_clients[ci].objs[oi];
+            if (o->type != OBJ_SURFACE || !o->data) continue;
+            wl_surface_t *s = o->data;
+            if (s->mapped && s->xdg_toplevel_id && !s->is_popup && !s->is_subsurface) {
+                has_top = true; break;
+            }
+        }
+        if (has_top) wl_client_set_minimized(ci, m);
+    }
+    if (m) { g_kbd_ci = -1; g_kbd_sid = 0; }
+    else { extern void gui_wl_raise(void); gui_wl_raise(); }
+}
+
 /* Title of the topmost mapped Wayland toplevel (for the taskbar button).
  * Returns NULL when no client has set a title. */
 const char *wayland_browser_title(void) {
@@ -2854,11 +2882,12 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
     if (!s->mapped || !s->own_pix || s->minimized) return 0;
     if (s->own_w <= 0 || s->own_h <= 0) return 0;
     if (s->is_popup) {
-        /* Only draw popups that took an input grab — i.e. interactive menus and
-         * dropdowns. Passive popups (hover tooltips) are skipped: their multi-surface
-         * layout composites poorly here (black frames, flicker, fragments) and they
-         * add no function. This keeps right-click menus / dropdowns working. */
-        if (!s->popup_has_grab) return 0;
+        /* Draw mapped popups (menus/dropdowns) that carry opaque content. Grab
+         * can't gate this: Firefox's hamburger/PanelUI menu is a real 340x674
+         * interactive menu that never takes an xdg_popup grab, so requiring a
+         * grab left it invisible. Skip only fully-transparent popup surfaces —
+         * those are empty parents whose pixels live in a child subsurface,
+         * which the blit draws separately. */
         int total = s->own_w * s->own_h, step = total > 4096 ? total / 4096 : 1, opaque = 0;
         for (int i = 0; i < total; i += step) if ((s->own_pix[i] >> 24) != 0) { opaque = 1; break; }
         if (!opaque) return 0;
@@ -2963,15 +2992,35 @@ void wayland_blit_surfaces(void) {
                 blitted += blit_one_surface(tops[i].ci, sub, c->objs[oi].id, do_log);
         }
     }
-    /* popups (menus/dropdowns) on top of all windows */
+    /* popups (menus/dropdowns) on top of all windows, each followed by its own
+     * content subsurfaces. Firefox/GTK render a menu's pixels in a subsurface of
+     * the popup (like the page is a subsurface of the toplevel), so the popup
+     * surface itself is often empty — the subsurface holds the menu. The toplevel
+     * loop above only draws subsurfaces parented to a toplevel, so popup-child
+     * subsurfaces must be drawn here or the menu is invisible. */
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
         wl_client_t *c = &g_wl_clients[ci];
         if (!c->active) continue;
         for (int oi = 0; oi < c->n_objs; oi++) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
-            if (s && s->is_popup)
-                blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
+            if (!s || !s->is_popup) continue;
+            blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
+            /* Draw the popup's own content subsurfaces on top of it: Firefox/GTK
+             * render a menu's pixels in a subsurface of the popup (like a page is
+             * a subsurface of a toplevel), so the popup surface alone is empty. */
+            for (int si = 0; si < c->n_objs; si++) {
+                if (c->objs[si].type != OBJ_SURFACE) continue;
+                wl_surface_t *sub = c->objs[si].data;
+                if (!sub || !sub->is_subsurface || sub->is_popup) continue;
+                wl_surface_t *anc = sub; int guard = 0;
+                while (anc && anc->is_subsurface && guard++ < 8) {
+                    wl_obj_t *po = wl_find_obj_any(anc->parent_surface_id);
+                    anc = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
+                }
+                if (anc == s)
+                    blitted += blit_one_surface(ci, sub, c->objs[si].id, do_log);
+            }
         }
     }
     (void)blitted;
