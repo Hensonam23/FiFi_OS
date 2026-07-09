@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/stat.h>   /* chmod() for owner-only IPC socket */
 #include <sys/ioctl.h>
 #include <poll.h>
 #include <time.h>
@@ -560,6 +561,9 @@ void ipc_init(void) {
         g_srv_fd = -1;
         return;
     }
+    /* Owner-only: the IPC socket accepts frame/gamepad messages, so it must not
+     * be reachable by other local users. (All FiFi apps run as the same user.) */
+    chmod(FIFI_SOCK, 0600);
 
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         g_clients[i].fd     = -1;
