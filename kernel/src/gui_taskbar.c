@@ -123,7 +123,7 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
 
 void taskbar_draw_btn(int slot, const char *label) {
     uint64_t fb_h = console_fb_height();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();
     uint64_t tbw  = taskbtn_w();
     uint64_t bx   = taskbtn_start_x() + (uint64_t)slot * (tbw + TASKBTN_GAP);
     bool     vis  = (slot < MAX_WINS && g_wins[slot].active &&
@@ -142,7 +142,7 @@ void taskbar_draw_tray(void) {
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();
     uint32_t bg   = COL_TASKBAR;
 
     /* ── Clock ── */
@@ -327,8 +327,8 @@ static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
 }
 
 int tray_item_at(int32_t mx, int32_t my) {
-    uint64_t ty = console_fb_height() - TASKBAR_H;
-    if ((uint64_t)my < ty) return TRAY_NONE;
+    uint64_t ty = panel_y();
+    if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return TRAY_NONE;
     static const int ids[6] = { TRAY_BATT, TRAY_CPU, TRAY_NET, TRAY_MEM, TRAY_VOL, TRAY_CLK };
     for (int k = 0; k < 6; k++) {
         if (ids[k] == TRAY_BATT && !g_batt_present) continue;
@@ -384,7 +384,7 @@ void tray_tip_draw(void) {
     char buf[96]; tray_tip_text(g_tray_hover, buf, (int)sizeof buf);
     if (!buf[0]) return;
     uint64_t fw = console_font_width(), fh = console_font_height();
-    uint64_t ty = console_fb_height() - TASKBAR_H;
+    uint64_t ty = panel_y();
     uint64_t tlen = (uint64_t)gui_strlen(buf);
     uint64_t tw = tlen * fw + 16u, th = fh + 10u;
     uint64_t ix, iw; tray_item_region(g_tray_hover, &ix, &iw);
@@ -392,7 +392,8 @@ void tray_tip_draw(void) {
     uint64_t px = center > tw / 2u ? center - tw / 2u : 0u;
     uint64_t fbw = console_fb_width();
     if (px + tw > fbw) px = fbw > tw ? fbw - tw : 0u;
-    uint64_t py = ty > th + 6u ? ty - th - 6u : 0u;
+    uint64_t py = (g_theme.panel_edge == PANEL_TOP) ? ty + TASKBAR_H + 6u
+                                                    : (ty > th + 6u ? ty - th - 6u : 0u);
     console_fill_rect(px, py, tw, th, 0x000e1622u);
     console_fill_rect(px, py, tw, 1u, 0x00304a70u);
     console_fill_rect(px, py + th - 1u, tw, 1u, 0x00223048u);
@@ -497,7 +498,7 @@ static uint32_t *fav_icon(int i, uint32_t *ow, uint32_t *oh) {
 void favbar_draw(void) {
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
-    uint64_t ty  = console_fb_height() - TASKBAR_H;
+    uint64_t ty  = panel_y();
     uint64_t fbw = fav_btn_w();
     uint64_t sx  = favbar_start_x();
     int n = favbar_count();
@@ -541,8 +542,8 @@ void favbar_draw(void) {
 }
 
 int favbar_hit(int32_t mx, int32_t my) {
-    uint64_t ty = console_fb_height() - TASKBAR_H;
-    if ((uint64_t)my < ty) return -1;
+    uint64_t ty = panel_y();
+    if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return -1;  /* within panel strip */
     uint64_t fbw = fav_btn_w();
     uint64_t sx  = favbar_start_x();
     int n = favbar_count();
@@ -558,7 +559,7 @@ void taskbar_draw(void) {
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();
 
     /* Panel fill. Frosted glass (fx_glass): repaint the wallpaper behind the
      * strip, then blend a translucent dark panel so the desktop tone shows
@@ -572,7 +573,9 @@ void taskbar_draw(void) {
     } else {
         console_fill_vgrad(0, ty, fb_w, TASKBAR_H, 0x00101624u, 0x00080b14u);
     }
-    console_fill_rect(0, ty, fb_w, 1u, 0x00223350u);
+    /* accent hairline on the INNER edge (the side facing the desktop) */
+    uint64_t hair_y = (g_theme.panel_edge == PANEL_TOP) ? ty + TASKBAR_H - 1u : ty;
+    console_fill_rect(0, hair_y, fb_w, 1u, 0x00223350u);
 
     /* Launcher button: accent gradient pill */
     uint64_t lw = logo_eff_w();
@@ -650,7 +653,7 @@ void vol_popup_draw(void) {
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();
 
     /* Height: top-pad + title + gap + btn-row + bot-pad */
     uint64_t btn_h  = fh + 4u;
@@ -661,7 +664,9 @@ void vol_popup_draw(void) {
     uint64_t pop_right = (g_vol_tray_w > 0u) ? (g_vol_tray_x + g_vol_tray_w) : (fb_w - 4u);
     uint64_t px = (pop_right > VOL_POP_W) ? (pop_right - VOL_POP_W) : 0u;
     if (px + VOL_POP_W > fb_w) px = fb_w - VOL_POP_W;
-    uint64_t py = (ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u;
+    uint64_t py = (g_theme.panel_edge == PANEL_TOP)
+                    ? ty + TASKBAR_H + 4u                            /* top panel: open downward */
+                    : ((ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u);  /* bottom: open upward */
     g_vol_pop_x = px;
     g_vol_pop_y = py;
 
@@ -775,7 +780,7 @@ void cal_popup_draw(void) {
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();
 
     uint8_t td = 1, tmon = 1; uint16_t tyr = 2026;
     rtc_get_date(&td, &tmon, &tyr);
@@ -796,7 +801,9 @@ void cal_popup_draw(void) {
     uint64_t pop_right = (g_clk_w > 0u) ? (g_clk_x + g_clk_w) : (fb_w - 4u);
     uint64_t px = (pop_right > pop_w) ? (pop_right - pop_w) : 0u;
     if (px + pop_w > fb_w) px = fb_w - pop_w;
-    uint64_t py = (ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u;
+    uint64_t py = (g_theme.panel_edge == PANEL_TOP)
+                    ? ty + TASKBAR_H + 4u                            /* top panel: open downward */
+                    : ((ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u);  /* bottom: open upward */
     g_cal_pop_x = px; g_cal_pop_y = py; g_cal_pop_w = pop_w; g_cal_pop_h = pop_h;
 
     /* Background + accent border */

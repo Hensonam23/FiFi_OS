@@ -611,7 +611,12 @@ void gui_on_tick(void) {
 
     uint64_t fb_h = console_fb_height();
     uint64_t fb_w = console_fb_width();
-    uint64_t ty   = fb_h - TASKBAR_H;
+    uint64_t ty   = panel_y();               /* panel top (edge-aware) */
+    uint64_t ty_end = ty + TASKBAR_H;        /* panel bottom */
+    /* "in the panel strip" — replaces the old bottom-only `my >= ty` gate so
+     * hit-testing is correct for a top panel too. */
+    bool in_panel = ((uint64_t)my >= ty && (uint64_t)my < ty_end);
+    (void)ty_end;
 
     /* ── Taskbar favorite drag-to-reorder / click-to-launch ──────────────
      * A left-press on a favorite records it (g_fav_drag_idx) and defers the
@@ -2669,7 +2674,7 @@ void gui_on_tick(void) {
     }
 
     /* ── Taskbar clicks ── */
-    if (btn_pressed && (uint64_t)my >= ty) {
+    if (btn_pressed && in_panel) {
         int32_t cx, cy;
 
         if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w())) {
@@ -2867,7 +2872,7 @@ void gui_on_tick(void) {
      * A reliable close that works regardless of window focus/z-order state
      * (the in-window titlebar close can get flaky with multi-surface apps). */
 #ifdef __linux__
-    if (rbtn_pressed && (uint64_t)my >= ty) {
+    if (rbtn_pressed && in_panel) {
         extern bool wayland_browser_present(void);
         extern bool wayland_close_active(void);
         __attribute__((weak)) int ipc_window_count(void);
@@ -2885,7 +2890,7 @@ void gui_on_tick(void) {
 #endif
 
     /* ── Right-click on Text editor window (edit mode): context menu ── */
-    if (rbtn_pressed && (uint64_t)my < ty) {
+    if (rbtn_pressed && !in_panel) {
         for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
             int si = g_z[zi];
             window_t *w = &g_wins[si];
@@ -2917,7 +2922,7 @@ void gui_on_tick(void) {
     }
 
     /* ── Right-click on Files window: file browser context menu ── */
-    if (rbtn_pressed && (uint64_t)my < ty) {
+    if (rbtn_pressed && !in_panel) {
         for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
             int si = g_z[zi];
             window_t *w = &g_wins[si];
@@ -3011,7 +3016,7 @@ void gui_on_tick(void) {
     }
 
     /* ── Right-click a taskbar favorite: unpin it (built-ins can't be removed) ── */
-    if (rbtn_pressed && (uint64_t)my >= ty) {
+    if (rbtn_pressed && in_panel) {
         int fi = favbar_hit(mx, my);
         if (fi >= FAVBAR_BUILTINS) {
             gui_fav_remove_at(fi - FAVBAR_BUILTINS);
@@ -3035,7 +3040,7 @@ void gui_on_tick(void) {
 #ifdef __linux__
     { extern bool wayland_has_focus(void); wl_focused_rc = wayland_has_focus(); }
 #endif
-    if (rbtn_pressed && !wl_focused_rc && (uint64_t)my < ty) {
+    if (rbtn_pressed && !wl_focused_rc && !in_panel) {
         /* Check if click is on any window */
         bool on_win = false;
         for (int zi = MAX_WINS - 1; zi >= 0; zi--) {

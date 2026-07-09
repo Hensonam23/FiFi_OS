@@ -599,6 +599,7 @@ bool     gui_streq(const char *a, const char *b);
 uint64_t desk_top(void);
 uint64_t desk_bot(void);
 uint64_t desk_avail(void);
+uint64_t panel_y(void);                /* panel (taskbar) top Y — edge-aware */
 uint32_t desktop_bg_at(uint64_t y);   /* wallpaper colour at row y (corner rounding) */
 void     gui_toast(const char *msg, uint32_t color);
 void     gui_draw_str(uint64_t px, uint64_t py, const char *s, uint32_t fg, uint32_t bg);

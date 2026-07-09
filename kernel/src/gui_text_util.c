@@ -10,8 +10,26 @@ void gui_toast(const char *msg, uint32_t color) {
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-uint64_t desk_top(void)   { return g_theme.statusbar ? STATUS_H : 0u; }
-uint64_t desk_bot(void)   { return console_fb_height() - TASKBAR_H; }
+/* Panel (taskbar) top-left Y for a horizontal panel. TOP sits just below the
+ * status bar; BOTTOM (default; also LEFT/RIGHT until the vertical layout lands)
+ * hugs the bottom edge. Single source of truth for the panel's Y so draw, hit
+ * and struts agree. */
+uint64_t panel_y(void) {
+    if (g_theme.panel_edge == PANEL_TOP)
+        return g_theme.statusbar ? STATUS_H : 0u;
+    return console_fb_height() - TASKBAR_H;
+}
+
+uint64_t desk_top(void) {
+    uint64_t t = g_theme.statusbar ? STATUS_H : 0u;
+    if (g_theme.panel_edge == PANEL_TOP) t += TASKBAR_H;   /* panel below status bar */
+    return t;
+}
+uint64_t desk_bot(void) {
+    uint64_t b = console_fb_height();
+    if (g_theme.panel_edge != PANEL_TOP) b -= TASKBAR_H;   /* bottom-anchored panel */
+    return b;
+}
 uint64_t desk_avail(void) { return desk_bot() - desk_top(); }
 
 size_t gui_strlen(const char *s) {
