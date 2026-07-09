@@ -2500,18 +2500,43 @@ bool wayland_toplevel_info(int idx, char *title, int max, bool *focused) {
     if (focused) {
         uint32_t maxz = 0;
         for (int i = 0; ; i++) { wl_surface_t *o = wl_nth_toplevel(i, NULL);
-                                 if (!o) break; if (o->z > maxz) maxz = o->z; }
-        *focused = !g_wl_minimized && s->z == maxz;
+                                 if (!o) break; if (!o->minimized && o->z > maxz) maxz = o->z; }
+        *focused = !g_wl_minimized && !s->minimized && s->z == maxz;
     }
     return true;
 }
 
-/* Taskbar click: raise the idx-th toplevel to the front and give it focus. */
+/* Set the minimized flag on ALL toplevel surfaces of a client, so a multi-surface
+ * app (Firefox spawns several) hides/shows as one window. */
+static void wl_client_set_minimized(int ci, bool m) {
+    if (ci < 0 || ci >= MAX_WL_CLIENTS) return;
+    wl_client_t *c = &g_wl_clients[ci];
+    for (int oi = 0; oi < c->n_objs; oi++) {
+        if (c->objs[oi].type != OBJ_SURFACE) continue;
+        wl_surface_t *o = c->objs[oi].data;
+        /* Match what the blit draws (any non-popup, non-subsurface surface) —
+         * the visible content surface may not carry an xdg_toplevel_id, so
+         * gating on that left it drawn while the window "minimized". */
+        if (o && !o->is_popup && !o->is_subsurface)
+            o->minimized = m;
+    }
+}
+
+/* Taskbar click: toggle the idx-th window. If it is the frontmost visible window,
+ * minimize it; otherwise restore + raise + focus it (standard taskbar behavior). */
 void wayland_toplevel_activate(int idx) {
     int ci = -1;
     wl_surface_t *s = wl_nth_toplevel(idx, &ci);
     if (!s || ci < 0) return;
-    s->minimized = false;
+    uint32_t maxz = 0;
+    for (int i = 0; ; i++) { wl_surface_t *o = wl_nth_toplevel(i, NULL);
+                             if (!o) break; if (!o->minimized && o->z > maxz) maxz = o->z; }
+    if (!s->minimized && !g_wl_minimized && s->z == maxz) {
+        wl_client_set_minimized(ci, true);           /* minimize the whole window */
+        if (g_kbd_ci == ci) { g_kbd_ci = -1; g_kbd_sid = 0; }
+        return;
+    }
+    wl_client_set_minimized(ci, false);              /* restore */
     g_wl_minimized = false;
     wl_toplevel_raise(s);
     extern void gui_wl_raise(void);
@@ -2918,6 +2943,10 @@ void wayland_blit_surfaces(void) {
     }
     for (int i = 0; i < ntop; i++) {
         blitted += blit_one_surface(tops[i].ci, tops[i].s, tops[i].oid, do_log);
+        /* A minimized toplevel draws nothing — and neither may its content
+         * subsurfaces (GTK/Firefox render the page in a subsurface, so drawing
+         * them anyway would leave a "minimized" window still fully visible). */
+        if (tops[i].s->minimized) continue;
         /* draw this toplevel's subsurfaces right on top of it */
         wl_client_t *c = &g_wl_clients[tops[i].ci];
         for (int oi = 0; oi < c->n_objs; oi++) {
