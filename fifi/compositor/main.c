@@ -175,6 +175,31 @@ void gaming_mode_set(bool on)        {
     }
 }
 
+/* Put the machine on the "performance" governor and unlock turbo at startup so
+ * the desktop never idles at the CPU's minimum frequency (the stock powersave
+ * governor pinned it at ~800MHz). This mirrors the boot-init perf block for the
+ * common case where only the compositor binary is redeployed (no image rebuild).
+ * All best-effort: a missing knob is simply skipped ("no matter the system"). */
+static void apply_perf_defaults(void) {
+    int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
+    if (ncpus < 1) ncpus = 8;
+    for (int cpu = 0; cpu < ncpus; cpu++) {
+        char path[96]; int fd;
+        snprintf(path, sizeof path,
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
+        fd = open(path, O_WRONLY);
+        if (fd >= 0) { write(fd, "performance", 11); close(fd); }
+        snprintf(path, sizeof path,
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/energy_performance_preference", cpu);
+        fd = open(path, O_WRONLY);
+        if (fd >= 0) { write(fd, "performance", 11); close(fd); }
+    }
+    int fd = open("/sys/devices/system/cpu/intel_pstate/no_turbo", O_WRONLY);
+    if (fd >= 0) { write(fd, "0", 1); close(fd); }
+    fd = open("/sys/devices/system/cpu/cpufreq/boost", O_WRONLY);
+    if (fd >= 0) { write(fd, "1", 1); close(fd); }
+}
+
 /* ── Threading: event thread (main) + render thread ────────────────────── */
 
 static pthread_mutex_t g_mx   = PTHREAD_MUTEX_INITIALIZER;
@@ -194,7 +219,10 @@ static void restore_term(void) {
 static void sig_handler(int sig) {
     (void)sig;
     g_quit = true;
-    pthread_cond_signal(&g_cond);
+    /* Async-signal context: do NOT call pthread_cond_signal — if the signal
+     * interrupts a thread inside the condvar internals, re-entering them can
+     * self-deadlock or corrupt state. We are terminating via _exit anyway.
+     * restore_term()+write() are the minimal cleanup to leave the TTY usable. */
     restore_term();
     write(STDOUT_FILENO, "\033[?25h", 6);
     _exit(0);
@@ -451,6 +479,8 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGUSR1, shot_sig_handler);
 
+    apply_perf_defaults();   /* full CPU frequency from the first frame */
+
     write(STDOUT_FILENO, "\033[?25l", 6);
 
     if (tcgetattr(STDIN_FILENO, &g_orig_term) == 0) {
@@ -563,8 +593,11 @@ int main(void) {
             nfds++;
         }
 
-        /* poll() outside the mutex — render thread can flush concurrently. */
-        poll(pfd, (nfds_t)nfds, g_gaming_mode ? 0 : 4);
+        /* poll() outside the mutex — render thread can flush concurrently.
+         * Never use timeout 0: that made gaming mode busy-poll a whole core for
+         * no benefit (the render thread paces frames itself; input wakes poll
+         * immediately regardless). 2ms = 500Hz input sampling in gaming. */
+        poll(pfd, (nfds_t)nfds, g_gaming_mode ? 2 : 4);
 
         pthread_mutex_lock(&g_mx);
 
@@ -590,7 +623,14 @@ int main(void) {
         /* ── evdev: read input events into rings ───────────────────────── */
         /* Rescan for newly plugged devices every ~5 seconds */
         static int _rescan_ticks = 0;
-        if (++_rescan_ticks >= 300) { _rescan_ticks = 0; input_rescan(); }
+        if (++_rescan_ticks >= 300) { _rescan_ticks = 0;
+            input_rescan();
+            /* Rebuild the poll set. input_rescan() closes the fds of unplugged
+             * devices; leaving those stale fds in pfd made poll() return
+             * immediately with POLLNVAL every iteration, spinning the event
+             * thread at 100% CPU. This also picks up newly plugged devices. */
+            nevdev = input_get_all_fds(evdev_fds, 20);
+        }
         int32_t px, py; bool pb_l, pb_r;
         mouse_get_state(&px, &py, &pb_l, &pb_r);
         input_poll();

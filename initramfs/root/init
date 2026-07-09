@@ -18,6 +18,35 @@ echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
 # ── Hostname ──────────────────────────────────────────────────────────────────
 echo "FiFiOS" > /proc/sys/kernel/hostname 2>/dev/null || true
 
+# ── Performance: use the whole machine, don't idle at the frequency floor ─────
+# Stock governors (powersave, or an unavailable "schedutil") pinned the CPU at
+# its ~800MHz minimum. FiFi targets full performance, so put every CPU policy on
+# the "performance" governor (always present on intel_pstate/amd_pstate/acpi),
+# lift the max to the hardware ceiling, unlock turbo/boost, and bias energy hints
+# toward performance. Everything is best-effort so it is a no-op on any machine
+# that lacks a given knob ("no matter the system"). Runs before the desktop so
+# boot itself is fast too.
+for _pol in /sys/devices/system/cpu/cpu*/cpufreq; do
+    [ -d "$_pol" ] || continue
+    echo performance > "$_pol/scaling_governor" 2>/dev/null || true
+    [ -r "$_pol/cpuinfo_max_freq" ] && \
+        cat "$_pol/cpuinfo_max_freq" > "$_pol/scaling_max_freq" 2>/dev/null || true
+    echo performance > "$_pol/energy_performance_preference" 2>/dev/null || true
+done
+# Turbo / boost (knob name differs by driver)
+echo 0   > /sys/devices/system/cpu/intel_pstate/no_turbo     2>/dev/null || true
+echo 100 > /sys/devices/system/cpu/intel_pstate/max_perf_pct 2>/dev/null || true
+echo 1   > /sys/devices/system/cpu/cpufreq/boost             2>/dev/null || true
+# GPU: request the top power/performance state where the driver exposes it
+# (amdgpu/nvidia sysfs). Best-effort; native GPU apps benefit even while the
+# compositor itself is still software-rendered.
+for _g in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
+    echo high > "$_g" 2>/dev/null || true
+done
+# Memory: keep working sets in RAM (this box has plenty), enable THP for big apps
+echo 10      > /proc/sys/vm/swappiness                          2>/dev/null || true
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled      2>/dev/null || true
+
 # ── PATH ──────────────────────────────────────────────────────────────────────
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
