@@ -35,7 +35,7 @@ if [ "$BROWSER" = "librewolf" ]; then
 
     echo "Downloading LibreWolf ${VER}..."
     URL="https://gitlab.com/api/v4/projects/${PROJ}/packages/generic/librewolf/${VER}/LibreWolf.x86_64.AppImage"
-    curl -L --progress-bar --output "$OUTPUT" "$URL"
+    curl -fL --progress-bar --output "$OUTPUT" "$URL"
     exit $?
 
 elif [ "$BROWSER" = "firefox" ]; then

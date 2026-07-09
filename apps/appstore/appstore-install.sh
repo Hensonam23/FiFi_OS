@@ -40,12 +40,12 @@ url:*)
     ;;
 gitlab:*)
     proj="${repo#gitlab:}"
-    rel=$(curl -sL --max-time 30 "https://gitlab.com/api/v4/projects/$proj/releases?per_page=10")
+    rel=$(curl -sL --max-time 30 "https://gitlab.com/api/v4/projects/$proj/releases?per_page=10" || true)
     allurls=$(printf '%s' "$rel" | grep -oE '"url":"[^"]*\.AppImage"' \
               | sed 's/^"url":"//;s/"$//')
     ;;
 *)
-    rel=$(curl -sL --max-time 30 "https://api.github.com/repos/$repo/releases?per_page=30")
+    rel=$(curl -sL --max-time 30 "https://api.github.com/repos/$repo/releases?per_page=30" || true)
     allurls=$(printf '%s' "$rel" | grep -oE '"browser_download_url": *"[^"]*\.AppImage"' \
               | sed 's/.*"browser_download_url": *"//;s/"$//')
     ;;
@@ -64,7 +64,7 @@ echo downloading > "$status"
 if [ -n "$srcfile" ]; then
     cp "$srcfile" "$dest.part" || { echo error > "$status"; exit 1; }
 else
-    curl -sL --max-time 600 "$url" -o "$dest.part" || { echo error > "$status"; exit 1; }
+    curl -fsL --max-time 600 "$url" -o "$dest.part" || { echo error > "$status"; rm -f "$dest.part"; exit 1; }
 fi
 mv "$dest.part" "$dest"
 chmod +x "$dest"
