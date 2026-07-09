@@ -1337,8 +1337,12 @@ bool console_flip_if_dirty(void) {
     g_dirty = false;
     uint32_t y0 = g_dirty_y0, y1 = g_dirty_y1;
     g_dirty_y0 = 0xFFFFFFFFu; g_dirty_y1 = 0u;
-    if (y0 >= y1) return true;
+    /* Clamp BOTH ends to the framebuffer before the empty-range test: a rect
+     * pasted at/below the bottom edge can widen y0 past con.h, and clamping
+     * only y1 would then make (y1 - y0) underflow into a huge OOB memcpy. */
+    if (y0 > (uint32_t)con.h) y0 = (uint32_t)con.h;
     if (y1 > (uint32_t)con.h) y1 = (uint32_t)con.h;
+    if (y0 >= y1) return true;
     uint64_t n = (uint64_t)(y1 - y0) * con.pitch32;
     const uint32_t *src = g_back + (uint64_t)y0 * con.pitch32;
     uint32_t *dst = (uint32_t *)(uintptr_t)con.pix + (uint64_t)y0 * con.pitch32;

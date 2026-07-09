@@ -185,8 +185,12 @@ void *kmalloc_aligned(size_t size, size_t align) {
     if (align & (align - 1)) panic("kmalloc_aligned: align not power-of-two");
 
     /* Large alloc: whole pages, with a header so kfree() doesn't panic.
-     * Returns ptr+16 (still 16-byte aligned). Pages are not reclaimed on free. */
-    if (size >= PAGE_SIZE) {
+     * Returns ptr+16 (still 16-byte aligned). Pages are not reclaimed on free.
+     * Threshold must account for the header: the bump path prepends a
+     * heap_hdr_t, so any request whose size+header exceeds a page cannot fit in
+     * the single-page bump arena and would spuriously return NULL (this bit
+     * sizes 4081..4095). Route those to the multi-page path. */
+    if (size + sizeof(heap_hdr_t) > PAGE_SIZE) {
         size_t pages = (size + sizeof(heap_hdr_t) + PAGE_SIZE - 1) / PAGE_SIZE;
         uint64_t bytes = (uint64_t)pages * PAGE_SIZE;
         uint64_t v = align_down_u64(next_page_virt);

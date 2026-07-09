@@ -445,8 +445,10 @@ void input_init(void) {
 
         char name[64] = "?";
         ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        name[sizeof(name) - 1] = '\0';   /* EVIOCGNAME may not NUL-terminate */
         char phys[64] = "";
         ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+        phys[sizeof(phys) - 1] = '\0';
 
         bool has_key = evdev_has_bit(fd, 0, EV_KEY);
         bool has_rel = evdev_has_bit(fd, 0, EV_REL);

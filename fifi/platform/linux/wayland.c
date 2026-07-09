@@ -1041,8 +1041,12 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&iface_len, args+4,  4);
             /* iface string starts at args+8, padded to 4 bytes */
             const char *iface = (const char *)(args + 8);
+            /* Reject implausible/hostile lengths before they can wrap the
+             * padding math or make strncmp/%.*s read past the message. Valid
+             * Wayland interface names are short. */
+            if (iface_len == 0 || iface_len > 64 || iface_len > args_len) break;
             uint32_t padded = (iface_len + 3) & ~3u;
-            if (8 + padded + 8 > args_len) break;
+            if ((uint64_t)8 + padded + 8 > args_len) break;
             memcpy(&ver,    args + 8 + padded,     4);
             memcpy(&new_id, args + 8 + padded + 4, 4);
 
@@ -1223,13 +1227,22 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             buf->height = h;
             buf->stride = stride;
             buf->format = fmt;
-            /* Map the pool fd if we have it */
-            if (pool->fd >= 0) {
-                void *mapped = mmap(NULL, (size_t)(h * stride),
+            /* Validate geometry against the pool BEFORE mapping. A hostile or
+             * buggy client can send negative/huge h*stride or an offset past the
+             * end of the pool fd; the old code mapped h*stride (computed in 32-bit,
+             * so it could overflow) with no bounds check, over-mapping the fd so a
+             * later read SIGBUSes the whole compositor. Compute in 64-bit and
+             * require the mapped span to lie within the pool. */
+            int64_t need = (int64_t)h * (int64_t)stride;
+            if (pool->fd >= 0 && w > 0 && h > 0 &&
+                (int64_t)stride >= (int64_t)w * 4 &&
+                offset >= 0 && need > 0 &&
+                (int64_t)offset + need <= (int64_t)pool->size) {
+                void *mapped = mmap(NULL, (size_t)need,
                                     PROT_READ, MAP_SHARED, pool->fd, offset);
                 if (mapped != MAP_FAILED) {
                     buf->data = mapped;
-                    buf->size = (size_t)(h * stride);
+                    buf->size = (size_t)need;
                 }
             }
             wl_new_obj(c, buf_id, OBJ_BUFFER, buf);
@@ -1456,7 +1469,13 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     if (c->objs[i].type == OBJ_SURFACE && c->objs[i].data) {
                         wl_surface_t *s = c->objs[i].data;
                         if (s->xdg_toplevel_id == obj_id) {
-                            uint32_t copy = slen < 127 ? slen : 127;
+                            /* Bound the copy to what actually follows the length
+                             * word (args_len-4), not just slen: slen only has to
+                             * be < args_len, so a large slen could otherwise read
+                             * past the message buffer. */
+                            uint32_t avail = args_len - 4u;
+                            uint32_t copy = slen < avail ? slen : avail;
+                            if (copy > 127u) copy = 127u;
                             memcpy(s->title, args + 4, copy);
                             s->title[copy] = '\0';
                             fprintf(stderr, "[wayland] toplevel title: %s\n", s->title);

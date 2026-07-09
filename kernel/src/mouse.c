@@ -328,7 +328,9 @@ static void cursor_draw(int32_t nx, int32_t ny) {
         if (py < 0 || (uint64_t)py >= sh) continue;
         uint32_t ol = cursor_ol[r];
         for (uint32_t b = 0; b <= CUR_W + 1u; b++) {
-            if (!((ol >> (16u - b)) & 1u)) continue;
+            /* Guard the shift: for b > 16 the (16u - b) count underflows to a
+             * huge value, which is undefined behavior for the shift. */
+            if (b > 16u || !((ol >> (16u - b)) & 1u)) continue;
             int32_t px = draw_x - 1 + (int32_t)b;
             if (px < 0 || (uint64_t)px >= sw) continue;
             fb[(uint64_t)py * pitch + (uint64_t)px] = CUR_OL;

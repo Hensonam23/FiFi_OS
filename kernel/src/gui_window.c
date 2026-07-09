@@ -257,7 +257,12 @@ void term_render_scrollback(window_t *w) {
     for (int row = 0; row < max_rows; row++) {
         int line_fe = g_term_scroll + (max_rows - 1 - row);
         if (line_fe >= total_sb) continue;
-        int len = console_tsb_get_line(line_fe, lbuf, max_cols + 1);
+        /* Clamp the destination capacity to lbuf: on a wide/hi-DPI terminal
+         * max_cols can exceed 255, and console_tsb_get_line treats the 3rd arg
+         * as capacity, so an unclamped call smashes this 256-byte stack buffer. */
+        int cap = max_cols + 1;
+        if (cap > (int)sizeof(lbuf)) cap = (int)sizeof(lbuf);
+        int len = console_tsb_get_line(line_fe, lbuf, cap);
         if (len <= 0) continue;
         uint64_t lx = cx;
         uint64_t ly = cy + (uint64_t)row * fh;

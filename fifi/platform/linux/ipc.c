@@ -339,9 +339,11 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
             }
         }
 
-        /* Update native frame_buf */
+        /* Update native frame_buf. Bounds check in 64-bit so a hostile fx/fy
+         * near UINT32_MAX cannot wrap fx+fw to a small value that passes the
+         * test and then aims the memcpy far past the frame buffer. */
         if (!c->minimized && c->frame_buf &&
-            fx + fw <= c->frame_w && fy + fh <= c->frame_h) {
+            (uint64_t)fx + fw <= c->frame_w && (uint64_t)fy + fh <= c->frame_h) {
             const uint32_t *src = (const uint32_t *)(pld + 16);
             for (uint32_t row = 0; row < fh; row++)
                 memcpy(c->frame_buf + (fy + row) * c->frame_w + fx,
