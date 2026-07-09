@@ -60,12 +60,20 @@ void settings_render(window_t *w) {
     uint64_t tog_bw_c = 11u * fw;   /* toggle button width */
     int tog_per_row = (int)((btn_avail_w + 6u) / (tog_bw_c + 6u));
     if (tog_per_row < 1) tog_per_row = 1;
-    if (tog_per_row > 4) tog_per_row = 4;
-    int tog_rows = (4 + tog_per_row - 1) / tog_per_row;
+    if (tog_per_row > THEME_TOGGLE_COUNT) tog_per_row = THEME_TOGGLE_COUNT;
+    int tog_rows = (THEME_TOGGLE_COUNT + tog_per_row - 1) / tog_per_row;
+
+    /* Panel-position tiles ("Bottom"=6 chars longest, +2 pad) */
+    uint64_t panel_bw_c = (6u + 2u) * fw;
+    int panel_per_row = (int)((btn_avail_w + 4u) / (panel_bw_c + 4u));
+    if (panel_per_row < 1) panel_per_row = 1;
+    if (panel_per_row > PANEL_POS_COUNT) panel_per_row = PANEL_POS_COUNT;
+    int panel_rows = (PANEL_POS_COUNT + panel_per_row - 1) / panel_per_row;
 
     uint64_t h_theme = (uint64_t)(SET_SEC_H + 4u) + 2u * SET_ROW_H + 20u
-                       + (uint64_t)wall_rows * (SET_ROW_H + 8u)
-                       + (uint64_t)tog_rows  * (SET_ROW_H + 8u)
+                       + (uint64_t)wall_rows  * (SET_ROW_H + 8u)
+                       + (uint64_t)panel_rows * (SET_ROW_H + 8u)
+                       + (uint64_t)tog_rows   * (SET_ROW_H + 8u)
                        + (fh + 6u) + 4u + 5u;
     uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
     uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + 2u * SET_ROW_H + 5u;
@@ -191,6 +199,7 @@ void settings_render(window_t *w) {
     g_theme_accent_by = 0; g_theme_accent_by2 = 0;
     g_theme_wall_by = 0; g_theme_wall_bh = 0; g_theme_wall_bw = 0;
     g_theme_toggle_h = 0; g_theme_toggle_w = 0;
+    g_theme_panel_bw = 0; g_theme_panel_bh = 0;
     g_utc_btn_by = 0; g_utc_btn_bh = 0;
     g_vol_btn_by = 0; g_vol_btn_bh = 0;
     g_vol_pop_btn_y = 0; g_vol_chime_bw = 0; g_vol_chime_bh = 0;
@@ -472,15 +481,55 @@ void settings_render(window_t *w) {
             }
         }
 
-        /* Toggle row(s): Clock 12h, Animations, Status Bar, Desk Info — wraps dynamically */
+        /* Panel position row: Bottom / Top / Left / Right (clone of wallpaper tiles) */
         {
-            static const char *tog_labels[4] = { "12h Clock", "Animations", "Status Bar", "Desk Info" };
-            bool tog_vals[4] = { g_theme.clock_12h, g_theme.animations, g_theme.statusbar, g_theme.desktop_info };
+            static const char *pos_names[PANEL_POS_COUNT] = { "Bottom", "Top", "Left", "Right" };
+            uint64_t pbh = (uint64_t)(fh + 6u);
+            uint64_t pbw = panel_bw_c;
+            g_theme_panel_bh = pbh; g_theme_panel_bw = pbw;
+            for (int _pi = 0; _pi < PANEL_POS_COUNT; _pi++) { g_theme_panel_bx[_pi] = 0; g_theme_panel_by[_pi] = 0; }
+            for (int prow = 0; prow < panel_rows; prow++) {
+                SADVBOT;
+                if (SVIS) {
+                    console_fill_rect(ix, SCY, iw, SET_ROW_H + 4u, COL_SET_BG);
+                    if (prow == 0)
+                        gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u + 2u)),
+                                     "Panel:", COL_SET_KEY_FG, COL_SET_BG);
+                }
+                uint64_t px2 = val_x;
+                uint64_t py2 = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - pbh) / 2u));
+                int i_start = prow * panel_per_row;
+                int i_end   = i_start + panel_per_row;
+                if (i_end > PANEL_POS_COUNT) i_end = PANEL_POS_COUNT;
+                for (int pi = i_start; pi < i_end; pi++) {
+                    g_theme_panel_bx[pi] = px2; g_theme_panel_by[pi] = py2;
+                    if (SVIS) {
+                        bool active = (pi == (int)g_theme.panel_edge);
+                        uint32_t bbg = active ? g_theme.accent : 0x00182838u;
+                        uint32_t bfg = active ? 0x00ffffffu   : 0x0090b0d0u;
+                        console_fill_rect(px2, py2, pbw, pbh, bbg);
+                        uint64_t nl  = (uint64_t)gui_strlen(pos_names[pi]);
+                        uint64_t bpx = px2 + (pbw > nl * fw ? (pbw - nl * fw) / 2u : 0u);
+                        gui_draw_str(bpx, py2 + (pbh - fh) / 2u, pos_names[pi], bfg, bbg);
+                    }
+                    px2 += pbw + 4u;
+                }
+                cy += SET_ROW_H + 8u;
+            }
+        }
+
+        /* Toggle row(s): wraps dynamically */
+        {
+            static const char *tog_labels[THEME_TOGGLE_COUNT] = {
+                "12h Clock", "Animations", "Status Bar", "Desk Info", "Glass", "Shadows", "Auto-hide" };
+            bool tog_vals[THEME_TOGGLE_COUNT] = {
+                g_theme.clock_12h, g_theme.animations, g_theme.statusbar, g_theme.desktop_info,
+                g_theme.fx_glass, g_theme.fx_shadows, g_theme.panel_autohide };
             uint64_t tbh = (uint64_t)(fh + 6u);
             uint64_t tbw = tog_bw_c;
             g_theme_toggle_h = tbh;
             g_theme_toggle_w = tbw;
-            for (int ti = 0; ti < 4; ti++) { g_theme_toggle_x[ti] = 0; g_theme_toggle_y[ti] = 0; }
+            for (int ti = 0; ti < THEME_TOGGLE_COUNT; ti++) { g_theme_toggle_x[ti] = 0; g_theme_toggle_y[ti] = 0; }
             for (int trow = 0; trow < tog_rows; trow++) {
                 SADVBOT;
                 if (SVIS)
@@ -489,7 +538,7 @@ void settings_render(window_t *w) {
                 uint64_t ty2 = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - tbh) / 2u));
                 int i_start  = trow * tog_per_row;
                 int i_end    = i_start + tog_per_row;
-                if (i_end > 4) i_end = 4;
+                if (i_end > THEME_TOGGLE_COUNT) i_end = THEME_TOGGLE_COUNT;
                 for (int ti = i_start; ti < i_end; ti++) {
                     g_theme_toggle_x[ti] = tx;
                     g_theme_toggle_y[ti] = ty2;

@@ -515,8 +515,13 @@ extern uint64_t     g_theme_wall_by_arr[WALLPAPER_COUNT];
 extern uint64_t     g_theme_wall_by;
 extern uint64_t     g_theme_wall_bw;
 extern uint64_t     g_theme_wall_bh;
-extern uint64_t     g_theme_toggle_x[4], g_theme_toggle_y[4];
+#define THEME_TOGGLE_COUNT 7   /* 12h, Animations, Status Bar, Desk Info, Glass, Shadows, Auto-hide */
+extern uint64_t     g_theme_toggle_x[THEME_TOGGLE_COUNT], g_theme_toggle_y[THEME_TOGGLE_COUNT];
 extern uint64_t     g_theme_toggle_w, g_theme_toggle_h;
+#define PANEL_POS_COUNT 4      /* Bottom, Top, Left, Right */
+extern uint64_t     g_theme_panel_bx[PANEL_POS_COUNT], g_theme_panel_by[PANEL_POS_COUNT];
+extern uint64_t     g_theme_panel_bw, g_theme_panel_bh;
+extern bool         g_panel_revealed;  /* auto-hide: panel currently shown */
 
 extern uint64_t     g_gui_tick;
 

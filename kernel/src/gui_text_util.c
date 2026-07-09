@@ -22,12 +22,13 @@ uint64_t panel_y(void) {
 
 uint64_t desk_top(void) {
     uint64_t t = g_theme.statusbar ? STATUS_H : 0u;
-    if (g_theme.panel_edge == PANEL_TOP) t += TASKBAR_H;   /* panel below status bar */
+    /* An auto-hidden panel floats over windows, so it reserves no desktop space. */
+    if (g_theme.panel_edge == PANEL_TOP && !g_theme.panel_autohide) t += TASKBAR_H;
     return t;
 }
 uint64_t desk_bot(void) {
     uint64_t b = console_fb_height();
-    if (g_theme.panel_edge != PANEL_TOP) b -= TASKBAR_H;   /* bottom-anchored panel */
+    if (g_theme.panel_edge != PANEL_TOP && !g_theme.panel_autohide) b -= TASKBAR_H;
     return b;
 }
 uint64_t desk_avail(void) { return desk_bot() - desk_top(); }

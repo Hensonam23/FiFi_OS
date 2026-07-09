@@ -212,7 +212,10 @@ uint64_t g_theme_wall_by_arr[WALLPAPER_COUNT];
 uint64_t g_theme_wall_by;
 uint64_t g_theme_wall_bw;
 uint64_t g_theme_wall_bh;
-uint64_t g_theme_toggle_x[4], g_theme_toggle_y[4];
+uint64_t g_theme_toggle_x[THEME_TOGGLE_COUNT], g_theme_toggle_y[THEME_TOGGLE_COUNT];
+uint64_t g_theme_panel_bx[PANEL_POS_COUNT], g_theme_panel_by[PANEL_POS_COUNT];
+uint64_t g_theme_panel_bw, g_theme_panel_bh;
+bool g_panel_revealed = false;
 uint64_t g_theme_toggle_w, g_theme_toggle_h;
 
 uint64_t g_gui_tick = 0;
@@ -613,9 +616,18 @@ void gui_on_tick(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t ty   = panel_y();               /* panel top (edge-aware) */
     uint64_t ty_end = ty + TASKBAR_H;        /* panel bottom */
-    /* "in the panel strip" — replaces the old bottom-only `my >= ty` gate so
-     * hit-testing is correct for a top panel too. */
-    bool in_panel = ((uint64_t)my >= ty && (uint64_t)my < ty_end);
+    bool in_strip = ((uint64_t)my >= ty && (uint64_t)my < ty_end);
+    /* Auto-hide: reveal when the cursor hits the panel's screen edge; stay shown
+     * while it's over the panel; hide when it leaves. A hidden panel is not
+     * clickable (in_panel false) so clicks pass through to the window beneath. */
+    if (g_theme.panel_autohide) {
+        bool at_edge = (g_theme.panel_edge == PANEL_TOP) ? ((uint64_t)my <= ty + 2u)
+                                                         : ((uint64_t)my + 3u >= fb_h);
+        bool reveal = g_panel_revealed ? (at_edge || in_strip) : at_edge;
+        if (reveal != g_panel_revealed) { g_panel_revealed = reveal; full_redraw(); }
+    }
+    /* "in the panel strip", edge-aware and (when auto-hiding) only while shown. */
+    bool in_panel = (!g_theme.panel_autohide || g_panel_revealed) && in_strip;
     (void)ty_end;
 
     /* ── Taskbar favorite drag-to-reorder / click-to-launch ──────────────
@@ -4113,17 +4125,34 @@ void gui_on_tick(void) {
                             }
                         }
                     }
-                    /* Toggle buttons: 12h Clock, Animations, Status Bar, Desk Info */
+                    /* Panel position tiles: Bottom / Top / Left / Right */
+                    if (g_theme_panel_bh > 0) {
+                        for (int pi = 0; pi < PANEL_POS_COUNT; pi++) {
+                            if ((uint64_t)my >= g_theme_panel_by[pi] &&
+                                (uint64_t)my <  g_theme_panel_by[pi] + g_theme_panel_bh &&
+                                (uint64_t)mx >= g_theme_panel_bx[pi] &&
+                                (uint64_t)mx <  g_theme_panel_bx[pi] + g_theme_panel_bw) {
+                                g_theme.panel_edge = (uint8_t)pi;
+                                gui_settings_save();
+                                full_redraw();
+                                break;
+                            }
+                        }
+                    }
+                    /* Toggle buttons: 12h, Animations, Status Bar, Desk Info, Glass, Shadows, Auto-hide */
                     if (g_theme_toggle_h > 0) {
-                        for (int ti = 0; ti < 4; ti++) {
+                        for (int ti = 0; ti < THEME_TOGGLE_COUNT; ti++) {
                             if ((uint64_t)my >= g_theme_toggle_y[ti] &&
                                 (uint64_t)my <  g_theme_toggle_y[ti] + g_theme_toggle_h &&
                                 (uint64_t)mx >= g_theme_toggle_x[ti] &&
                                 (uint64_t)mx <  g_theme_toggle_x[ti] + g_theme_toggle_w) {
-                                if (ti == 0) g_theme.clock_12h    = !g_theme.clock_12h;
-                                if (ti == 1) g_theme.animations   = !g_theme.animations;
-                                if (ti == 2) g_theme.statusbar    = !g_theme.statusbar;
-                                if (ti == 3) g_theme.desktop_info = !g_theme.desktop_info;
+                                if (ti == 0) g_theme.clock_12h     = !g_theme.clock_12h;
+                                if (ti == 1) g_theme.animations    = !g_theme.animations;
+                                if (ti == 2) g_theme.statusbar     = !g_theme.statusbar;
+                                if (ti == 3) g_theme.desktop_info  = !g_theme.desktop_info;
+                                if (ti == 4) g_theme.fx_glass      = !g_theme.fx_glass;
+                                if (ti == 5) g_theme.fx_shadows    = !g_theme.fx_shadows;
+                                if (ti == 6) g_theme.panel_autohide = !g_theme.panel_autohide;
                                 gui_settings_save();
                                 full_redraw();
                                 break;

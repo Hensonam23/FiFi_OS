@@ -327,6 +327,7 @@ static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
 }
 
 int tray_item_at(int32_t mx, int32_t my) {
+    if (g_theme.panel_autohide && !g_panel_revealed) return TRAY_NONE;
     uint64_t ty = panel_y();
     if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return TRAY_NONE;
     static const int ids[6] = { TRAY_BATT, TRAY_CPU, TRAY_NET, TRAY_MEM, TRAY_VOL, TRAY_CLK };
@@ -542,6 +543,7 @@ void favbar_draw(void) {
 }
 
 int favbar_hit(int32_t mx, int32_t my) {
+    if (g_theme.panel_autohide && !g_panel_revealed) return -1;   /* hidden panel: not clickable */
     uint64_t ty = panel_y();
     if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return -1;  /* within panel strip */
     uint64_t fbw = fav_btn_w();
@@ -555,6 +557,9 @@ int favbar_hit(int32_t mx, int32_t my) {
 }
 
 void taskbar_draw(void) {
+    /* Auto-hide: when enabled and not currently revealed, draw nothing — the
+     * panel floats over the (full-size) windows only while revealed. */
+    if (g_theme.panel_autohide && !g_panel_revealed) return;
     uint64_t fb_w = console_fb_width();
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
