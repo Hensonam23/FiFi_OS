@@ -616,13 +616,26 @@ void gui_on_tick(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t ty   = panel_y();               /* panel top (edge-aware) */
     uint64_t ty_end = ty + TASKBAR_H;        /* panel bottom */
-    bool in_strip = ((uint64_t)my >= ty && (uint64_t)my < ty_end);
+    /* "in the panel strip" — a vertical panel occupies an X strip, a horizontal
+     * one a Y strip. */
+    bool in_strip;
+    if (panel_is_vertical()) {
+        uint64_t px = panel_x();
+        in_strip = ((uint64_t)mx >= px && (uint64_t)mx < px + TASKBAR_H);
+    } else {
+        in_strip = ((uint64_t)my >= ty && (uint64_t)my < ty_end);
+    }
     /* Auto-hide: reveal when the cursor hits the panel's screen edge; stay shown
      * while it's over the panel; hide when it leaves. A hidden panel is not
      * clickable (in_panel false) so clicks pass through to the window beneath. */
     if (g_theme.panel_autohide) {
-        bool at_edge = (g_theme.panel_edge == PANEL_TOP) ? ((uint64_t)my <= ty + 2u)
-                                                         : ((uint64_t)my + 3u >= fb_h);
+        bool at_edge;
+        switch (g_theme.panel_edge) {
+            case PANEL_TOP:   at_edge = ((uint64_t)my <= ty + 2u); break;
+            case PANEL_LEFT:  at_edge = ((uint64_t)mx <= 2u); break;
+            case PANEL_RIGHT: at_edge = ((uint64_t)mx + 3u >= fb_w); break;
+            default:          at_edge = ((uint64_t)my + 3u >= fb_h); break;  /* BOTTOM */
+        }
         bool reveal = g_panel_revealed ? (at_edge || in_strip) : at_edge;
         if (reveal != g_panel_revealed) { g_panel_revealed = reveal; full_redraw(); }
     }
@@ -2689,7 +2702,14 @@ void gui_on_tick(void) {
     if (btn_pressed && in_panel) {
         int32_t cx, cy;
 
-        if (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w())) {
+        bool on_logo;
+        if (panel_is_vertical()) {
+            uint64_t ly = vpanel_logo_y();
+            on_logo = ((uint64_t)my >= ly && (uint64_t)my < ly + (TASKBAR_H - 6u));
+        } else {
+            on_logo = (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w()));
+        }
+        if (on_logo) {
             g_vol_popup_open = false;
             g_cal_popup_open = false;
             g_launcher_open = !g_launcher_open;

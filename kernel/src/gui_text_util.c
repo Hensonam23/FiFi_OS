@@ -14,24 +14,54 @@ void gui_toast(const char *msg, uint32_t color) {
  * status bar; BOTTOM (default; also LEFT/RIGHT until the vertical layout lands)
  * hugs the bottom edge. Single source of truth for the panel's Y so draw, hit
  * and struts agree. */
+/* When the panel is on TOP, the status bar moves to the BOTTOM so the top edge
+ * holds only the panel (no stacked double-bar). Otherwise the status bar is at
+ * the top. Disabled status bar => no bar at all (desktop grows). */
+bool statusbar_bottom(void) { return g_theme.statusbar && g_theme.panel_edge == PANEL_TOP; }
+uint64_t statusbar_y(void) {
+    return statusbar_bottom() ? console_fb_height() - STATUS_H : 0u;
+}
+
 uint64_t panel_y(void) {
-    if (g_theme.panel_edge == PANEL_TOP)
-        return g_theme.statusbar ? STATUS_H : 0u;
+    /* TOP panel sits at the very top (the status bar, if any, is at the bottom). */
+    if (g_theme.panel_edge == PANEL_TOP) return 0u;
     return console_fb_height() - TASKBAR_H;
 }
 
+bool panel_is_vertical(void) {
+    return g_theme.panel_edge == PANEL_LEFT || g_theme.panel_edge == PANEL_RIGHT;
+}
+/* Left X of a vertical (left/right) panel strip. */
+uint64_t panel_x(void) {
+    if (g_theme.panel_edge == PANEL_RIGHT) return console_fb_width() - TASKBAR_H;
+    return 0;   /* LEFT (or n/a) */
+}
+
 uint64_t desk_top(void) {
-    uint64_t t = g_theme.statusbar ? STATUS_H : 0u;
+    uint64_t t = 0u;
+    if (g_theme.statusbar && !statusbar_bottom()) t = STATUS_H;   /* status bar at top */
     /* An auto-hidden panel floats over windows, so it reserves no desktop space. */
     if (g_theme.panel_edge == PANEL_TOP && !g_theme.panel_autohide) t += TASKBAR_H;
     return t;
 }
 uint64_t desk_bot(void) {
     uint64_t b = console_fb_height();
-    if (g_theme.panel_edge != PANEL_TOP && !g_theme.panel_autohide) b -= TASKBAR_H;
+    if (g_theme.panel_edge == PANEL_BOTTOM && !g_theme.panel_autohide) b -= TASKBAR_H;
+    if (statusbar_bottom()) b -= STATUS_H;   /* status bar relocated to the bottom */
     return b;
 }
-uint64_t desk_avail(void) { return desk_bot() - desk_top(); }
+/* Horizontal desktop bounds — a left/right panel reserves a vertical strip. */
+uint64_t desk_left(void) {
+    if (g_theme.panel_edge == PANEL_LEFT && !g_theme.panel_autohide) return TASKBAR_H;
+    return 0u;
+}
+uint64_t desk_right(void) {
+    uint64_t r = console_fb_width();
+    if (g_theme.panel_edge == PANEL_RIGHT && !g_theme.panel_autohide) r -= TASKBAR_H;
+    return r;
+}
+uint64_t desk_avail(void)  { return desk_bot() - desk_top(); }
+uint64_t desk_availw(void) { return desk_right() - desk_left(); }
 
 size_t gui_strlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;

@@ -605,6 +605,16 @@ uint64_t desk_top(void);
 uint64_t desk_bot(void);
 uint64_t desk_avail(void);
 uint64_t panel_y(void);                /* panel (taskbar) top Y — edge-aware */
+bool     panel_is_vertical(void);      /* true for LEFT/RIGHT panels */
+uint64_t panel_x(void);                /* vertical panel strip left X */
+uint64_t desk_left(void);
+uint64_t desk_right(void);
+uint64_t desk_availw(void);            /* usable desktop width */
+bool     statusbar_bottom(void);       /* status bar relocated to bottom (top panel) */
+uint64_t statusbar_y(void);            /* status bar top Y */
+uint64_t vpanel_logo_y(void);          /* vertical dock: logo square Y */
+uint64_t vpanel_fav_y0(void);          /* vertical dock: first favorite Y */
+void     taskbar_draw_vertical(void);
 uint32_t desktop_bg_at(uint64_t y);   /* wallpaper colour at row y (corner rounding) */
 void     gui_toast(const char *msg, uint32_t color);
 void     gui_draw_str(uint64_t px, uint64_t py, const char *s, uint32_t fg, uint32_t bg);

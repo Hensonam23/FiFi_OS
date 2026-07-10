@@ -356,9 +356,10 @@ void win_show(window_t *w, int slot) {
          * the exact same spot (each stays individually grabbable). */
         uint64_t ox = (uint64_t)slot * 28u;
         uint64_t oy = (uint64_t)slot * 28u;
-        w->x = (fb_w - w->w) / 2u + ox;
+        uint64_t availw = desk_availw();
+        w->x = desk_left() + (availw > w->w ? (availw - w->w) / 2u : 0u) + ox;
         w->y = desk_top() + (avail - w->h) / 2u + oy;
-        if (w->x + w->w > fb_w) w->x = fb_w > w->w ? fb_w - w->w : 0;
+        if (w->x + w->w > desk_right()) w->x = desk_right() > w->w ? desk_right() - w->w : desk_left();
         if (w->y + w->h > desk_bot()) w->y = desk_bot() > w->h ? desk_bot() - w->h : desk_top();
     }
 
@@ -409,8 +410,8 @@ void win_maximize_toggle(window_t *w) {
             w->saved_x = w->x; w->saved_y = w->y;
             w->saved_w = w->w; w->saved_h = w->h;
         }
-        w->x = 0; w->y = desk_top();
-        w->w = fb_w; w->h = desk_avail();
+        w->x = desk_left(); w->y = desk_top();
+        w->w = desk_availw(); w->h = desk_avail();
         w->state = WIN_MAXIMIZED;
     }
     w->half_snapped = false;

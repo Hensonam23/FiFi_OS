@@ -328,6 +328,7 @@ static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
 
 int tray_item_at(int32_t mx, int32_t my) {
     if (g_theme.panel_autohide && !g_panel_revealed) return TRAY_NONE;
+    if (panel_is_vertical()) return TRAY_NONE;   /* vertical dock has no tray */
     uint64_t ty = panel_y();
     if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return TRAY_NONE;
     static const int ids[6] = { TRAY_BATT, TRAY_CPU, TRAY_NET, TRAY_MEM, TRAY_VOL, TRAY_CLK };
@@ -542,8 +543,90 @@ void favbar_draw(void) {
     }
 }
 
+/* ── Vertical (left/right) panel: a dock of stacked app icons ─────────────
+ * The clock/tray stay in the top status bar (macOS-style: dock on the side,
+ * clock in the menu bar), which sidesteps fitting the clock in a thin strip. */
+uint64_t vpanel_top(void)   { return g_theme.statusbar ? STATUS_H : 0u; }
+/* Y of the top logo square, and of the first favorite below it. */
+uint64_t vpanel_logo_y(void){ return vpanel_top() + 4u; }
+uint64_t vpanel_fav_y0(void){ return vpanel_logo_y() + (TASKBAR_H - 6u) + 8u; }
+
+void taskbar_draw_vertical(void) {
+    if (g_theme.panel_autohide && !g_panel_revealed) return;
+    uint64_t fb_h  = console_fb_height();
+    uint64_t fw    = console_font_width(), fh = console_font_height();
+    uint64_t thick = TASKBAR_H;
+    uint64_t px    = panel_x();
+    uint64_t top   = vpanel_top();
+    uint64_t ph    = fb_h > top ? fb_h - top : 0u;
+
+    /* Strip fill: frosted glass (wallpaper behind, then translucent) or gradient. */
+    if (g_theme.fx_glass) {
+        for (uint64_t yy = 0; yy < ph; yy++)
+            console_fill_rect(px, top + yy, thick, 1u, desktop_bg_at(top + yy));
+        console_blend_rect(px, top, thick, ph, 0x00121b2eu, 202u);
+    } else {
+        console_fill_vgrad(px, top, thick, ph, 0x00101624u, 0x00080b14u);
+    }
+    /* accent hairline on the inner edge (facing the desktop) */
+    uint64_t hair_x = (g_theme.panel_edge == PANEL_LEFT) ? (px + thick - 1u) : px;
+    console_fill_rect(hair_x, top, 1u, ph, 0x00223350u);
+
+    /* Logo square (opens the launcher) */
+    uint64_t ly = vpanel_logo_y();
+    uint32_t lg_top = g_launcher_open ? 0x00548ae0u : 0x002d54a8u;
+    uint32_t lg_bot = g_launcher_open ? 0x003a6cc4u : 0x001f3c80u;
+    console_fill_vgrad(px + 3u, ly, thick - 6u, thick - 6u, lg_top, lg_bot);
+    gui_draw_str_fg(px + (thick > fw ? (thick - fw) / 2u : 0u),
+                    ly + ((thick - 6u) > fh ? ((thick - 6u) - fh) / 2u : 0u),
+                    "F", 0x00f2f7ffu);
+
+    /* Favorites stacked downward */
+    uint64_t fy = vpanel_fav_y0();
+    int n = favbar_count();
+    for (int i = 0; i < n; i++) {
+        uint64_t by = fy + (uint64_t)i * (thick + TASKBTN_GAP);
+        if (by + thick > top + ph) break;
+        bool hov = (g_fav_hover == i), run = favbar_running(i), foc = favbar_focused(i);
+        uint32_t bt = foc ? 0x00335a94u : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
+        uint32_t bb = foc ? 0x00244572u : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
+        console_fill_vgrad(px + 3u, by + 3u, thick - 6u, thick - 6u, bt, bb);
+        uint64_t isz = (thick > 14u) ? thick - 12u : 8u;
+        uint64_t ix = px + (thick > isz ? (thick - isz) / 2u : 0u);
+        uint64_t iy = by + (thick > isz ? (thick - isz) / 2u : 0u);
+        bool drew = false;
+#ifdef __linux__
+        { uint32_t iw = 0, ih = 0; uint32_t *img = fav_icon(i, &iw, &ih);
+          if (img) { console_blit_scaled_alpha(img, iw, ih, ix, iy, isz, isz); drew = true; } }
+#endif
+        if (!drew) {
+            const char *lbl = favbar_label(i);
+            char C[2] = { lbl[0] ? lbl[0] : '?', '\0' };
+            if (C[0] >= 'a' && C[0] <= 'z') C[0] = (char)(C[0] - 32);
+            gui_draw_str_fg(px + (thick - fw) / 2u, by + (thick - fh) / 2u, C,
+                            hov ? 0x00f0f6ffu : 0x0090b8e0u);
+        }
+        if (run) {   /* running indicator: short vertical bar on the inner edge */
+            uint64_t bar = foc ? thick - 10u : thick / 2u;
+            uint64_t bar_y = by + (thick > bar ? (thick - bar) / 2u : 0u);
+            uint64_t bar_x = (g_theme.panel_edge == PANEL_LEFT) ? (px + thick - 3u) : (px + 1u);
+            console_fill_rect(bar_x, bar_y, 2u, bar, foc ? 0x0078b4ffu : 0x00507fb0u);
+        }
+    }
+}
+
 int favbar_hit(int32_t mx, int32_t my) {
     if (g_theme.panel_autohide && !g_panel_revealed) return -1;   /* hidden panel: not clickable */
+    if (panel_is_vertical()) {
+        uint64_t px = panel_x(), thick = TASKBAR_H;
+        if ((uint64_t)mx < px || (uint64_t)mx >= px + thick) return -1;
+        uint64_t fy = vpanel_fav_y0();
+        if ((uint64_t)my < fy) return -1;
+        uint64_t rel = (uint64_t)my - fy, stride = thick + TASKBTN_GAP;
+        if (rel % stride >= thick) return -1;          /* in the gap between icons */
+        int idx = (int)(rel / stride);
+        return (idx >= 0 && idx < favbar_count()) ? idx : -1;
+    }
     uint64_t ty = panel_y();
     if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return -1;  /* within panel strip */
     uint64_t fbw = fav_btn_w();
@@ -560,6 +643,8 @@ void taskbar_draw(void) {
     /* Auto-hide: when enabled and not currently revealed, draw nothing — the
      * panel floats over the (full-size) windows only while revealed. */
     if (g_theme.panel_autohide && !g_panel_revealed) return;
+    /* Left/right edges use the vertical dock layout instead. */
+    if (panel_is_vertical()) { taskbar_draw_vertical(); return; }
     uint64_t fb_w = console_fb_width();
     uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();

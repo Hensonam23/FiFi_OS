@@ -8,16 +8,16 @@ void draw_status_bar(void) {
     uint64_t fh   = console_font_height();
     uint32_t bar_bg = 0x0008101cu;
 
-    if (!g_theme.statusbar) {
-        /* Clear the status bar strip so it blends into desktop */
-        console_fill_rect(0, 0, fb_w, STATUS_H, 0x001a1a2eu);
-        return;
-    }
+    /* No status bar when disabled — the desktop simply extends over the strip. */
+    if (!g_theme.statusbar) return;
 
-    uint64_t sy   = (STATUS_H > fh) ? (STATUS_H - fh) / 2u : 0u;
+    /* Status bar sits at the top, or at the bottom when the panel is on top. */
+    uint64_t sby  = statusbar_y();
+    uint64_t sy   = sby + ((STATUS_H > fh) ? (STATUS_H - fh) / 2u : 0u);
 
-    console_fill_rect(0, 0, fb_w, STATUS_H, bar_bg);
-    console_fill_rect(0, STATUS_H - 1, fb_w, 1, COL_TASKBAR_SEP);
+    console_fill_rect(0, sby, fb_w, STATUS_H, bar_bg);
+    /* separator hairline on the inner edge (facing the desktop) */
+    console_fill_rect(0, statusbar_bottom() ? sby : sby + STATUS_H - 1u, fb_w, 1, COL_TASKBAR_SEP);
 
     /* Left: branding */
     gui_draw_str(6u, sy, "FiFi OS", g_theme.accent, bar_bg);
@@ -403,8 +403,8 @@ void draw_desktop_info(void) {
     uint64_t row_h2  = fh + 4u;
     uint64_t panel_h = (uint64_t)nrows * row_h2 + fh + 16u; /* title + rows + padding */
 
-    /* Place panel: bottom-left, 24px from edges */
-    uint64_t px = 24u;
+    /* Place panel: bottom-left, 24px from edges — clear of a left-edge dock. */
+    uint64_t px = desk_left() + 24u;
     uint64_t py = dbot > panel_h + 24u ? dbot - panel_h - 24u : dt + 4u;
     if (py + panel_h > dbot) return;
 
