@@ -102,26 +102,34 @@ ensure_xwayland() {
     rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock 2>/dev/null || true
     # xkbcomp: image ships it at /usr/bin; older boxes only have it in the runtime.
     [ -x /usr/bin/xkbcomp ] || cp "$RT/bin/xkbcomp" /usr/bin/xkbcomp 2>/dev/null || true
+    # Client-side xkbcommon (GTK/Qt toolkits) looks for keymap data at the
+    # compiled-in default /usr/share/X11/xkb; /usr resets each boot, so link it
+    # to the runtime copy (without this, GTK apps abort with "Failed to create
+    # XKB keymap"). Harmless if /usr/share/X11/xkb already exists.
+    if [ ! -e /usr/share/X11/xkb ] && [ -d "$RT/share/X11/xkb" ]; then
+        mkdir -p /usr/share/X11 2>/dev/null && ln -s "$RT/share/X11/xkb" /usr/share/X11/xkb 2>/dev/null || true
+    fi
     # xkb data: prefer the image copy, fall back to the runtime one.
     xkbdir=/usr/share/X11/xkb
     [ -d "$xkbdir" ] || xkbdir="$RT/share/X11/xkb"
     # windowed (NOT -fullscreen) so the FiFi compositor can decorate it with a
     # titlebar + traffic-lights and the user can move/resize it
+    # -displayfd: XWayland writes the display number to this fd ONLY once it is
+    # actually ready to accept client connections. Waiting on that (not the mere
+    # existence of the socket, which appears earlier during xkb/screen setup) is
+    # what reliably fixes the cold-start race that left soffice exiting to a
+    # black X root. Route fd 3 to a file and poll it.
+    : > /tmp/xwayland.ready 2>/dev/null || true
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     LD_LIBRARY_PATH="$RT/lib" \
         busybox setsid /usr/bin/Xwayland :0 -geometry 1800x1050 \
-        -xkbdir "$xkbdir" </dev/null >/tmp/xwayland.log 2>&1 &
-    # Wait for the X server to be ready before the app connects. busybox has no
-    # `seq`, so the old `$(seq 1 40)` loop expanded to nothing and did NOT wait —
-    # the X11 app (soffice) then raced XWayland startup, lost, and exited with
-    # "no suitable windowing system found", leaving a black window. Use a plain
-    # while loop, then a short grace so the server is actually accepting clients.
+        -xkbdir "$xkbdir" -displayfd 3 </dev/null >/tmp/xwayland.log 2>&1 3>/tmp/xwayland.ready &
     _i=0
-    while [ "$_i" -lt 60 ]; do
-        [ -S /tmp/.X11-unix/X0 ] && break
-        sleep 0.25; _i=$((_i + 1))
+    while [ "$_i" -lt 150 ]; do
+        [ -s /tmp/xwayland.ready ] && break          # ready to accept clients
+        sleep 0.1; _i=$((_i + 1))
     done
-    sleep 0.6
+    sleep 0.4   # tiny extra margin
 }
 
 launch_dir() {
@@ -133,14 +141,57 @@ launch_dir() {
     if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
         ensure_xwayland
         export DISPLAY=:0
-        export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL (no GTK/Wayland)
-        unset GDK_BACKEND QT_QPA_PLATFORM       # don't steer it to Wayland
-        export APPDIR="$dir"; cd "$dir"
-        # NOT sandboxed: the "gen" VCL talks to a rootful XWayland via the X
-        # socket, and any unshare namespace (even without PID) makes soffice.bin
-        # exit before it maps (a black X root). Isolating an app that already
-        # shares one rootful X server buys little, so run it unsandboxed.
-        [ -x "$dir/AppRun" ] && exec "$dir/AppRun" "$@"
+        export SAL_USE_VCLPLUGIN=gtk3          # gtk3 over XWayland/X11 (gen VCL exits 81 on this box)
+        # Scrub shared-runtime env that isn't meant for a raw-X11 soffice: an
+        # invalid "disabled:" D-Bus address (soffice aborts during first-run
+        # before it can even log), the Wayland/Electron toolkit hints, and the
+        # a11y-disable vars. This matches the minimal env under which soffice
+        # starts cleanly.
+        unset GDK_BACKEND QT_QPA_PLATFORM MOZ_ENABLE_WAYLAND MOZ_DISABLE_CONTENT_SANDBOX \
+              ELECTRON_OZONE_PLATFORM_HINT ELECTRON_DISABLE_SANDBOX USE_X11 \
+              APPIMAGE_EXTRACT_AND_RUN DBUS_SESSION_BUS_ADDRESS \
+              GTK_A11Y NO_AT_BRIDGE GNOME_ACCESSIBILITY QT_ACCESSIBILITY
+        export APPDIR="$dir"
+        # This AppImage's AppRun/oosplash wrapper fails to spawn soffice.bin on
+        # this box (it never launches -> the rootful X root stays black), but
+        # soffice.bin itself starts fine. So launch it DIRECTLY from its program
+        # dir: LibreOffice's own libs load via RPATH ($ORIGIN) and the system
+        # libs (cairo, nss) come from the browser sysroot already on
+        # LD_LIBRARY_PATH. NOT sandboxed (gen VCL talks to a shared rootful
+        # XWayland; any namespace makes soffice exit before it maps).
+        _prog=""
+        for _p in "$dir"/opt/*/program "$dir"/program; do
+            [ -x "$_p/soffice.bin" ] && { _prog="$_p"; break; }
+        done
+        if [ -n "$_prog" ]; then
+            export LD_LIBRARY_PATH="$_prog:$LD_LIBRARY_PATH"
+            cd "$_prog"
+            # A COLD (freshly started) XWayland fails its very first X client even
+            # after it signals ready via -displayfd; the next client succeeds. So
+            # retry soffice: if it dies within a few seconds (the cold-X failure
+            # is immediate), relaunch — by then XWayland is warm and it starts.
+            # Once a launch survives the probe window, wait on it (it is the
+            # persistent office process; fifi-run exits when the user closes it).
+            _t=0
+            while [ "$_t" -lt 5 ]; do
+                ./soffice.bin --nologo --norestore "$@" &
+                _sopid=$!
+                _w=0
+                while [ "$_w" -lt 8 ]; do
+                    kill -0 "$_sopid" 2>/dev/null || break
+                    sleep 1; _w=$((_w + 1))
+                done
+                if kill -0 "$_sopid" 2>/dev/null; then
+                    wait "$_sopid"; exit $?
+                fi
+                _t=$((_t + 1))
+                rm -f "$HOME"/.config/libreoffice/*/.lock 2>/dev/null || true
+                sleep 1
+            done
+            exit 1
+        fi
+        cd "$dir"
+        [ -x "$dir/AppRun" ] && exec "$dir/AppRun" "$@"   # fallback
     fi
     # Archimage/JuNest packages (ivan-hc builds) run a containerized Arch inside
     # proot and refuse to start as root. Give them a fake non-root identity via
