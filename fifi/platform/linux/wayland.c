@@ -2234,7 +2234,9 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     wl_end_msg(bc, h);
                     wl_client_flush(bc);
                 } else if (rel >= bw - 48) {              /* maximize / restore */
-                    if (!bar_s->maximized) {
+                    bool eff_max = bar_s->maximized ||
+                        (bar_s->own_w >= g_w * 9 / 10 && bar_s->own_h >= g_h * 85 / 100);
+                    if (!eff_max) {
                         bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
                         bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
                         bar_s->maximized = true;
@@ -2244,9 +2246,20 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                                                 XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
                     } else {
                         bar_s->maximized = false;
-                        bar_s->x = bar_s->restore_x;
-                        bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
-                        send_toplevel_configure(bc, bar_s, bar_s->restore_w, bar_s->restore_h, 0, 0);
+                        int32_t Mx, My, Mw, Mh; wl_maxarea(&Mx, &My, &Mw, &Mh);
+                        int32_t rw = bar_s->restore_w, rh = bar_s->restore_h;
+                        if (rw < 200 || rh < 200 || rw >= g_w * 9 / 10 || rh >= g_h * 85 / 100) {
+                            rw = Mw * 80 / 100; rh = Mh * 85 / 100;
+                            if (rw > 1400) rw = 1400;
+                            if (rh > 900)  rh = 900;
+                            bar_s->x = Mx + (Mw - rw) / 2;
+                            bar_s->y = My + (Mh - rh) / 2;
+                        } else {
+                            bar_s->x = bar_s->restore_x;
+                            bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
+                        }
+                        bar_s->restore_w = rw; bar_s->restore_h = rh;
+                        send_toplevel_configure(bc, bar_s, rw, rh, 0, 0);
                     }
                     wl_client_flush(bc);
                 } else if (rel >= bw - 72) {              /* minimize (taskbar restores) */
@@ -2263,7 +2276,14 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     bool dbl = (s_dc_sid == bar_sid && dms > 0 && dms < 400);
                     s_dc_ts = now; s_dc_sid = bar_sid;
                     if (dbl) {
-                        if (!bar_s->maximized) {
+                        /* An Electron/self-sizing app can fill the screen while
+                         * its compositor maximized flag is still false (it never
+                         * sent set_maximized) — treat it as effectively maximized
+                         * by its actual committed size so double-click RESTORES it
+                         * to a windowed size instead of "maximizing" (no-op). */
+                        bool eff_max = bar_s->maximized ||
+                            (bar_s->own_w >= g_w * 9 / 10 && bar_s->own_h >= g_h * 85 / 100);
+                        if (!eff_max) {
                             if (!bar_s->half_snapped) {
                                 bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
                                 bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
@@ -2274,10 +2294,23 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                             send_toplevel_configure(bc, bar_s, Mw, Mh,
                                                     XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
                         } else {
-                            bar_s->maximized = false;
-                            bar_s->x = bar_s->restore_x;
-                            bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
-                            send_toplevel_configure(bc, bar_s, bar_s->restore_w, bar_s->restore_h, 0, 0);
+                            bar_s->maximized = false; bar_s->half_snapped = false;
+                            int32_t Mx, My, Mw, Mh; wl_maxarea(&Mx, &My, &Mw, &Mh);
+                            int32_t rw = bar_s->restore_w, rh = bar_s->restore_h;
+                            /* If the saved restore size is missing or itself
+                             * near-fullscreen, fall back to a centered windowed size. */
+                            if (rw < 200 || rh < 200 || rw >= g_w * 9 / 10 || rh >= g_h * 85 / 100) {
+                                rw = Mw * 80 / 100; rh = Mh * 85 / 100;
+                                if (rw > 1400) rw = 1400;
+                                if (rh > 900)  rh = 900;
+                                bar_s->x = Mx + (Mw - rw) / 2;
+                                bar_s->y = My + (Mh - rh) / 2;
+                            } else {
+                                bar_s->x = bar_s->restore_x;
+                                bar_s->y = bar_s->restore_y < top ? top : bar_s->restore_y;
+                            }
+                            bar_s->restore_w = rw; bar_s->restore_h = rh;
+                            send_toplevel_configure(bc, bar_s, rw, rh, 0, 0);
                         }
                         wl_client_flush(bc);
                     } else {                               /* drag-move */
