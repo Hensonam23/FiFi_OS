@@ -83,7 +83,17 @@ ensure_xwayland() {
     LD_LIBRARY_PATH="$RT/lib" \
         busybox setsid /usr/bin/Xwayland :0 -geometry 1800x1050 \
         -xkbdir "$xkbdir" </dev/null >/tmp/xwayland.log 2>&1 &
-    for _i in $(seq 1 40); do [ -S /tmp/.X11-unix/X0 ] && break; sleep 0.25; done
+    # Wait for the X server to be ready before the app connects. busybox has no
+    # `seq`, so the old `$(seq 1 40)` loop expanded to nothing and did NOT wait —
+    # the X11 app (soffice) then raced XWayland startup, lost, and exited with
+    # "no suitable windowing system found", leaving a black window. Use a plain
+    # while loop, then a short grace so the server is actually accepting clients.
+    _i=0
+    while [ "$_i" -lt 60 ]; do
+        [ -S /tmp/.X11-unix/X0 ] && break
+        sleep 0.25; _i=$((_i + 1))
+    done
+    sleep 0.6
 }
 
 launch_dir() {
