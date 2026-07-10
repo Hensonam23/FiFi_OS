@@ -47,9 +47,27 @@ static void chrome_circle(uint64_t cx, uint64_t cy, uint32_t col) {
     }
 }
 
+/* Fill a horizontal span of the title bar. With glass on, a glossy upper band
+ * over a matte lower band reads as frosted glass (opaque — no accumulation on
+ * partial repaints); otherwise a plain steel gradient. */
+static void titlebar_fill(window_t *w, uint64_t x, uint64_t span, bool active) {
+    if (g_theme.fx_glass) {
+        uint32_t hi  = active ? 0x003a577fu : 0x00263040u;
+        uint32_t mid = active ? 0x00283a5eu : 0x001d2532u;
+        uint32_t lo  = active ? 0x001b2942u : 0x00151b24u;
+        uint64_t half = TITLE_H / 2u; if (half == 0u) half = 1u;
+        console_fill_vgrad(x, w->y, span, half, hi, mid);
+        console_fill_vgrad(x, w->y + half, span, TITLE_H - half, mid, lo);
+    } else {
+        uint32_t gt = active ? 0x00324a72u : 0x00202836u;
+        uint32_t gb = active ? 0x001e2c48u : 0x00161c26u;
+        console_fill_vgrad(x, w->y, span, TITLE_H, gt, gb);
+    }
+}
+
 /* Draw the three titlebar buttons (traffic-light circles on the title gradient).
  * Glyphs appear on hover only, macOS/KDE style. */
-static void chrome_buttons(window_t *w, int slot, uint32_t grad_top, uint32_t grad_bot) {
+static void chrome_buttons(window_t *w, int slot, bool active) {
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
     uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
@@ -63,8 +81,11 @@ static void chrome_buttons(window_t *w, int slot, uint32_t grad_top, uint32_t gr
     };
     for (int i = 0; i < 3; i++) {
         bool hov = (g_chrome_win == slot && g_chrome_btn == btns[i].btn);
-        /* restore the title gradient beneath the button cell */
-        console_fill_vgrad(btns[i].bx, w->y, BTN_W, TITLE_H, grad_top, grad_bot);
+        /* restore the title bar beneath the button cell */
+        titlebar_fill(w, btns[i].bx, BTN_W, active);
+        /* specular top edge on the button cell to match the bar */
+        if (g_theme.fx_glass)
+            console_fill_rect(btns[i].bx, w->y, BTN_W, 1u, active ? 0x005b7cb0u : 0x00323d50u);
         uint64_t cxc = btns[i].bx + BTN_W / 2u;
         chrome_circle(cxc, cyc, hov ? btns[i].hcol : btns[i].col);
         if (hov)
@@ -90,9 +111,6 @@ void win_draw_chrome(window_t *w, bool fill_content) {
         if (_ow->raise_z > global_top) global_top = _ow->raise_z;
     }
     bool active = (my_z >= global_top);
-    /* Title bar gradient: focused = lifted steel-blue, unfocused = flat dark. */
-    uint32_t grad_top = active ? 0x00324a72u : 0x00202836u;
-    uint32_t grad_bot = active ? 0x001e2c48u : 0x00161c26u;
 
     /* Compute button positions (needed for both full and partial paths) */
     w->btn_cls_x = w->x + w->w - BTN_W;
@@ -103,7 +121,7 @@ void win_draw_chrome(window_t *w, bool fill_content) {
 
     if (!fill_content) {
         /* Hover-only repaint: just the 3 button cells. */
-        chrome_buttons(w, slot, grad_top, grad_bot);
+        chrome_buttons(w, slot, active);
         return;
     }
 
@@ -128,10 +146,12 @@ void win_draw_chrome(window_t *w, bool fill_content) {
             console_fill_rect(w->x + w->w, w->y, 1u, w->h, ring);
     }
 
-    /* Title bar gradient */
-    console_fill_vgrad(w->x, w->y, w->w, TITLE_H, grad_top, grad_bot);
-    /* Top highlight hairline */
-    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x00466492u : 0x002a3446u);
+    /* Title bar — frosted glass (glossy top over matte bottom) or plain grad */
+    titlebar_fill(w, w->x, w->w, active);
+    /* Specular top edge + soft highlight just beneath it (the glass catching light) */
+    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x005b7cb0u : 0x00323d50u);
+    if (g_theme.fx_glass)
+        console_fill_rect(w->x, w->y + 1u, w->w, 1u, active ? 0x00415f8cu : 0x00283242u);
     /* Bottom separator line */
     console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);
 
@@ -166,7 +186,7 @@ void win_draw_chrome(window_t *w, bool fill_content) {
     }
 
     /* Buttons: traffic-light circles */
-    chrome_buttons(w, slot, grad_top, grad_bot);
+    chrome_buttons(w, slot, active);
 
     if (fill_content) {
         /* Neutral thin frame (accent lives in the focus ring, not the border) */
