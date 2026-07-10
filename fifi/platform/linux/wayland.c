@@ -1351,24 +1351,31 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                          * is drawn just above the surface top (see ssd_draw_chrome). */
                         if (!s->placed) {
                             s->placed = true;
-                            extern uint32_t console_font_height(void);
-                            int32_t fhh = (int32_t)console_font_height();
-                            int32_t status = fhh + 6, taskbar = fhh + 10;
-                            int32_t top = status + SSD_TITLE_H;
-                            int32_t avail_h = g_h - top - taskbar;
-                            int32_t rw = g_w * 78 / 100, rh = avail_h * 88 / 100;
+                            /* Place within the desktop work area so the window
+                             * never overlaps the panel, whichever edge it's on.
+                             * desk_* are linked from the GUI and read the same
+                             * g_theme; the content sits below its SSD titlebar. */
+                            extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+                            extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+                            int32_t wx = (int32_t)desk_left();
+                            int32_t wy = (int32_t)desk_top() + SSD_TITLE_H;
+                            int32_t ww = (int32_t)desk_availw();
+                            int32_t wh = (int32_t)desk_avail() - SSD_TITLE_H;
+                            if (ww < 200) ww = g_w;
+                            if (wh < 200) wh = g_h;
+                            int32_t rw = ww * 78 / 100, rh = wh * 88 / 100;
                             if (rw > 1500) rw = 1500;
                             if (rh > 950)  rh = 950;
-                            /* Cascade successive windows so a second window
-                             * doesn't land exactly on the first — step down-right
-                             * by 40px, wrapping every 6 windows. */
+                            /* Cascade successive windows down-right, wrapping every 6. */
                             static int s_cascade = 0;
                             int32_t casc = (s_cascade++ % 6) * 40;
                             s->restore_w = rw; s->restore_h = rh;
-                            s->restore_x = (g_w - rw) / 2 + casc;
-                            s->restore_y = top + (avail_h - rh) / 2 + casc;
-                            if (s->restore_x + rw > g_w) s->restore_x = g_w - rw;
-                            if (s->restore_y + rh > g_h - taskbar) s->restore_y = g_h - taskbar - rh;
+                            s->restore_x = wx + (ww - rw) / 2 + casc;
+                            s->restore_y = wy + (wh - rh) / 2 + casc;
+                            if (s->restore_x + rw > wx + ww) s->restore_x = wx + ww - rw;
+                            if (s->restore_y + rh > wy + wh) s->restore_y = wy + wh - rh;
+                            if (s->restore_x < wx) s->restore_x = wx;
+                            if (s->restore_y < wy) s->restore_y = wy;
                             s->maximized = false;
                             s->x = s->restore_x; s->y = s->restore_y;
                             send_toplevel_configure(c, s, rw, rh, 0, 0);
