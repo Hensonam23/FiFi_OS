@@ -169,6 +169,29 @@ void ttf_close(void *hv) {
     free(h);
 }
 
+/* Small LRU of open scratch handles so per-frame previews (the font picker)
+ * don't re-read + re-parse a whole font file on every row/hover. The cache
+ * OWNS these handles — callers must NOT ttf_close() the result. */
+#define PV_CACHE 8
+static struct { char path[96]; void *h; } g_pv[PV_CACHE];
+static int g_pv_next;
+
+void *ttf_open_cached(const char *path) {
+    if (!path) return NULL;
+    for (int i = 0; i < PV_CACHE; i++)
+        if (g_pv[i].h && strcmp(g_pv[i].path, path) == 0) return g_pv[i].h;
+    void *h = ttf_open(path);
+    if (!h) return NULL;
+    int slot = g_pv_next;
+    g_pv_next = (g_pv_next + 1) % PV_CACHE;
+    if (g_pv[slot].h) ttf_close(g_pv[slot].h);
+    g_pv[slot].h = h;
+    int i = 0;
+    for (; path[i] && i < (int)sizeof(g_pv[slot].path) - 1; i++) g_pv[slot].path[i] = path[i];
+    g_pv[slot].path[i] = '\0';
+    return h;
+}
+
 int ttf_open_baseline(void *hv, int px_size) {
     ttf_handle_t *h = (ttf_handle_t *)hv;
     if (!h || px_size < 1) return 0;

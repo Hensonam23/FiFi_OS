@@ -1321,6 +1321,7 @@ uint64_t console_render_psf_string(const char *path, const char *s,
         #undef LE32
     } else return 0;
     if (fw == 0u || fw > 64u || fh == 0u || fh > 64u || nglyphs == 0u || nglyphs > 512u) return 0;
+    if (fbpg < ((fw + 7u) / 8u) * fh) return 0;   /* stride sanity — avoid OOB read */
     if ((uint64_t)data_off + (uint64_t)nglyphs * fbpg > raw_size) return 0;
     const uint8_t *data = d + data_off;
     uint32_t bpr = (fw + 7u) / 8u;
@@ -1397,6 +1398,10 @@ bool console_load_psf(const char *path) {
     if (new_fw == 0u || new_fw > 64u) return false;
     if (new_fh == 0u || new_fh > 64u) return false;
     if (new_nglyphs == 0u || new_nglyphs > 512u) return false;
+    /* Reject fonts whose declared bytes-per-glyph is smaller than the geometry
+     * requires — glyph rows are read at fh*bpr stride, so fbpg < fh*bpr would
+     * read past the validated glyph region (OOB on a malformed PSF2). */
+    if (new_fbpg < ((new_fw + 7u) / 8u) * new_fh) return false;
     uint64_t glyph_bytes = (uint64_t)new_nglyphs * new_fbpg;
     if ((uint64_t)data_off + glyph_bytes > raw_size) return false;
     if (glyph_bytes > FONT_BUF_SIZE) return false;
@@ -1405,6 +1410,11 @@ bool console_load_psf(const char *path) {
     for (uint64_t i = 0; i < glyph_bytes; i++)
         g_font_buf[i] = src[i];
 
+#ifdef __linux__
+    /* Committing a PSF font — drop any active scalable TTF so the render path
+     * stops taking the TTF branch with stale metrics/cache. */
+    ttf_clear();
+#endif
     g_fw      = new_fw;
     g_fh      = new_fh;
     g_fbpg    = new_fbpg;
@@ -1486,7 +1496,7 @@ bool console_load_font(const char *path, int px_size) {
 uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, uint64_t py,
                                  uint32_t target_h, uint32_t fg, uint64_t max_w) {
     if (!con.initialized || !s || !path || target_h == 0) return 0;
-    void *h = ttf_open(path);
+    void *h = ttf_open_cached(path);   /* cache-owned; do NOT close */
     if (!h) return 0;
     /* Right clip edge: the box boundary, but never past the framebuffer. */
     uint64_t clip_r = (max_w > 0u && px + max_w < con.w) ? (px + max_w) : con.w;
@@ -1523,8 +1533,7 @@ uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, u
         x += (adv > 0 ? (uint64_t)adv : target_h / 2u);
         if (x >= clip_r) break;                                       /* stop past the box */
     }
-    ttf_close(h);
-    return x - px;
+    return x - px;   /* h is cache-owned — not closed here */
 }
 #endif
 

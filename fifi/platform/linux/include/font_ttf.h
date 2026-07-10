@@ -31,6 +31,9 @@ const uint8_t *ttf_glyph(uint32_t cp, int *w, int *h, int *xoff, int *ytop, int 
 /* ── Scratch handle (preview rendering, no cache, does not touch active) ── */
 void *ttf_open(const char *path);                 /* NULL on failure */
 void  ttf_close(void *h);
+/* Like ttf_open but returns a handle owned by an internal LRU cache — do NOT
+ * close it. For hot per-frame preview rendering (avoids re-parsing the file). */
+void *ttf_open_cached(const char *path);
 int   ttf_open_baseline(void *h, int px_size);
 /* Rasterize one codepoint from a scratch handle at px_size. Caller must free
  * the returned bitmap with ttf_free_bitmap(). */
