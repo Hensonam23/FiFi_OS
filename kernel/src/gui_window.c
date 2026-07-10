@@ -65,9 +65,11 @@ static void titlebar_fill(window_t *w, uint64_t x, uint64_t span, bool active) {
     }
 }
 
-/* Draw the three titlebar buttons (traffic-light circles on the title gradient).
- * Glyphs appear on hover only, macOS/KDE style. */
+/* Draw the three titlebar traffic-light circles. The title-bar background is
+ * already painted by titlebar_paint(), so this only draws the circles + the
+ * hover glyph (macOS/KDE style). */
 static void chrome_buttons(window_t *w, int slot, bool active) {
+    (void)active;
     uint64_t fw  = console_font_width();
     uint64_t fh  = console_font_height();
     uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
@@ -81,11 +83,6 @@ static void chrome_buttons(window_t *w, int slot, bool active) {
     };
     for (int i = 0; i < 3; i++) {
         bool hov = (g_chrome_win == slot && g_chrome_btn == btns[i].btn);
-        /* restore the title bar beneath the button cell */
-        titlebar_fill(w, btns[i].bx, BTN_W, active);
-        /* specular top edge on the button cell to match the bar */
-        if (g_theme.fx_glass)
-            console_fill_rect(btns[i].bx, w->y, BTN_W, 1u, active ? 0x005b7cb0u : 0x00323d50u);
         uint64_t cxc = btns[i].bx + BTN_W / 2u;
         chrome_circle(cxc, cyc, hov ? btns[i].hcol : btns[i].col);
         if (hov)
@@ -94,10 +91,91 @@ static void chrome_buttons(window_t *w, int slot, bool active) {
     }
 }
 
-void win_draw_chrome(window_t *w, bool fill_content) {
-    uint64_t fw = console_font_width();
-    uint64_t fh = console_font_height();
+/* Per-window captured backdrop for the translucent title bar (see-through glass). */
+static uint32_t *g_tb_bg[MAX_WINS];
+static uint64_t  g_tb_bg_x[MAX_WINS], g_tb_bg_y[MAX_WINS], g_tb_bg_w[MAX_WINS];
 
+void win_titlebar_bg_free(int slot) {
+    if (slot < 0 || slot >= MAX_WINS) return;
+    if (g_tb_bg[slot]) { kfree(g_tb_bg[slot]); g_tb_bg[slot] = 0; }
+    g_tb_bg_w[slot] = 0;
+}
+
+/* Paint the entire title bar (background + specular + title text + buttons).
+ * With Glass on it is TRANSLUCENT: do_capture=true (full redraw, run after the
+ * desktop+lower windows are painted) grabs the fresh backdrop behind the bar and
+ * blends a tint over it; do_capture=false (hover repaint) restores that stored
+ * backdrop first, so re-blends never accumulate. Glass off = opaque glossy grad. */
+static void titlebar_paint(window_t *w, int slot, bool active, bool do_capture) {
+    uint64_t fw  = console_font_width();
+    uint64_t fh  = console_font_height();
+    uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
+    bool translucent = false;
+
+    if (g_theme.fx_glass && slot >= 0 && slot < MAX_WINS) {
+        if (do_capture) {
+            if (!g_tb_bg[slot] || g_tb_bg_w[slot] != w->w) {
+                if (g_tb_bg[slot]) kfree(g_tb_bg[slot]);
+                g_tb_bg[slot] = (uint32_t *)kmalloc(w->w * TITLE_H * 4u);
+            }
+            if (g_tb_bg[slot]) {
+                console_capture_rect(g_tb_bg[slot], w->x, w->y, w->w, TITLE_H);
+                g_tb_bg_x[slot] = w->x; g_tb_bg_y[slot] = w->y; g_tb_bg_w[slot] = w->w;
+                translucent = true;
+            }
+        } else if (g_tb_bg[slot] && g_tb_bg_w[slot] == w->w &&
+                   g_tb_bg_x[slot] == w->x && g_tb_bg_y[slot] == w->y) {
+            console_paste_rect(g_tb_bg[slot], w->x, w->y, w->w, TITLE_H);
+            translucent = true;
+        }
+    }
+
+    if (translucent) {
+        /* frosted tint over the restored desktop backdrop — the see-through look */
+        uint32_t tint = active ? 0x0022344fu : 0x00151c27u;
+        uint8_t  a    = active ? 176u : 198u;
+        console_blend_rect(w->x, w->y, w->w, TITLE_H, tint, a);
+    } else {
+        titlebar_fill(w, w->x, w->w, active);   /* opaque glossy fallback */
+    }
+    /* specular top edge + soft highlight (glass catching light) */
+    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x006a8ec4u : 0x00323d50u);
+    if (g_theme.fx_glass)
+        console_blend_rect(w->x, w->y + 1u, w->w, 1u, 0x00ffffffu, active ? 42u : 22u);
+    console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);   /* bottom sep */
+
+    /* Title text: prefix '*' for unsaved editor changes; centered or clipped. */
+    const char *disp_title = w->title;
+    char _mod_title[68];
+    if (w->type == WIN_TEXT && w->text.edit_modified) {
+        _mod_title[0] = '*'; _mod_title[1] = ' ';
+        int _mt = 2;
+        for (const char *_p = w->title; *_p && _mt < 67; _p++, _mt++) _mod_title[_mt] = *_p;
+        _mod_title[_mt] = '\0';
+        disp_title = _mod_title;
+    }
+    uint64_t tlen   = (uint64_t)gui_strlen(disp_title);
+    uint64_t avail  = w->btn_min_x > w->x + 8u ? w->btn_min_x - w->x - 8u : 0u;
+    uint64_t max_ch = fw > 0u ? avail / fw : 0u;
+    uint64_t tpx;
+    if (tlen <= max_ch) {
+        tpx = w->x + (w->w - tlen * fw) / 2u;
+        if (w->w < tlen * fw) tpx = w->x + 4u;
+        gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
+    } else {
+        tpx = w->x + 4u;
+        if (max_ch > 3u) {
+            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch - 3u);
+            gui_draw_str_fg(tpx + (max_ch - 3u) * fw, tpy, "...", 0x00506878u);
+        } else {
+            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
+        }
+    }
+
+    chrome_buttons(w, slot, active);
+}
+
+void win_draw_chrome(window_t *w, bool fill_content) {
     int slot = (int)(w - g_wins);
     /* Active (focused) = this window is the single GLOBALLY topmost window, comparing
      * raise_z across every built-in window AND every IPC window. Exactly one window is
@@ -117,11 +195,10 @@ void win_draw_chrome(window_t *w, bool fill_content) {
     w->btn_max_x = w->btn_cls_x - BTN_W;
     w->btn_min_x = w->btn_max_x - BTN_W;
 
-    uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
-
     if (!fill_content) {
-        /* Hover-only repaint: just the 3 button cells. */
-        chrome_buttons(w, slot, active);
+        /* Hover repaint: repaint the whole title bar (restores the captured
+         * backdrop so the translucent glass doesn't accumulate) + buttons. */
+        titlebar_paint(w, slot, active, false);
         return;
     }
 
@@ -146,47 +223,9 @@ void win_draw_chrome(window_t *w, bool fill_content) {
             console_fill_rect(w->x + w->w, w->y, 1u, w->h, ring);
     }
 
-    /* Title bar — frosted glass (glossy top over matte bottom) or plain grad */
-    titlebar_fill(w, w->x, w->w, active);
-    /* Specular top edge + soft highlight just beneath it (the glass catching light) */
-    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x005b7cb0u : 0x00323d50u);
-    if (g_theme.fx_glass)
-        console_fill_rect(w->x, w->y + 1u, w->w, 1u, active ? 0x00415f8cu : 0x00283242u);
-    /* Bottom separator line */
-    console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);
-
-    /* Build display title: prefix '*' when text editor has unsaved changes */
-    const char *disp_title = w->title;
-    char _mod_title[68];
-    if (w->type == WIN_TEXT && w->text.edit_modified) {
-        _mod_title[0] = '*'; _mod_title[1] = ' ';
-        int _mt = 2;
-        for (const char *_p = w->title; *_p && _mt < 67; _p++, _mt++) _mod_title[_mt] = *_p;
-        _mod_title[_mt] = '\0';
-        disp_title = _mod_title;
-    }
-
-    /* Title: centered if it fits, left-aligned+clipped if too wide */
-    uint64_t tlen     = (uint64_t)gui_strlen(disp_title);
-    uint64_t avail    = w->btn_min_x > w->x + 8u ? w->btn_min_x - w->x - 8u : 0u;
-    uint64_t max_ch   = fw > 0u ? avail / fw : 0u;
-    uint64_t tpx;
-    if (tlen <= max_ch) {
-        tpx = w->x + (w->w - tlen * fw) / 2u;
-        if (w->w < tlen * fw) tpx = w->x + 4u;
-        gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
-    } else {
-        tpx = w->x + 4u;
-        if (max_ch > 3u) {
-            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch - 3u);
-            gui_draw_str_fg(tpx + (max_ch - 3u) * fw, tpy, "...", 0x00506878u);
-        } else {
-            gui_draw_str_clip_fg(tpx, tpy, disp_title, COL_TITLE_FG, max_ch);
-        }
-    }
-
-    /* Buttons: traffic-light circles */
-    chrome_buttons(w, slot, active);
+    /* Title bar — translucent frosted glass (see-through) or opaque glossy grad,
+     * plus specular edge, title text, and traffic-light buttons. */
+    titlebar_paint(w, slot, active, true);
 
     if (fill_content) {
         /* Neutral thin frame (accent lives in the focus ring, not the border) */
@@ -409,6 +448,7 @@ void win_hide(window_t *w, int slot) {
     /* Close any open menus for this window */
     if (g_txt_ctx_win == (int)(w - g_wins)) { g_txt_ctx_open = false; g_txt_ctx_win = -1; }
     if (w->type == WIN_SETTINGS) { g_font_dd_open = 0; g_font_dd_hover = -1; }
+    win_titlebar_bg_free((int)(w - g_wins));   /* drop the captured glass backdrop */
     if (g_theme.animations) {
         w->anim_phase = ANIM_CLOSE;
         w->anim_step  = 1;
