@@ -30,9 +30,35 @@ int favbar_builtin_slot(int idx) {
 }
 
 uint64_t fav_btn_w(void)     { return TASKBAR_H; }                 /* square icon button */
-uint64_t favbar_start_x(void){ return LOGO_X + logo_eff_w() + 8u; }
 uint64_t favbar_w(void) {
     return (uint64_t)favbar_count() * (fav_btn_w() + TASKBTN_GAP) + 8u;
+}
+/* Left X where the favorites (and window pills after them) begin. Honors
+ * panel_align on a horizontal panel: START = left after the logo (Windows),
+ * CENTER = the favorites+pills run centered on screen (macOS dock), END =
+ * right-justified before the tray. Everything (draw + hit) derives from this. */
+uint64_t favbar_start_x(void) {
+    uint64_t base = LOGO_X + logo_eff_w() + 8u;
+    if (g_theme.panel_align == PALIGN_START || panel_is_vertical()) return base;
+    /* run = favorites + open window pills */
+    int npill = 0;
+    __attribute__((weak)) int ipc_window_count(void);
+    if (ipc_window_count) { int n = ipc_window_count(); npill += n < 8 ? n : 8; }
+#ifdef __linux__
+    __attribute__((weak)) int wayland_toplevel_count(void);
+    if (wayland_toplevel_count) npill += wayland_toplevel_count();
+#endif
+    uint64_t run  = favbar_w() + (uint64_t)npill * (taskbtn_w() + TASKBTN_GAP);
+    uint64_t fb_w = console_fb_width();
+    if (run >= fb_w) return base;
+    if (g_theme.panel_align == PALIGN_CENTER) {
+        uint64_t s = (fb_w - run) / 2u;
+        return s > base ? s : base;                 /* never overlap the logo */
+    }
+    /* PALIGN_END: right-justify, leaving room for the tray (~18 chars). */
+    uint64_t reserve = 18u * console_font_width();
+    uint64_t e = (fb_w > reserve + run) ? (fb_w - reserve - run) : base;
+    return e > base ? e : base;
 }
 
 uint64_t taskbtn_start_x(void) {

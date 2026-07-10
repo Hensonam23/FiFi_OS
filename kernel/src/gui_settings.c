@@ -70,9 +70,17 @@ void settings_render(window_t *w) {
     if (panel_per_row > PANEL_POS_COUNT) panel_per_row = PANEL_POS_COUNT;
     int panel_rows = (PANEL_POS_COUNT + panel_per_row - 1) / panel_per_row;
 
+    /* Panel-alignment tiles ("Center"=6 chars longest, +2 pad) */
+    uint64_t align_bw_c = (6u + 2u) * fw;
+    int align_per_row = (int)((btn_avail_w + 4u) / (align_bw_c + 4u));
+    if (align_per_row < 1) align_per_row = 1;
+    if (align_per_row > PANEL_ALIGN_COUNT) align_per_row = PANEL_ALIGN_COUNT;
+    int align_rows = (PANEL_ALIGN_COUNT + align_per_row - 1) / align_per_row;
+
     uint64_t h_theme = (uint64_t)(SET_SEC_H + 4u) + 2u * SET_ROW_H + 20u
                        + (uint64_t)wall_rows  * (SET_ROW_H + 8u)
                        + (uint64_t)panel_rows * (SET_ROW_H + 8u)
+                       + (uint64_t)align_rows * (SET_ROW_H + 8u)
                        + (uint64_t)tog_rows   * (SET_ROW_H + 8u)
                        + (fh + 6u) + 4u + 5u;
     uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
@@ -200,6 +208,7 @@ void settings_render(window_t *w) {
     g_theme_wall_by = 0; g_theme_wall_bh = 0; g_theme_wall_bw = 0;
     g_theme_toggle_h = 0; g_theme_toggle_w = 0;
     g_theme_panel_bw = 0; g_theme_panel_bh = 0;
+    g_theme_align_bw = 0; g_theme_align_bh = 0;
     g_utc_btn_by = 0; g_utc_btn_bh = 0;
     g_vol_btn_by = 0; g_vol_btn_bh = 0;
     g_vol_pop_btn_y = 0; g_vol_chime_bw = 0; g_vol_chime_bh = 0;
@@ -513,6 +522,41 @@ void settings_render(window_t *w) {
                         gui_draw_str(bpx, py2 + (pbh - fh) / 2u, pos_names[pi], bfg, bbg);
                     }
                     px2 += pbw + 4u;
+                }
+                cy += SET_ROW_H + 8u;
+            }
+        }
+
+        /* Panel alignment row: Left / Center / Right (macOS-dock vs Windows) */
+        {
+            static const char *al_names[PANEL_ALIGN_COUNT] = { "Left", "Center", "Right" };
+            uint64_t abh = (uint64_t)(fh + 6u), abw = align_bw_c;
+            g_theme_align_bh = abh; g_theme_align_bw = abw;
+            for (int _ai = 0; _ai < PANEL_ALIGN_COUNT; _ai++) { g_theme_align_bx[_ai] = 0; g_theme_align_by[_ai] = 0; }
+            for (int arow = 0; arow < align_rows; arow++) {
+                SADVBOT;
+                if (SVIS) {
+                    console_fill_rect(ix, SCY, iw, SET_ROW_H + 4u, COL_SET_BG);
+                    if (arow == 0)
+                        gui_draw_str(cx, (uint64_t)(cy + (int64_t)((SET_ROW_H - fh) / 2u + 2u)),
+                                     "Align:", COL_SET_KEY_FG, COL_SET_BG);
+                }
+                uint64_t ax2 = val_x;
+                uint64_t ay2 = (uint64_t)(cy + (int64_t)((SET_ROW_H + 4u - abh) / 2u));
+                int i_start = arow * align_per_row, i_end = i_start + align_per_row;
+                if (i_end > PANEL_ALIGN_COUNT) i_end = PANEL_ALIGN_COUNT;
+                for (int ai = i_start; ai < i_end; ai++) {
+                    g_theme_align_bx[ai] = ax2; g_theme_align_by[ai] = ay2;
+                    if (SVIS) {
+                        bool active = (ai == (int)g_theme.panel_align);
+                        uint32_t bbg = active ? g_theme.accent : 0x00182838u;
+                        uint32_t bfg = active ? 0x00ffffffu   : 0x0090b0d0u;
+                        console_fill_rect(ax2, ay2, abw, abh, bbg);
+                        uint64_t nl = (uint64_t)gui_strlen(al_names[ai]);
+                        gui_draw_str(ax2 + (abw > nl * fw ? (abw - nl * fw) / 2u : 0u),
+                                     ay2 + (abh - fh) / 2u, al_names[ai], bfg, bbg);
+                    }
+                    ax2 += abw + 4u;
                 }
                 cy += SET_ROW_H + 8u;
             }

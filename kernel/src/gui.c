@@ -215,6 +215,8 @@ uint64_t g_theme_wall_bh;
 uint64_t g_theme_toggle_x[THEME_TOGGLE_COUNT], g_theme_toggle_y[THEME_TOGGLE_COUNT];
 uint64_t g_theme_panel_bx[PANEL_POS_COUNT], g_theme_panel_by[PANEL_POS_COUNT];
 uint64_t g_theme_panel_bw, g_theme_panel_bh;
+uint64_t g_theme_align_bx[PANEL_ALIGN_COUNT], g_theme_align_by[PANEL_ALIGN_COUNT];
+uint64_t g_theme_align_bw, g_theme_align_bh;
 bool g_panel_revealed = false;
 uint64_t g_theme_toggle_w, g_theme_toggle_h;
 
@@ -4153,6 +4155,20 @@ void gui_on_tick(void) {
                                 (uint64_t)mx >= g_theme_panel_bx[pi] &&
                                 (uint64_t)mx <  g_theme_panel_bx[pi] + g_theme_panel_bw) {
                                 g_theme.panel_edge = (uint8_t)pi;
+                                gui_settings_save();
+                                full_redraw();
+                                break;
+                            }
+                        }
+                    }
+                    /* Panel alignment tiles: Left / Center / Right */
+                    if (g_theme_align_bh > 0) {
+                        for (int ai = 0; ai < PANEL_ALIGN_COUNT; ai++) {
+                            if ((uint64_t)my >= g_theme_align_by[ai] &&
+                                (uint64_t)my <  g_theme_align_by[ai] + g_theme_align_bh &&
+                                (uint64_t)mx >= g_theme_align_bx[ai] &&
+                                (uint64_t)mx <  g_theme_align_bx[ai] + g_theme_align_bw) {
+                                g_theme.panel_align = (uint8_t)ai;
                                 gui_settings_save();
                                 full_redraw();
                                 break;

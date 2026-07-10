@@ -521,6 +521,9 @@ extern uint64_t     g_theme_toggle_w, g_theme_toggle_h;
 #define PANEL_POS_COUNT 4      /* Bottom, Top, Left, Right */
 extern uint64_t     g_theme_panel_bx[PANEL_POS_COUNT], g_theme_panel_by[PANEL_POS_COUNT];
 extern uint64_t     g_theme_panel_bw, g_theme_panel_bh;
+#define PANEL_ALIGN_COUNT 3    /* Left(Start), Center, Right(End) */
+extern uint64_t     g_theme_align_bx[PANEL_ALIGN_COUNT], g_theme_align_by[PANEL_ALIGN_COUNT];
+extern uint64_t     g_theme_align_bw, g_theme_align_bh;
 extern bool         g_panel_revealed;  /* auto-hide: panel currently shown */
 
 extern uint64_t     g_gui_tick;
