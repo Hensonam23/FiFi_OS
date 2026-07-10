@@ -25,6 +25,9 @@ int            g_launch_filt_n;
 char           g_launch_q[40];
 int            g_launch_qlen;
 int            g_launcher_scroll;
+/* Frosted-glass backdrop capture for the launcher (see launcher_draw). */
+uint32_t      *g_launcher_bg = 0;
+uint64_t       g_lbg_x = 0, g_lbg_y = 0, g_lbg_w = 0, g_lbg_h = 0;
 
 extern void gui_desktop_save(void);
 
@@ -121,6 +124,8 @@ void launcher_open_reset(void) {
     g_launch_q[0] = '\0'; g_launch_qlen = 0;
     g_launcher_hover = 0; g_launcher_scroll = 0;
     g_launchctx_row = -1; g_launchctx_hover = -1;
+    /* Drop any stale frosted-glass backdrop so this open recaptures a fresh one. */
+    if (g_launcher_bg) { kfree(g_launcher_bg); g_launcher_bg = 0; }
 
     /* Built-in windows: exec is set only so the icon resolver finds a logo;
      * launcher_do_launch checks .builtin first, so these still open the window. */
@@ -366,8 +371,27 @@ void launcher_draw(void) {
     uint64_t sh = launcher_search_h();
     uint64_t by = launcher_body_y();
 
-    /* Panel + outline */
-    console_fill_vgrad(lx, ly, w, ph, 0x00161d30u, 0x000d111du);
+    /* Panel + outline. Frosted glass: the launcher isn't redrawn over a fresh
+     * full_redraw every frame (only on open/hover/search), so a naive blend
+     * would accumulate alpha. Instead capture the CLEAN desktop behind the panel
+     * once per open (on the first draw, before anything is painted here), then
+     * restore that backdrop and blend a translucent panel over it each draw. */
+    if (g_theme.fx_glass) {
+        if (!g_launcher_bg || g_lbg_w != w || g_lbg_h != ph ||
+            g_lbg_x != lx || g_lbg_y != ly) {
+            if (g_launcher_bg) { kfree(g_launcher_bg); g_launcher_bg = 0; }
+            g_launcher_bg = kmalloc(w * ph * 4u);
+            if (g_launcher_bg) {
+                console_capture_rect(g_launcher_bg, lx, ly, w, ph);
+                g_lbg_x = lx; g_lbg_y = ly; g_lbg_w = w; g_lbg_h = ph;
+            }
+        }
+        if (g_launcher_bg) console_paste_rect(g_launcher_bg, lx, ly, w, ph);
+        console_blend_rect(lx, ly, w, ph, 0x0016223au, 206u);   /* frosted panel */
+        console_blend_rect(lx, ly + 1u, w, 1u, 0x00ffffffu, 22u); /* top sheen */
+    } else {
+        console_fill_vgrad(lx, ly, w, ph, 0x00161d30u, 0x000d111du);
+    }
     console_fill_rect(lx, ly, w, 1u, 0x003a5688u);
     console_fill_rect(lx, ly + ph - 1u, w, 1u, 0x00223048u);
     console_fill_rect(lx, ly, 1u, ph, 0x00223048u);
