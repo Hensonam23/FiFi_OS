@@ -2876,6 +2876,7 @@ void gui_on_tick(void) {
             g_launcher_hover = -1;
             g_cal_popup_open = false;
             g_vol_popup_open = !g_vol_popup_open;
+            popup_glass_invalidate();   /* recapture a fresh frosted backdrop */
             if (g_vol_popup_open) {
                 taskbar_draw_tray();
                 vol_popup_draw();
@@ -2894,6 +2895,7 @@ void gui_on_tick(void) {
             g_launcher_hover = -1;
             g_vol_popup_open = false;
             g_cal_popup_open = !g_cal_popup_open;
+            popup_glass_invalidate();   /* recapture a fresh frosted backdrop */
             if (g_cal_popup_open) {
                 /* Seed the view to the current month and start on the day grid. */
                 uint8_t _cd = 1, _cm = 1; uint16_t _cy16 = 2026;

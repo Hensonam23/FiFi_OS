@@ -778,6 +778,38 @@ void taskbar_draw(void) {
 /* ── Volume tray popup ───────────────────────────────────────────────── */
 #define VOL_POP_W 170u
 
+/* ── Frosted-glass backdrop for the taskbar popups (volume / calendar) ─────
+ * Only one is open at a time (they're mutually exclusive), so a single shared
+ * backdrop buffer suffices. Capture the clean desktop behind the popup once,
+ * then restore it and blend a translucent tint each draw — this shows the
+ * desktop THROUGH the popup without the alpha accumulating on repaints. */
+static uint32_t *g_popup_bg = 0;
+static uint64_t  g_pbg_x, g_pbg_y, g_pbg_w, g_pbg_h;
+
+void popup_glass_invalidate(void) {
+    if (g_popup_bg) { kfree(g_popup_bg); g_popup_bg = 0; }
+    g_pbg_w = 0; g_pbg_h = 0;
+}
+
+static void popup_glass_bg(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t opaque_bg) {
+    if (!g_theme.fx_glass) { console_fill_rect(x, y, w, h, opaque_bg); return; }
+    if (!g_popup_bg || g_pbg_w != w || g_pbg_h != h || g_pbg_x != x || g_pbg_y != y) {
+        if (g_popup_bg) { kfree(g_popup_bg); g_popup_bg = 0; }
+        g_popup_bg = (uint32_t *)kmalloc(w * h * 4u);
+        if (g_popup_bg) {
+            console_capture_rect(g_popup_bg, x, y, w, h);   /* clean desktop behind */
+            g_pbg_x = x; g_pbg_y = y; g_pbg_w = w; g_pbg_h = h;
+        }
+    }
+    if (g_popup_bg) {
+        console_paste_rect(g_popup_bg, x, y, w, h);
+        console_blend_rect(x, y, w, h, 0x00121c30u, 202u);        /* frosted tint */
+        console_blend_rect(x, y + 1u, w, 1u, 0x00ffffffu, 26u);   /* top sheen */
+    } else {
+        console_fill_rect(x, y, w, h, opaque_bg);
+    }
+}
+
 void vol_popup_draw(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t fb_h = console_fb_height();
@@ -800,10 +832,10 @@ void vol_popup_draw(void) {
     g_vol_pop_x = px;
     g_vol_pop_y = py;
 
-    /* Background + accent border */
+    /* Background (frosted glass) + accent border */
     uint32_t pbg = 0x00101828u;
     uint32_t pbo = g_theme.accent;
-    console_fill_rect(px, py, VOL_POP_W, pop_h, pbg);
+    popup_glass_bg(px, py, VOL_POP_W, pop_h, pbg);
     console_fill_rect(px, py, VOL_POP_W, 1u, pbo);
     console_fill_rect(px, py + pop_h - 1u, VOL_POP_W, 1u, pbo);
     console_fill_rect(px, py, 1u, pop_h, pbo);
@@ -936,9 +968,9 @@ void cal_popup_draw(void) {
                     : ((ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u);  /* bottom: open upward */
     g_cal_pop_x = px; g_cal_pop_y = py; g_cal_pop_w = pop_w; g_cal_pop_h = pop_h;
 
-    /* Background + accent border */
+    /* Background (frosted glass) + accent border */
     uint32_t pbo = g_theme.accent;
-    console_fill_vgrad(px, py, pop_w, pop_h, 0x00141d30u, 0x000c1220u);
+    popup_glass_bg(px, py, pop_w, pop_h, 0x00141d30u);
     console_fill_rect(px, py, pop_w, 1u, pbo);
     console_fill_rect(px, py + pop_h - 1u, pop_w, 1u, pbo);
     console_fill_rect(px, py, 1u, pop_h, pbo);
