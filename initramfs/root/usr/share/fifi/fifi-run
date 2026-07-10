@@ -130,6 +130,11 @@ ensure_xwayland() {
         sleep 0.1; _i=$((_i + 1))
     done
     sleep 0.4   # tiny extra margin
+    # Warm up the fresh server: a cold XWayland fails its FIRST X client even
+    # after -displayfd (final init completes on first connect). Absorb that with
+    # a throwaway xkbcomp connection so the real app's first launch starts
+    # cleanly — otherwise the failed first attempt maps and leaves a stale window.
+    busybox timeout 4 /usr/bin/xkbcomp :0 /dev/null >/dev/null 2>&1 || true
 }
 
 launch_dir() {
