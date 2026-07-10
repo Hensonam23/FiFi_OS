@@ -48,6 +48,34 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # The X client libs, libEGL, and xkbcomp live in the persistent runtime; only
 # /usr resets each boot, so xkbcomp is re-seeded there (Xwayland execs it by
 # absolute path).
+# --- app sandbox -------------------------------------------------------------
+# Launch each app in isolated namespaces so a compromised or misbehaving app
+# cannot see, signal, or snoop the compositor or the other apps: a fresh PID
+# namespace (only its own process tree is visible via /proc), a private IPC
+# namespace (no shared System V IPC / shared memory with other apps), a private
+# mount namespace (its mount changes don't propagate to the host), and a private
+# UTS namespace. We deliberately do NOT unshare the user namespace (that re-trips
+# the browser's blocked nested-userns content-sandbox path) or the network
+# namespace (apps need the network). Set FIFI_SANDBOX=0 to disable if an app
+# misbehaves. exec so the app replaces this shell (the compositor tracks apps by
+# their Wayland connection, not pid, so a new PID namespace is fine).
+sandbox_exec() {
+    if [ "${FIFI_SANDBOX:-1}" = "1" ]; then
+        # A PID namespace is the strongest isolation but kills the whole namespace
+        # the instant its pid 1 exits — fine for apps whose main process stays
+        # alive (Electron, Firefox: _sb_pid=1) but fatal for launchers that fork a
+        # child and exit (LibreOffice's soffice/oosplash), which would take the
+        # real process down with them. Those use the lighter mount/ipc/uts sandbox.
+        # If unshare is unavailable/fails, exec returns and we fall through to the
+        # plain exec below rather than failing the launch.
+        if [ "${_sb_pid:-0}" = "1" ]; then
+            exec busybox unshare --mount --uts --ipc --pid --mount-proc -f -- "$@"
+        fi
+        exec busybox unshare --mount --uts --ipc -- "$@"
+    fi
+    exec "$@"
+}
+
 # True if a process whose comm matches $1 is running.
 proc_running() {
     for _d in /proc/[0-9]*; do
@@ -108,6 +136,10 @@ launch_dir() {
         export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL (no GTK/Wayland)
         unset GDK_BACKEND QT_QPA_PLATFORM       # don't steer it to Wayland
         export APPDIR="$dir"; cd "$dir"
+        # NOT sandboxed: the "gen" VCL talks to a rootful XWayland via the X
+        # socket, and any unshare namespace (even without PID) makes soffice.bin
+        # exit before it maps (a black X root). Isolating an app that already
+        # shares one rootful X server buys little, so run it unsandboxed.
         [ -x "$dir/AppRun" ] && exec "$dir/AppRun" "$@"
     fi
     # Archimage/JuNest packages (ivan-hc builds) run a containerized Arch inside
@@ -142,15 +174,17 @@ launch_dir() {
         prof="$(dirname "$dir")/profile"
         mkdir -p "$prof" 2>/dev/null || true
         export APPDIR="$dir"; cd "$dir"
-        exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
+        _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
+        sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
     fi
     if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then
         set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
+        _sb_pid=1   # Electron keeps its main process alive → safe for a PID namespace
     fi
-    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; exec "$dir/AppRun" "$@"; fi
+    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; sandbox_exec "$dir/AppRun" "$@"; fi
     # fallback: an executable named like the dir's parent
     b=$(ls "$dir" 2>/dev/null | while read f; do [ -x "$dir/$f" ] && [ -f "$dir/$f" ] && echo "$f" && break; done)
-    [ -n "$b" ] && exec "$dir/$b" "$@"
+    [ -n "$b" ] && sandbox_exec "$dir/$b" "$@"
     echo "fifi-run: no launchable binary in $dir" >&2; exit 1
 }
 
@@ -166,6 +200,6 @@ case "$target" in
         launch_dir "$ext/squashfs-root" "$@"
         ;;
     *)
-        exec "$target" "$@"
+        sandbox_exec "$target" "$@"
         ;;
 esac
