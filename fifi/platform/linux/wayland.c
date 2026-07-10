@@ -2103,9 +2103,18 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     s->x = g_iop_ox + (mx - g_iop_sx);
                     s->y = g_iop_oy + (my - g_iop_sy);
                     if (s->ssd) {
-                        extern uint32_t console_font_height(void);
-                        int32_t top2 = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
-                        if (s->y < top2) s->y = top2;
+                        /* Keep the window + its titlebar inside the work area so
+                         * it can't be dragged under the panel on any edge. */
+                        extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+                        extern uint64_t desk_right(void); extern uint64_t desk_bot(void);
+                        int32_t minx = (int32_t)desk_left();
+                        int32_t miny = (int32_t)desk_top() + SSD_TITLE_H;
+                        int32_t maxx = (int32_t)desk_right() - s->own_w;
+                        int32_t maxy = (int32_t)desk_bot() - s->own_h;
+                        if (s->x < minx) s->x = minx;
+                        if (s->y < miny) s->y = miny;
+                        if (maxx >= minx && s->x > maxx) s->x = maxx;
+                        if (maxy >= miny && s->y > maxy) s->y = maxy;
                     }
                 } else {                          /* resize */
                     int32_t nw = g_iop_ow, nh = g_iop_oh, nx = g_iop_ox, ny = g_iop_oy;
