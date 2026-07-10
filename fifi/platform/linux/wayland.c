@@ -2126,6 +2126,22 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     if (g_iop_edges & 1) { nh = g_iop_oh - dy; ny = g_iop_oy + dy; }
                     if (nw < 200) nw = 200;
                     if (nh < 150) nh = 150;
+                    /* Clamp to the work area so a resize can't push the window
+                     * under the panel on any edge (the panel is never covered). */
+                    {
+                        extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+                        extern uint64_t desk_right(void); extern uint64_t desk_bot(void);
+                        int32_t dl = (int32_t)desk_left();
+                        int32_t miny = (int32_t)desk_top() + SSD_TITLE_H;
+                        int32_t dr = (int32_t)desk_right();
+                        int32_t db = (int32_t)desk_bot();
+                        if (nx < dl)   { nw -= (dl - nx);   nx = dl; }
+                        if (ny < miny) { nh -= (miny - ny); ny = miny; }
+                        if (nx + nw > dr) nw = dr - nx;
+                        if (ny + nh > db) nh = db - ny;
+                        if (nw < 200) nw = 200;
+                        if (nh < 150) nh = 150;
+                    }
                     s->x = nx; s->y = ny;
                     /* Send RESIZING + MAXIMIZED: Electron (Bitwarden) ignores
                      * plain/floating configure sizes and snaps back, but honors

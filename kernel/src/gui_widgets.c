@@ -226,8 +226,23 @@ uint64_t launcher_rows_visible(void) {
 uint64_t launcher_panel_h(void) {
     return launcher_header_h() + launcher_rows_visible() * launcher_row_h() + 8u;
 }
-uint64_t launcher_lx(void) { return LOGO_X; }
-uint64_t launcher_ly(void) { return console_fb_height() - TASKBAR_H - launcher_panel_h(); }
+/* The launcher opens adjacent to the panel's logo, toward the desktop. */
+uint64_t launcher_lx(void) {
+    if (g_theme.panel_edge == PANEL_RIGHT) {
+        uint64_t w = launcher_panel_w(), r = desk_right();
+        return r > w ? r - w : 0u;                 /* left of the right dock */
+    }
+    if (g_theme.panel_edge == PANEL_LEFT) return desk_left();  /* right of the left dock */
+    return desk_left() + LOGO_X;                    /* bottom/top: near the logo */
+}
+uint64_t launcher_ly(void) {
+    uint64_t h = launcher_panel_h();
+    if (g_theme.panel_edge == PANEL_TOP ||
+        g_theme.panel_edge == PANEL_LEFT ||
+        g_theme.panel_edge == PANEL_RIGHT) return desk_top();  /* below top panel / by the dock */
+    uint64_t b = desk_bot();                        /* BOTTOM: above the panel */
+    return b > h ? b - h : 0u;
+}
 uint64_t launcher_body_y(void) { return launcher_ly() + launcher_header_h(); }
 
 /* ── Hit testing ───────────────────────────────────────────────────────── */
