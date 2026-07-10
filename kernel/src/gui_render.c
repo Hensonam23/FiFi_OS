@@ -654,15 +654,44 @@ void full_redraw(void) {
             if (ah < 4) ah = 4;
             uint64_t ax = w->x + (w->w - aw) / 2u;
             uint64_t ay = w->y + (w->h - ah) / 2u;
-            console_fill_rect(ax, ay, aw, ah, COL_WIN_BG);
-            /* Title bar strip */
-            uint64_t tbh = ah < 24u ? ah : 24u;
-            console_fill_rect(ax, ay, aw, tbh, 0x00141e2cu);
-            /* Border */
-            console_fill_rect(ax, ay, aw, 1u, 0x00304060u);
-            console_fill_rect(ax, ay + ah - 1u, aw, 1u, 0x00304060u);
-            console_fill_rect(ax, ay, 1u, ah, 0x00304060u);
-            console_fill_rect(ax + aw - 1u, ay, 1u, ah, 0x00304060u);
+            if (g_theme.fx_glass) {
+                /* iOS-style liquid-glass materialize: a frosted translucent pane
+                 * scaling up, blended over the composited desktop so it shows
+                 * through like glass, with a glossy specular rim + top sheen and
+                 * rounded corners. Settles into the solid window on the final
+                 * frame. Redrawn over fresh content each tick, so no accumulation. */
+                uint32_t a = 128u + (uint32_t)_sc2;          /* 164..228: firmer as it grows */
+                if (a > 230u) a = 230u;
+                console_blend_rect(ax, ay, aw, ah, 0x00243a5eu, (uint8_t)a);
+                uint64_t sheen_h = ah / 5u; if (sheen_h < 1u) sheen_h = 1u;
+                console_blend_rect(ax, ay, aw, sheen_h, 0x00ffffffu, 24u);   /* top sheen */
+                /* glossy specular rim — brighter top/left */
+                console_blend_rect(ax,             ay,            aw, 1u, 0x00d0e6ffu, 170u);
+                console_blend_rect(ax,             ay,            1u, ah, 0x00bcd8ffu, 145u);
+                console_blend_rect(ax,             ay + ah - 1u,  aw, 1u, 0x008fb4e0u, 95u);
+                console_blend_rect(ax + aw - 1u,   ay,            1u, ah, 0x008fb4e0u, 95u);
+                /* rounded corners: reveal the backdrop */
+                int R = 6;
+                for (int r = 0; r < R; r++) {
+                    int dyc = R - r; int rr = R * R - dyc * dyc; if (rr < 0) rr = 0;
+                    int sq = 0; while ((sq + 1) * (sq + 1) <= rr) sq++;
+                    int nn = R - sq; if (nn <= 0) continue; if ((uint64_t)nn > aw) nn = (int)aw;
+                    uint32_t ct = desktop_bg_at(ay + (uint64_t)r);
+                    uint32_t cb = desktop_bg_at(ay + ah - 1u - (uint64_t)r);
+                    console_fill_rect(ax,                     ay + (uint64_t)r,        (uint64_t)nn, 1u, ct);
+                    console_fill_rect(ax + aw - (uint64_t)nn, ay + (uint64_t)r,        (uint64_t)nn, 1u, ct);
+                    console_fill_rect(ax,                     ay + ah - 1u - (uint64_t)r, (uint64_t)nn, 1u, cb);
+                    console_fill_rect(ax + aw - (uint64_t)nn, ay + ah - 1u - (uint64_t)r, (uint64_t)nn, 1u, cb);
+                }
+            } else {
+                console_fill_rect(ax, ay, aw, ah, COL_WIN_BG);
+                uint64_t tbh = ah < 24u ? ah : 24u;
+                console_fill_rect(ax, ay, aw, tbh, 0x00141e2cu);
+                console_fill_rect(ax, ay, aw, 1u, 0x00304060u);
+                console_fill_rect(ax, ay + ah - 1u, aw, 1u, 0x00304060u);
+                console_fill_rect(ax, ay, 1u, ah, 0x00304060u);
+                console_fill_rect(ax + aw - 1u, ay, 1u, ah, 0x00304060u);
+            }
             if (w->type != WIN_TERM) suppress_term = true;
             continue;
         }
