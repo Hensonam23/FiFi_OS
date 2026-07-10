@@ -13,6 +13,12 @@
 #define COL_SET_SEP     0x00182838u
 #define COL_SET_HINT    0x00405060u
 
+/* Index of px in the size ladder, or -1 if it is a fine-tuned value. */
+static int font_size_index(int px) {
+    for (int i = 0; i < g_font_size_count; i++) if (g_font_sizes[i] == px) return i;
+    return -1;
+}
+
 /* Visibility helpers for settings scroll — cy is int64 here */
 #define SVIS     (cy >= (int64_t)iy && cy < (int64_t)(iy + ih))
 #define SBOT     (cy >= (int64_t)(iy + ih))
@@ -203,7 +209,7 @@ void settings_render(window_t *w) {
     int64_t cy = (int64_t)(iy + SET_PAD) - (int64_t)g_settings_scroll;
 
     /* Reset all hitboxes — only re-set when section is in the visible area */
-    g_font_prev_bx = 0; g_font_next_bx = 0; g_font_btn_by = 0; g_font_btn_bh = 0;
+    g_font_fam_bh = 0; g_font_size_bh = 0; g_font_btn_by = 0; g_font_btn_bh = 0;
     g_theme_accent_by = 0; g_theme_accent_by2 = 0;
     g_theme_wall_by = 0; g_theme_wall_bh = 0; g_theme_wall_bw = 0;
     g_theme_toggle_h = 0; g_theme_toggle_w = 0;
@@ -291,9 +297,23 @@ void settings_render(window_t *w) {
             cpu_str[ri] = '\0';
         }
     }
-    /* Use human-readable font label from picker instead of raw filename */
-    int nfonts = 0; while (g_font_paths[nfonts]) nfonts++;
-    const char *font_label = g_font_labels[g_font_idx < nfonts ? g_font_idx : 0];
+    /* Human-readable font label: "Family NN px" from the current selection. */
+    char font_label[52];
+    {
+        int ri = 0;
+        if (g_font_count > 0) {
+            int fam = (g_font_family >= 0 && g_font_family < g_font_count) ? g_font_family : 0;
+            const char *p = g_fonts[fam].name;
+            while (*p && ri < 40) font_label[ri++] = *p++;
+            font_label[ri++] = ' ';
+            char szl[8]; gui_itoa(g_font_px, szl, 6);
+            for (int k = 0; szl[k] && ri < 48; k++) font_label[ri++] = szl[k];
+            font_label[ri++] = 'p'; font_label[ri++] = 'x';
+        } else {
+            const char *d = "(none)"; while (d[ri] && ri < 40) { font_label[ri] = d[ri]; ri++; }
+        }
+        font_label[ri] = '\0';
+    }
 
     __attribute__((weak)) const char *platform_kernel_str(void);
     const char *kern_ver = (platform_kernel_str && platform_kernel_str())
@@ -351,33 +371,49 @@ void settings_render(window_t *w) {
         cy += SET_SEC_H + 4u;
         SADVBOT;
 
-        /* Font row: [<] FontName [>] */
+        /* Font row: [ Family v ]  [ NN px v ] — two combo boxes; the open list
+         * is drawn as an overlay at the end of this function so it floats on top
+         * of the rows below it. */
         uint64_t btn_h = fh + 6u;
         if (SVIS) {
             console_fill_rect(ix, SCY, iw, btn_h, COL_SET_BG);
-            gui_draw_str(cx, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)), "Font:", COL_SET_KEY_FG, COL_SET_BG);
-            /* Prev button */
-            uint64_t pb_x = val_x;
-            console_fill_rect(pb_x, SCY, g_font_btn_bw, btn_h, 0x00182838u);
-            gui_draw_str(pb_x + (g_font_btn_bw - fw) / 2u, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
-                         "<", 0x0060a0e0u, 0x00182838u);
-            g_font_prev_bx = pb_x;
-            /* Font label */
-            uint64_t fl_x = pb_x + g_font_btn_bw + 4u;
-            uint64_t nxt_x = ix + iw - SET_PAD - g_font_btn_bw;
-            uint64_t fl_w  = nxt_x > fl_x + 2u ? nxt_x - fl_x - 2u : 1u;
-            uint64_t fl_max = fl_w / fw;
-            int nf = 0; while (g_font_paths[nf]) nf++;
-            int idx = g_font_idx < nf ? g_font_idx : 0;
-            gui_draw_str_clip(fl_x, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
-                              g_font_labels[idx], COL_SET_VAL_FG, COL_SET_BG, fl_max);
-            /* Next button */
-            console_fill_rect(nxt_x, SCY, g_font_btn_bw, btn_h, 0x00182838u);
-            gui_draw_str(nxt_x + (g_font_btn_bw - fw) / 2u, (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u)),
-                         ">", 0x0060a0e0u, 0x00182838u);
-            g_font_next_bx = nxt_x;
-            g_font_btn_by  = SCY;
-            g_font_btn_bh  = btn_h;
+            uint64_t ty = (uint64_t)(cy + (int64_t)((btn_h - fh) / 2u));
+            gui_draw_str(cx, ty, "Font:", COL_SET_KEY_FG, COL_SET_BG);
+
+            int fam = (g_font_family >= 0 && g_font_family < g_font_count) ? g_font_family : 0;
+
+            uint64_t avail  = (ix + iw > val_x + (uint64_t)SET_PAD) ? (ix + iw - (uint64_t)SET_PAD - val_x) : 10u * fw;
+            uint64_t size_w = 7u * fw + 20u;
+            if (size_w > avail / 2u) size_w = avail / 2u;
+            uint64_t fam_w  = avail > size_w + 8u ? avail - size_w - 8u : avail / 2u;
+            uint64_t fam_x  = val_x;
+            uint64_t size_x = val_x + fam_w + 8u;
+
+            /* Family combo — the label is drawn in its OWN typeface. */
+            uint32_t combo_bg = (g_font_dd_open == 1) ? 0x00203448u : 0x00182838u;
+            console_fill_rect(fam_x, SCY, fam_w, btn_h, combo_bg);
+            console_fill_rect(fam_x, SCY, fam_w, 1u, 0x002a4a66u);
+            console_fill_rect(fam_x, (uint64_t)(cy + (int64_t)btn_h - 1), fam_w, 1u, 0x000a1420u);
+#ifdef __linux__
+            if (g_font_count > 0)
+                console_render_ttf_name(g_fonts[fam].path, g_fonts[fam].name, fam_x + 8u, (uint64_t)cy + 3u,
+                                        (uint32_t)fh, COL_SET_VAL_FG);
+            else
+#endif
+                gui_draw_str_clip(fam_x + 8u, ty, "(no fonts)", COL_SET_VAL_FG, combo_bg, (fam_w - fw) / fw);
+            gui_draw_str(fam_x + fam_w - fw - 6u, ty, "\x1f", 0x0070b0f0u, combo_bg); /* down chevron */
+            g_font_fam_bx = fam_x; g_font_fam_by = SCY; g_font_fam_bw = fam_w; g_font_fam_bh = btn_h;
+
+            /* Size combo — "NN px". */
+            uint32_t sbg = (g_font_dd_open == 2) ? 0x00203448u : 0x00182838u;
+            console_fill_rect(size_x, SCY, size_w, btn_h, sbg);
+            console_fill_rect(size_x, SCY, size_w, 1u, 0x002a4a66u);
+            console_fill_rect(size_x, (uint64_t)(cy + (int64_t)btn_h - 1), size_w, 1u, 0x000a1420u);
+            char szl[8]; gui_itoa(g_font_px, szl, 6);
+            { int n = 0; while (szl[n]) n++; if (n < 5) { szl[n++] = ' '; szl[n++] = 'p'; szl[n++] = 'x'; szl[n] = '\0'; } }
+            gui_draw_str(size_x + 8u, ty, szl, COL_SET_VAL_FG, sbg);
+            gui_draw_str(size_x + size_w - fw - 6u, ty, "\x1f", 0x0070b0f0u, sbg);
+            g_font_size_bx = size_x; g_font_size_by = SCY; g_font_size_bw = size_w; g_font_size_bh = btn_h;
         }
         cy += btn_h + 4u;
         if (SVIS) console_fill_rect(ix, SCY, iw, 1u, COL_SET_SEP);
@@ -1163,5 +1199,66 @@ settings_done: ;
                               1u, COL_SET_SEP);
             gui_draw_str(cx, hint_y, "Press Esc or Ctrl+W to close", COL_SET_HINT, COL_SET_BG);
         }
+    }
+
+    /* ── Font dropdown overlay — drawn last so the open list floats on top of
+     * the rows beneath it, and scrolls when there are more items than fit.
+     * Item geometry (bx, top, item_h, visible, scroll) is derived purely from
+     * the anchor box + globals so the click handler reproduces it exactly. ── */
+    if ((g_font_dd_open == 1 && g_font_fam_bh > 0) ||
+        (g_font_dd_open == 2 && g_font_size_bh > 0)) {
+        int family_list = (g_font_dd_open == 1);
+        int n         = family_list ? g_font_count : g_font_size_count;
+        int selected  = family_list ? g_font_family
+                                     : font_size_index(g_font_px);
+        uint64_t bx   = family_list ? g_font_fam_bx : g_font_size_bx;
+        uint64_t bw   = family_list ? g_font_fam_bw : g_font_size_bw;
+        uint64_t item_h = family_list ? g_font_fam_bh : g_font_size_bh;
+        uint64_t top  = (family_list ? g_font_fam_by : g_font_size_by) + item_h;
+
+        int visible = n < FONT_DD_VISIBLE ? n : FONT_DD_VISIBLE;
+        int maxscroll = n - visible; if (maxscroll < 0) maxscroll = 0;
+        if (g_font_dd_scroll > maxscroll) g_font_dd_scroll = maxscroll;
+        if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
+        int scroll = g_font_dd_scroll;
+        uint64_t list_h = (uint64_t)visible * item_h;
+
+        console_fill_rect(bx + 4u, top + 4u, bw, list_h, 0x00060a12u);   /* shadow */
+        for (int r = 0; r < visible; r++) {
+            int i = scroll + r;
+            if (i >= n) break;
+            uint64_t ry = top + (uint64_t)r * item_h;
+            uint32_t rbg = (i == g_font_dd_hover) ? 0x002a4b70u
+                         : (i == selected)        ? 0x001c3350u : 0x00131d29u;
+            console_fill_rect(bx, ry, bw, item_h, rbg);
+            if (i == selected || i == g_font_dd_hover)
+                console_fill_rect(bx, ry, 3u, item_h, 0x0060b0f0u);
+            uint64_t ty = ry + (item_h - fh) / 2u;
+            if (family_list) {
+#ifdef __linux__
+                console_render_ttf_name(g_fonts[i].path, g_fonts[i].name,
+                                        bx + 10u, ry + 3u, (uint32_t)fh, COL_SET_VAL_FG);
+#endif
+            } else {
+                char szl[8]; gui_itoa(g_font_sizes[i], szl, 6);
+                { int m = 0; while (szl[m]) m++; if (m < 5) { szl[m++] = ' '; szl[m++] = 'p'; szl[m++] = 'x'; szl[m] = '\0'; } }
+                gui_draw_str(bx + 10u, ty, szl, COL_SET_VAL_FG, rbg);
+            }
+        }
+        /* scrollbar (when clipped) */
+        if (n > visible) {
+            uint64_t sbx = bx + bw - 5u;
+            console_fill_rect(sbx, top, 5u, list_h, 0x00101c28u);
+            uint64_t th = list_h * (uint64_t)visible / (uint64_t)n;
+            if (th < 12u) th = 12u;
+            uint64_t range = list_h > th ? list_h - th : 1u;
+            uint64_t ty = top + (maxscroll > 0 ? range * (uint64_t)scroll / (uint64_t)maxscroll : 0);
+            console_fill_rect(sbx + 1u, ty, 3u, th, 0x005088c0u);
+        }
+        /* outer border */
+        console_fill_rect(bx, top, bw, 1u, 0x00335578u);
+        console_fill_rect(bx, top, 1u, list_h, 0x00335578u);
+        console_fill_rect(bx + bw - 1u, top, 1u, list_h, 0x00335578u);
+        console_fill_rect(bx, top + list_h - 1u, bw, 1u, 0x00335578u);
     }
 }

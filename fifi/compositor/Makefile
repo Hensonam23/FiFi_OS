@@ -26,6 +26,7 @@ SRCS := \
     ../platform/linux/ipc.c \
     ../platform/linux/wayland.c \
     ../platform/linux/png.c \
+    ../platform/linux/font_ttf.c \
     ../platform/linux/vendor/lodepng.c \
     ../../kernel/src/gui.c \
     ../../kernel/src/gui_text_util.c \
@@ -81,6 +82,10 @@ $(BUILD)/comp/png.o: ../platform/linux/png.c | $(BUILD)/comp
 
 $(BUILD)/comp/lodepng.o: ../platform/linux/vendor/lodepng.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -Wno-all -c $< -o $@
+
+# stb_truetype implementation lives here — silence its internal warnings
+$(BUILD)/comp/font_ttf.o: ../platform/linux/font_ttf.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -Wno-all -Wno-extra -c $< -o $@
 
 # Kernel source files (compiled with Linux stubs)
 $(BUILD)/comp/gui.o: ../../kernel/src/gui.c | $(BUILD)/comp

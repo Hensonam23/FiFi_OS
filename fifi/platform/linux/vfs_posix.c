@@ -66,6 +66,16 @@ static bool make_full(char *out, size_t cap, const char *path) {
     return true;
 }
 
+/* Resolve a VFS path ("/fonts/x.ttf") to a real host path under VFS_ROOT so
+ * callers that use raw fopen (e.g. the TTF rasterizer) hit the same files as
+ * vfs_read. Returns the length written. */
+size_t vfs_real_path(const char *path, char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    make_full(out, cap, path);
+    size_t n = 0; while (out[n] && n < cap) n++;
+    return n;
+}
+
 /* Read-buffer cache — small pool so vfs_read pointers stay valid */
 #define RBUF_SLOTS 16
 #define RBUF_MAX   (512 * 1024)  /* 512 KB per file */

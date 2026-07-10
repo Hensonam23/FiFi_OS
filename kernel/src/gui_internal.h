@@ -387,11 +387,31 @@ extern bool         g_sb_drag_settings;
 
 extern int          g_term_scroll;
 
-extern int          g_font_idx;
-extern const char  *g_font_paths[];
-extern const char  *g_font_labels[];
-extern uint64_t     g_font_prev_bx, g_font_next_bx;
-extern uint64_t     g_font_btn_by, g_font_btn_bw, g_font_btn_bh;
+/* Scalable font catalog — one entry per .ttf/.otf scanned from /fonts. */
+#define FONT_MAX 200
+typedef struct {
+    char path[72];   /* "/fonts/<file>" */
+    char name[48];   /* family name from the font, or filename */
+} font_entry_t;
+extern font_entry_t g_fonts[FONT_MAX];
+extern int   g_font_count;
+extern int   g_font_family;      /* index into g_fonts (selected font) */
+extern int   g_font_px;          /* selected size in px (any value) */
+extern char  g_font_saved_path[72];
+extern bool  g_font_from_config;
+extern const int g_font_sizes[]; /* preset size ladder for the size dropdown */
+extern const int g_font_size_count;
+extern int   g_font_dd_open;     /* open dropdown: 0 none, 1 font list, 2 size */
+extern int   g_font_dd_hover;    /* hovered item in the open list, -1 none */
+extern int   g_font_dd_scroll;   /* first visible item in the open list */
+extern uint64_t g_font_fam_bx, g_font_fam_by, g_font_fam_bw, g_font_fam_bh;
+extern uint64_t g_font_size_bx, g_font_size_by, g_font_size_bw, g_font_size_bh;
+extern uint64_t g_font_btn_by, g_font_btn_bw, g_font_btn_bh; /* shared +/- btn width */
+const char *gui_font_current_path(void);
+void        gui_font_scan(void);
+void        gui_font_apply(void);   /* load current font+size into the console */
+/* Rows shown at once in an open font/size dropdown (rest reachable by scroll). */
+#define FONT_DD_VISIBLE 12
 extern uint64_t     g_utc_minus_bx, g_utc_plus_bx;
 extern uint64_t     g_utc_btn_by, g_utc_btn_bh;
 extern uint64_t     g_vol_minus_bx, g_vol_plus_bx;
@@ -434,6 +454,7 @@ extern uint64_t     g_clk_w;
 #define TRAY_CLK   5
 extern bool     g_batt_present;
 extern uint64_t g_batt_x, g_batt_w;
+extern uint64_t g_tray_left_x;   /* left edge of the taskbar system tray */
 extern uint64_t g_cpu_tray_x, g_cpu_tray_w;
 extern uint64_t g_net_tray_x, g_net_tray_w;
 extern uint64_t g_mem_tray_x, g_mem_tray_w;

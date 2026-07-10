@@ -3,10 +3,47 @@
 #include <stdbool.h>
 #ifdef __linux__
 #include <string.h>
+#include "font_ttf.h"    /* scalable AA glyphs (Linux compositor only) */
 #endif
 #include "console.h"
 #include "vfs.h"
 #include "pmm.h"
+
+#ifdef __linux__
+/* CP437 → Unicode. The console addresses glyphs by byte (PSF glyph index ==
+ * CP437 code point), so to render the same content with a Unicode TTF we map
+ * each byte to its CP437 codepoint. 0x20..0x7E are ASCII identity. */
+static const uint16_t g_cp437_uni[256] = {
+    0x0000,0x263A,0x263B,0x2665,0x2666,0x2663,0x2660,0x2022,0x25D8,0x25CB,0x25D9,0x2642,0x2640,0x266A,0x266B,0x263C,
+    0x25BA,0x25C4,0x2195,0x203C,0x00B6,0x00A7,0x25AC,0x21A8,0x2191,0x2193,0x2192,0x2190,0x221F,0x2194,0x25B2,0x25BC,
+    0x0020,0x0021,0x0022,0x0023,0x0024,0x0025,0x0026,0x0027,0x0028,0x0029,0x002A,0x002B,0x002C,0x002D,0x002E,0x002F,
+    0x0030,0x0031,0x0032,0x0033,0x0034,0x0035,0x0036,0x0037,0x0038,0x0039,0x003A,0x003B,0x003C,0x003D,0x003E,0x003F,
+    0x0040,0x0041,0x0042,0x0043,0x0044,0x0045,0x0046,0x0047,0x0048,0x0049,0x004A,0x004B,0x004C,0x004D,0x004E,0x004F,
+    0x0050,0x0051,0x0052,0x0053,0x0054,0x0055,0x0056,0x0057,0x0058,0x0059,0x005A,0x005B,0x005C,0x005D,0x005E,0x005F,
+    0x0060,0x0061,0x0062,0x0063,0x0064,0x0065,0x0066,0x0067,0x0068,0x0069,0x006A,0x006B,0x006C,0x006D,0x006E,0x006F,
+    0x0070,0x0071,0x0072,0x0073,0x0074,0x0075,0x0076,0x0077,0x0078,0x0079,0x007A,0x007B,0x007C,0x007D,0x007E,0x2302,
+    0x00C7,0x00FC,0x00E9,0x00E2,0x00E4,0x00E0,0x00E5,0x00E7,0x00EA,0x00EB,0x00E8,0x00EF,0x00EE,0x00EC,0x00C4,0x00C5,
+    0x00C9,0x00E6,0x00C6,0x00F4,0x00F6,0x00F2,0x00FB,0x00F9,0x00FF,0x00D6,0x00DC,0x00A2,0x00A3,0x00A5,0x20A7,0x0192,
+    0x00E1,0x00ED,0x00F3,0x00FA,0x00F1,0x00D1,0x00AA,0x00BA,0x00BF,0x2310,0x00AC,0x00BD,0x00BC,0x00A1,0x00AB,0x00BB,
+    0x2591,0x2592,0x2593,0x2502,0x2524,0x2561,0x2562,0x2556,0x2555,0x2563,0x2551,0x2557,0x255D,0x255C,0x255B,0x2510,
+    0x2514,0x2534,0x252C,0x251C,0x2500,0x253C,0x255E,0x255F,0x255A,0x2554,0x2569,0x2566,0x2560,0x2550,0x256C,0x2567,
+    0x2568,0x2564,0x2565,0x2559,0x2558,0x2552,0x2553,0x256B,0x256A,0x2518,0x250C,0x2588,0x2584,0x258C,0x2590,0x2580,
+    0x03B1,0x00DF,0x0393,0x03C0,0x03A3,0x03C3,0x00B5,0x03C4,0x03A6,0x0398,0x03A9,0x03B4,0x221E,0x03C6,0x03B5,0x2229,
+    0x2261,0x00B1,0x2265,0x2264,0x2320,0x2321,0x00F7,0x2248,0x00B0,0x2219,0x00B7,0x221A,0x207F,0x00B2,0x25A0,0x00A0,
+};
+
+/* Alpha-blend fg over bg by 8-bit coverage a. */
+static inline uint32_t cons_blend(uint32_t bg, uint32_t fg, uint8_t a) {
+    if (a == 0)   return bg;
+    if (a == 255) return fg;
+    uint32_t br = (bg >> 16) & 0xff, bgc = (bg >> 8) & 0xff, bb = bg & 0xff;
+    uint32_t fr = (fg >> 16) & 0xff, fgc = (fg >> 8) & 0xff, fb = fg & 0xff;
+    uint32_t r = (fr * a + br * (255u - a) + 127u) / 255u;
+    uint32_t g = (fgc * a + bgc * (255u - a) + 127u) / 255u;
+    uint32_t b = (fb * a + bb * (255u - a) + 127u) / 255u;
+    return (r << 16) | (g << 8) | b;
+}
+#endif  /* __linux__ */
 
 /* Auto-generated tiny 8x16 bitmap font (ASCII 0..127).
    Each glyph is 16 rows, each row is 8 bits (bit 7 = leftmost pixel). */
@@ -545,10 +582,67 @@ int console_tsb_get_line(int line_from_end, char *buf, int maxlen) {
 
 /* ── Framebuffer rendering (write-only — never reads video RAM) ─────────── */
 
+#ifdef __linux__
+/* Draw one console byte-glyph with the active TTF at pixel origin (px,py).
+ * fill_bg paints the cell background first (opaque text); otherwise only lit
+ * pixels are blended over existing content (transparent-bg path). scale>=1
+ * upsamples the cached coverage for large text. */
+static void draw_glyph_ttf(uint64_t px, uint64_t py, unsigned char uc,
+                           uint32_t fg, uint32_t bg, bool fill_bg, uint32_t scale) {
+    if (scale == 0) scale = 1;
+    uint64_t cw = (uint64_t)g_fw * scale;
+    uint64_t ch = (uint64_t)g_fh * scale;
+    if (fill_bg) fill_rect(px, py, cw, ch, bg);        /* marks dirty */
+    uint32_t cp = g_cp437_uni[uc];
+    if (cp == 0) return;                                /* NUL / blank cell */
+    int w, h, xo, yt, adv;
+    const uint8_t *cov = ttf_glyph(cp, &w, &h, &xo, &yt, &adv);
+    if (!cov || w <= 0 || h <= 0) return;               /* space / no glyph */
+    int base = ttf_baseline();
+    /* Centre the glyph's advance box in the fixed cell: monospace fonts have
+     * adv == cell so pad is 0; proportional fonts get balanced side padding
+     * (reads as clean tracking instead of a left-clumped double-space). */
+    int pad = ((int)g_fw - adv) / 2;
+    int gx = (int)px + (pad + xo) * (int)scale;
+    int gy = (int)py + (base + yt) * (int)scale;
+    uint32_t *back = g_back;
+    if (!fill_bg && back) {
+        g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        if ((uint32_t)(py + ch) > g_dirty_y1) g_dirty_y1 = (uint32_t)(py + ch);
+    }
+    for (int yy = 0; yy < h; yy++) {
+        for (uint32_t sy = 0; sy < scale; sy++) {
+            int dy = gy + yy * (int)scale + (int)sy;
+            if (dy < 0 || (uint64_t)dy >= con.h) continue;
+            const uint8_t *crow = cov + (uint64_t)yy * w;
+            for (int xx = 0; xx < w; xx++) {
+                uint8_t a = crow[xx];
+                if (!a) continue;
+                for (uint32_t sx = 0; sx < scale; sx++) {
+                    int dx = gx + xx * (int)scale + (int)sx;
+                    if (dx < 0 || (uint64_t)dx >= con.w) continue;
+                    if (back) {
+                        uint32_t *p = back + (uint64_t)dy * con.pitch32 + dx;
+                        *p = cons_blend(*p, fg, a);
+                    } else {
+                        volatile uint32_t *p = con.pix + (uint64_t)dy * con.pitch32 + dx;
+                        *p = cons_blend(*p, fg, a);
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
+
 static void render_char(uint64_t cell_x, uint64_t cell_y, unsigned char uc) {
     const uint64_t px = con.x_off + cell_x * g_fw;
     const uint64_t py = cell_y * g_fh + con.y_offset;
     if (px + g_fw > con.w || py + g_fh > con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf(px, py, uc, con.fg, con.bg, true, 1); return; }
+#endif
 
     uint32_t gi = (uc < g_fglyphs) ? uc : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
@@ -794,8 +888,11 @@ void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
 /* Render a single glyph at absolute pixel coordinates (bypasses cell buffer). */
 void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg) {
     if (!con.initialized) return;
-    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     if (px + g_fw > con.w || py + g_fh > con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf(px, py, ch, fg, bg, true, 1); return; }
+#endif
+    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
     if (g_back) {
@@ -831,8 +928,11 @@ void console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t f
  * never paints past the title bar, and it's cheaper (skips background writes). */
 void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg) {
     if (!con.initialized) return;
-    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     if (px + g_fw > con.w || py + g_fh > con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf(px, py, ch, fg, 0, false, 1); return; }
+#endif
+    uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
     uint32_t *dst_base = g_back ? g_back : NULL;
@@ -874,6 +974,9 @@ uint64_t           console_pitch32(void)  { return con.pitch32; }
 void console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
                                   uint64_t scale, uint32_t fg, uint32_t bg) {
     if (!con.initialized || scale == 0) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf(px, py, ch, fg, bg, true, (uint32_t)scale); return; }
+#endif
     uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
@@ -1195,6 +1298,69 @@ uint32_t    console_font_width(void)  { return g_fw; }
 uint32_t    console_font_height(void) { return g_fh; }
 const char *console_font_name(void)   { return g_fname; }
 
+/* Render `s` using the glyphs of the PSF at `path`, WITHOUT touching the active
+ * console font — used for the font-preview labels in Settings so each font name
+ * appears in its own typeface. The font's native height is scaled (nearest
+ * neighbour) to fit `target_h` px; only lit pixels are written (transparent
+ * background). Returns the total pixel width drawn (0 on failure). */
+uint64_t console_render_psf_string(const char *path, const char *s,
+                                    uint64_t px, uint64_t py,
+                                    uint32_t target_h, uint32_t fg) {
+    if (!con.initialized || target_h == 0 || !s) return 0;
+    const void *raw = NULL; uint64_t raw_size = 0;
+    if (vfs_read(path, &raw, &raw_size) != 0 || !raw || raw_size < 4) return 0;
+    const uint8_t *d = (const uint8_t *)raw;
+    uint32_t fw, fh, fbpg, nglyphs, data_off;
+    if (d[0] == 0x36u && d[1] == 0x04u) {
+        fw = 8u; fh = d[3]; fbpg = d[3];
+        nglyphs = (d[2] & 0x01u) ? 512u : 256u; data_off = 4u;
+    } else if (d[0] == 0x72u && d[1] == 0xb5u && d[2] == 0x4au && d[3] == 0x86u) {
+        if (raw_size < 32u) return 0;
+        #define LE32(o) ((uint32_t)d[o]|((uint32_t)d[(o)+1]<<8)|((uint32_t)d[(o)+2]<<16)|((uint32_t)d[(o)+3]<<24))
+        data_off = LE32(8); nglyphs = LE32(16); fbpg = LE32(20); fh = LE32(24); fw = LE32(28);
+        #undef LE32
+    } else return 0;
+    if (fw == 0u || fw > 64u || fh == 0u || fh > 64u || nglyphs == 0u || nglyphs > 512u) return 0;
+    if ((uint64_t)data_off + (uint64_t)nglyphs * fbpg > raw_size) return 0;
+    const uint8_t *data = d + data_off;
+    uint32_t bpr = (fw + 7u) / 8u;
+
+    /* preserve aspect: output glyph width scales with the same ratio as height */
+    uint32_t gw = (fw * target_h + fh / 2u) / fh;
+    if (gw == 0u) gw = 1u;
+    uint64_t x = px;
+    uint32_t *back = g_back;
+    if (back) {
+        g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        if ((uint32_t)(py + target_h) > g_dirty_y1) g_dirty_y1 = (uint32_t)(py + target_h);
+    }
+    for (const char *p = s; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        uint32_t gi = (ch < nglyphs) ? ch : ('?' < nglyphs ? '?' : 0u);
+        const uint8_t *glyph = data + (uint64_t)gi * fbpg;
+        for (uint32_t oy = 0; oy < target_h; oy++) {
+            uint32_t sy = oy * fh / target_h;
+            const uint8_t *scan = glyph + sy * bpr;
+            uint64_t ppy = py + oy;
+            if (ppy >= con.h) break;
+            for (uint32_t ox = 0; ox < gw; ox++) {
+                uint32_t sx = ox * fw / gw;
+                uint8_t b = scan[sx >> 3];
+                uint32_t bit = (b >> (7u - (sx & 7u))) & 1u; /* PSF is MSB-first */
+                if (!bit) continue;
+                uint64_t ppx = x + ox;
+                if (ppx >= con.w) continue;
+                if (back) back[ppy * con.pitch32 + ppx] = fg;
+                else      con.pix[ppy * con.pitch32 + ppx] = fg;
+            }
+        }
+        x += gw; /* glyphs already carry side-bearing in the bitmap */
+        if (x >= con.w) break;
+    }
+    return x - px;
+}
+
 bool console_load_psf(const char *path) {
     const void *raw = NULL;
     uint64_t raw_size = 0;
@@ -1264,6 +1430,100 @@ bool console_load_psf(const char *path) {
     }
     return true;
 }
+
+#ifdef __linux__
+static int cons_ends_with_ci(const char *s, const char *suf) {
+    size_t ls = strlen(s), lf = strlen(suf);
+    if (lf > ls) return 0;
+    const char *p = s + (ls - lf);
+    for (size_t i = 0; i < lf; i++) {
+        char a = p[i], b = suf[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/* Unified font loader: a .ttf/.otf/.ttc path activates the scalable AA
+ * renderer at px_size; anything else loads a PSF bitmap font (px_size ignored).
+ * Falls through to the previous font on failure. */
+bool console_load_font(const char *path, int px_size) {
+    if (!path) return false;
+    int is_ttf = cons_ends_with_ci(path, ".ttf") || cons_ends_with_ci(path, ".otf")
+              || cons_ends_with_ci(path, ".ttc");
+    if (!is_ttf) { ttf_clear(); return console_load_psf(path); }
+
+    if (!ttf_load(path, px_size)) return false;
+    g_fw = ttf_cell_w();
+    g_fh = ttf_cell_h();
+    if (g_fw == 0) g_fw = 1;
+    if (g_fh == 0) g_fh = 1;
+    g_fglyphs = 0x110000u;                 /* TTF path indexes by Unicode, not this */
+    g_fmsb = true;
+
+    const char *base = path;
+    for (const char *p = path; *p; p++) if (*p == '/') base = p + 1;
+    uint32_t ni = 0;
+    while (base[ni] && ni < 63u) { g_fname[ni] = base[ni]; ni++; }
+    g_fname[ni] = '\0';
+
+    if (con.initialized) {
+        con.cols = (con.w - con.x_off) / g_fw;
+        con.rows = con.vp_h ? con.vp_h / g_fh : 0;
+        if (con.cols > CELL_MAX_COLS) con.cols = CELL_MAX_COLS;
+        if (con.rows > CELL_MAX_ROWS) con.rows = CELL_MAX_ROWS;
+        con.cx = 0; con.cy = 0;
+        console_clear();
+    }
+    return true;
+}
+
+/* Render an ASCII string in the font at `path` (scaled to target_h px) WITHOUT
+ * touching the active font — used for font-name previews in the picker. Only
+ * lit pixels are alpha-blended (transparent background). Returns width drawn. */
+uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, uint64_t py,
+                                 uint32_t target_h, uint32_t fg) {
+    if (!con.initialized || !s || !path || target_h == 0) return 0;
+    void *h = ttf_open(path);
+    if (!h) return 0;
+    int base = ttf_open_baseline(h, (int)target_h);
+    uint64_t x = px;
+    uint32_t *back = g_back;
+    if (back) {
+        g_dirty = true;
+        if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
+        uint32_t y1 = (uint32_t)(py + target_h + target_h / 3u + 2u);
+        if (y1 > g_dirty_y1) g_dirty_y1 = y1;
+    }
+    for (const char *p = s; *p; p++) {
+        int w, bh, xo, yt, adv;
+        const uint8_t *cov = ttf_open_glyph(h, (uint32_t)(unsigned char)*p, (int)target_h,
+                                            &w, &bh, &xo, &yt, &adv);
+        if (cov && w > 0 && bh > 0) {
+            int gx = (int)x + xo, gy = (int)py + base + yt;
+            for (int yy = 0; yy < bh; yy++) {
+                int dy = gy + yy;
+                if (dy < 0 || (uint64_t)dy >= con.h) continue;
+                const uint8_t *crow = cov + (uint64_t)yy * w;
+                for (int xx = 0; xx < w; xx++) {
+                    uint8_t a = crow[xx];
+                    if (!a) continue;
+                    int dx = gx + xx;
+                    if (dx < 0 || (uint64_t)dx >= con.w) continue;
+                    if (back) { uint32_t *q = back + (uint64_t)dy * con.pitch32 + dx; *q = cons_blend(*q, fg, a); }
+                    else { volatile uint32_t *q = con.pix + (uint64_t)dy * con.pitch32 + dx; *q = cons_blend(*q, fg, a); }
+                }
+            }
+        }
+        ttf_free_bitmap(cov);
+        x += (adv > 0 ? (uint64_t)adv : target_h / 2u);
+        if (x >= con.w) break;
+    }
+    ttf_close(h);
+    return x - px;
+}
+#endif
 
 /* Update viewport coords and re-render the cell buffer.
  * Used when opening/reopening the window — cell-buffer text is restored. */

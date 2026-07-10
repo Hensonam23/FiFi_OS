@@ -50,15 +50,20 @@ uint64_t favbar_start_x(void) {
 #endif
     uint64_t run  = favbar_w() + (uint64_t)npill * (taskbtn_w() + TASKBTN_GAP);
     uint64_t fb_w = console_fb_width();
-    if (run >= fb_w) return base;
+    /* Right boundary = actual tray left edge (clock/vol/net/battery), captured
+     * by the previous tray draw; fall back to a wide reserve on the first frame
+     * so we err toward not overlapping. */
+    uint64_t avail_right = g_tray_left_x > base ? g_tray_left_x - 8u
+                         : (fb_w > 30u * console_font_width() ? fb_w - 30u * console_font_width() : base);
+    if (avail_right <= base) return base;
+    uint64_t region = avail_right - base;
+    if (run >= region) return base;                 /* doesn't fit → left-align */
     if (g_theme.panel_align == PALIGN_CENTER) {
-        uint64_t s = (fb_w - run) / 2u;
-        return s > base ? s : base;                 /* never overlap the logo */
+        uint64_t s = base + (region - run) / 2u;
+        return s > base ? s : base;                 /* centered between logo and tray */
     }
-    /* PALIGN_END: right-justify, leaving room for the tray (~18 chars). */
-    uint64_t reserve = 18u * console_font_width();
-    uint64_t e = (fb_w > reserve + run) ? (fb_w - reserve - run) : base;
-    return e > base ? e : base;
+    /* PALIGN_END: right-justify against the tray. */
+    return avail_right - run;
 }
 
 uint64_t taskbtn_start_x(void) {
@@ -329,12 +334,16 @@ void taskbar_draw_tray(void) {
         g_batt_x = bxx; g_batt_w = bodyw + nub;
         left_edge = bxx > 8u ? bxx - 8u : 0u;
     }
+    /* Leftmost pixel of the system tray — right/center-aligned favorites must
+     * stop here so they never overlap the clock/volume/network/battery. */
+    g_tray_left_x = left_edge;
 }
 
 /* ── System tray indicators state + hover tooltips ───────────────────── */
 static int cal_dow(int y, int m, int d);   /* defined in the calendar section below */
 bool     g_batt_present = false;
 uint64_t g_batt_x = 0, g_batt_w = 0;
+uint64_t g_tray_left_x = 0;   /* left edge of the tray run (set each frame) */
 uint64_t g_cpu_tray_x = 0, g_cpu_tray_w = 0;
 uint64_t g_net_tray_x = 0, g_net_tray_w = 0;
 uint64_t g_mem_tray_x = 0, g_mem_tray_w = 0;

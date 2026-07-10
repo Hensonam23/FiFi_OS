@@ -39,3 +39,7 @@ int vfs_isdir(const char *path);
 /* List directory entries as "name\n" lines into buf. Returns bytes written.
  * For "/" lists all VFS files (same as vfs_list). For subdirs delegates to ext2. */
 size_t vfs_listdir(const char *path, char *buf, size_t cap);
+#ifdef __linux__
+/* Resolve a VFS path to a real host path (under VFS_ROOT) for raw fopen. */
+size_t vfs_real_path(const char *path, char *out, size_t cap);
+#endif

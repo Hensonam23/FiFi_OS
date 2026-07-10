@@ -1,4 +1,7 @@
 #include "gui_internal.h"
+#ifdef __linux__
+#include "font_ttf.h"   /* ttf_family_name for the font scanner */
+#endif
 
 /* Forward declarations for public API functions used inside gui_on_tick */
 void gui_show_desktop(void);
@@ -113,19 +116,104 @@ bool     g_sb_drag_settings   = false;
 
 int g_term_scroll = 0;
 
-int g_font_idx = 0;
-const char *g_font_paths[] = {
-    "/fonts/ter16b.psf", "/fonts/ter20b.psf", "/fonts/ter24b.psf",
-    "/fonts/ter28b.psf", "/fonts/ter32b.psf",
-    "/fonts/default.psf", NULL
-};
-const char *g_font_labels[] = {
-    "Terminus 8x16", "Terminus 10x20", "Terminus 12x24",
-    "Terminus 14x28", "Terminus 16x32",
-    "Default 8x16", NULL
-};
-uint64_t g_font_prev_bx = 0, g_font_next_bx = 0;
+/* Scalable font catalog — filled by gui_font_scan() from the .ttf/.otf files
+ * in /fonts. The size is an independent axis (any px), so one font renders at
+ * any size via the stb_truetype rasterizer. */
+font_entry_t g_fonts[FONT_MAX];
+int  g_font_count  = 0;
+int  g_font_family = 0;    /* index into g_fonts */
+int  g_font_px     = 20;   /* selected size in px */
+char g_font_saved_path[72] = "";
+bool g_font_from_config = false;
+
+/* Size ladder for the size dropdown (any of these; also fine-tunable +/-). */
+const int g_font_sizes[] = { 8,9,10,11,12,13,14,15,16,18,20,22,24,26,28,32,36,40,44,48,56,64,72 };
+const int g_font_size_count = (int)(sizeof(g_font_sizes) / sizeof(g_font_sizes[0]));
+
+int g_font_dd_open   = 0;  /* 0 none, 1 font list, 2 size list */
+int g_font_dd_hover  = -1;
+int g_font_dd_scroll = 0;
+uint64_t g_font_fam_bx = 0, g_font_fam_by = 0, g_font_fam_bw = 0, g_font_fam_bh = 0;
+uint64_t g_font_size_bx = 0, g_font_size_by = 0, g_font_size_bw = 0, g_font_size_bh = 0;
+
+/* Shared small +/- button width (UTC row, volume row). */
 uint64_t g_font_btn_by  = 0, g_font_btn_bw  = 28u, g_font_btn_bh = 0u;
+
+const char *gui_font_current_path(void) {
+    if (g_font_count <= 0) return 0;
+    int f = (g_font_family >= 0 && g_font_family < g_font_count) ? g_font_family : 0;
+    return g_fonts[f].path;
+}
+
+#ifdef __linux__
+static int fnt_suffix_ci(const char *s, const char *suf) {
+    int ls = 0, lf = 0; while (s[ls]) ls++; while (suf[lf]) lf++;
+    if (lf > ls) return 0;
+    const char *p = s + (ls - lf);
+    for (int i = 0; i < lf; i++) {
+        char a = p[i], b = suf[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+static int fnt_name_cmp(const char *a, const char *b) {   /* case-insensitive */
+    for (;; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        if (!ca) return 0;
+    }
+}
+/* Scan /fonts for scalable fonts, resolve each family name, sort A→Z. */
+void gui_font_scan(void) {
+    g_font_count = 0;
+    static char buf[16384];
+    size_t n = vfs_listdir("/fonts", buf, sizeof buf);
+    if (!n) return;
+    char *p = buf;
+    while (*p && g_font_count < FONT_MAX) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (*p && (fnt_suffix_ci(p, ".ttf") || fnt_suffix_ci(p, ".otf") || fnt_suffix_ci(p, ".ttc"))) {
+            font_entry_t *e = &g_fonts[g_font_count];
+            snprintf(e->path, sizeof e->path, "/fonts/%s", p);
+            if (!ttf_family_name(e->path, e->name, (int)sizeof e->name) || !e->name[0]) {
+                int i = 0;
+                for (; p[i] && i < (int)sizeof(e->name) - 1; i++) { if (p[i] == '.') break; e->name[i] = p[i]; }
+                e->name[i] = '\0';
+            }
+            g_font_count++;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    for (int i = 1; i < g_font_count; i++) {          /* insertion sort by name */
+        font_entry_t t = g_fonts[i];
+        int j = i - 1;
+        while (j >= 0 && fnt_name_cmp(g_fonts[j].name, t.name) > 0) { g_fonts[j + 1] = g_fonts[j]; j--; }
+        g_fonts[j + 1] = t;
+    }
+}
+/* Load the current font+size into the console; PSF fallback if none. */
+void gui_font_apply(void) {
+    if (g_font_family < 0 || g_font_family >= g_font_count) g_font_family = 0;
+    if (g_font_px < 6)  g_font_px = 6;
+    if (g_font_px > 96) g_font_px = 96;
+    const char *path = gui_font_current_path();
+    if (!path || !console_load_font(path, g_font_px)) {
+        if (!console_load_psf("/fonts/ter20b.psf"))
+            console_load_psf("/fonts/ter16b.psf");
+    }
+}
+#else
+void gui_font_scan(void) {}
+void gui_font_apply(void) {
+    if (!console_load_psf("/fonts/ter20b.psf")) console_load_psf("/fonts/ter16b.psf");
+}
+#endif
 uint64_t g_utc_minus_bx = 0, g_utc_plus_bx = 0;
 uint64_t g_utc_btn_by   = 0, g_utc_btn_bh  = 0u;
 uint64_t g_vol_minus_bx = 0, g_vol_plus_bx  = 0;
@@ -319,13 +407,15 @@ void gui_settings_save(void) {
     fprintf(f, "accent=%u\nwallpaper=%d\nclock_12h=%d\nanimations=%d\n"
                "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
                "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
-               "fx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n",
+               "fx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
+               "font_file=%s\nfont_px=%d\n",
             (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.clock_12h,
             (int)g_theme.animations, (int)g_theme.statusbar,
             (int)g_theme.desktop_info, (int)g_theme.utc_offset,
             (int)g_theme.panel_edge, (int)g_theme.panel_align,
             (int)g_theme.panel_autohide, (int)g_theme.panel_size,
-            (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius);
+            (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius,
+            (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px);
     fclose(f);
 }
 void gui_settings_load(void) {
@@ -348,6 +438,12 @@ void gui_settings_load(void) {
         else if (sscanf(line, "fx_glass=%d", &v) == 1)      g_theme.fx_glass = (v != 0);
         else if (sscanf(line, "fx_shadows=%d", &v) == 1)    g_theme.fx_shadows = (v != 0);
         else if (sscanf(line, "corner_radius=%d", &v) == 1) { if (v >= 0 && v <= 12) g_theme.corner_radius = (uint8_t)v; }
+        else if (strncmp(line, "font_file=", 10) == 0) {
+            char *val = line + 10;
+            char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
+            if (val[0]) { snprintf(g_font_saved_path, sizeof g_font_saved_path, "%s", val); g_font_from_config = true; }
+        }
+        else if (sscanf(line, "font_px=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
     }
     fclose(f);
 }
@@ -452,14 +548,25 @@ void gui_init(void) {
     /* Load persisted user settings (theme/colors/toggles) over the defaults. */
     gui_settings_load();
 
-    /* Pick font based on display resolution so text is readable at any DPI. */
-    if      (fb_w >= 3840) g_font_idx = 4;  /* ter32b -- 4K */
-    else if (fb_w >= 2560) g_font_idx = 3;  /* ter28b -- 2.5K (e.g. 2560x1600) */
-    else if (fb_w >= 1920) g_font_idx = 2;  /* ter24b -- 1080p */
-    else if (fb_w >= 1280) g_font_idx = 1;  /* ter20b -- 720p */
-    else                   g_font_idx = 0;  /* ter16b -- small/QEMU */
-    if (!console_load_psf(g_font_paths[g_font_idx]))
+#ifdef __linux__
+    /* Scan the bundled scalable fonts and pick the active one. */
+    gui_font_scan();
+    if (g_font_from_config && g_font_saved_path[0]) {
+        for (int i = 0; i < g_font_count; i++)
+            if (strcmp(g_fonts[i].path, g_font_saved_path) == 0) { g_font_family = i; break; }
+    }
+    if (!g_font_from_config) {
+        /* DPI-appropriate default size; prefer DejaVu Sans Mono if present. */
+        g_font_px = (fb_w >= 3840) ? 30 : (fb_w >= 2560) ? 24 :
+                    (fb_w >= 1920) ? 20 : (fb_w >= 1280) ? 18 : 16;
+        for (int i = 0; i < g_font_count; i++)
+            if (strstr(g_fonts[i].name, "DejaVu Sans Mono")) { g_font_family = i; break; }
+    }
+    gui_font_apply();
+#else
+    if (!console_load_psf("/fonts/ter20b.psf"))
         console_load_psf("/fonts/ter16b.psf");
+#endif
 
     /* Initialize z-order: 0=bottom ... MAX_WINS-1=top */
     for (int i = 0; i < MAX_WINS; i++) g_z[i] = i;
@@ -745,6 +852,27 @@ void gui_on_tick(void) {
                 }
                 break;
             }
+        }
+    }
+
+    /* ── Hover tracking for the open font dropdown ── */
+    if (g_font_dd_open != 0 && !g_dragging && !g_resizing) {
+        int family_list = (g_font_dd_open == 1);
+        int n        = family_list ? g_font_count : g_font_size_count;
+        uint64_t bx  = family_list ? g_font_fam_bx : g_font_size_bx;
+        uint64_t bw  = family_list ? g_font_fam_bw : g_font_size_bw;
+        uint64_t item_h = family_list ? g_font_fam_bh : g_font_size_bh;
+        uint64_t top = (family_list ? g_font_fam_by : g_font_size_by) + item_h;
+        int visible = n < FONT_DD_VISIBLE ? n : FONT_DD_VISIBLE;
+        int new_h = -1;
+        if (item_h > 0 && (uint64_t)mx >= bx && (uint64_t)mx < bx + bw &&
+            (uint64_t)my >= top && (uint64_t)my < top + (uint64_t)visible * item_h)
+            new_h = g_font_dd_scroll + (int)(((uint64_t)my - top) / item_h);
+        if (new_h != g_font_dd_hover) {
+            g_font_dd_hover = new_h;
+            for (int si2 = 0; si2 < MAX_WINS; si2++)
+                if (g_wins[si2].active && g_wins[si2].type == WIN_SETTINGS &&
+                    g_wins[si2].state != WIN_HIDDEN) { settings_render(&g_wins[si2]); break; }
         }
     }
 
@@ -2664,6 +2792,19 @@ void gui_on_tick(void) {
             }
             scroll = 0;   /* consumed by the launcher */
         }
+        if (scroll && g_font_dd_open) {
+            int n = (g_font_dd_open == 1) ? g_font_count : g_font_size_count;
+            if (n > FONT_DD_VISIBLE) {
+                int maxscroll = n - FONT_DD_VISIBLE;
+                g_font_dd_scroll -= (int)scroll;
+                if (g_font_dd_scroll > maxscroll) g_font_dd_scroll = maxscroll;
+                if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
+                for (int si2 = 0; si2 < MAX_WINS; si2++)
+                    if (g_wins[si2].active && g_wins[si2].type == WIN_SETTINGS &&
+                        g_wins[si2].state != WIN_HIDDEN) { settings_render(&g_wins[si2]); break; }
+            }
+            scroll = 0;   /* consumed by the open dropdown */
+        }
         if (scroll) {
             /* Close fb context menu on scroll */
             if (g_fb_ctx_open) { g_fb_ctx_open = false; full_redraw(); }
@@ -4069,6 +4210,44 @@ void gui_on_tick(void) {
                         }
                     }
                 } else if (w->type == WIN_SETTINGS && in_win && !in_tb) {
+                    /* An open font dropdown floats over the rows below it, so it
+                     * must intercept clicks before anything else: an item click
+                     * selects, a click anywhere else just closes it. */
+                    if (g_font_dd_open != 0) {
+                        int family_list = (g_font_dd_open == 1);
+                        int n        = family_list ? g_font_count : g_font_size_count;
+                        uint64_t bx  = family_list ? g_font_fam_bx : g_font_size_bx;
+                        uint64_t bw  = family_list ? g_font_fam_bw : g_font_size_bw;
+                        uint64_t item_h = family_list ? g_font_fam_bh : g_font_size_bh;
+                        uint64_t top = (family_list ? g_font_fam_by : g_font_size_by) + item_h;
+                        int visible = n < FONT_DD_VISIBLE ? n : FONT_DD_VISIBLE;
+                        int picked = -1;
+                        if (item_h > 0 && (uint64_t)mx >= bx && (uint64_t)mx < bx + bw &&
+                            (uint64_t)my >= top && (uint64_t)my < top + (uint64_t)visible * item_h) {
+                            int row = (int)(((uint64_t)my - top) / item_h);
+                            picked = g_font_dd_scroll + row;
+                        }
+                        g_font_dd_open = 0; g_font_dd_hover = -1; g_font_dd_scroll = 0;
+                        bool changed = false;
+                        if (picked >= 0 && picked < n) {
+                            if (family_list) {
+                                if (picked != g_font_family) { g_font_family = picked; changed = true; }
+                            } else if (g_font_sizes[picked] != g_font_px) {
+                                g_font_px = g_font_sizes[picked]; changed = true;
+                            }
+                        }
+                        if (changed) {
+                            gui_font_apply();
+                            gui_settings_save();
+                            /* re-fit the settings window to the new font metrics */
+                            g_wins[2].w = 0; g_wins[2].h = 0;
+                            win_show(&g_wins[2], 2);
+                        } else {
+                            win_draw_chrome(w, false); settings_render(w);
+                        }
+                        mouse_consume_click(&(int32_t){0}, &(int32_t){0});
+                        goto settings_click_done;
+                    }
                     /* Scrollbar click/drag */
                     {
                         uint64_t _ix = w->x + BORDER, _iy = w->y + TITLE_H;
@@ -4099,27 +4278,40 @@ void gui_on_tick(void) {
                             goto settings_click_done;
                         }
                     }
-                    /* Font selector prev/next buttons */
-                    if (g_font_btn_bh > 0 &&
-                        (uint64_t)my >= g_font_btn_by &&
-                        (uint64_t)my <  g_font_btn_by + g_font_btn_bh) {
-                        int nf = 0; while (g_font_paths[nf]) nf++;
-                        bool changed_font = false;
-                        if ((uint64_t)mx >= g_font_prev_bx &&
-                            (uint64_t)mx < g_font_prev_bx + g_font_btn_bw) {
-                            g_font_idx = (g_font_idx > 0) ? g_font_idx - 1 : nf - 1;
-                            changed_font = true;
-                        } else if ((uint64_t)mx >= g_font_next_bx &&
-                                   (uint64_t)mx < g_font_next_bx + g_font_btn_bw) {
-                            g_font_idx = (g_font_idx < nf - 1) ? g_font_idx + 1 : 0;
-                            changed_font = true;
+                    /* Font family combo → toggle the family dropdown, scrolled
+                     * so the current selection is visible. */
+                    if (g_font_fam_bh > 0 &&
+                        (uint64_t)my >= g_font_fam_by && (uint64_t)my < g_font_fam_by + g_font_fam_bh &&
+                        (uint64_t)mx >= g_font_fam_bx && (uint64_t)mx < g_font_fam_bx + g_font_fam_bw) {
+                        g_font_dd_open = (g_font_dd_open == 1) ? 0 : 1;
+                        g_font_dd_hover = -1;
+                        if (g_font_dd_open == 1) {
+                            int mx_sc = g_font_count - FONT_DD_VISIBLE; if (mx_sc < 0) mx_sc = 0;
+                            g_font_dd_scroll = g_font_family - FONT_DD_VISIBLE / 2;
+                            if (g_font_dd_scroll > mx_sc) g_font_dd_scroll = mx_sc;
+                            if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
                         }
-                        if (changed_font) {
-                            console_load_psf(g_font_paths[g_font_idx]);
-                            /* Reset settings window size so win_show recomputes it at the new font metrics */
-                            g_wins[2].w = 0; g_wins[2].h = 0;
-                            win_show(&g_wins[2], 2);
+                        win_draw_chrome(w, false); settings_render(w);
+                        mouse_consume_click(&(int32_t){0}, &(int32_t){0});
+                        goto settings_click_done;
+                    }
+                    /* Font size combo → toggle the size dropdown */
+                    if (g_font_size_bh > 0 &&
+                        (uint64_t)my >= g_font_size_by && (uint64_t)my < g_font_size_by + g_font_size_bh &&
+                        (uint64_t)mx >= g_font_size_bx && (uint64_t)mx < g_font_size_bx + g_font_size_bw) {
+                        g_font_dd_open = (g_font_dd_open == 2) ? 0 : 2;
+                        g_font_dd_hover = -1;
+                        if (g_font_dd_open == 2) {
+                            int si0 = 0;
+                            for (int k = 0; k < g_font_size_count; k++) if (g_font_sizes[k] == g_font_px) { si0 = k; break; }
+                            int mx_sc = g_font_size_count - FONT_DD_VISIBLE; if (mx_sc < 0) mx_sc = 0;
+                            g_font_dd_scroll = si0 - FONT_DD_VISIBLE / 2;
+                            if (g_font_dd_scroll > mx_sc) g_font_dd_scroll = mx_sc;
+                            if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
                         }
+                        win_draw_chrome(w, false); settings_render(w);
+                        mouse_consume_click(&(int32_t){0}, &(int32_t){0});
+                        goto settings_click_done;
                     }
                     /* Accent colour swatches (16 presets across 2 rows) */
                     if (g_theme_swatch_sz > 0) {

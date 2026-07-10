@@ -388,6 +388,7 @@ void win_hide(window_t *w, int slot) {
     g_snap_preview = 0;
     /* Close any open menus for this window */
     if (g_txt_ctx_win == (int)(w - g_wins)) { g_txt_ctx_open = false; g_txt_ctx_win = -1; }
+    if (w->type == WIN_SETTINGS) { g_font_dd_open = 0; g_font_dd_hover = -1; }
     if (g_theme.animations) {
         w->anim_phase = ANIM_CLOSE;
         w->anim_step  = 1;

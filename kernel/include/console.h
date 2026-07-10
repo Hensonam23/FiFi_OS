@@ -57,9 +57,22 @@ void console_blit_scaled_alpha(const uint32_t *src, uint64_t sw, uint64_t sh,
 
 /* PSF font loading — loads a .psf file from VFS into the console renderer */
 bool        console_load_psf(const char *path);
+#ifdef __linux__
+/* Unified loader: .ttf/.otf/.ttc → scalable AA font at px_size; else PSF. */
+bool        console_load_font(const char *path, int px_size);
+/* Draw `s` in the font at `path` (scaled to target_h) without changing the
+ * active font — used for font-name previews. Returns pixel width drawn. */
+uint64_t    console_render_ttf_name(const char *path, const char *s, uint64_t px, uint64_t py,
+                                    uint32_t target_h, uint32_t fg);
+#endif
 uint32_t    console_font_width(void);
 uint32_t    console_font_height(void);
 const char *console_font_name(void);
+/* Render `s` in the font at `path` (scaled to target_h) without changing the
+ * active font — used for per-font preview labels. Returns pixel width drawn. */
+uint64_t    console_render_psf_string(const char *path, const char *s,
+                                      uint64_t px, uint64_t py,
+                                      uint32_t target_h, uint32_t fg);
 
 /* Terminal scrollback ring buffer (64KB).
  * All console_putc output is captured here even while suppressed. */
