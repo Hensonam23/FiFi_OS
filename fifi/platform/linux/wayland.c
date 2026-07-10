@@ -966,6 +966,21 @@ static void wl_toplevel_raise(wl_surface_t *s) {
     if (s && !s->is_popup && !s->is_subsurface && s->xdg_toplevel_id)
         s->z = g_wl_z_next++;
 }
+
+/* Maximized geometry for a Wayland toplevel = the desktop work area minus the
+ * SSD titlebar (which sits above the content). Reads the shared desk_* struts so
+ * a maximized window fills exactly the area not covered by the panel, on any
+ * edge — the taskbar is never overlapped. */
+static void wl_maxarea(int32_t *mx, int32_t *my, int32_t *mw, int32_t *mh) {
+    extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+    extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+    *mx = (int32_t)desk_left();
+    *my = (int32_t)desk_top() + SSD_TITLE_H;
+    *mw = (int32_t)desk_availw();
+    *mh = (int32_t)desk_avail() - SSD_TITLE_H;
+    if (*mw < 200) *mw = 200;
+    if (*mh < 200) *mh = 200;
+}
 static int32_t  g_prev_mx = -1, g_prev_my = -1;
 static uint8_t  g_prev_btns = 0;
 
@@ -2194,13 +2209,13 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     wl_end_msg(bc, h);
                     wl_client_flush(bc);
                 } else if (rel >= bw - 48) {              /* maximize / restore */
-                    int32_t taskbar = fh2 + 10;
                     if (!bar_s->maximized) {
                         bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
                         bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
                         bar_s->maximized = true;
-                        bar_s->x = 0; bar_s->y = top;
-                        send_toplevel_configure(bc, bar_s, g_w, g_h - top - taskbar,
+                        int32_t Mx, My, Mw, Mh; wl_maxarea(&Mx, &My, &Mw, &Mh);
+                        bar_s->x = Mx; bar_s->y = My;
+                        send_toplevel_configure(bc, bar_s, Mw, Mh,
                                                 XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
                     } else {
                         bar_s->maximized = false;
@@ -2223,15 +2238,15 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                     bool dbl = (s_dc_sid == bar_sid && dms > 0 && dms < 400);
                     s_dc_ts = now; s_dc_sid = bar_sid;
                     if (dbl) {
-                        int32_t taskbar2 = fh2 + 10;
                         if (!bar_s->maximized) {
                             if (!bar_s->half_snapped) {
                                 bar_s->restore_x = bar_s->x; bar_s->restore_y = bar_s->y;
                                 bar_s->restore_w = bar_s->own_w; bar_s->restore_h = bar_s->own_h;
                             }
                             bar_s->maximized = true; bar_s->half_snapped = false;
-                            bar_s->x = 0; bar_s->y = top;
-                            send_toplevel_configure(bc, bar_s, g_w, g_h - top - taskbar2,
+                            int32_t Mx, My, Mw, Mh; wl_maxarea(&Mx, &My, &Mw, &Mh);
+                            bar_s->x = Mx; bar_s->y = My;
+                            send_toplevel_configure(bc, bar_s, Mw, Mh,
                                                     XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
                         } else {
                             bar_s->maximized = false;
@@ -2731,11 +2746,16 @@ bool wayland_snap_focused(int zone) {
     }
     if (!s) s = first;
     if (!s || s->fullscreen) return false;
-    extern uint32_t console_font_height(void);
-    int32_t fh      = (int32_t)console_font_height();
-    int32_t top     = fh + 6 + SSD_TITLE_H;
-    int32_t taskbar = fh + 10;
-    int32_t avail_h = g_h - top - taskbar;
+    /* Snap within the desktop work area so a snapped/maximized Wayland window
+     * never overlaps the panel on any edge. */
+    extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+    extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+    int32_t wx  = (int32_t)desk_left();
+    int32_t top = (int32_t)desk_top() + SSD_TITLE_H;
+    int32_t ww  = (int32_t)desk_availw();
+    int32_t wh  = (int32_t)desk_avail() - SSD_TITLE_H;
+    if (ww < 200) ww = g_w;
+    if (wh < 200) wh = g_h;
     if (zone == 0) {
         if (s->maximized || s->half_snapped) {
             s->maximized = false; s->half_snapped = false;
@@ -2752,17 +2772,17 @@ bool wayland_snap_focused(int zone) {
     }
     if (zone == 3) {
         s->maximized = true; s->half_snapped = false;
-        s->x = 0; s->y = top;
-        send_toplevel_configure(c, s, g_w, avail_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+        s->x = wx; s->y = top;
+        send_toplevel_configure(c, s, ww, wh, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
     } else {
         /* halves are sent with the MAXIMIZED state too: toolkits honor
          * maximized configure sizes EXACTLY, while Electron ignores plain
          * floating sizes entirely. Compositor-side we track it as
          * half_snapped, not maximized. */
         s->maximized = false; s->half_snapped = true;
-        s->x = (zone == 1) ? 0 : g_w / 2;
+        s->x = (zone == 1) ? wx : wx + ww / 2;
         s->y = top;
-        send_toplevel_configure(c, s, (zone == 1) ? g_w / 2 : g_w - g_w / 2, avail_h,
+        send_toplevel_configure(c, s, (zone == 1) ? ww / 2 : ww - ww / 2, wh,
                                 XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
     }
     wl_client_flush(c);

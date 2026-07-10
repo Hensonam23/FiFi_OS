@@ -3450,8 +3450,9 @@ void gui_on_tick(void) {
                 w->saved_x = w->x; w->saved_y = w->y;
                 w->saved_w = w->w; w->saved_h = w->h;
                 w->y = desk_top(); w->h = desk_avail();
-                if (g_snap_preview == 1) { w->x = 0;           w->w = fb_w2 / 2u; }
-                else                     { w->x = fb_w2 / 2u;  w->w = fb_w2 - fb_w2/2u; }
+                uint64_t dl = desk_left(), dw = desk_availw(); (void)fb_w2;
+                if (g_snap_preview == 1) { w->x = dl;              w->w = dw / 2u; }
+                else                     { w->x = dl + dw / 2u;    w->w = dw - dw / 2u; }
                 w->state       = WIN_NORMAL;
                 w->half_snapped = true;
                 g_snap_preview = 0;
@@ -3461,9 +3462,11 @@ void gui_on_tick(void) {
             int32_t new_x = mx - g_drag_off_x;
             int32_t new_y = my - g_drag_off_y;
             uint64_t fb_w2 = console_fb_width();
-            if (new_x < 0) new_x = 0;
+            /* Clamp to the desktop work area so a window can never be dragged
+             * under the panel on any edge (the taskbar is never overlapped). */
+            if (new_x < (int32_t)desk_left()) new_x = (int32_t)desk_left();
             if (new_y < (int32_t)desk_top()) new_y = (int32_t)desk_top();
-            if ((uint64_t)new_x + w->w > fb_w2) new_x = (int32_t)(fb_w2 - w->w);
+            if ((uint64_t)new_x + w->w > desk_right()) new_x = (int32_t)(desk_right() - w->w);
             if ((uint64_t)new_y + w->h > desk_bot()) new_y = (int32_t)(desk_bot() - w->h);
             /* Detect half-snap zone: cursor near left or right screen edge */
             int old_snap = g_snap_preview;

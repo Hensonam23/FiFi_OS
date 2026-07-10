@@ -210,7 +210,7 @@ static icon_img_t *desk_icon_logo(int i) {
  * icon without running off the screen edge (so labels never right-align). */
 uint64_t desk_icon_col_x(void) {
     uint64_t fw  = console_font_width();
-    uint64_t fbw = console_fb_width();
+    uint64_t fbw = desk_right();   /* usable right edge — clears a right-edge dock */
     uint64_t flush = (fbw > DESK_ICON_W + DESK_ICON_PAD) ? fbw - DESK_ICON_W - DESK_ICON_PAD : 0u;
     uint64_t maxlw = 0;
     for (int i = 0; i < DESK_ICON_MAX; i++) {
@@ -618,8 +618,9 @@ void full_redraw(void) {
     /* (Window drop shadows removed by design — flat windows, no shadow.) */
     /* Snap-to-half preview: draw before windows so the dragged window appears on top */
     if (g_snap_preview && g_dragging) {
-        uint64_t px = (g_snap_preview == 2) ? fb_w / 2u : 0u;
-        uint64_t pw = fb_w / 2u;
+        uint64_t dl = desk_left(), dw = desk_availw();
+        uint64_t pw = dw / 2u;
+        uint64_t px = (g_snap_preview == 2) ? dl + dw / 2u : dl;
         uint64_t py = desk_top();
         uint64_t ph = desk_avail();
         console_fill_rect(px, py, pw, ph, 0x00101c30u);

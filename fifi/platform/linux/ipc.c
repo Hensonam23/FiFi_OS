@@ -163,9 +163,12 @@ static void scale_buf(const uint32_t *src, uint32_t sw, uint32_t sh,
 /* Apply a snap zone to client i (l=left half, 2=right half, 3=maximize) */
 static void ipc_apply_snap(int i, int zone) {
     ipc_client_t *c = &g_clients[i];
-    uint32_t fb_w = (uint32_t)console_fb_width();
-    uint32_t fb_h = (uint32_t)console_fb_height();
-    uint32_t tb_h = 32u;  /* TASKBAR_H */
+    /* Snap within the desktop work area (shared struts) so an IPC app window
+     * never overlaps the panel, whichever edge it's on. */
+    extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+    extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+    uint32_t dl = (uint32_t)desk_left(),  dt = (uint32_t)desk_top();
+    uint32_t dw = (uint32_t)desk_availw(), dh = (uint32_t)desk_avail();
 
     if (!c->snapped) {
         c->pre_snap_x = c->win_x;
@@ -175,16 +178,13 @@ static void ipc_apply_snap(int i, int zone) {
     }
     switch (zone) {
     case 1:  /* left half */
-        c->win_x = 0; c->win_y = 0;
-        c->win_w = fb_w / 2; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        c->win_x = dl;          c->win_y = dt; c->win_w = dw / 2;      c->win_h = dh;
         break;
     case 2:  /* right half */
-        c->win_x = fb_w / 2; c->win_y = 0;
-        c->win_w = fb_w - fb_w / 2; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        c->win_x = dl + dw / 2; c->win_y = dt; c->win_w = dw - dw / 2; c->win_h = dh;
         break;
     case 3:  /* maximize */
-        c->win_x = 0; c->win_y = 0;
-        c->win_w = fb_w; c->win_h = fb_h > tb_h ? fb_h - tb_h : fb_h;
+        c->win_x = dl;          c->win_y = dt; c->win_w = dw;          c->win_h = dh;
         break;
     }
     c->snapped = true;

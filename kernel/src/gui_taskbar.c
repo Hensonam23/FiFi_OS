@@ -579,6 +579,11 @@ uint64_t vpanel_fav_y0(void){ return vpanel_logo_y() + (TASKBAR_H - 6u) + 8u; }
 
 void taskbar_draw_vertical(void) {
     if (g_theme.panel_autohide && !g_panel_revealed) return;
+    /* The vertical dock has no tray/clock — clear those hit regions so a click
+     * on the dock can't match a STALE horizontal clock/volume region (which
+     * sat at the far right and would otherwise swallow right-dock clicks and
+     * pop the calendar instead of launching the app). */
+    g_clk_w = 0u; g_vol_tray_w = 0u;
     uint64_t fb_h  = console_fb_height();
     uint64_t fw    = console_font_width(), fh = console_font_height();
     uint64_t thick = TASKBAR_H;

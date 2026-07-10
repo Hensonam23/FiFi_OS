@@ -484,8 +484,10 @@ void win_do_resize(window_t *w, int32_t mx, int32_t my) {
                    ? (int64_t)_settings_min
                    : (int64_t)MIN_WIN_W;
     int64_t  mh   = (int64_t)MIN_WIN_H;
-    int64_t  dtop = (int64_t)desk_top();
-    int64_t  dbot = (int64_t)desk_bot();
+    int64_t  dtop  = (int64_t)desk_top();
+    int64_t  dbot  = (int64_t)desk_bot();
+    int64_t  dleft = (int64_t)desk_left();
+    int64_t  dright= (int64_t)desk_right();
 
     if (nw < mw) {
         if (g_resize_dir == RES_W || g_resize_dir == RES_NW || g_resize_dir == RES_SW)
@@ -497,13 +499,13 @@ void win_do_resize(window_t *w, int32_t mx, int32_t my) {
             ny = (int64_t)g_resize_wy0 + (int64_t)g_resize_wh0 - mh;
         nh = mh;
     }
-    if (nx < 0) nx = 0;
+    if (nx < dleft) nx = dleft;
     if (ny < dtop) ny = dtop;
-    if (nx + nw > (int64_t)fb_w) {
+    if (nx + nw > dright) {
         if (g_resize_dir == RES_W || g_resize_dir == RES_NW || g_resize_dir == RES_SW)
-            nx = (int64_t)fb_w - nw;
+            nx = dright - nw;
         else
-            nw = (int64_t)fb_w - nx;
+            nw = dright - nx;
     }
     if (ny + nh > dbot) {
         if (g_resize_dir == RES_N || g_resize_dir == RES_NW || g_resize_dir == RES_NE)
