@@ -1481,12 +1481,15 @@ bool console_load_font(const char *path, int px_size) {
 
 /* Render an ASCII string in the font at `path` (scaled to target_h px) WITHOUT
  * touching the active font — used for font-name previews in the picker. Only
- * lit pixels are alpha-blended (transparent background). Returns width drawn. */
+ * lit pixels are alpha-blended (transparent background). Glyphs are clipped to
+ * [px, px+max_w) so long names never spill past their box. Returns width drawn. */
 uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, uint64_t py,
-                                 uint32_t target_h, uint32_t fg) {
+                                 uint32_t target_h, uint32_t fg, uint64_t max_w) {
     if (!con.initialized || !s || !path || target_h == 0) return 0;
     void *h = ttf_open(path);
     if (!h) return 0;
+    /* Right clip edge: the box boundary, but never past the framebuffer. */
+    uint64_t clip_r = (max_w > 0u && px + max_w < con.w) ? (px + max_w) : con.w;
     int base = ttf_open_baseline(h, (int)target_h);
     uint64_t x = px;
     uint32_t *back = g_back;
@@ -1510,7 +1513,7 @@ uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, u
                     uint8_t a = crow[xx];
                     if (!a) continue;
                     int dx = gx + xx;
-                    if (dx < 0 || (uint64_t)dx >= con.w) continue;
+                    if (dx < 0 || (uint64_t)dx >= clip_r) continue;   /* clip to box */
                     if (back) { uint32_t *q = back + (uint64_t)dy * con.pitch32 + dx; *q = cons_blend(*q, fg, a); }
                     else { volatile uint32_t *q = con.pix + (uint64_t)dy * con.pitch32 + dx; *q = cons_blend(*q, fg, a); }
                 }
@@ -1518,7 +1521,7 @@ uint64_t console_render_ttf_name(const char *path, const char *s, uint64_t px, u
         }
         ttf_free_bitmap(cov);
         x += (adv > 0 ? (uint64_t)adv : target_h / 2u);
-        if (x >= con.w) break;
+        if (x >= clip_r) break;                                       /* stop past the box */
     }
     ttf_close(h);
     return x - px;

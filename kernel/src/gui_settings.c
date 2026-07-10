@@ -397,7 +397,8 @@ void settings_render(window_t *w) {
 #ifdef __linux__
             if (g_font_count > 0)
                 console_render_ttf_name(g_fonts[fam].path, g_fonts[fam].name, fam_x + 8u, (uint64_t)cy + 3u,
-                                        (uint32_t)fh, COL_SET_VAL_FG);
+                                        (uint32_t)fh, COL_SET_VAL_FG,
+                                        fam_w > fw + 24u ? fam_w - fw - 24u : fam_w / 2u); /* leave room for chevron */
             else
 #endif
                 gui_draw_str_clip(fam_x + 8u, ty, "(no fonts)", COL_SET_VAL_FG, combo_bg, (fam_w - fw) / fw);
@@ -1237,7 +1238,8 @@ settings_done: ;
             if (family_list) {
 #ifdef __linux__
                 console_render_ttf_name(g_fonts[i].path, g_fonts[i].name,
-                                        bx + 10u, ry + 3u, (uint32_t)fh, COL_SET_VAL_FG);
+                                        bx + 10u, ry + 3u, (uint32_t)fh, COL_SET_VAL_FG,
+                                        bw > 22u ? bw - 22u : bw / 2u); /* clip inside box + scrollbar */
 #endif
             } else {
                 char szl[8]; gui_itoa(g_font_sizes[i], szl, 6);

@@ -63,7 +63,7 @@ bool        console_load_font(const char *path, int px_size);
 /* Draw `s` in the font at `path` (scaled to target_h) without changing the
  * active font — used for font-name previews. Returns pixel width drawn. */
 uint64_t    console_render_ttf_name(const char *path, const char *s, uint64_t px, uint64_t py,
-                                    uint32_t target_h, uint32_t fg);
+                                    uint32_t target_h, uint32_t fg, uint64_t max_w);
 #endif
 uint32_t    console_font_width(void);
 uint32_t    console_font_height(void);
