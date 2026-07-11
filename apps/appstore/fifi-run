@@ -146,7 +146,7 @@ launch_dir() {
     if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
         ensure_xwayland
         export DISPLAY=:0
-        export SAL_USE_VCLPLUGIN=gtk3          # gtk3 over XWayland/X11 (gen VCL exits 81 on this box)
+        export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL: one rootful window (gtk3 makes a 2nd)
         # Scrub shared-runtime env that isn't meant for a raw-X11 soffice: an
         # invalid "disabled:" D-Bus address (soffice aborts during first-run
         # before it can even log), the Wayland/Electron toolkit hints, and the
