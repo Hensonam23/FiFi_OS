@@ -670,10 +670,18 @@ static void desk_icon_launch(int idx, bool force) {
     const char *ipath = g_desk_icons[idx].path;
     const char *_base = strrchr(ipath, '/');
     _base = _base ? _base + 1 : ipath;
-    bool _is_exec = (strrchr(_base, '.') == NULL);
+    const char *_ext = strrchr(_base, '.');
+    /* An APP shortcut launches the app; only real DOCUMENT files open in the
+     * editor/viewer. App launchers have no extension, are .sh/.AppImage, or live
+     * in the app-store dir. This is why a Discord/Steam shortcut must run the app
+     * rather than open its launcher script in the text editor. */
+    bool _is_app = (_ext == NULL)
+                 || strcasecmp(_ext, ".sh") == 0
+                 || strcasecmp(_ext, ".appimage") == 0
+                 || strstr(ipath, "/apps/") != NULL;
     __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
     __attribute__((weak)) void gui_spawn_app(const char *p);
-    if (_is_exec) {
+    if (_is_app) {
         if (gui_spawn_app) gui_spawn_app(ipath);
         g_desk_icon_dbl = -1;
         return;

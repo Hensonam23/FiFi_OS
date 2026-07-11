@@ -498,15 +498,20 @@ static void ev_map_request(const uint8_t *e) {
     xwin_t *w = xwin_add(window);
     x_change_event_mask(window, EV_PROPERTY_CHANGE);   /* watch title/serial */
     x_set_wm_state(window, 1 /*Normal*/);              /* ICCCM: window is managed */
-    /* Maximize the window to fill the rootful X screen so the app has no black
-     * X-root border around it. (Rootful presents the whole screen as one FiFi
-     * window; filling it with the app makes them coincide.) */
-    if (w) { w->x = 0; w->y = 0; w->w = s_screen_w; w->h = s_screen_h; }
-    x_configure(window, 0, 0, s_screen_w, s_screen_h, false);
+    /* Maximize the MAIN/document window to fill the rootful X screen so the app
+     * has no black X-root border. But only large windows: maximizing a small
+     * fixed-size dialog would blow it up to a mostly-black full-screen window.
+     * Dialogs/popups keep their natural size + position (drawn over the app). */
+    bool big = w && w->w >= s_screen_w * 2 / 5 && w->h >= s_screen_h * 2 / 5;
+    if (big) {
+        w->x = 0; w->y = 0; w->w = s_screen_w; w->h = s_screen_h;
+        x_configure(window, 0, 0, s_screen_w, s_screen_h, false);
+    }
     x_map_window(window);       /* honor the map (we are the redirect target) */
     /* Complete the ICCCM handshake so the client finalizes layout + paints:
      * tell it its final geometry and give it input focus. */
-    x_send_configure_notify(window, 0, 0, s_screen_w, s_screen_h);
+    if (w) x_send_configure_notify(window, w->x, w->y, w->w, w->h);
+    else   x_send_configure_notify(window, 0, 0, s_screen_w, s_screen_h);
     x_set_input_focus(window);
     /* Title the FiFi window with the app name. fifi-run writes it to a file
      * (reliable); fall back to the X window's _NET_WM_NAME/WM_NAME. */

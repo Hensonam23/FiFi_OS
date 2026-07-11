@@ -105,6 +105,29 @@ launch_dir() {
     # $1 = extracted squashfs-root dir. Detect Electron/Chromium and add the
     # flags they need on this box (root -> no sandbox, force wayland+swgl).
     dir="$1"; shift
+    # Discord-style "downloader" AppImage: it ships an updater_bootstrap that
+    # fetches the real (Electron) app to $HOME/.config on first run, then runs
+    # it. Do the download here and launch the fetched binary with Electron flags;
+    # the shared libs it needs (NSS, etc.) come from $RT/lib.
+    if [ -x "$dir/updater_bootstrap" ] && [ -f "$dir/discord" ]; then
+        export HOME=/fifi-data/home
+        mkdir -p "$HOME/.config/discord" 2>/dev/null || true
+        exe=$(ls -d "$HOME"/.config/discord/app-*/Discord 2>/dev/null | tail -1)
+        if [ -z "$exe" ]; then
+            ( cd "$dir" && LD_LIBRARY_PATH="$dir/usr/lib:$LD_LIBRARY_PATH" \
+              ./updater_bootstrap --no-zenity "$HOME/.config/discord" \
+              stable https://updates.discord.com/ ) >/tmp/discord-install.log 2>&1 || true
+            exe=$(ls -d "$HOME"/.config/discord/app-*/Discord 2>/dev/null | tail -1)
+        fi
+        if [ -n "$exe" ]; then
+            export LD_LIBRARY_PATH="$(dirname "$exe"):$LD_LIBRARY_PATH"
+            _sb_pid=1   # Electron keeps its main process alive
+            sandbox_exec "$exe" --no-sandbox --ozone-platform=wayland \
+                --disable-gpu --in-process-gpu "$@"
+        fi
+        echo "fifi-run: Discord bootstrap failed (see /tmp/discord-install.log)" >&2
+        exit 1
+    fi
     # X11-only apps (LibreOffice): no Wayland backend, so run them under a
     # rootful XWayland presented as a single FiFi window.
     if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
