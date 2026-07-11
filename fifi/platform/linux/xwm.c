@@ -669,6 +669,16 @@ static int x_process_one(void) {
 bool xwm_active(void) { return X.up; }
 int  xwm_fd(void)     { return X.up ? X.fd : -1; }
 
+/* Number of mapped, non-override X windows. The compositor hides the rootful
+ * XWayland screen window when this is 0 (no X app = nothing to show). */
+int xwm_x_window_count(void) {
+    if (!X.up) return 0;
+    int n = 0;
+    for (int i = 0; i < XWM_MAX_WINS; i++)
+        if (X.wins[i].window && X.wins[i].mapped && !X.wins[i].override_redirect) n++;
+    return n;
+}
+
 bool xwm_init(void) {
     if (X.up) return true;
     /* Respawn backoff so a crash-looping XWayland can't fork-bomb. */

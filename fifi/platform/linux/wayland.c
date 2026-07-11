@@ -346,6 +346,7 @@ typedef struct {
     bool         is_x11;
     uint32_t     x11_window;    /* X window id (for xwm_configure/close/focus) */
     bool         x11_override;  /* override-redirect (menu/tooltip: no chrome) */
+    bool         is_xwl_root;   /* the rootful XWayland screen (hidden when no X app) */
     /* xwayland_shell_v1: XWayland stamps each X window's surface with a 64-bit
      * serial (also written to the X window's WL_SURFACE_SERIAL property) so the
      * X window manager can correlate the X window to this surface. */
@@ -358,6 +359,12 @@ typedef struct {
 static inline bool wl_is_toplevel_role(const wl_surface_t *s) {
     return s && !s->is_popup && !s->is_subsurface &&
            (s->xdg_toplevel_id || s->is_x11);
+}
+/* The rootful XWayland screen is spawned at boot and stays alive, but it should
+ * only be shown while an X app is actually running in it — otherwise its empty
+ * black root would sit on the desktop. */
+static inline bool xwl_root_empty(const wl_surface_t *s) {
+    return s && s->is_xwl_root && xwm_x_window_count() == 0;
 }
 
 /* ── Client ───────────────────────────────────────────────────────────────── */
@@ -808,6 +815,7 @@ static void deco_grant_ssd(wl_client_t *c, wl_surface_t *s) {
 static bool ssd_decorated(const wl_surface_t *s) {
     if (!s || !s->ssd || s->is_popup || s->is_subsurface || !wl_is_toplevel_role(s))
         return false;
+    if (xwl_root_empty(s)) return false;   /* empty XWayland root: not shown */
     if (!s->mapped || s->minimized || !s->own_pix || s->own_w < 8 || s->own_h < 8)
         return false;
     /* Rootless X11 windows: override-redirect (menus/tooltips) are borderless;
@@ -1566,6 +1574,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             if (!strncmp(s->title, "Xwayland", 8)) {
                                 extern uint32_t console_font_height(void);
                                 s->ssd = true;
+                                s->is_xwl_root = true;   /* hidden while no X app runs */
                                 /* X11 buffers carry no meaningful alpha (X is
                                  * XRGB); blend would render the whole X screen
                                  * transparent. Blit it opaque instead. */
@@ -2680,7 +2689,7 @@ static wl_surface_t *wl_nth_toplevel(int idx, int *out_ci) {
             if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
             if (!s || !s->mapped || !s->own_pix || !wl_is_toplevel_role(s) ||
-                s->x11_override) continue;   /* override-redirect = no taskbar button */
+                s->x11_override || xwl_root_empty(s)) continue;  /* skip empty XWayland root */
             if (n == idx) { if (out_ci) *out_ci = ci; return s; }
             n++;
         }
@@ -3305,6 +3314,7 @@ void wayland_blit_surfaces(void) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
             if (!s || s->is_subsurface || s->is_popup) continue;
+            if (xwl_root_empty(s)) continue;   /* don't draw the empty XWayland root */
             if (s->z == 0) s->z = g_wl_z_next++;
             if (ntop < (int)(sizeof tops / sizeof tops[0]))
                 tops[ntop].ci = ci, tops[ntop].s = s, tops[ntop].oid = c->objs[oi].id, ntop++;

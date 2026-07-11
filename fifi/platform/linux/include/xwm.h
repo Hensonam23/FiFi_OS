@@ -35,6 +35,7 @@ void xwm_poll(void);       /* drain + dispatch pending X events (under g_mx)    
 int  xwm_fd(void);         /* X socket fd for poll(), or -1 when not connected    */
 void xwm_shutdown(void);   /* disconnect (e.g. XWayland died)                     */
 bool xwm_active(void);     /* connected and managing                              */
+int  xwm_x_window_count(void); /* mapped non-override X windows (0 = hide root)   */
 
 /* ── Compositor -> X requests (called by wayland.c when the user acts) ───────
  * The FiFi-side window geometry is authoritative once the user drags/resizes;
