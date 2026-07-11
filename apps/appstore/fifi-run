@@ -25,6 +25,9 @@ export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib$
 # no D-Bus / a11y on the box -> disable so toolkits don't hang or crash
 export NO_AT_BRIDGE=1 GTK_A11Y=none GNOME_ACCESSIBILITY=0 QT_ACCESSIBILITY=0
 export DBUS_SESSION_BUS_ADDRESS=disabled:
+# FiFi runs apps as root; RunImage/sharun bundles (e.g. Steam) refuse root unless
+# told it's allowed. Harmless for apps that don't use RunImage.
+export RIM_ALLOW_ROOT=1
 # software rendering (no GPU stack on the box yet)
 export LIBGL_ALWAYS_SOFTWARE=1
 # steer every toolkit to Wayland
@@ -202,6 +205,18 @@ launch_dir() {
         unset XDG_DATA_DIRS FONTCONFIG_PATH XKB_CONFIG_ROOT LD_LIBRARY_PATH
         export HOME=/home/fifi USER=fifi LOGNAME=fifi
         exec busybox unshare -U -- "$dir/AppRun" "$@"
+    fi
+    # RunImage / sharun bundles (e.g. Steam) ship their own rootfs and do their
+    # own bubblewrap containerization. Wrapping them in our unshare --mount breaks
+    # bwrap's pivot_root ("Invalid argument"), so run their AppRun DIRECTLY (no
+    # sandbox_exec) and give it a persistent, writable home. RIM_ALLOW_ROOT=1 (set
+    # above) lets it accept root.
+    if [ -d "$dir/rootfs" ] && [ -x "$dir/AppRun" ]; then
+        chmod 0666 "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" 2>/dev/null || true
+        mkdir -p /fifi-data/home 2>/dev/null || true
+        export HOME=/fifi-data/home
+        export APPDIR="$dir"; cd "$dir"
+        exec "$dir/AppRun" "$@"
     fi
     export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
     # Firefox/LibreWolf refuse to run as root ONLY when $HOME is owned by a
