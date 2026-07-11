@@ -690,6 +690,7 @@ uint64_t launcher_eff_w(void);
 uint64_t launcher_item_h(void);
 void vol_popup_draw(void);
 void popup_glass_invalidate(void);   /* drop cached frosted backdrop (call on popup open/close) */
+void menu_glass_invalidate(void);    /* same, for context menus */
 void fb_ctx_open_at(int win_slot, int row, bool is_dir, int32_t x, int32_t y);
 void fb_ctx_run(int item);
 

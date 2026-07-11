@@ -3258,7 +3258,8 @@ void gui_on_tick(void) {
             g_ctx_x = ctx_x;
             g_ctx_y = ctx_y;
             g_ctx_open = true;
-            ctx_draw();
+            menu_glass_invalidate();   /* recapture a fresh frosted backdrop */
+            full_redraw();             /* paint the desktop behind, then the glass menu */
             return;
         }
     }

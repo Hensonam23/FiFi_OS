@@ -478,6 +478,39 @@ void launcher_draw(void) {
 
 /* ── Context menu ────────────────────────────────────────────────────── */
 
+/* ── Frosted-glass backdrop for context menus (see popup_glass_bg) ──────────
+ * Context menus are mutually exclusive, so one shared backdrop buffer suffices.
+ * Capture the clean desktop behind the menu once, then restore + blend a
+ * translucent tint each draw so the desktop shows through without accumulating.
+ * Invalidated when a menu opens so it recaptures a fresh backdrop. */
+static uint32_t *g_menu_bg = 0;
+static uint64_t  g_mbg_x, g_mbg_y, g_mbg_w, g_mbg_h;
+
+void menu_glass_invalidate(void) {
+    if (g_menu_bg) { kfree(g_menu_bg); g_menu_bg = 0; }
+    g_mbg_w = 0; g_mbg_h = 0;
+}
+
+static void menu_glass_bg(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+                          uint32_t opaque_top, uint32_t opaque_bot) {
+    if (!g_theme.fx_glass) { console_fill_vgrad(x, y, w, h, opaque_top, opaque_bot); return; }
+    if (!g_menu_bg || g_mbg_w != w || g_mbg_h != h || g_mbg_x != x || g_mbg_y != y) {
+        if (g_menu_bg) { kfree(g_menu_bg); g_menu_bg = 0; }
+        g_menu_bg = (uint32_t *)kmalloc(w * h * 4u);
+        if (g_menu_bg) {
+            console_capture_rect(g_menu_bg, x, y, w, h);
+            g_mbg_x = x; g_mbg_y = y; g_mbg_w = w; g_mbg_h = h;
+        }
+    }
+    if (g_menu_bg) {
+        console_paste_rect(g_menu_bg, x, y, w, h);
+        console_blend_rect(x, y, w, h, 0x00141d30u, 202u);        /* frosted tint */
+        console_blend_rect(x, y + 1u, w, 1u, 0x00ffffffu, 26u);   /* top sheen */
+    } else {
+        console_fill_vgrad(x, y, w, h, opaque_top, opaque_bot);
+    }
+}
+
 void ctx_draw(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
@@ -497,7 +530,7 @@ void ctx_draw(void) {
     uint64_t total_h = 2u;
     for (int _i = 0; _i < (int)CTX_ITEMS; _i++)
         total_h += ctx_items[_i] ? CTX_ITEM_H : 8u;
-    console_fill_vgrad((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
+    menu_glass_bg((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, 0x003a5688u);
     console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, 0x00223048u);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, 0x00223048u);
