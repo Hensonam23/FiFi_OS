@@ -42,9 +42,10 @@ export ELECTRON_DISABLE_SANDBOX=1
 export USE_X11=false
 export APPIMAGE_EXTRACT_AND_RUN=1
 
-# Start a rootful XWayland (:0) on demand for apps that only speak X11 (e.g.
-# LibreOffice's "gen" VCL). Rootful = the whole X screen is ONE FiFi window
-# (the compositor has no X11 window-manager, so rootless can't map windows).
+# Start a ROOTLESS XWayland (:0) on demand for apps that only speak X11 (e.g.
+# LibreOffice's "gen" VCL). Rootless = each X11 window becomes its own FiFi
+# window with normal decorations and no black X-root border. The compositor's
+# built-in X11 window manager (xwm.c) maps + decorates these windows.
 # The X client libs, libEGL, and xkbcomp live in the persistent runtime; only
 # /usr resets each boot, so xkbcomp is re-seeded there (Xwayland execs it by
 # absolute path).
@@ -87,54 +88,17 @@ proc_running() {
 }
 
 ensure_xwayland() {
-    # hint the compositor with a friendly window title (XWayland reports only
-    # "Xwayland on :0"); the compositor relabels its window to this.
-    printf '%s' "${APP_NAME:-App}" > /tmp/xwayland-title 2>/dev/null || true
-    # Rootful XWayland presents the whole X screen as ONE FiFi window = one app.
-    # Reuse the running X server ONLY while an X app (soffice) is still attached
-    # to it. An XWayland left alive after its app closed has a stale/black X root
-    # that a new app won't repaint into — so tear that orphan down and start a
-    # fresh server. (A dead XWayland leaving only a socket is handled the same.)
-    if [ -S /tmp/.X11-unix/X0 ] && proc_running Xwayland && proc_running soffice.bin; then
-        return 0
-    fi
-    proc_running Xwayland && { busybox pkill -9 Xwayland 2>/dev/null; sleep 1; }
-    rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock 2>/dev/null || true
-    # xkbcomp: image ships it at /usr/bin; older boxes only have it in the runtime.
-    [ -x /usr/bin/xkbcomp ] || cp "$RT/bin/xkbcomp" /usr/bin/xkbcomp 2>/dev/null || true
-    # Client-side xkbcommon (GTK/Qt toolkits) looks for keymap data at the
-    # compiled-in default /usr/share/X11/xkb; /usr resets each boot, so link it
-    # to the runtime copy (without this, GTK apps abort with "Failed to create
-    # XKB keymap"). Harmless if /usr/share/X11/xkb already exists.
-    if [ ! -e /usr/share/X11/xkb ] && [ -d "$RT/share/X11/xkb" ]; then
-        mkdir -p /usr/share/X11 2>/dev/null && ln -s "$RT/share/X11/xkb" /usr/share/X11/xkb 2>/dev/null || true
-    fi
-    # xkb data: prefer the image copy, fall back to the runtime one.
-    xkbdir=/usr/share/X11/xkb
-    [ -d "$xkbdir" ] || xkbdir="$RT/share/X11/xkb"
-    # windowed (NOT -fullscreen) so the FiFi compositor can decorate it with a
-    # titlebar + traffic-lights and the user can move/resize it
-    # -displayfd: XWayland writes the display number to this fd ONLY once it is
-    # actually ready to accept client connections. Waiting on that (not the mere
-    # existence of the socket, which appears earlier during xkb/screen setup) is
-    # what reliably fixes the cold-start race that left soffice exiting to a
-    # black X root. Route fd 3 to a file and poll it.
-    : > /tmp/xwayland.ready 2>/dev/null || true
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    LD_LIBRARY_PATH="$RT/lib" \
-        busybox setsid /usr/bin/Xwayland :0 -geometry 1800x1050 \
-        -xkbdir "$xkbdir" -displayfd 3 </dev/null >/tmp/xwayland.log 2>&1 3>/tmp/xwayland.ready &
+    # XWayland is spawned and window-managed by the COMPOSITOR itself (rootless,
+    # launched with -wm so each X11 window becomes its own decorated FiFi window
+    # with no black X-root border; see xwm.c). We only wait for the compositor's
+    # window manager to be up: /tmp/xwm.ready implies XWayland is running and
+    # accepting clients on :0. (xwm removes the file if XWayland dies.)
     _i=0
-    while [ "$_i" -lt 150 ]; do
-        [ -s /tmp/xwayland.ready ] && break          # ready to accept clients
-        sleep 0.1; _i=$((_i + 1))
+    while [ "$_i" -lt 200 ]; do
+        [ -e /tmp/xwm.ready ] && [ -S /tmp/.X11-unix/X0 ] && return 0
+        sleep 0.05; _i=$((_i + 1))
     done
-    sleep 0.4   # tiny extra margin
-    # Warm up the fresh server: a cold XWayland fails its FIRST X client even
-    # after -displayfd (final init completes on first connect). Absorb that with
-    # a throwaway xkbcomp connection so the real app's first launch starts
-    # cleanly — otherwise the failed first attempt maps and leaves a stale window.
-    busybox timeout 4 /usr/bin/xkbcomp :0 /dev/null >/dev/null 2>&1 || true
+    return 0   # proceed anyway; the app's own retry loop tolerates a slow start
 }
 
 launch_dir() {
@@ -146,6 +110,10 @@ launch_dir() {
     if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
         ensure_xwayland
         export DISPLAY=:0
+        # Tell the compositor's X window manager what to title the window (the
+        # app name), instead of the raw "Xwayland on :0". Written before the app
+        # maps so the WM reads it on the first MapRequest.
+        printf '%s' "${APP_NAME:-App}" > /tmp/fifi-x11-title 2>/dev/null || true
         export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL: one rootful window (gtk3 makes a 2nd)
         # Scrub shared-runtime env that isn't meant for a raw-X11 soffice: an
         # invalid "disabled:" D-Bus address (soffice aborts during first-run

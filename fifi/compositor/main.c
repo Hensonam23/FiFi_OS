@@ -21,6 +21,7 @@
 #include "../platform/linux/vendor/lodepng.h"
 #include "limine.h"
 #include "mouse.h"
+#include "xwm.h"     /* rootless-XWayland window manager */
 
 /* Linux platform functions */
 void input_init(void);
@@ -566,6 +567,8 @@ int main(void) {
     pthread_t render_tid;
     pthread_create(&render_tid, NULL, render_thread_fn, NULL);
 
+    int s_xwm_probe = 0;   /* throttles X-WM connect attempts while X is down */
+
     /* ── Event loop: I/O only ────────────────────────────────────────────── */
     for (;;) {
         int nfds = 0;
@@ -592,6 +595,14 @@ int main(void) {
             pfd[nfds].events = POLLIN;
             nfds++;
         }
+        /* Rootless-XWayland window manager: poll its X socket alongside Wayland
+         * so LibreOffice and other X11 apps get their own decorated windows. */
+        int x_fd = xwm_fd();
+        if (x_fd >= 0 && nfds < MAX_PFD) {
+            pfd[nfds].fd     = x_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
 
         /* poll() outside the mutex — render thread can flush concurrently.
          * Never use timeout 0: that made gaming mode busy-poll a whole core for
@@ -604,6 +615,14 @@ int main(void) {
         /* ── IPC: accept new connections, read app frame messages ──────── */
         ipc_poll();
         wayland_poll();
+        /* Lazily connect the X window manager once XWayland is up (started on
+         * demand by fifi-run); retried at ~250ms cadence while not connected. */
+        if (xwm_active()) {
+            xwm_poll();
+        } else if (++s_xwm_probe >= 10) {   /* ~40ms: attach before the app maps */
+            s_xwm_probe = 0;
+            xwm_init();
+        }
 
         if (g_want_shot) { g_want_shot = 0; take_screenshot(); }
 

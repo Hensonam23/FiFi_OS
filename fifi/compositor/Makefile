@@ -25,6 +25,7 @@ SRCS := \
     ../platform/linux/audio.c \
     ../platform/linux/ipc.c \
     ../platform/linux/wayland.c \
+    ../platform/linux/xwm.c \
     ../platform/linux/png.c \
     ../platform/linux/font_ttf.c \
     ../platform/linux/vendor/lodepng.c \
@@ -75,6 +76,9 @@ $(BUILD)/comp/ipc.o: ../platform/linux/ipc.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/wayland.o: ../platform/linux/wayland.c | $(BUILD)/comp
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/comp/xwm.o: ../platform/linux/xwm.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/png.o: ../platform/linux/png.c | $(BUILD)/comp

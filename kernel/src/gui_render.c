@@ -228,18 +228,35 @@ uint64_t desk_icon_col_x(void) {
     return (flush < col_for_label) ? flush : col_for_label;  /* the more-left of the two */
 }
 
+/* Resolve icon i's top-left. Placed icons use their stored (x,y); the rest
+ * auto-stack in the right-edge column (only active+unplaced icons count, so a
+ * mix of dragged and default icons both lay out sensibly). */
+void desk_icon_pos(int i, uint64_t *ox, uint64_t *oy) {
+    if (i < 0 || i >= DESK_ICON_MAX) { *ox = 0; *oy = 0; return; }
+    if (g_desk_icons[i].placed) {
+        *ox = (uint64_t)(g_desk_icons[i].x < 0 ? 0 : g_desk_icons[i].x);
+        *oy = (uint64_t)(g_desk_icons[i].y < 0 ? 0 : g_desk_icons[i].y);
+        return;
+    }
+    uint64_t y = desk_top() + DESK_ICON_PAD;
+    for (int j = 0; j < i; j++) {
+        if (!g_desk_icons[j].active || g_desk_icons[j].placed) continue;
+        y += DESK_ICON_H + DESK_ICON_PAD;
+    }
+    *ox = desk_icon_col_x();
+    *oy = y;
+}
+
 void draw_desktop_icons(void) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    uint64_t dt = desk_top();
     uint64_t db = desk_bot();
-    /* Icons column along the right edge, top-down */
-    uint64_t icon_x = desk_icon_col_x();
-    uint64_t icon_y = dt + DESK_ICON_PAD;
 
     for (int i = 0; i < DESK_ICON_MAX; i++) {
         if (!g_desk_icons[i].active) continue;
-        if (icon_y + DESK_ICON_H > db) break;
+        uint64_t icon_x, icon_y;
+        desk_icon_pos(i, &icon_x, &icon_y);
+        if (icon_y + DESK_ICON_H > db) continue;   /* off the bottom of the work area */
 
         bool hov = (g_desk_icon_hover == i);
         bool sel = (g_desk_icon_sel   == i);
@@ -308,25 +325,23 @@ void draw_desktop_icons(void) {
         /* Plain label text — no background box or shadow behind it. */
         gui_draw_str_fg(llx, lly, lbuf, hov ? 0x00e0efffU : 0x00c0d8f0u);
 
-        g_desk_icons[i].active = g_desk_icons[i].active; /* touch to suppress warn */
-        icon_y += DESK_ICON_H + DESK_ICON_PAD;
     }
 }
 
 /* ── Desktop icon position helper ────────────────────────────────────── */
 /* Returns icon index at (mx,my), -1 if none */
 int desk_icon_at(int mx, int my) {
-    uint64_t dt = desk_top();
     uint64_t db = desk_bot();
-    uint64_t icon_x = desk_icon_col_x();
-    uint64_t icon_y = dt + DESK_ICON_PAD;
+    /* Iterate topmost-last so a dragged (placed) icon overlapping another wins
+     * the hit-test; here order is fine since placed icons rarely overlap. */
     for (int i = 0; i < DESK_ICON_MAX; i++) {
         if (!g_desk_icons[i].active) continue;
-        if (icon_y + DESK_ICON_H > db) break;
+        uint64_t icon_x, icon_y;
+        desk_icon_pos(i, &icon_x, &icon_y);
+        if (icon_y + DESK_ICON_H > db) continue;
         if ((uint64_t)mx >= icon_x - 2u && (uint64_t)mx < icon_x + DESK_ICON_W + 2u &&
             (uint64_t)my >= icon_y - 2u && (uint64_t)my < icon_y + DESK_ICON_H + 2u)
             return i;
-        icon_y += DESK_ICON_H + DESK_ICON_PAD;
     }
     return -1;
 }
@@ -735,6 +750,10 @@ void full_redraw(void) {
         fb_ctx_draw();
     if (g_txt_ctx_open)
         txt_ctx_draw();
+    if (g_icon_ctx_open)
+        icon_ctx_draw();
+    if (g_icon_props_open)
+        icon_props_draw();
 
     /* Toast notification overlay */
     if (g_toast_ticks > 0 && g_toast_msg[0]) {
@@ -814,6 +833,8 @@ void gui_draw_popups(void) {
     if (g_ctx_open)       ctx_draw();
     if (g_fb_ctx_open)    fb_ctx_draw();
     if (g_txt_ctx_open)   txt_ctx_draw();
+    if (g_icon_ctx_open)  icon_ctx_draw();
+    if (g_icon_props_open) icon_props_draw();
     if (g_toast_ticks > 0 && g_toast_msg[0]) {
         uint64_t fb_w2 = console_fb_width();
         uint64_t fw    = console_font_width();

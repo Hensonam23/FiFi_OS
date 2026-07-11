@@ -32,6 +32,27 @@ int         g_desk_icon_hover = -1;
 int         g_desk_icon_sel   = -1;
 int         g_desk_icon_dbl   = -1;
 uint64_t    g_desk_icon_click_t = 0;
+/* Drag-to-move state. g_icon_drag is the icon under a held left button (a drag
+ * candidate); g_icon_dragging flips true once the cursor moves past a threshold,
+ * which is what distinguishes a reposition from a launch click. */
+int         g_icon_drag       = -1;
+bool        g_icon_dragging   = false;
+int32_t     g_icon_drag_ox    = 0;   /* cursor offset within the icon cell */
+int32_t     g_icon_drag_oy    = 0;
+int32_t     g_icon_press_x    = 0;   /* where the press landed (drag threshold) */
+int32_t     g_icon_press_y    = 0;
+/* Per-icon right-click menu (Open / Properties / Remove). */
+bool        g_icon_ctx_open   = false;
+int         g_icon_ctx_target = -1;
+int32_t     g_icon_ctx_x      = 0;
+int32_t     g_icon_ctx_y      = 0;
+int         g_icon_ctx_hover  = -1;
+/* Properties popup for a desktop icon. */
+bool        g_icon_props_open = false;
+int         g_icon_props_target = -1;
+/* Slot index that the most recent gui_add_desktop_icon() filled (-1 if full).
+ * Lets gui_desktop_load restore a saved position onto the icon it just added. */
+int         g_desk_icon_last_added = -1;
 
 /* weak: real impl in platform.c for linux-desktop */
 __attribute__((weak)) bool platform_load_image(const char *path __attribute__((unused)),
@@ -459,7 +480,12 @@ void gui_desktop_save(void) {
     for (int i = 0; i < DESK_ICON_MAX; i++) {
         if (!g_desk_icons[i].active) continue;
         if (strcmp(g_desk_icons[i].path, "/bin/fifi-installer") == 0) continue;
-        fprintf(f, "icon=%s\t%s\n", g_desk_icons[i].path, g_desk_icons[i].label);
+        /* Format: path \t label \t placed \t x \t y  (trailing fields are
+         * optional; an old 2-field line loads as a default auto-column icon). */
+        fprintf(f, "icon=%s\t%s\t%d\t%d\t%d\n",
+                g_desk_icons[i].path, g_desk_icons[i].label,
+                g_desk_icons[i].placed ? 1 : 0,
+                g_desk_icons[i].x, g_desk_icons[i].y);
     }
     fclose(f);
 }
@@ -470,13 +496,28 @@ void gui_desktop_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (strncmp(line, "icon=", 5) != 0) continue;
         char *path = line + 5;
-        /* Split on TAB: path\tlabel; strip trailing newline. */
+        char *nl = strchr(path, '\n'); if (nl) *nl = '\0';
+        /* Split TAB-separated fields: path \t label \t placed \t x \t y. */
+        char *label = "", *sp = "", *sx = "", *sy = "";
         char *tab = strchr(path, '\t');
-        char *label = "";
-        if (tab) { *tab = '\0'; label = tab + 1; }
-        char *nl = strchr(label, '\n'); if (nl) *nl = '\0';
-        nl = strchr(path, '\n'); if (nl) *nl = '\0';
-        if (path[0]) gui_add_desktop_icon(path, label);
+        if (tab) { *tab = '\0'; label = tab + 1;
+            tab = strchr(label, '\t');
+            if (tab) { *tab = '\0'; sp = tab + 1;
+                tab = strchr(sp, '\t');
+                if (tab) { *tab = '\0'; sx = tab + 1;
+                    tab = strchr(sx, '\t');
+                    if (tab) { *tab = '\0'; sy = tab + 1; }
+                }
+            }
+        }
+        if (!path[0]) continue;
+        gui_add_desktop_icon(path, label);
+        int idx = g_desk_icon_last_added;
+        if (idx >= 0 && sp[0] == '1') {
+            g_desk_icons[idx].placed = true;
+            g_desk_icons[idx].x = (int32_t)atoi(sx);
+            g_desk_icons[idx].y = (int32_t)atoi(sy);
+        }
     }
     fclose(f);
 }
@@ -621,6 +662,42 @@ void gui_init(void) {
 void gui_add_desktop_icon(const char *path, const char *label);
 void gui_set_wallpaper_image(const char *path);
 
+/* Launch the app/document behind a desktop icon. Executables (no extension)
+ * open on a single click; documents require a double-click (600ms window),
+ * unless `force` is set (the right-click menu's "Open" opens immediately). */
+static void desk_icon_launch(int idx, bool force) {
+    if (idx < 0 || idx >= DESK_ICON_MAX || !g_desk_icons[idx].active) return;
+    const char *ipath = g_desk_icons[idx].path;
+    const char *_base = strrchr(ipath, '/');
+    _base = _base ? _base + 1 : ipath;
+    bool _is_exec = (strrchr(_base, '.') == NULL);
+    __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
+    __attribute__((weak)) void gui_spawn_app(const char *p);
+    if (_is_exec) {
+        if (gui_spawn_app) gui_spawn_app(ipath);
+        g_desk_icon_dbl = -1;
+        return;
+    }
+    uint64_t now = pit_ticks();
+    if (force || (g_desk_icon_dbl == idx && now - g_desk_icon_click_t < 60u)) {
+        const char *ext = strrchr(ipath, '.');
+        bool is_img = false;
+        if (ext) {
+            static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
+            for (int _ii = 0; imgs[_ii]; _ii++)
+                if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
+        }
+        if (is_img && gui_spawn_app_with_arg)
+            gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
+        else if (gui_spawn_app_with_arg)
+            gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
+        g_desk_icon_dbl = -1;
+    } else {
+        g_desk_icon_dbl     = idx;
+        g_desk_icon_click_t = now;
+    }
+}
+
 /* ── File browser context menu executor (shared by keyboard + mouse) ── */
 
 void gui_on_tick(void) {
@@ -718,6 +795,92 @@ void gui_on_tick(void) {
             btn_pressed = true;
             mx = sx;
             my = sy;
+        }
+    }
+
+    /* ── Desktop icon drag in progress (precedes all other handlers) ────── */
+    if (g_icon_drag >= 0 && g_desk_icons[g_icon_drag].active) {
+        /* End the drag on release OR any time the button is no longer actually
+         * held (guards against a stuck candidate if a press ever arrives without
+         * a matching release). */
+        if (btn_released || !lbtn) {
+            if (g_icon_dragging) {
+                g_desk_icons[g_icon_drag].placed = true;   /* commit + persist */
+                gui_desktop_save();
+            } else {
+                desk_icon_launch(g_icon_drag, false);      /* plain click = open */
+            }
+            g_icon_drag = -1;
+            g_icon_dragging = false;
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+            return;
+        }
+        int32_t adx = mx - g_icon_press_x, ady = my - g_icon_press_y;
+        if (adx < 0) adx = -adx;
+        if (ady < 0) ady = -ady;
+        if (!g_icon_dragging && (adx > 4 || ady > 4)) g_icon_dragging = true;
+        if (g_icon_dragging) {
+            int32_t nx = mx - g_icon_drag_ox, ny = my - g_icon_drag_oy;
+            int32_t minx = (int32_t)desk_left(), miny = (int32_t)desk_top();
+            int32_t maxx = (int32_t)desk_right() - (int32_t)DESK_ICON_W;
+            int32_t maxy = (int32_t)desk_bot()   - (int32_t)DESK_ICON_H;
+            if (nx < minx) nx = minx;
+            if (ny < miny) ny = miny;
+            if (nx > maxx) nx = maxx;
+            if (ny > maxy) ny = maxy;
+            g_desk_icons[g_icon_drag].placed = true;
+            g_desk_icons[g_icon_drag].x = nx;
+            g_desk_icons[g_icon_drag].y = ny;
+            full_redraw();
+        }
+        return;
+    }
+
+    /* ── Desktop icon properties popup: any click dismisses it ──────────── */
+    if (g_icon_props_open && (btn_pressed || rbtn_pressed)) {
+        g_icon_props_open = false;
+        menu_glass_invalidate();
+        full_redraw();
+        int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+        return;
+    }
+
+    /* ── Desktop icon right-click menu (Open / Properties / Remove) ─────── */
+    if (g_icon_ctx_open) {
+        int32_t cx, cy; uint64_t cw, ch;
+        icon_ctx_rect(&cx, &cy, &cw, &ch);
+        bool inside = ((int32_t)mx >= cx && (uint64_t)mx < (uint64_t)cx + cw &&
+                       (int32_t)my >= cy && (uint64_t)my < (uint64_t)cy + ch);
+        int item = -1;
+        if (inside) {
+            int rel = (int)my - (cy + 1);
+            if (rel >= 0) { int it = rel / (int)CTX_ITEM_H;
+                if (it >= 0 && it < ICON_CTX_ITEMS) item = it; }
+        }
+        if (item != g_icon_ctx_hover) { g_icon_ctx_hover = item; full_redraw(); }
+
+        if (btn_pressed || rbtn_pressed) {
+            int target = g_icon_ctx_target;
+            g_icon_ctx_open = false;
+            if (inside && item >= 0 && target >= 0 && g_desk_icons[target].active) {
+                if (item == 0) {                 /* Open */
+                    desk_icon_launch(target, true);
+                } else if (item == 1) {          /* Properties */
+                    g_icon_props_open   = true;
+                    g_icon_props_target = target;
+                    menu_glass_invalidate();
+                } else if (item == 2) {          /* Remove */
+                    g_desk_icons[target].active = false;
+                    if (g_desk_icon_sel == target) g_desk_icon_sel = -1;
+                    if (g_desk_icon_dbl == target) g_desk_icon_dbl = -1;
+                    gui_desktop_save();
+                }
+            }
+            menu_glass_invalidate();
+            full_redraw();
+            int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
+            return;
         }
     }
 
@@ -3128,49 +3291,40 @@ void gui_on_tick(void) {
             g_desk_icon_hover = new_hov;
             if (!g_launcher_open && !g_ctx_open) full_redraw();
         }
-        /* Left-click on desktop icon */
+        /* Left-press on a desktop icon starts a drag candidate; the actual
+         * launch happens on release only if the icon was not moved (so a click
+         * still opens it, but a click-and-drag repositions it instead).
+         * A drag needs a genuinely-held button: a SYNTHETIC click (mouse_click/
+         * IPC, where lbtn stays false so there is never a matching release) must
+         * launch immediately, or the icon would stick to the cursor forever. */
         if (btn_pressed && new_hov >= 0) {
-            g_desk_icon_sel = new_hov;
-            const char *ipath = g_desk_icons[new_hov].path;
-            const char *_base = strrchr(ipath, '/');
-            _base = _base ? _base + 1 : ipath;
-            bool _is_exec = (strrchr(_base, '.') == NULL);
-            __attribute__((weak)) void gui_spawn_app_with_arg(const char *p, const char *a);
-            __attribute__((weak)) void gui_spawn_app(const char *p);
-            if (_is_exec) {
-                /* Executables (no extension) open on single click */
-                if (gui_spawn_app) gui_spawn_app(ipath);
-                g_desk_icon_dbl = -1;
+            g_desk_icon_sel   = new_hov;
+            g_icon_ctx_open   = false;
+            if (lbtn) {
+                g_icon_drag     = new_hov;
+                g_icon_dragging = false;
+                g_icon_press_x  = mx;
+                g_icon_press_y  = my;
+                uint64_t ix, iy; desk_icon_pos(new_hov, &ix, &iy);
+                g_icon_drag_ox  = mx - (int32_t)ix;
+                g_icon_drag_oy  = my - (int32_t)iy;
             } else {
-                /* Documents open on double-click (600ms window) */
-                uint64_t now = pit_ticks();
-                if (g_desk_icon_dbl == new_hov && now - g_desk_icon_click_t < 60u) {
-                    const char *ext = strrchr(ipath, '.');
-                    bool is_img = false;
-                    if (ext) {
-                        static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
-                        for (int _ii = 0; imgs[_ii]; _ii++)
-                            if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
-                    }
-                    if (is_img && gui_spawn_app_with_arg)
-                        gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
-                    else if (gui_spawn_app_with_arg)
-                        gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
-                    g_desk_icon_dbl = -1;
-                } else {
-                    g_desk_icon_dbl     = new_hov;
-                    g_desk_icon_click_t = now;
-                }
+                desk_icon_launch(new_hov, false);
             }
             full_redraw();
             int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
         }
-        /* Right-click on desktop icon: remove */
+        /* Right-click on a desktop icon opens its context menu (Open,
+         * Properties, Remove) instead of deleting it outright. */
         if (rbtn_pressed && new_hov >= 0) {
-            g_desk_icons[new_hov].active = false;
-            if (g_desk_icon_sel == new_hov) g_desk_icon_sel = -1;
-            if (g_desk_icon_dbl == new_hov) g_desk_icon_dbl = -1;
-            gui_desktop_save();
+            g_desk_icon_sel   = new_hov;
+            g_icon_ctx_open   = true;
+            g_icon_ctx_target = new_hov;
+            g_icon_ctx_hover  = -1;
+            g_icon_ctx_x      = mx;
+            g_icon_ctx_y      = my;
+            g_icon_props_open = false;
+            menu_glass_invalidate();
             full_redraw();
             int32_t _cx, _cy; mouse_consume_click(&_cx, &_cy);
             return;
@@ -4750,6 +4904,7 @@ void gui_set_wallpaper_image(const char *path) {
 
 /* Add a desktop icon shortcut. label may be NULL (defaults to basename of path). */
 void gui_add_desktop_icon(const char *path, const char *label) {
+    g_desk_icon_last_added = -1;
     if (!path) return;
     /* Find an empty slot */
     for (int i = 0; i < DESK_ICON_MAX; i++) {
@@ -4760,6 +4915,10 @@ void gui_add_desktop_icon(const char *path, const char *label) {
             else
                 g_desk_icons[i].label[0] = '\0';
             g_desk_icons[i].active = true;
+            g_desk_icons[i].placed = false;   /* fresh slot: default auto-column */
+            g_desk_icons[i].x = 0;
+            g_desk_icons[i].y = 0;
+            g_desk_icon_last_added = i;
             full_redraw();
             return;
         }

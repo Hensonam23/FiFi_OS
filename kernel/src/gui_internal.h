@@ -158,6 +158,8 @@ typedef struct {
     char path[256];
     char label[48];
     bool active;
+    bool placed;        /* true once the user has dragged it to a custom spot */
+    int32_t x, y;       /* custom top-left (valid when placed) */
 } desk_icon_t;
 
 #define ACCENT_PRESET_COUNT 16
@@ -328,6 +330,19 @@ extern int          g_desk_icon_hover;
 extern int          g_desk_icon_sel;
 extern int          g_desk_icon_dbl;
 extern uint64_t     g_desk_icon_click_t;
+/* Per-icon right-click menu + properties popup (see icon_ctx_draw). */
+extern bool         g_icon_ctx_open;
+extern int          g_icon_ctx_target;
+extern int32_t      g_icon_ctx_x, g_icon_ctx_y;
+extern int          g_icon_ctx_hover;
+extern bool         g_icon_props_open;
+extern int          g_icon_props_target;
+#define ICON_CTX_ITEMS 3
+void icon_ctx_draw(void);
+void icon_props_draw(void);
+uint64_t icon_ctx_w(void);
+void icon_ctx_rect(int32_t *ox, int32_t *oy, uint64_t *ow, uint64_t *oh);
+const char *desk_icon_basename(const char *path);
 
 extern window_t     g_wins[MAX_WINS];
 extern int          g_z[MAX_WINS];
@@ -704,6 +719,7 @@ uint64_t desk_icon_col_x(void);
 void draw_desktop_info(void);
 void draw_resize_hint(int slot, resize_dir_t dir);
 int  desk_icon_at(int mx, int my);
+void desk_icon_pos(int i, uint64_t *ox, uint64_t *oy);
 void gui_draw_popups(void);
 
 /* ── Forward declarations: gui_settings.c ───────────────────────────── */

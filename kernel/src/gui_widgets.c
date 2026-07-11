@@ -555,6 +555,129 @@ void ctx_draw(void) {
     (void)fw;
 }
 
+/* ── Desktop icon right-click menu ──────────────────────────────────────── */
+static const char *icon_ctx_items[ICON_CTX_ITEMS] = { "Open", "Properties", "Remove" };
+
+uint64_t icon_ctx_w(void) {
+    uint64_t fw = console_font_width();
+    uint64_t maxlen = 0;
+    for (int i = 0; i < ICON_CTX_ITEMS; i++) {
+        uint64_t l = (uint64_t)gui_strlen(icon_ctx_items[i]);
+        if (l > maxlen) maxlen = l;
+    }
+    return maxlen * fw + 40u;
+}
+
+/* Final on-screen rect of the icon menu (clamped so it never runs off-screen).
+ * Shared by the draw and the click hit-test so both agree. */
+void icon_ctx_rect(int32_t *ox, int32_t *oy, uint64_t *ow, uint64_t *oh) {
+    uint64_t cw = icon_ctx_w();
+    uint64_t ch = (uint64_t)ICON_CTX_ITEMS * CTX_ITEM_H + 2u;
+    int32_t cx = g_icon_ctx_x, cy = g_icon_ctx_y;
+    uint64_t fbw = console_fb_width(), fbh = console_fb_height();
+    if ((uint64_t)cx + cw > fbw) cx = (int32_t)(fbw > cw ? fbw - cw : 0u);
+    if ((uint64_t)cy + ch > fbh) cy = (int32_t)(fbh > ch ? fbh - ch : 0u);
+    if (cx < 0) cx = 0;
+    if (cy < 0) cy = 0;
+    *ox = cx; *oy = cy; *ow = cw; *oh = ch;
+}
+
+void icon_ctx_draw(void) {
+    if (!g_icon_ctx_open) return;
+    uint64_t fh = console_font_height();
+    int32_t cx, cy; uint64_t cw, total_h;
+    icon_ctx_rect(&cx, &cy, &cw, &total_h);
+
+    menu_glass_bg((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, 0x003a5688u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, 0x00223048u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, 0x00223048u);
+    console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, 0x00223048u);
+
+    uint64_t ry = (uint64_t)cy + 1u;
+    for (int i = 0; i < ICON_CTX_ITEMS; i++) {
+        bool hov = (g_icon_ctx_hover == i);
+        if (hov)
+            console_fill_vgrad((uint64_t)cx + 3u, ry + 1u, cw - 6u, CTX_ITEM_H - 2u,
+                               0x003a6cc8u, 0x002a4f9cu);
+        uint64_t spx = (uint64_t)cx + 14u;
+        uint64_t spy = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
+        gui_draw_str_fg(spx, spy, icon_ctx_items[i], hov ? 0x00f2f7ffu : COL_LAUNCH_FG);
+        ry += CTX_ITEM_H;
+    }
+}
+
+/* ── Desktop icon properties popup ──────────────────────────────────────── */
+void icon_props_draw(void) {
+    if (!g_icon_props_open) return;
+    int idx = g_icon_props_target;
+    if (idx < 0 || idx >= DESK_ICON_MAX || !g_desk_icons[idx].active) return;
+    uint64_t fw = console_font_width();
+    uint64_t fh = console_font_height();
+    const char *path  = g_desk_icons[idx].path;
+    const char *label = g_desk_icons[idx].label[0]
+                        ? g_desk_icons[idx].label : desk_icon_basename(path);
+    const char *base  = strrchr(path, '/'); base = base ? base + 1 : path;
+    bool is_exec = (strrchr(base, '.') == NULL);
+    const char *ext = strrchr(path, '.');
+
+    uint64_t fbw = console_fb_width(), fbh = console_fb_height();
+    uint64_t w  = fbw > 620u ? 560u : (fbw > 120u ? fbw - 60u : fbw);
+    uint64_t rowh = fh + 10u;
+    uint64_t titleh = fh + 14u;
+    uint64_t h  = titleh + rowh * 4u + 22u;
+    uint64_t x  = (fbw > w) ? (fbw - w) / 2u : 0u;
+    uint64_t y  = (fbh > h) ? (fbh - h) / 2u : 0u;
+
+    /* No full-screen dim: a per-frame blend over the whole screen would
+     * accumulate to solid black. The popup's own frosted-glass backdrop
+     * (captured once below) is enough to make it read as a dialog. */
+    menu_glass_bg(x, y, w, h, 0x001a2238u, 0x00101625u);
+    console_fill_rect(x, y, w, 1u, 0x004268a0u);
+    console_fill_rect(x, y + h - 1u, w, 1u, 0x00223048u);
+    console_fill_rect(x, y, 1u, h, 0x00223048u);
+    console_fill_rect(x + w - 1u, y, 1u, h, 0x00223048u);
+
+    /* Title bar */
+    console_fill_vgrad(x + 1u, y + 1u, w - 2u, titleh, 0x00223558u, 0x00182740u);
+    gui_draw_str_fg(x + 14u, y + (titleh - fh) / 2u + 1u, "Properties", 0x00eaf2ffu);
+    /* Close [X] box, top-right */
+    uint64_t bx = x + w - 26u, by = y + 5u;
+    console_fill_rect(bx, by, 20u, 20u, 0x00803038u);
+    gui_draw_str_fg(bx + 6u, by + (20u - fh) / 2u, "x", 0x00ffe0e0u);
+
+    /* Truncate a value string to fit inside the inner width. */
+    uint64_t inner = w - 28u;
+    uint64_t maxch = fw ? inner / fw : 40u;
+
+    struct { const char *k; const char *v; } rows[4];
+    char tbuf[64];
+    if (is_exec)              strncpy(tbuf, "Application", sizeof tbuf - 1);
+    else if (ext) { tbuf[0] = '\0'; strncpy(tbuf, ext, sizeof tbuf - 1); strncat(tbuf, " document", sizeof tbuf - 1 - gui_strlen(tbuf)); }
+    else                      strncpy(tbuf, "File", sizeof tbuf - 1);
+    tbuf[sizeof tbuf - 1] = '\0';
+    rows[0].k = "Name";     rows[0].v = label;
+    rows[1].k = "Type";     rows[1].v = tbuf;
+    rows[2].k = "Location"; rows[2].v = "Desktop";
+    rows[3].k = "Path";     rows[3].v = path;
+
+    uint64_t ry = y + titleh + 8u;
+    for (int i = 0; i < 4; i++) {
+        char line[320];
+        line[0] = '\0';
+        strncpy(line, rows[i].k, sizeof line - 1);
+        strncat(line, ": ", sizeof line - 1 - gui_strlen(line));
+        strncat(line, rows[i].v, sizeof line - 1 - gui_strlen(line));
+        line[sizeof line - 1] = '\0';
+        if ((uint64_t)gui_strlen(line) > maxch && maxch > 3u) {
+            line[maxch - 3u] = '.'; line[maxch - 2u] = '.'; line[maxch - 1u] = '.';
+            line[maxch] = '\0';
+        }
+        gui_draw_str_fg(x + 14u, ry, line, 0x00d6e2f4u);
+        ry += rowh;
+    }
+}
+
 /* ── Text editor context menu draw ──────────────────────────────────── */
 void txt_ctx_draw(void) {
     if (!g_txt_ctx_open) return;

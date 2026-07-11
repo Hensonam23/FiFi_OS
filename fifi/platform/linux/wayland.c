@@ -30,6 +30,8 @@
 #include <poll.h>
 #include <time.h>
 
+#include "xwm.h"   /* rootless-XWayland window manager (X11-side; see xwm.c) */
+
 /* ── Wire protocol constants ─────────────────────────────────────────────── */
 
 /* wl_display (object 1) opcodes */
@@ -200,6 +202,15 @@
 #define WL_SUBCOMP_DESTROY        0
 #define WL_SUBCOMP_GET_SUBSURFACE 1
 
+/* xwayland_shell_v1 / xwayland_surface_v1 (rootless XWayland). The shell lets
+ * XWayland tag each X window's wl_surface with a 64-bit serial; the same serial
+ * is written to the X window's WL_SURFACE_SERIAL property, so xwm.c can pair the
+ * two. */
+#define XWL_SHELL_DESTROY               0   /* request */
+#define XWL_SHELL_GET_XWAYLAND_SURFACE  1   /* request: new_id, wl_surface */
+#define XWL_SURFACE_SET_SERIAL          0   /* request: uint lo, uint hi */
+#define XWL_SURFACE_DESTROY             1   /* request */
+
 /* wl_subsurface opcodes (requests) */
 #define WL_SUBSURF_DESTROY        0
 #define WL_SUBSURF_SET_POSITION   1
@@ -244,6 +255,8 @@ typedef enum {
     OBJ_TL_DECO,        /* data ALIASES a wl_surface_t — never freed here */
     OBJ_KDE_DECO_MGR,   /* org_kde_kwin_server_decoration_manager (GTK3/Firefox) */
     OBJ_KDE_DECO,       /* org_kde_kwin_server_decoration; data ALIASES a wl_surface_t */
+    OBJ_XWL_SHELL,      /* xwayland_shell_v1 (rootless XWayland correlation) */
+    OBJ_XWL_SURFACE,    /* xwayland_surface_v1; data ALIASES a wl_surface_t */
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -326,7 +339,26 @@ typedef struct {
     /* Pending destroy: set by DESTROY, cleaned up on next COMMIT so Firefox can
      * receive buffer_release before the surface is gone (fixes tab-close crash). */
     bool         pending_destroy;
+    /* Rootless XWayland: this Wayland surface is the content of an X11 window
+     * managed by xwm.c. It has no xdg_toplevel (XWayland drives no xdg-shell for
+     * its windows); it is presented as a FiFi toplevel anyway and its resize/
+     * close/focus route back to the X server via xwm_* instead of xdg-shell. */
+    bool         is_x11;
+    uint32_t     x11_window;    /* X window id (for xwm_configure/close/focus) */
+    bool         x11_override;  /* override-redirect (menu/tooltip: no chrome) */
+    /* xwayland_shell_v1: XWayland stamps each X window's surface with a 64-bit
+     * serial (also written to the X window's WL_SURFACE_SERIAL property) so the
+     * X window manager can correlate the X window to this surface. */
+    uint64_t     xwl_serial;
 } wl_surface_t;
+
+/* "Is a managed toplevel window" — an xdg_toplevel OR a rootless-XWayland X11
+ * window. Both are drawn, decorated (unless override-redirect), stacked, and get
+ * a taskbar button. Popups/subsurfaces never qualify. */
+static inline bool wl_is_toplevel_role(const wl_surface_t *s) {
+    return s && !s->is_popup && !s->is_subsurface &&
+           (s->xdg_toplevel_id || s->is_x11);
+}
 
 /* ── Client ───────────────────────────────────────────────────────────────── */
 #define WL_RECV_BUF 65536
@@ -514,10 +546,10 @@ static void free_obj_data(wl_obj_t *o) {
         }
         /* else: already freed via another reference — skip silently (no abort). */
     } else if (o->type == OBJ_SUBSURFACE || o->type == OBJ_TL_DECO ||
-               o->type == OBJ_KDE_DECO) {
-        /* A subsurface / decoration is only a ROLE handle aliasing a wl_surface_t
-         * owned by that surface's OBJ_SURFACE slot. It does NOT own the pointer —
-         * freeing it here double-frees the surface. Drop the alias. */
+               o->type == OBJ_KDE_DECO || o->type == OBJ_XWL_SURFACE) {
+        /* A subsurface / decoration / xwayland_surface is only a ROLE handle
+         * aliasing a wl_surface_t owned by that surface's OBJ_SURFACE slot. It
+         * does NOT own the pointer — freeing here double-frees. Drop the alias. */
     } else if (o->data) {
         free(o->data);
     }
@@ -641,6 +673,7 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
     send_registry_global(c, reg_id,  7, "wl_subcompositor",       1);
     send_registry_global(c, reg_id,  8, "zxdg_decoration_manager_v1", 1);
     send_registry_global(c, reg_id,  9, "org_kde_kwin_server_decoration_manager", 1);
+    send_registry_global(c, reg_id, 10, "xwayland_shell_v1",      1);
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -695,6 +728,17 @@ static void send_output_info(wl_client_t *c, uint32_t out_id) {
 static void send_toplevel_configure(wl_client_t *c, wl_surface_t *s,
                                      int32_t cw, int32_t ch,
                                      uint32_t st1, uint32_t st2) {
+    /* Rootless-XWayland windows have no xdg_toplevel: a configure must resize
+     * the X window instead. Position (s->x/y) is already set by the caller for
+     * maximize/snap paths; push the new size + position to the X server. */
+    if (s->is_x11) {
+        if (cw > 0) s->w = cw;
+        if (ch > 0) s->h = ch;
+        xwm_configure(s->x11_window, s->x, s->y,
+                      cw > 0 ? cw : s->w, ch > 0 ? ch : s->h);
+        (void)st1; (void)st2;
+        return;
+    }
     uint32_t ser = next_serial(c);
     s->serial = ser;
     if (c->output_id && s->surface_id) {
@@ -723,6 +767,15 @@ static void send_xdg_surface_configure(wl_client_t *c, wl_surface_t *s) {
 }
 
 static void wl_client_flush(wl_client_t *c);
+
+/* Ask a toplevel to close: xdg_toplevel.close for Wayland clients, a polite
+ * WM_DELETE_WINDOW for rootless-XWayland windows. */
+static void toplevel_request_close(wl_client_t *c, wl_surface_t *s) {
+    if (s->is_x11) { xwm_close(s->x11_window); return; }
+    int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
+    wl_end_msg(c, h);
+    wl_client_flush(c);
+}
 
 /* Grant server-side decorations: the client drops its own titlebar and the
  * compositor draws the FiFi chrome instead. The window is re-placed as a
@@ -753,10 +806,13 @@ static void deco_grant_ssd(wl_client_t *c, wl_surface_t *s) {
  * So: decorate if the center is opaque, OR it's transparent but smaller than the
  * full display (a real window, not the phantom host). */
 static bool ssd_decorated(const wl_surface_t *s) {
-    if (!s || !s->ssd || s->is_popup || s->is_subsurface || !s->xdg_toplevel_id)
+    if (!s || !s->ssd || s->is_popup || s->is_subsurface || !wl_is_toplevel_role(s))
         return false;
     if (!s->mapped || s->minimized || !s->own_pix || s->own_w < 8 || s->own_h < 8)
         return false;
+    /* Rootless X11 windows: override-redirect (menus/tooltips) are borderless;
+     * a normal X11 toplevel is always a real, opaque window → always decorate. */
+    if (s->is_x11) return !s->x11_override;
     uint32_t px = s->own_pix[(int64_t)(s->own_h / 2) * (int64_t)s->own_w + s->own_w / 2];
     if ((px >> 24) != 0) return true;                 /* opaque center → real window */
     return (s->own_w < g_w || s->own_h < g_h);        /* transparent but not full-screen → real window */
@@ -963,7 +1019,7 @@ static uint32_t g_kbd_sid   = 0;
  * bumped when a window is focused/clicked so the active window comes forward. */
 static uint32_t g_wl_z_next = 1;
 static void wl_toplevel_raise(wl_surface_t *s) {
-    if (s && !s->is_popup && !s->is_subsurface && s->xdg_toplevel_id)
+    if (wl_is_toplevel_role(s))
         s->z = g_wl_z_next++;
 }
 
@@ -1105,6 +1161,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 wl_push_u32(c, 2 /* Server */);
                 wl_end_msg(c, dh);
                 wl_client_flush(c);
+            } else if (name == 10 && strncmp(iface, "xwayland_shell_v1", iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_XWL_SHELL, NULL);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -1735,6 +1793,40 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         break;
     }
 
+    case OBJ_XWL_SHELL:
+        if (opcode == XWL_SHELL_GET_XWAYLAND_SURFACE && args_len >= 8) {
+            /* get_xwayland_surface(new_id, wl_surface): the new object ALIASES
+             * the existing wl_surface so set_serial can stamp it. */
+            uint32_t xs_id, surf_id;
+            memcpy(&xs_id,   args,     4);
+            memcpy(&surf_id, args + 4, 4);
+            wl_obj_t *so = wl_find_obj(c, surf_id);
+            if (!so || so->type != OBJ_SURFACE) so = wl_find_obj_any(surf_id);
+            wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
+            wl_new_obj(c, xs_id, OBJ_XWL_SURFACE, s);
+            fprintf(stderr, "[wayland] xwl get_xwayland_surface obj=%u surface=%u (s=%p)\n",
+                    xs_id, surf_id, (void *)s);
+        } else if (opcode == XWL_SHELL_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+
+    case OBJ_XWL_SURFACE: {
+        wl_surface_t *xs = obj ? obj->data : NULL;
+        if (opcode == XWL_SURFACE_SET_SERIAL && args_len >= 8) {
+            uint32_t lo, hi;
+            memcpy(&lo, args,     4);
+            memcpy(&hi, args + 4, 4);
+            if (xs) xs->xwl_serial = ((uint64_t)hi << 32) | lo;
+            fprintf(stderr, "[wayland] xwl set_serial %llu on surface %u\n",
+                    xs ? (unsigned long long)xs->xwl_serial : 0ULL,
+                    xs ? xs->surface_id : 0);
+        } else if (opcode == XWL_SURFACE_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+    }
+
     case OBJ_SUBCOMPOSITOR:
         if (opcode == WL_SUBCOMP_GET_SUBSURFACE && args_len >= 12) {
             /* get_subsurface(new id sub, surface, parent): assign the subsurface
@@ -2143,14 +2235,21 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                         if (nh < 150) nh = 150;
                     }
                     s->x = nx; s->y = ny;
-                    /* Send RESIZING + MAXIMIZED: Electron (Bitwarden) ignores
-                     * plain/floating configure sizes and snaps back, but honors
-                     * a maximized-flagged size exactly — so this lets the user
-                     * drag it to any size, not just full-screen or a half-snap. */
-                    send_toplevel_configure(c, s, nw, nh,
-                                            XDG_TOPLEVEL_STATE_RESIZING,
-                                            XDG_TOPLEVEL_STATE_MAXIMIZED);
-                    wl_client_flush(c);
+                    if (s->is_x11) {
+                        /* X11 window: resize the X window itself; XWayland will
+                         * recommit a buffer at the new size (one-frame lag). */
+                        s->w = nw; s->h = nh;
+                        xwm_configure(s->x11_window, nx, ny, nw, nh);
+                    } else {
+                        /* Send RESIZING + MAXIMIZED: Electron (Bitwarden) ignores
+                         * plain/floating configure sizes and snaps back, but honors
+                         * a maximized-flagged size exactly — so this lets the user
+                         * drag it to any size, not just full-screen or a half-snap. */
+                        send_toplevel_configure(c, s, nw, nh,
+                                                XDG_TOPLEVEL_STATE_RESIZING,
+                                                XDG_TOPLEVEL_STATE_MAXIMIZED);
+                        wl_client_flush(c);
+                    }
                 }
             } else { g_iop = 0; }
         } else { g_iop = 0; }
@@ -2230,9 +2329,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 int32_t fh2 = (int32_t)console_font_height();
                 int32_t top = fh2 + 6 + SSD_TITLE_H;
                 if (rel >= bw - 24) {                     /* close */
-                    int h = wl_begin_msg(bc, bar_s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
-                    wl_end_msg(bc, h);
-                    wl_client_flush(bc);
+                    toplevel_request_close(bc, bar_s);
                 } else if (rel >= bw - 48) {              /* maximize / restore */
                     bool eff_max = bar_s->maximized ||
                         (bar_s->own_w >= g_w * 9 / 10 && bar_s->own_h >= g_h * 85 / 100);
@@ -2364,8 +2461,10 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
 
     bool new_in_popup = new_s && surface_in_popup_tree(new_s);
     /* A press on a Wayland window raises it above the other Wayland windows. */
-    if (new_s && !new_in_popup && (btns & 1) && !(g_prev_btns & 1))
+    if (new_s && !new_in_popup && (btns & 1) && !(g_prev_btns & 1)) {
         wl_toplevel_raise(new_s);
+        if (new_s->is_x11) xwm_activate(new_s->x11_window);  /* X raise + focus */
+    }
 
     /* ── Pointer focus (follows whatever surface is under the cursor) ── */
     if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
@@ -2398,6 +2497,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
             wl_client_flush(nc);
             g_kbd_ci  = new_ci;
             g_kbd_sid = new_sid;
+            if (new_s->is_x11) xwm_set_focus(new_s->x11_window);  /* mirror X focus */
         }
     }
 
@@ -2579,8 +2679,8 @@ static wl_surface_t *wl_nth_toplevel(int idx, int *out_ci) {
         for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
             if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
-            if (!s || !s->mapped || !s->own_pix || !s->xdg_toplevel_id ||
-                s->is_popup || s->is_subsurface) continue;
+            if (!s || !s->mapped || !s->own_pix || !wl_is_toplevel_role(s) ||
+                s->x11_override) continue;   /* override-redirect = no taskbar button */
             if (n == idx) { if (out_ci) *out_ci = ci; return s; }
             n++;
         }
@@ -2668,7 +2768,7 @@ void wayland_set_all_minimized(bool m) {
             wl_obj_t *o = &g_wl_clients[ci].objs[oi];
             if (o->type != OBJ_SURFACE || !o->data) continue;
             wl_surface_t *s = o->data;
-            if (s->mapped && s->xdg_toplevel_id && !s->is_popup && !s->is_subsurface) {
+            if (s->mapped && wl_is_toplevel_role(s)) {
                 has_top = true; break;
             }
         }
@@ -2676,6 +2776,153 @@ void wayland_set_all_minimized(bool m) {
     }
     if (m) { g_kbd_ci = -1; g_kbd_sid = 0; }
     else { extern void gui_wl_raise(void); gui_wl_raise(); }
+}
+
+/* ── Rootless XWayland surface presentation (called from xwm.c) ──────────────
+ * xwm.c manages the X11 side and, once it knows an X window's WL_SURFACE_ID,
+ * hands the correlated Wayland surface here to be shown as a FiFi window. */
+
+/* Find the wl_surface XWayland tagged with a given 64-bit serial (via
+ * xwayland_surface_v1.set_serial). Returns the client index too, for focus. */
+static wl_surface_t *find_surface_by_serial(uint64_t serial, int *out_ci) {
+    if (!serial) return NULL;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->xwl_serial == serial) { if (out_ci) *out_ci = ci; return s; }
+        }
+    }
+    return NULL;
+}
+
+static wl_surface_t *find_surface_by_x11(uint32_t xwindow, int *out_ci) {
+    if (!xwindow) return NULL;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->is_x11 && s->x11_window == xwindow) {
+                if (out_ci) *out_ci = ci; return s;
+            }
+        }
+    }
+    return NULL;
+}
+
+bool wayland_x11_adopt(uint64_t serial, uint32_t xwindow,
+                       int32_t x, int32_t y, int32_t w, int32_t h,
+                       bool decorated, const char *title) {
+    int ci = -1;
+    wl_surface_t *s = find_surface_by_serial(serial, &ci);
+    if (!s) {
+        /* The Wayland surface / its set_serial has not arrived yet (the X and
+         * Wayland sockets race). xwm.c retries on the next event. */
+        return false;
+    }
+    s->is_x11        = true;
+    s->x11_window    = xwindow;
+    s->x11_override  = !decorated;
+    s->force_opaque  = true;         /* X buffers are XRGB — blit opaque */
+    s->ssd           = decorated;    /* real toplevel gets FiFi chrome */
+    s->is_popup      = false;
+    s->is_subsurface = false;
+    if (title && title[0]) { strncpy(s->title, title, sizeof(s->title) - 1);
+                             s->title[sizeof(s->title) - 1] = '\0'; }
+    /* Placement: honor the X geometry for override-redirect (menus must land at
+     * their exact spot); for a normal toplevel, cascade into the work area if the
+     * X window has no sensible position yet. */
+    if (decorated) {
+        extern uint64_t desk_left(void); extern uint64_t desk_top(void);
+        int32_t px = (x > 0) ? x : (int32_t)desk_left() + 120;
+        int32_t py = (y > (int32_t)0) ? y : (int32_t)desk_top() + SSD_TITLE_H + 40;
+        if (py < (int32_t)desk_top() + SSD_TITLE_H) py = (int32_t)desk_top() + SSD_TITLE_H;
+        s->x = px; s->y = py;
+    } else {
+        s->x = x; s->y = y;          /* override-redirect: exact position */
+    }
+    if (w > 0) { s->w = w; }
+    if (h > 0) { s->h = h; }
+    s->placed = true;
+    wl_toplevel_raise(s);
+    /* Give the new toplevel keyboard focus (both Wayland-side, so XWayland gets
+     * key events, and X-side, so the app knows it is focused). */
+    if (decorated && ci >= 0) {
+        if (g_kbd_ci >= 0 && g_kbd_sid &&
+            (g_kbd_ci != ci || g_kbd_sid != s->surface_id) &&
+            g_wl_clients[g_kbd_ci].active) {
+            wl_send_kbd_leave(&g_wl_clients[g_kbd_ci], g_kbd_sid);
+            wl_client_flush(&g_wl_clients[g_kbd_ci]);
+        }
+        wl_send_kbd_enter(&g_wl_clients[ci], s->surface_id);
+        wl_client_flush(&g_wl_clients[ci]);
+        g_kbd_ci = ci; g_kbd_sid = s->surface_id;
+        xwm_set_focus(xwindow);
+        extern void gui_wl_raise(void); gui_wl_raise();
+    }
+    fprintf(stderr, "[wayland] adopted x11 win 0x%x (serial %llu) -> surface %u at %d,%d %dx%d '%s'\n",
+            xwindow, (unsigned long long)serial, s->surface_id,
+            s->x, s->y, s->w, s->h, s->title);
+    return true;
+}
+
+void wayland_x11_unmap(uint32_t xwindow) {
+    int ci = -1;
+    wl_surface_t *s = find_surface_by_x11(xwindow, &ci);
+    if (!s) return;
+    if (g_kbd_ci == ci && g_kbd_sid == s->surface_id) { g_kbd_ci = -1; g_kbd_sid = 0; }
+    if (g_focus_ci == ci && g_focus_sid == s->surface_id) { g_focus_ci = -1; g_focus_sid = 0; }
+    s->is_x11 = false;
+    s->x11_window = 0;
+    s->x11_override = false;
+    s->mapped = false;            /* stop drawing/hit-testing it */
+}
+
+void wayland_x11_geometry(uint32_t xwindow, int32_t x, int32_t y,
+                          int32_t w, int32_t h) {
+    wl_surface_t *s = find_surface_by_x11(xwindow, NULL);
+    if (!s) return;
+    if (s->x11_override) { s->x = x; s->y = y; }   /* menus reposition; toplevels keep FiFi pos */
+    if (w > 0) s->w = w;
+    if (h > 0) s->h = h;
+}
+
+void wayland_x11_title(uint32_t xwindow, const char *title) {
+    wl_surface_t *s = find_surface_by_x11(xwindow, NULL);
+    if (!s || !title) return;
+    strncpy(s->title, title, sizeof(s->title) - 1);
+    s->title[sizeof(s->title) - 1] = '\0';
+}
+
+/* Rootful XWayland presents the whole X screen as one toplevel titled "Xwayland
+ * on :0"; relabel it to the running X app's name so the FiFi titlebar reads e.g.
+ * "LibreOffice" instead. (The rootful screen surface is the sole force_opaque
+ * xdg toplevel.) */
+void wayland_x11_root_title(const char *title) {
+    if (!title || !title[0]) return;
+    /* Ignore junk titles (LibreOffice has a "♥" Donate window etc.): require a
+     * few ASCII alphanumerics so we relabel to a real app name like "LibreOffice"
+     * rather than a stray glyph. */
+    int alnum = 0;
+    for (const char *p = title; *p; p++)
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+            (*p >= '0' && *p <= '9')) alnum++;
+    if (alnum < 3) return;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (s && s->force_opaque && s->xdg_toplevel_id &&
+                !s->is_popup && !s->is_subsurface && !s->is_x11) {
+                strncpy(s->title, title, sizeof(s->title) - 1);
+                s->title[sizeof(s->title) - 1] = '\0';
+                return;
+            }
+        }
+    }
 }
 
 /* Title of the topmost mapped Wayland toplevel (for the taskbar button).
@@ -2766,11 +3013,9 @@ bool wayland_close_active(void) {
         for (int oi = 0; oi < c->n_objs; oi++) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
-            if (!s || !s->xdg_toplevel_id || s->is_popup || s->is_subsurface) continue;
+            if (!s || !wl_is_toplevel_role(s) || s->is_popup || s->is_subsurface) continue;
             if (!s->mapped) continue;
-            int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
-            wl_end_msg(c, h);
-            wl_client_flush(c);
+            toplevel_request_close(c, s);
             sent = true;
         }
     }
@@ -2860,15 +3105,13 @@ bool wayland_close_focused(void) {
     for (int oi = 0; oi < c->n_objs; oi++) {
         if (c->objs[oi].type != OBJ_SURFACE) continue;
         wl_surface_t *t = c->objs[oi].data;
-        if (!t || !t->xdg_toplevel_id || t->is_popup || t->is_subsurface || !t->mapped) continue;
+        if (!t || !wl_is_toplevel_role(t) || t->is_popup || t->is_subsurface || !t->mapped) continue;
         if (!first) first = t;
         if (ssd_decorated(t)) { s = t; break; }
     }
     if (!s) s = first;
     if (!s) return false;
-    int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
-    wl_end_msg(c, h);
-    wl_client_flush(c);
+    toplevel_request_close(c, s);
     return true;
 }
 
