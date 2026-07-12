@@ -1,0 +1,22 @@
+#!/bin/sh
+# bt — pair and connect Bluetooth devices (headphones, speakers, controllers).
+# Thin wrapper around bluetoothctl; A2DP audio routes through PipeWire once a
+# device connects. Type `bt` in any terminal.
+
+if ! command -v bluetoothctl >/dev/null 2>&1; then
+    echo "Bluetooth is not available in this build."
+    printf "Press Enter to close..." ; read _ ; exit 1
+fi
+if [ ! -S /run/dbus/system_bus_socket ]; then
+    echo "Bluetooth service isn't running (no system D-Bus)."
+    echo "Check /fifi-data/bluetooth.log"
+    printf "Press Enter to close..." ; read _ ; exit 1
+fi
+
+clear
+echo "FiFi Bluetooth  -  pair a device"
+echo "  scan on          discover nearby devices (wait a few seconds)"
+echo "  pair <MAC>       pair, then:  trust <MAC>  and  connect <MAC>"
+echo "  devices          list known devices     quit  exit"
+echo
+exec bluetoothctl

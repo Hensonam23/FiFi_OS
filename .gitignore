@@ -84,3 +84,4 @@ __pycache__/
 serial*.log
 test/popup/inject
 test/popup/mtest
+initramfs/root/usr/share/fifi/authorized_keys

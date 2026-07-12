@@ -25,6 +25,9 @@ export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib$
 # no D-Bus / a11y on the box -> disable so toolkits don't hang or crash
 export NO_AT_BRIDGE=1 GTK_A11Y=none GNOME_ACCESSIBILITY=0 QT_ACCESSIBILITY=0
 export DBUS_SESSION_BUS_ADDRESS=disabled:
+# FiFi runs apps as root; RunImage/sharun bundles (e.g. Steam) refuse root unless
+# told it's allowed. Harmless for apps that don't use RunImage.
+export RIM_ALLOW_ROOT=1
 # software rendering (no GPU stack on the box yet)
 export LIBGL_ALWAYS_SOFTWARE=1
 # steer every toolkit to Wayland
@@ -42,9 +45,10 @@ export ELECTRON_DISABLE_SANDBOX=1
 export USE_X11=false
 export APPIMAGE_EXTRACT_AND_RUN=1
 
-# Start a rootful XWayland (:0) on demand for apps that only speak X11 (e.g.
-# LibreOffice's "gen" VCL). Rootful = the whole X screen is ONE FiFi window
-# (the compositor has no X11 window-manager, so rootless can't map windows).
+# Start a ROOTLESS XWayland (:0) on demand for apps that only speak X11 (e.g.
+# LibreOffice's "gen" VCL). Rootless = each X11 window becomes its own FiFi
+# window with normal decorations and no black X-root border. The compositor's
+# built-in X11 window manager (xwm.c) maps + decorates these windows.
 # The X client libs, libEGL, and xkbcomp live in the persistent runtime; only
 # /usr resets each boot, so xkbcomp is re-seeded there (Xwayland execs it by
 # absolute path).
@@ -76,6 +80,26 @@ sandbox_exec() {
     exec "$@"
 }
 
+# Log which shared libraries an executable cannot resolve, so an app that fails
+# to start (the usual cause on a minimal system is a missing .so) leaves a clear
+# breadcrumb instead of dying silently. Diagnostic ONLY: LD_TRACE_LOADED_OBJECTS
+# makes the dynamic loader list libraries and exit WITHOUT running the program,
+# guarded by a timeout, and this always returns success so it can never block or
+# break a real launch. Any missing library can then be dropped into $RT/lib.
+diag_libs() {
+    _b="$1"
+    [ -x "$_b" ] || return 0
+    _miss=$(LD_TRACE_LOADED_OBJECTS=1 timeout 5 "$_b" 2>/dev/null | grep "not found")
+    {
+        echo "[${APP_NAME:-app}] launch: $_b"
+        if [ -n "$_miss" ]; then
+            echo "  MISSING LIBRARIES (drop these into $RT/lib):"
+            echo "$_miss" | sed 's/^/    /'
+        fi
+    } > /fifi-data/apps/last-launch.log 2>/dev/null || true
+    return 0
+}
+
 # True if a process whose comm matches $1 is running.
 proc_running() {
     for _d in /proc/[0-9]*; do
@@ -87,65 +111,55 @@ proc_running() {
 }
 
 ensure_xwayland() {
-    # hint the compositor with a friendly window title (XWayland reports only
-    # "Xwayland on :0"); the compositor relabels its window to this.
-    printf '%s' "${APP_NAME:-App}" > /tmp/xwayland-title 2>/dev/null || true
-    # Rootful XWayland presents the whole X screen as ONE FiFi window = one app.
-    # Reuse the running X server ONLY while an X app (soffice) is still attached
-    # to it. An XWayland left alive after its app closed has a stale/black X root
-    # that a new app won't repaint into — so tear that orphan down and start a
-    # fresh server. (A dead XWayland leaving only a socket is handled the same.)
-    if [ -S /tmp/.X11-unix/X0 ] && proc_running Xwayland && proc_running soffice.bin; then
-        return 0
-    fi
-    proc_running Xwayland && { busybox pkill -9 Xwayland 2>/dev/null; sleep 1; }
-    rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock 2>/dev/null || true
-    # xkbcomp: image ships it at /usr/bin; older boxes only have it in the runtime.
-    [ -x /usr/bin/xkbcomp ] || cp "$RT/bin/xkbcomp" /usr/bin/xkbcomp 2>/dev/null || true
-    # Client-side xkbcommon (GTK/Qt toolkits) looks for keymap data at the
-    # compiled-in default /usr/share/X11/xkb; /usr resets each boot, so link it
-    # to the runtime copy (without this, GTK apps abort with "Failed to create
-    # XKB keymap"). Harmless if /usr/share/X11/xkb already exists.
-    if [ ! -e /usr/share/X11/xkb ] && [ -d "$RT/share/X11/xkb" ]; then
-        mkdir -p /usr/share/X11 2>/dev/null && ln -s "$RT/share/X11/xkb" /usr/share/X11/xkb 2>/dev/null || true
-    fi
-    # xkb data: prefer the image copy, fall back to the runtime one.
-    xkbdir=/usr/share/X11/xkb
-    [ -d "$xkbdir" ] || xkbdir="$RT/share/X11/xkb"
-    # windowed (NOT -fullscreen) so the FiFi compositor can decorate it with a
-    # titlebar + traffic-lights and the user can move/resize it
-    # -displayfd: XWayland writes the display number to this fd ONLY once it is
-    # actually ready to accept client connections. Waiting on that (not the mere
-    # existence of the socket, which appears earlier during xkb/screen setup) is
-    # what reliably fixes the cold-start race that left soffice exiting to a
-    # black X root. Route fd 3 to a file and poll it.
-    : > /tmp/xwayland.ready 2>/dev/null || true
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    LD_LIBRARY_PATH="$RT/lib" \
-        busybox setsid /usr/bin/Xwayland :0 -geometry 1800x1050 \
-        -xkbdir "$xkbdir" -displayfd 3 </dev/null >/tmp/xwayland.log 2>&1 3>/tmp/xwayland.ready &
+    # XWayland is spawned and window-managed by the COMPOSITOR itself (rootless,
+    # launched with -wm so each X11 window becomes its own decorated FiFi window
+    # with no black X-root border; see xwm.c). We only wait for the compositor's
+    # window manager to be up: /tmp/xwm.ready implies XWayland is running and
+    # accepting clients on :0. (xwm removes the file if XWayland dies.)
     _i=0
-    while [ "$_i" -lt 150 ]; do
-        [ -s /tmp/xwayland.ready ] && break          # ready to accept clients
-        sleep 0.1; _i=$((_i + 1))
+    while [ "$_i" -lt 200 ]; do
+        [ -e /tmp/xwm.ready ] && [ -S /tmp/.X11-unix/X0 ] && return 0
+        sleep 0.05; _i=$((_i + 1))
     done
-    sleep 0.4   # tiny extra margin
-    # Warm up the fresh server: a cold XWayland fails its FIRST X client even
-    # after -displayfd (final init completes on first connect). Absorb that with
-    # a throwaway xkbcomp connection so the real app's first launch starts
-    # cleanly — otherwise the failed first attempt maps and leaves a stale window.
-    busybox timeout 4 /usr/bin/xkbcomp :0 /dev/null >/dev/null 2>&1 || true
+    return 0   # proceed anyway; the app's own retry loop tolerates a slow start
 }
 
 launch_dir() {
     # $1 = extracted squashfs-root dir. Detect Electron/Chromium and add the
     # flags they need on this box (root -> no sandbox, force wayland+swgl).
     dir="$1"; shift
+    # Discord-style "downloader" AppImage: it ships an updater_bootstrap that
+    # fetches the real (Electron) app to $HOME/.config on first run, then runs
+    # it. Do the download here and launch the fetched binary with Electron flags;
+    # the shared libs it needs (NSS, etc.) come from $RT/lib.
+    if [ -x "$dir/updater_bootstrap" ] && [ -f "$dir/discord" ]; then
+        export HOME=/fifi-data/home
+        mkdir -p "$HOME/.config/discord" 2>/dev/null || true
+        exe=$(ls -d "$HOME"/.config/discord/app-*/Discord 2>/dev/null | tail -1)
+        if [ -z "$exe" ]; then
+            ( cd "$dir" && LD_LIBRARY_PATH="$dir/usr/lib:$LD_LIBRARY_PATH" \
+              ./updater_bootstrap --no-zenity "$HOME/.config/discord" \
+              stable https://updates.discord.com/ ) >/tmp/discord-install.log 2>&1 || true
+            exe=$(ls -d "$HOME"/.config/discord/app-*/Discord 2>/dev/null | tail -1)
+        fi
+        if [ -n "$exe" ]; then
+            export LD_LIBRARY_PATH="$(dirname "$exe"):$LD_LIBRARY_PATH"
+            _sb_pid=1   # Electron keeps its main process alive
+            sandbox_exec "$exe" --no-sandbox --ozone-platform=wayland \
+                --disable-gpu --in-process-gpu "$@"
+        fi
+        echo "fifi-run: Discord bootstrap failed (see /tmp/discord-install.log)" >&2
+        exit 1
+    fi
     # X11-only apps (LibreOffice): no Wayland backend, so run them under a
     # rootful XWayland presented as a single FiFi window.
     if [ -n "$(ls -d "$dir"/program/soffice "$dir"/opt/*/program/soffice 2>/dev/null)" ]; then
         ensure_xwayland
         export DISPLAY=:0
+        # Tell the compositor's X window manager what to title the window (the
+        # app name), instead of the raw "Xwayland on :0". Written before the app
+        # maps so the WM reads it on the first MapRequest.
+        printf '%s' "${APP_NAME:-App}" > /tmp/fifi-x11-title 2>/dev/null || true
         export SAL_USE_VCLPLUGIN=gen           # raw-X11 VCL: one rootful window (gtk3 makes a 2nd)
         # Scrub shared-runtime env that isn't meant for a raw-X11 soffice: an
         # invalid "disabled:" D-Bus address (soffice aborts during first-run
@@ -177,12 +191,14 @@ launch_dir() {
             # is immediate), relaunch — by then XWayland is warm and it starts.
             # Once a launch survives the probe window, wait on it (it is the
             # persistent office process; fifi-run exits when the user closes it).
+            # The cold-X crash is immediate, so a short 4s probe is enough to
+            # confirm health — no need to sit through 8s on a good launch.
             _t=0
             while [ "$_t" -lt 5 ]; do
                 ./soffice.bin --nologo --norestore "$@" &
                 _sopid=$!
                 _w=0
-                while [ "$_w" -lt 8 ]; do
+                while [ "$_w" -lt 4 ]; do
                     kill -0 "$_sopid" 2>/dev/null || break
                     sleep 1; _w=$((_w + 1))
                 done
@@ -212,6 +228,18 @@ launch_dir() {
         export HOME=/home/fifi USER=fifi LOGNAME=fifi
         exec busybox unshare -U -- "$dir/AppRun" "$@"
     fi
+    # RunImage / sharun bundles (e.g. Steam) ship their own rootfs and do their
+    # own bubblewrap containerization. Wrapping them in our unshare --mount breaks
+    # bwrap's pivot_root ("Invalid argument"), so run their AppRun DIRECTLY (no
+    # sandbox_exec) and give it a persistent, writable home. RIM_ALLOW_ROOT=1 (set
+    # above) lets it accept root.
+    if [ -d "$dir/rootfs" ] && [ -x "$dir/AppRun" ]; then
+        chmod 0666 "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" 2>/dev/null || true
+        mkdir -p /fifi-data/home 2>/dev/null || true
+        export HOME=/fifi-data/home
+        export APPDIR="$dir"; cd "$dir"
+        exec "$dir/AppRun" "$@"
+    fi
     export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
     # Firefox/LibreWolf refuse to run as root ONLY when $HOME is owned by a
     # different uid — and /root here belongs to the image-builder uid. Point HOME
@@ -229,6 +257,25 @@ launch_dir() {
         # a stale instance/lock and silently exit.
         prof="$(dirname "$dir")/profile"
         mkdir -p "$prof" 2>/dev/null || true
+        # The compositor already draws a FiFi titlebar (server-side decorations),
+        # but Firefox also draws its OWN window controls into the tab strip and a
+        # CSD shadow margin -> duplicate buttons + a transparent border on top of
+        # ours. Tell Firefox not to draw in the titlebar so only the FiFi chrome
+        # shows. Written to user.js so it applies every launch (guarded so we don't
+        # duplicate it).
+        if ! grep -q "browser.tabs.inTitlebar" "$prof/user.js" 2>/dev/null; then
+            {
+              printf 'user_pref("browser.tabs.inTitlebar", 0);\n'
+              printf 'user_pref("browser.tabs.drawInTitlebar", false);\n'
+              # The quit/close-tabs confirmation renders as a transparent, unclosable
+              # dialog on this compositor (its content is on a subsurface we don't
+              # composite). Disable the prompts so Firefox just closes cleanly.
+              printf 'user_pref("browser.warnOnQuit", false);\n'
+              printf 'user_pref("browser.warnOnClose", false);\n'
+              printf 'user_pref("browser.tabs.warnOnClose", false);\n'
+              printf 'user_pref("browser.sessionstore.warnOnQuit", false);\n'
+            } >> "$prof/user.js"
+        fi
         export APPDIR="$dir"; cd "$dir"
         _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
@@ -237,10 +284,10 @@ launch_dir() {
         set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
         _sb_pid=1   # Electron keeps its main process alive → safe for a PID namespace
     fi
-    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; sandbox_exec "$dir/AppRun" "$@"; fi
+    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; diag_libs "$dir/AppRun"; sandbox_exec "$dir/AppRun" "$@"; fi
     # fallback: an executable named like the dir's parent
     b=$(ls "$dir" 2>/dev/null | while read f; do [ -x "$dir/$f" ] && [ -f "$dir/$f" ] && echo "$f" && break; done)
-    [ -n "$b" ] && sandbox_exec "$dir/$b" "$@"
+    [ -n "$b" ] && { diag_libs "$dir/$b"; sandbox_exec "$dir/$b" "$@"; }
     echo "fifi-run: no launchable binary in $dir" >&2; exit 1
 }
 
@@ -256,6 +303,7 @@ case "$target" in
         launch_dir "$ext/squashfs-root" "$@"
         ;;
     *)
+        diag_libs "$target"
         sandbox_exec "$target" "$@"
         ;;
 esac

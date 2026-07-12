@@ -710,16 +710,6 @@ bool ipc_needs_redraw(void) {
  * Called from ipc_blit_all() right after each window's body so the whole window
  * (body + chrome) is painted as a unit in z-order — a higher window then fully
  * overpaints any lower window. */
-/* Filled circle, radius 6 — matches chrome_circle() in gui_window.c so IPC
- * windows get the exact same traffic-light buttons as built-ins. */
-static void ipc_chrome_circle(uint64_t cx, uint64_t cy, uint32_t col) {
-    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
-    for (int dy = -6; dy <= 6; dy++) {
-        uint8_t sw = spans[dy + 6];
-        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
-    }
-}
-
 static void ipc_draw_chrome(ipc_client_t *c) {
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
@@ -759,13 +749,26 @@ static void ipc_draw_chrome(ipc_client_t *c) {
             console_render_glyph_fg(tx, gy, (unsigned char)c->title[j], C_TITLEFG);
     }
 
-    /* Buttons: traffic-light circles (min grey, max green, close red) */
+    /* Buttons: conventional flat symbols (minimize / maximize / close), NOT
+     * macOS traffic-light circles. Drawn from rectangles so no font glyph is
+     * needed; matches gui_window.c chrome_buttons(). */
     uint64_t cyc = c->win_y + TITLE_H / 2u;
+    uint32_t gc  = focused ? 0x00cbd6e6u : 0x00808c9cu;
     if (c->win_w >= BTN_W * 3u + 16u) {
-        ipc_chrome_circle(min_x + BTN_W / 2u, cyc, 0x00707a8cu);
-        ipc_chrome_circle(max_x + BTN_W / 2u, cyc, 0x005e9e56u);
+        uint64_t mcx = min_x + BTN_W / 2u;                 /* minimize: bottom bar */
+        console_fill_rect(mcx - 5u, cyc + 4u, 10u, 2u, gc);
+        uint64_t xcx = max_x + BTN_W / 2u, sq = 9u;        /* maximize: square outline */
+        uint64_t x0 = xcx - sq / 2u, y0 = cyc - sq / 2u;
+        console_fill_rect(x0, y0, sq, 1u, gc);
+        console_fill_rect(x0, y0 + sq - 1u, sq, 1u, gc);
+        console_fill_rect(x0, y0, 1u, sq, gc);
+        console_fill_rect(x0 + sq - 1u, y0, 1u, sq, gc);
     }
-    ipc_chrome_circle(cls_x + BTN_W / 2u, cyc, 0x00c05048u);
+    uint64_t ccx = cls_x + BTN_W / 2u;                     /* close: X */
+    for (uint64_t k = 0; k < 9u; k++) {
+        console_fill_rect(ccx - 4u + k, cyc - 4u + k, 2u, 2u, gc);
+        console_fill_rect(ccx - 4u + k, cyc + 4u - k, 2u, 2u, gc);
+    }
 
     /* 1px window border — neutral frame, matches built-ins */
     uint32_t br_col = focused ? 0x00283a58u : 0x001d2634u;
@@ -811,6 +814,46 @@ void ipc_blit_all(void) {
      * this loop fully overpaints every lower window — body AND chrome. Drawing all bodies
      * first and all chrome in a second pass (the old design) let a lower window's title
      * bar and border bleed over a higher window's body where they overlapped. */
+    for (int j = 0; j < n; j++) {
+        ipc_client_t *c = &g_clients[order[j]];
+        if (c->disp_buf)
+            console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
+        else
+            console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
+        ipc_draw_chrome(c);
+    }
+}
+
+/* Re-blit any IPC window that was raised ABOVE the Wayland layer, so a focused
+ * IPC window (e.g. the App Store) visually sits on top of Wayland/XWayland
+ * windows. Without this, ipc_blit_all() paints IPC windows first and
+ * wayland_blit_surfaces() always overpaints them, so the App Store could never
+ * come to the front even though the cross-layer input routing in main.c already
+ * treats it as topmost. An IPC window counts as "above Wayland" when its
+ * z_order exceeds the Wayland layer's shared raise value (gui_wl_z()). Called
+ * from main.c right after wayland_blit_surfaces(), before the panels repaint. */
+void ipc_overdraw_top(void) {
+    extern uint32_t gui_wl_z(void);
+    uint32_t wl_z = gui_wl_z();
+    int order[IPC_MAX_APPS];
+    int n = 0;
+    for (int i = 0; i < IPC_MAX_APPS; i++) {
+        ipc_client_t *c = &g_clients[i];
+        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
+        if (c->z_order <= wl_z) continue;   /* not raised above the Wayland layer */
+        order[n++] = i;
+    }
+    if (n == 0) return;
+    /* Insertion sort ascending by z_order (highest painted last = on top) */
+    for (int a = 1; a < n; a++) {
+        int key = order[a];
+        int b = a - 1;
+        while (b >= 0 && g_clients[order[b]].z_order > g_clients[key].z_order) {
+            order[b + 1] = order[b];
+            b--;
+        }
+        order[b + 1] = key;
+    }
     for (int j = 0; j < n; j++) {
         ipc_client_t *c = &g_clients[order[j]];
         if (c->disp_buf)

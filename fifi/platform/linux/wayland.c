@@ -2646,13 +2646,20 @@ void wayland_send_key(uint32_t evdev_key, uint32_t state) {
  * minimized (wayland_send_mouse stops being called, so it never recomputes) and
  * every keystroke gets eaten instead of reaching IPC apps like the App Store. */
 bool wayland_has_focus(void) {
-    if (g_focus_ci < 0 || !g_focus_sid || g_wl_minimized) return false;
-    wl_client_t *fc = &g_wl_clients[g_focus_ci];
-    if (!fc->active) { g_focus_ci = -1; g_focus_sid = 0; return false; }
-    wl_obj_t *o = wl_find_obj(fc, g_focus_sid);
+    /* Gate for KEYBOARD input routing (all callers use it to decide whether keys
+     * go to Wayland). It must track KEYBOARD focus (g_kbd_ci/g_kbd_sid) — the same
+     * surface wayland_send_key() targets — NOT pointer focus. Previously it checked
+     * g_focus_ci (POINTER focus): when the pointer left the toplevel (e.g. moved
+     * over the URL-bar autocomplete popup) pointer focus cleared and keys were
+     * blocked even though the browser still held keyboard focus, so typing never
+     * reached Firefox/LibreWolf. */
+    if (g_kbd_ci < 0 || !g_kbd_sid || g_wl_minimized) return false;
+    wl_client_t *fc = &g_wl_clients[g_kbd_ci];
+    if (!fc->active) { g_kbd_ci = -1; g_kbd_sid = 0; return false; }
+    wl_obj_t *o = wl_find_obj(fc, g_kbd_sid);
     wl_surface_t *s = (o && o->type == OBJ_SURFACE) ? o->data : NULL;
     if (!s || !s->mapped || s->minimized || s->pending_destroy) {
-        g_focus_ci = -1; g_focus_sid = 0;
+        g_kbd_ci = -1; g_kbd_sid = 0;
         return false;
     }
     return true;
@@ -3126,17 +3133,9 @@ bool wayland_close_focused(void) {
 
 /* ── Blit Wayland surfaces to the FiFi framebuffer ───────────────────────── */
 
-/* FiFi Breeze chrome for server-side-decorated Wayland toplevels: identical
- * gradient titlebar + traffic-light circles as built-in and IPC windows. */
-static void ssd_circle(uint64_t cx, uint64_t cy, uint32_t col) {
-    extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
-    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
-    for (int dy = -6; dy <= 6; dy++) {
-        uint8_t sw = spans[dy + 6];
-        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
-    }
-}
-
+/* FiFi Breeze chrome for server-side-decorated Wayland toplevels: same gradient
+ * titlebar + flat window buttons (minimize/maximize/close) as built-in and IPC
+ * windows — deliberately not macOS traffic-light circles. */
 /* Decode a UTF-8 title into ASCII so the bitmap font never renders raw
  * multibyte bytes as mojibake (Firefox uses an em-dash: "Page — LibreWolf").
  * Mirrors taskbar_ascii_label() in gui_taskbar.c. */
@@ -3202,13 +3201,25 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
         for (size_t j = 0; j < tlen; j++, tx += fw)
             console_render_glyph_fg(tx, gy, (unsigned char)ttl[j], 0x00e8eeffu);
     }
-    /* traffic lights: min grey, max green, close red */
+    /* Window buttons: conventional flat symbols (minimize / maximize / close),
+     * NOT macOS traffic-light circles. Drawn from rectangles. */
     uint64_t cyc = ty + SSD_TITLE_H / 2u;
+    uint32_t gc  = focused ? 0x00cbd6e6u : 0x00808c9cu;
     if (w >= 88u) {
-        ssd_circle(x + w - 60u, cyc, 0x00707a8cu);
-        ssd_circle(x + w - 36u, cyc, 0x005e9e56u);
+        uint64_t mcx = x + w - 60u;                        /* minimize: bottom bar */
+        console_fill_rect(mcx - 5u, cyc + 4u, 10u, 2u, gc);
+        uint64_t xcx = x + w - 36u, sq = 9u;               /* maximize: square outline */
+        uint64_t x0 = xcx - sq / 2u, y0 = cyc - sq / 2u;
+        console_fill_rect(x0, y0, sq, 1u, gc);
+        console_fill_rect(x0, y0 + sq - 1u, sq, 1u, gc);
+        console_fill_rect(x0, y0, 1u, sq, gc);
+        console_fill_rect(x0 + sq - 1u, y0, 1u, sq, gc);
     }
-    ssd_circle(x + w - 12u, cyc, 0x00c05048u);
+    uint64_t ccx = x + w - 12u;                            /* close: X */
+    for (uint64_t k = 0; k < 9u; k++) {
+        console_fill_rect(ccx - 4u + k, cyc - 4u + k, 2u, 2u, gc);
+        console_fill_rect(ccx - 4u + k, cyc + 4u - k, 2u, 2u, gc);
+    }
     /* frame + focus ring around bar+content */
     uint64_t th = (uint64_t)SSD_TITLE_H + (uint64_t)s->own_h;
     uint32_t frame = focused ? 0x00283a58u : 0x001d2634u;

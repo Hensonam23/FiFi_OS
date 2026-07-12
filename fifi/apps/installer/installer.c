@@ -59,9 +59,10 @@
 #define VIEW_DISK     1
 #define VIEW_BROWSER  2
 #define VIEW_SOFTWARE 3
-#define VIEW_CONFIRM  4
-#define VIEW_PROGRESS 5
-#define VIEW_DONE     6
+#define VIEW_AI       4
+#define VIEW_CONFIRM  5
+#define VIEW_PROGRESS 6
+#define VIEW_DONE     7
 
 /* Browser choices */
 #define BROWSER_LIBREWOLF 0
@@ -69,6 +70,53 @@
 
 /* Software flags */
 #define SW_LIBREOFFICE (1u << 0)
+
+/* ── Offline AI assistant model catalog ──────────────────────────────────────
+ * A range of local (offline) models sorted by load, each with the RAM and GPU
+ * it comfortably wants so the installer can pick one that fits their machine
+ * without overloading it. `id` is passed to fifi-install.sh, which owns the
+ * download URLs. Index 0 is always "no AI" so the default forces no download. */
+typedef struct {
+    const char *id;    /* token handed to fifi-install.sh */
+    const char *name;  /* display name */
+    const char *tier;  /* load level */
+    const char *dl;    /* download size */
+    const char *ram;   /* recommended system RAM (display) */
+    const char *gpu;   /* recommended GPU (display) */
+    const char *desc;  /* one-line summary */
+    int   ram_gb;      /* recommended RAM in GB (for auto-recommend) */
+    int   vram_gb;     /* recommended GPU VRAM in GB; 0 = runs fine on CPU */
+} ai_model_t;
+
+static const ai_model_t AI_MODELS[] = {
+    { "none", "No AI assistant", "", "", "", "",
+      "Skip for now. You can add one later (run fifi-ai-install).", 0, 0 },
+    { "qwen2.5-0.5b", "Qwen2.5 0.5B", "Tiny", "0.4 GB", "2 GB RAM", "No GPU needed",
+      "Smallest and fastest. Runs on almost anything.", 2, 0 },
+    { "llama3.2-1b", "Llama 3.2 1B", "Very light", "0.8 GB", "4 GB RAM", "No GPU needed",
+      "Fast on any PC. Basic chat, summaries, quick questions.", 4, 0 },
+    { "qwen2.5-1.5b", "Qwen2.5 1.5B", "Light", "0.9 GB", "4 GB RAM", "No GPU needed",
+      "A bit smarter than 1B, still very light on resources.", 4, 0 },
+    { "gemma2-2b", "Gemma 2 2B", "Compact", "1.6 GB", "6 GB RAM", "GPU optional",
+      "Google's small model. Good quality for its size.", 6, 0 },
+    { "llama3.2-3b", "Llama 3.2 3B", "Balanced", "2.0 GB", "8 GB RAM", "GPU optional (4 GB+)",
+      "A capable all-rounder for most machines.", 8, 0 },
+    { "phi3.5-mini", "Phi-3.5 Mini 3.8B", "Balanced", "2.2 GB", "8 GB RAM", "GPU optional (4 GB+)",
+      "Microsoft's model. Strong reasoning for its size.", 8, 0 },
+    { "mistral-7b", "Mistral 7B", "Capable", "4.1 GB", "16 GB RAM", "GPU 6 GB+",
+      "Popular general-purpose model. Wants a mid-range PC.", 16, 6 },
+    { "qwen2.5-7b", "Qwen2.5 7B", "Capable", "4.7 GB", "16 GB RAM", "GPU 6 GB+",
+      "Stronger reasoning and coding. Mid-range or better.", 16, 6 },
+    { "llama3.1-8b", "Llama 3.1 8B", "High quality", "4.6 GB", "16 GB RAM", "GPU 8 GB+",
+      "High-quality answers. Great on a gaming PC.", 16, 8 },
+    { "gemma2-9b", "Gemma 2 9B", "High quality", "5.4 GB", "16 GB RAM", "GPU 8 GB+",
+      "Excellent quality. Wants a dedicated GPU.", 16, 8 },
+    { "qwen2.5-14b", "Qwen2.5 14B", "Very high", "9.0 GB", "32 GB RAM", "GPU 12 GB+",
+      "Top quality. Ideal for 32 GB RAM + RTX 4080-class.", 32, 12 },
+    { "qwen2.5-32b", "Qwen2.5 32B", "Maximum", "18.5 GB", "48 GB RAM", "GPU 24 GB+",
+      "Best quality. Enthusiast machines / big GPUs only.", 48, 24 },
+};
+#define N_AI_MODELS ((int)(sizeof(AI_MODELS)/sizeof(AI_MODELS[0])))
 
 /* Compositor chrome height */
 #define CHROME_H 24
@@ -121,6 +169,13 @@ typedef struct {
     int       browser;
     /* software */
     uint32_t  software;
+    /* offline AI model (index into AI_MODELS; 0 = none) */
+    int       ai_model;
+    int       ai_scroll;
+    int       ai_reco;       /* auto-recommended model index (from detected hardware) */
+    int       sys_ram_gb;    /* detected total RAM */
+    int       gpu_vram_gb;   /* detected GPU VRAM (0 = unknown / none) */
+    bool      gpu_present;    /* a dedicated GPU (NVIDIA/AMD) is present */
     /* install process */
     pid_t     install_pid;
     int       install_pipe;
@@ -431,7 +486,8 @@ static void render_welcome(app_t *a) {
     const char *steps[]={"1.  Choose a disk to install to",
         "2.  Choose your browser  (Firefox or LibreWolf)",
         "3.  Select additional software  (LibreOffice by default)",
-        "4.  Install FiFi OS and download selected software",NULL};
+        "4.  Pick an offline AI assistant  (optional)",
+        "5.  Install FiFi OS and download your software",NULL};
     for (int i=0;steps[i];i++) { text(a,steps[i],m+8,y,C_TEXT_SUB,bw-8); y+=g_fh+5; }
     y+=8;
     text(a,"Online, the latest versions are downloaded. Offline, the copies on",
@@ -460,7 +516,7 @@ static void click_welcome(app_t *a, int mx, int my) {
 
 static void render_disk(app_t *a) {
     fill(a,0,0,a->win_w,a->win_h,C_BG);
-    draw_header(a,"Step 1 of 4  /  Choose a disk or partition");
+    draw_header(a,"Step 1 of 5  /  Choose a disk or partition");
     int cw=a->win_w-40;
     int y=CONTENT_Y;
     int nlines=text_wrap(a,"Select a disk to fully install to, or a partition to install alongside an existing OS. The selection will be formatted.",
@@ -551,7 +607,7 @@ static void click_disk(app_t *a, int mx, int my) {
 
 static void render_browser(app_t *a) {
     fill(a,0,0,a->win_w,a->win_h,C_BG);
-    draw_header(a,"Step 2 of 4  /  Choose your browser");
+    draw_header(a,"Step 2 of 5  /  Choose your browser");
     int y=CONTENT_Y, cw=a->win_w-40;
     text(a,"Your browser will be downloaded during installation.",OPT_CARD_X,y,C_TEXT_SUB,cw); y+=g_fh+10;
 
@@ -595,7 +651,7 @@ static void click_browser(app_t *a, int mx, int my) {
 
 static void render_software(app_t *a) {
     fill(a,0,0,a->win_w,a->win_h,C_BG);
-    draw_header(a,"Step 3 of 4  /  Additional software");
+    draw_header(a,"Step 3 of 5  /  Additional software");
     int y=CONTENT_Y, cw=a->win_w-40;
     text(a,"Select software to install alongside FiFi OS.",OPT_CARD_X,y,C_TEXT_SUB,cw); y+=g_fh+10;
 
@@ -626,6 +682,197 @@ static void click_software(app_t *a, int mx, int my) {
     if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
         { a->view=VIEW_BROWSER; a->dirty=true; }
     if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_AI; a->dirty=true; }
+}
+
+/* ── 10b. View: Offline AI assistant ────────────────────────────────────────── */
+
+/* Read a sysfs hex value like "0x030000" or "0x10de". Returns -1 on failure. */
+static int read_hex_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    unsigned v = 0;
+    int n = fscanf(f, "%x", &v);      /* %x accepts the 0x prefix */
+    fclose(f);
+    return n == 1 ? (int)v : -1;
+}
+
+/* Total system RAM in GB (rounded), from /proc/meminfo. 0 if unreadable. */
+static int detect_ram_gb(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[128]; long kb = 0;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "MemTotal: %ld kB", &kb) == 1) break;
+    fclose(f);
+    return (int)((kb + 1024L * 512) / (1024L * 1024));
+}
+
+/* Detect a dedicated GPU (NVIDIA/AMD PCI display device) and, where the driver
+ * exposes it (amdgpu), its VRAM. NVIDIA VRAM is not readable without the vendor
+ * driver, so gpu_vram_gb stays 0 (unknown) there — we then trust the dedicated
+ * GPU and let RAM bound the recommendation. */
+static void detect_gpu(bool *present, int *vram_gb) {
+    *present = false; *vram_gb = 0;
+    DIR *d = opendir("/sys/bus/pci/devices");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char p[256];
+            snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/class", e->d_name);
+            int cls = read_hex_file(p);
+            if (cls < 0 || ((cls >> 16) & 0xff) != 0x03) continue;   /* not a display device */
+            snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/vendor", e->d_name);
+            int ven = read_hex_file(p);
+            if (ven == 0x10de || ven == 0x1002) *present = true;     /* NVIDIA / AMD */
+        }
+        closedir(d);
+    }
+    DIR *dr = opendir("/sys/class/drm");
+    if (dr) {
+        struct dirent *e;
+        while ((e = readdir(dr)) != NULL) {
+            if (strncmp(e->d_name, "card", 4) != 0 || strchr(e->d_name, '-')) continue;
+            char p[256];
+            snprintf(p, sizeof p, "/sys/class/drm/%s/device/mem_info_vram_total", e->d_name);
+            FILE *f = fopen(p, "r");
+            if (f) {
+                long b = 0;
+                if (fscanf(f, "%ld", &b) == 1 && b > 0) {
+                    int g = (int)((b + 1024L*1024*512) / (1024L*1024*1024));
+                    /* Ignore tiny iGPU VRAM (<2 GB): it would misrepresent a system
+                     * whose real GPU is an NVIDIA card (VRAM not readable here) as
+                     * having almost none. Leaving vram 0 = "unknown", so the reco
+                     * trusts the dedicated GPU and lets RAM bound it. */
+                    if (g >= 2 && g > *vram_gb) *vram_gb = g;
+                }
+                fclose(f);
+            }
+        }
+        closedir(dr);
+    }
+}
+
+/* Pick the best model for the detected hardware: the largest whose recommended
+ * RAM fits, and whose GPU need is met — CPU-friendly models (vram_gb 0) always
+ * qualify; GPU models only with a dedicated GPU (and enough VRAM when known). */
+static void ai_compute_reco(app_t *a) {
+    /* Detected RAM is in GiB; the catalog's ram_gb uses marketing GB (a "32 GB"
+     * stick reads ~30 GiB, and the kernel reserves some). Add ~8% headroom so a
+     * 32 GB machine still qualifies for its tier, without over-recommending. */
+    int eff_ram = a->sys_ram_gb + a->sys_ram_gb / 12;
+    int reco = 1;   /* floor: smallest real model */
+    for (int i = 1; i < N_AI_MODELS; i++) {
+        if (AI_MODELS[i].ram_gb > eff_ram) continue;
+        if (AI_MODELS[i].vram_gb == 0) { reco = i; continue; }  /* CPU-friendly */
+        if (!a->gpu_present) continue;                          /* GPU model, no dGPU */
+        if (a->gpu_vram_gb == 0 || AI_MODELS[i].vram_gb <= a->gpu_vram_gb) reco = i;
+    }
+    a->ai_reco = reco;
+}
+
+/* Detect hardware and work out which model best fits. We only TAG + name the
+ * recommendation — we never pre-select it. The default stays "No AI assistant"
+ * (index 0) so a download is always an opt-in choice, never forced on anyone. */
+static void detect_system(app_t *a) {
+    a->sys_ram_gb = detect_ram_gb();
+    detect_gpu(&a->gpu_present, &a->gpu_vram_gb);
+    ai_compute_reco(a);
+    a->ai_model = 0;   /* default: no AI — user must actively opt in */
+    /* Scroll so the recommended model is visible on first view (it may sit below
+     * the fold); render clamps the upper bound. */
+    a->ai_scroll = a->ai_reco > 3 ? a->ai_reco - 3 : 0;
+}
+
+#define AI_ROW_H   58
+#define AI_ROW_Y0  (CONTENT_Y + 2*g_fh + 6)
+#define AI_VISIBLE 7
+
+static void ai_clamp_scroll(app_t *a) {
+    if (a->ai_scroll > N_AI_MODELS-AI_VISIBLE) a->ai_scroll = N_AI_MODELS-AI_VISIBLE;
+    if (a->ai_scroll < 0) a->ai_scroll = 0;
+}
+
+static void render_ai(app_t *a) {
+    fill(a,0,0,a->win_w,a->win_h,C_BG);
+    draw_header(a,"Step 4 of 5  /  Offline AI assistant");
+    int cw=a->win_w-40;
+    text(a,"Optional: pick a local AI model, or keep \"No AI assistant\". Scroll for more.",
+         OPT_CARD_X,CONTENT_Y,C_TEXT_SUB,cw);
+    /* What we detected + what we recommend, so the user can judge for themselves. */
+    char gpu[48];
+    if (a->gpu_present && a->gpu_vram_gb > 0)
+        snprintf(gpu,sizeof gpu,"%d GB GPU", a->gpu_vram_gb);
+    else if (a->gpu_present)
+        snprintf(gpu,sizeof gpu,"dedicated GPU");
+    else
+        snprintf(gpu,sizeof gpu,"no dedicated GPU");
+    char det[144];
+    snprintf(det,sizeof det,"This PC: %d GB RAM, %s   ->   Recommended: %s",
+             a->sys_ram_gb, gpu, AI_MODELS[a->ai_reco].name);
+    text(a,det,OPT_CARD_X,CONTENT_Y+g_fh+1,C_TEXT_H,cw);
+
+    ai_clamp_scroll(a);
+    int y=AI_ROW_Y0;
+    for (int i=a->ai_scroll; i<N_AI_MODELS && i<a->ai_scroll+AI_VISIBLE; i++) {
+        const ai_model_t *m=&AI_MODELS[i];
+        bool sel=(a->ai_model==i), hov=(a->hover==i);
+        uint32_t bg = sel?C_CARD_SEL:(hov?C_CARD_HOV:C_CARD_NORMAL);
+        fill(a,OPT_CARD_X,y,cw,AI_ROW_H-6,bg);
+        rect_border(a,OPT_CARD_X,y,cw,AI_ROW_H-6,sel?C_BORDER_SEL:C_BORDER);
+        if (sel) fill(a,OPT_CARD_X,y+1,3,AI_ROW_H-8,C_ACCENT);
+        radio(a,OPT_CARD_X+22,y+(AI_ROW_H-6)/2,sel);
+        int tx=OPT_CARD_X+44;
+        /* line 1: name (+ "Recommended" tag on the auto-picked model) + tier */
+        char nm[72]; const char *dn = m->name;
+        if (i == a->ai_reco) { snprintf(nm,sizeof nm,"%s  (Recommended)",m->name); dn = nm; }
+        text(a,dn,tx,y+7,sel?C_TEXT_H:C_TEXT_B,cw-260);
+        if (m->tier[0]) text_right(a,m->tier,OPT_CARD_X+cw-14,y+7,C_TEXT_ACC);
+        /* line 2: the requirements the user cares about */
+        char spec[128];
+        if (m->dl[0])
+            snprintf(spec,sizeof(spec),"Download %s   -   %s   -   %s",m->dl,m->ram,m->gpu);
+        else
+            snprintf(spec,sizeof(spec),"%s",m->desc);
+        text(a,spec,tx,y+7+g_fh+3,C_TEXT_SUB,cw-(tx-OPT_CARD_X)-16);
+        y+=AI_ROW_H;
+    }
+    /* scroll hints (match disk view style) */
+    if (a->ai_scroll>0)
+        text(a,"^ more above",OPT_CARD_X,AI_ROW_Y0-g_fh-2,C_TEXT_DIM,cw);
+    if (a->ai_scroll+AI_VISIBLE < N_AI_MODELS) {
+        char more[48]; snprintf(more,sizeof(more),"v more below  (%d not shown)",
+            N_AI_MODELS-a->ai_scroll-AI_VISIBLE);
+        text(a,more,OPT_CARD_X,y+2,C_TEXT_DIM,cw);
+    }
+
+    hline(a,0,a->win_h-BTN_H-16,a->win_w,C_SEP);
+    btn_ghost(a,20,a->win_h-BTN_H-12,100,BTN_H,"Back",a->hover==100);
+    btn_primary(a,a->win_w-176,a->win_h-BTN_H-12,156,BTN_H,"Next",a->hover==101);
+}
+
+static void hover_ai(app_t *a, int mx, int my) {
+    int old=a->hover; a->hover=-1;
+    int y=AI_ROW_Y0;
+    for (int i=a->ai_scroll; i<N_AI_MODELS && i<a->ai_scroll+AI_VISIBLE; i++) {
+        if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+AI_ROW_H-6) { a->hover=i; break; }
+        y+=AI_ROW_H;
+    }
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=100;
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12) a->hover=101;
+    if (a->hover!=old) a->dirty=true;
+}
+static void click_ai(app_t *a, int mx, int my) {
+    int y=AI_ROW_Y0;
+    for (int i=a->ai_scroll; i<N_AI_MODELS && i<a->ai_scroll+AI_VISIBLE; i++) {
+        if (mx>=OPT_CARD_X&&mx<a->win_w-20&&my>=y&&my<y+AI_ROW_H-6)
+            { a->ai_model=i; a->dirty=true; return; }
+        y+=AI_ROW_H;
+    }
+    if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
+        { a->view=VIEW_SOFTWARE; a->dirty=true; }
+    if (mx>=a->win_w-176&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
         { a->view=VIEW_CONFIRM; a->dirty=true; }
 }
 
@@ -633,12 +880,12 @@ static void click_software(app_t *a, int mx, int my) {
 
 static void render_confirm(app_t *a) {
     fill(a,0,0,a->win_w,a->win_h,C_BG);
-    draw_header(a,"Step 4 of 4  /  Confirm");
+    draw_header(a,"Step 5 of 5  /  Confirm");
     int y=CONTENT_Y, m=20, cw=a->win_w-40;
     text(a,"Review your choices before installing.",m,y,C_TEXT_SUB,cw); y+=g_fh+12;
 
     /* Summary box */
-    fill(a,m,y,cw,120,C_CARD_NORMAL); rect_border(a,m,y,cw,120,C_BORDER);
+    fill(a,m,y,cw,150,C_CARD_NORMAL); rect_border(a,m,y,cw,150,C_BORDER);
     int sy=y+14, lx=m+12, vx=m+140;
     text(a,"Disk:",lx,sy,C_TEXT_SUB,0);
     if (a->sel_disk>=0) {
@@ -653,6 +900,13 @@ static void render_confirm(app_t *a) {
     text(a,"Software:",lx,sy,C_TEXT_SUB,0);
     text(a,(a->software&SW_LIBREOFFICE)?"LibreOffice":"(none extra)",vx,sy,C_TEXT_B,0);
     sy+=g_fh+10;
+    text(a,"AI model:",lx,sy,C_TEXT_SUB,0);
+    if (a->ai_model>0) {
+        char ai[96]; snprintf(ai,sizeof(ai),"%s  (%s download)",
+            AI_MODELS[a->ai_model].name, AI_MODELS[a->ai_model].dl);
+        text(a,ai,vx,sy,C_TEXT_B,cw-140-24);
+    } else text(a,"(none)",vx,sy,C_TEXT_B,0);
+    sy+=g_fh+10;
     text(a,"Action:",lx,sy,C_TEXT_SUB,0);
     if (a->sel_disk>=0) {
         const char *verb = a->disks[a->sel_disk].is_part ? "Format" : "Erase";
@@ -660,7 +914,7 @@ static void render_confirm(app_t *a) {
             verb, a->disks[a->sel_disk].name);
         text(a,act,vx,sy,C_ERR,cw-140-24);
     }
-    y+=136;
+    y+=166;
     const char *warn = (a->sel_disk>=0&&a->disks[a->sel_disk].is_part)
         ? "This cannot be undone. The selected partition will be permanently formatted."
         : "This cannot be undone. The selected disk will be permanently erased.";
@@ -693,14 +947,15 @@ static void start_install(app_t *a) {
         char disk[40]; snprintf(disk,sizeof(disk),"/dev/%s",a->disks[a->sel_disk].name);
         execl("/bin/fifi-install.sh","fifi-install.sh",disk,
               a->browser==BROWSER_LIBREWOLF?"librewolf":"firefox",
-              (a->software&SW_LIBREOFFICE)?"libreoffice":"none",NULL);
+              (a->software&SW_LIBREOFFICE)?"libreoffice":"none",
+              AI_MODELS[a->ai_model].id,NULL);
         printf("ERROR: /bin/fifi-install.sh not found\n"); fflush(stdout); _exit(1);
     }
     close(pfd[1]);
 }
 static void click_confirm(app_t *a, int mx, int my) {
     if (mx>=20&&mx<120&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
-        { a->view=VIEW_SOFTWARE; a->dirty=true; }
+        { a->view=VIEW_AI; a->dirty=true; }
     if (a->sel_disk>=0&&mx>=a->win_w-196&&mx<a->win_w-20&&my>=a->win_h-BTN_H-12&&my<a->win_h-12)
         start_install(a);
 }
@@ -827,6 +1082,7 @@ static void render_app(app_t *a) {
     case VIEW_DISK:     render_disk(a);     break;
     case VIEW_BROWSER:  render_browser(a);  break;
     case VIEW_SOFTWARE: render_software(a); break;
+    case VIEW_AI:       render_ai(a);       break;
     case VIEW_CONFIRM:  render_confirm(a);  break;
     case VIEW_PROGRESS: render_progress(a); break;
     case VIEW_DONE:     render_done(a);     break;
@@ -839,6 +1095,7 @@ static void on_hover(app_t *a, int mx, int my) {
     case VIEW_DISK:     hover_disk(a,mx,my);     break;
     case VIEW_BROWSER:  hover_browser(a,mx,my);  break;
     case VIEW_SOFTWARE: hover_software(a,mx,my); break;
+    case VIEW_AI:       hover_ai(a,mx,my);       break;
     case VIEW_CONFIRM:  hover_confirm(a,mx,my);  break;
     case VIEW_DONE:     hover_done(a,mx,my);     break;
     case VIEW_PROGRESS:
@@ -858,6 +1115,7 @@ static void on_click(app_t *a, int mx, int my, int sock) {
     case VIEW_DISK:     click_disk(a,mx,my);     break;
     case VIEW_BROWSER:  click_browser(a,mx,my);  break;
     case VIEW_SOFTWARE: click_software(a,mx,my); break;
+    case VIEW_AI:       click_ai(a,mx,my);       break;
     case VIEW_CONFIRM:  click_confirm(a,mx,my);  break;
     case VIEW_DONE:
         if (a->hover==0) {
@@ -900,6 +1158,7 @@ int main(void) {
     a.win_w=WIN_W; a.win_h=WIN_H;
     a.view=VIEW_WELCOME; a.dirty=true;
     a.browser=BROWSER_LIBREWOLF; a.software=SW_LIBREOFFICE;
+    detect_system(&a);   /* read RAM + GPU, pre-select the recommended AI model */
     a.sel_disk=-1; a.install_pipe=-1; a.install_pid=-1;
 
     /* Load PSF2 font */
@@ -978,6 +1237,12 @@ int main(void) {
                                 if (a.disk_scroll<0) a.disk_scroll=0;
                                 if (a.disk_scroll>a.ndisks-visible) a.disk_scroll=a.ndisks-visible;
                                 if (a.disk_scroll<0) a.disk_scroll=0;
+                                a.dirty=true;
+                            }
+                            /* Scroll wheel on the AI model list */
+                            if (scroll && a.view==VIEW_AI) {
+                                a.ai_scroll -= (int)scroll;
+                                ai_clamp_scroll(&a);
                                 a.dirty=true;
                             }
                         }

@@ -1,6 +1,47 @@
 #!/bin/sh
 # FiFi OS — PID 1 init
 
+# ── Stage 1: relocate to a real (tmpfs) root so pivot_root / bubblewrap work ──
+# The initramfs root is the special `rootfs`, on which pivot_root is FORBIDDEN,
+# so Steam and other bubblewrap-sandboxed apps fail. On the FIRST entry we copy
+# the whole initramfs into a tmpfs and switch_root into it (a real filesystem
+# where pivot_root works), then re-exec /init there. Everything after this block
+# then runs on the tmpfs root exactly as before.
+#
+# Safety (this must never brick a boot):
+#   - `/.fifi-realroot` marker: set in the new root so we never switch twice.
+#   - Escape hatch: add `fifi_noswitch` to the GRUB kernel cmdline to skip this
+#     entirely and boot straight off the initramfs (recovery path).
+#   - Verify-before-switch: only switch if the copy produced a bootable root;
+#     ANY failure unmounts the tmpfs and falls through to a normal initramfs boot.
+if [ ! -e /.fifi-realroot ]; then
+    _switch=1
+    mount -t proc none /proc 2>/dev/null
+    for _a in $(cat /proc/cmdline 2>/dev/null); do
+        [ "$_a" = "fifi_noswitch" ] && _switch=0
+        [ "$_a" = "fifi_live" ] && _switch=0   # live/installer USB: no switch_root
+    done
+    umount /proc 2>/dev/null || true
+    if [ "$_switch" = 1 ] && mkdir -p /newroot 2>/dev/null && \
+       mount -t tmpfs -o size=75% tmpfs /newroot 2>/dev/null; then
+        for _d in /*; do
+            case "$_d" in
+                /newroot|/proc|/sys|/dev|/run|/tmp) continue ;;
+            esac
+            cp -a "$_d" /newroot/ 2>/dev/null || true
+        done
+        mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run /newroot/tmp \
+                 /newroot/fifi-data 2>/dev/null
+        # Commit to the switch only if the new root is actually bootable.
+        if [ -e /newroot/init ] && [ -x /newroot/bin/busybox ] && [ -d /newroot/usr/lib ]; then
+            : > /newroot/.fifi-realroot
+            exec switch_root /newroot /init
+            # exec only returns on failure -> fall through to a normal boot
+        fi
+        umount /newroot 2>/dev/null || true
+    fi
+fi
+
 # ── Mount essential virtual filesystems ──────────────────────────────────────
 mount -t proc     none /proc
 mount -t sysfs    none /sys
@@ -82,40 +123,71 @@ mkdir -p /fifi-data
 # The kernel cmdline may include fifi_data_uuid=<UUID> written by the installer.
 # If found, mount that ext4 partition as /fifi-data so settings and software
 # persist between reboots. Falls back to tmpfs-backed /fifi-data on live USB.
+# Parse the data-partition UUID from the kernel cmdline. The installer has passed
+# either a bare UUID or (historically) a whole blkid line, so accept both forms
+# and discard anything that is not a clean UUID — we never trust it blindly, it is
+# only a fast-path hint; the marker probe below is authoritative.
 FIFI_DATA_UUID=""
+FIFI_LIVE=0
 for arg in $(cat /proc/cmdline 2>/dev/null); do
-    case "$arg" in fifi_data_uuid=*) FIFI_DATA_UUID="${arg#fifi_data_uuid=}" ;; esac
+    case "$arg" in
+        fifi_data_uuid=*) FIFI_DATA_UUID="${arg#fifi_data_uuid=}" ;;
+        UUID=*)           [ -z "$FIFI_DATA_UUID" ] && FIFI_DATA_UUID="${arg#UUID=}" ;;
+        fifi_live)        FIFI_LIVE=1 ;;   # booted from the install USB, not a disk
+    esac
 done
-if [ -n "$FIFI_DATA_UUID" ]; then
-    DATA_DEV=""
-    # /dev/disk/by-uuid/ requires udev which we don't run — probe directly instead.
-    # Try standard symlink first (works if udev is somehow available)
-    [ -b "/dev/disk/by-uuid/$FIFI_DATA_UUID" ] && DATA_DEV="/dev/disk/by-uuid/$FIFI_DATA_UUID"
-    # Otherwise mount-probe every likely ext4 partition looking for the installed marker
-    if [ -z "$DATA_DEV" ]; then
-        _pm="/tmp/_fifi_probe" ; mkdir -p "$_pm"
-        for _d in /dev/nvme0n1p4 /dev/nvme0n1p3 /dev/nvme0n1p2 \
-                  /dev/nvme1n1p1 /dev/nvme2n1p1 \
-                  /dev/sda2 /dev/sda3 /dev/sda4 /dev/sda5 \
-                  /dev/sdb1 /dev/sdb2 /dev/sdc1 /dev/sdc2; do
-            [ -b "$_d" ] || continue
-            mount -t ext4 -o ro "$_d" "$_pm" 2>/dev/null || continue
-            # Accept this device if it has our installed marker
-            if [ -f "$_pm/installed" ]; then
-                DATA_DEV="$_d"
-                umount "$_pm" ; break
-            fi
-            umount "$_pm"
-        done
-        rmdir "$_pm" 2>/dev/null
+case "$FIFI_DATA_UUID" in *[!0-9A-Fa-f-]*|"") FIFI_DATA_UUID="" ;; esac
+# A live/installer USB must NEVER adopt an already-installed FiFi data partition
+# (that would boot the user straight into their existing install). Its GRUB sets
+# fifi_live; when present we skip the probe below and run on tmpfs -> installer.
+
+# Find the FIFI-DATA partition by its /installed marker. We cannot rely on udev
+# (/dev/disk/by-uuid), a fixed device path, or a fixed partition list — the disk
+# layout varies per machine and nvme/USB nodes can lag a few seconds behind /init.
+# So poll /proc/partitions and mount-probe EVERY partition for the marker, retrying
+# while devices settle. Marker found -> installed system (mount it); none -> live
+# boot (tmpfs fallback). An installed disk is found on the first pass with no delay.
+DATA_DEV=""
+_pm="/tmp/_fifi_probe" ; mkdir -p "$_pm"
+_try=0
+while [ "$FIFI_LIVE" != 1 ] && [ -z "$DATA_DEV" ] && [ "$_try" -lt 20 ]; do
+    # Fast path: udev by-uuid symlink, if one happens to exist
+    if [ -n "$FIFI_DATA_UUID" ] && [ -b "/dev/disk/by-uuid/$FIFI_DATA_UUID" ]; then
+        DATA_DEV="/dev/disk/by-uuid/$FIFI_DATA_UUID"
+        break
     fi
-    if [ -n "$DATA_DEV" ]; then
-        mount -t ext4 "$DATA_DEV" /fifi-data 2>/dev/null && \
-            echo "fifi-data: mounted $DATA_DEV" || \
-            echo "fifi-data: mount failed, using tmpfs"
-    else
-        echo "fifi-data: data partition not found (UUID=$FIFI_DATA_UUID), using tmpfs"
-    fi
+    # Probe every partition the kernel currently knows about (skip whole disks and
+    # virtual/loop/ram devices). read from a file, not a pipe, so DATA_DEV persists.
+    while read -r _maj _min _blk _name _rest; do
+        case "$_name" in
+            ""|name|loop*|ram*|sr*|nbd*|dm-*|md*|zram*) continue ;;
+            *[0-9]) : ;;   # partitions end in a digit
+            *)      continue ;;
+        esac
+        _d="/dev/$_name"
+        [ -b "$_d" ] || continue
+        mount -t ext4 -o ro "$_d" "$_pm" 2>/dev/null || continue
+        if [ -f "$_pm/installed" ]; then
+            umount "$_pm" 2>/dev/null
+            DATA_DEV="$_d"
+            break
+        fi
+        umount "$_pm" 2>/dev/null
+    done < /proc/partitions
+    [ -n "$DATA_DEV" ] && break
+    _try=$((_try + 1))
+    sleep 1
+done
+rmdir "$_pm" 2>/dev/null
+
+if [ -n "$DATA_DEV" ]; then
+    mount -t ext4 "$DATA_DEV" /fifi-data 2>/dev/null && \
+        echo "fifi-data: mounted $DATA_DEV" || \
+        echo "fifi-data: mount of $DATA_DEV failed, using tmpfs"
+elif [ "$FIFI_LIVE" = 1 ]; then
+    echo "fifi-data: live/installer USB, using tmpfs (installer will run)"
+else
+    echo "fifi-data: no installed partition found, using tmpfs (live mode)"
 fi
 
 # ── Loopback interface ────────────────────────────────────────────────────────
@@ -154,6 +226,10 @@ done
 # the App Store then shows Update buttons without a manual "Check Updates".
 # Offline-safe: the check just fails quietly and retries next boot.
 ( sleep 25
+  # Build the App Store catalog if missing, so search works on a fresh install
+  # (offline-safe: fails quietly, retries next boot).
+  [ -s /fifi-data/apps/catalog.tsv ] || \
+      { [ -f /fifi-data/apps/appstore-sync.sh ] && sh /fifi-data/apps/appstore-sync.sh >/dev/null 2>&1; }
   [ -f /fifi-data/apps/appstore-update-check.sh ] && \
       sh /fifi-data/apps/appstore-update-check.sh >/dev/null 2>&1 ) &
 [ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
@@ -166,6 +242,21 @@ if [ -d /usr/share/fifi/icons ]; then
         [ -f "$ic" ] || continue
         b=$(basename "$ic")
         [ -f "/fifi-data/icons/$b" ] || cp "$ic" "/fifi-data/icons/$b" 2>/dev/null || true
+    done
+fi
+
+# Bundled TTF/OTF fonts — seed into /fifi-data/fonts so the Settings font picker
+# (which scans /fonts -> /fifi-data/fonts) has fonts on a fresh install. The
+# mounted data partition shadows the baked copy, so seed onto it here.
+mkdir -p /fifi-data/fonts
+if [ -d /usr/share/fifi/fonts ]; then
+    # .psf too: the App Store + other FiFi apps load /fifi-data/fonts/ter16b.psf;
+    # without it their text renders blank (they fall back to an empty glyph set).
+    for ft in /usr/share/fifi/fonts/*.ttf /usr/share/fifi/fonts/*.otf \
+              /usr/share/fifi/fonts/*.ttc /usr/share/fifi/fonts/*.psf; do
+        [ -f "$ft" ] || continue
+        b=$(basename "$ft")
+        [ -f "/fifi-data/fonts/$b" ] || cp "$ft" "/fifi-data/fonts/$b" 2>/dev/null || true
     done
 fi
 
@@ -192,9 +283,17 @@ if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
     [ -f /etc/passwd ] || echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
     [ -f /etc/group ]  || echo 'root:x:0:' > /etc/group
 
-    # /root/.ssh -> /fifi-data/ssh so authorized_keys is persistent
-    mkdir -p /root
-    [ -L /root/.ssh ] || [ -d /root/.ssh ] || ln -sf /fifi-data/ssh /root/.ssh
+    # Authorize SSH via a REAL ~/.ssh directory. dropbear can reject a SYMLINKED
+    # ~/.ssh, so build /root/.ssh fresh each boot from two sources: the persistent
+    # per-install keys (/fifi-data/ssh/authorized_keys, survives updates) plus any
+    # baked key. TEMPORARY/TEST: /usr/share/fifi/authorized_keys holds a dev key so
+    # remote access works out of the box — REMOVE it before any public release.
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    : > /root/.ssh/authorized_keys
+    [ -f /fifi-data/ssh/authorized_keys ] && cat /fifi-data/ssh/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null
+    [ -f /usr/share/fifi/authorized_keys ] && cat /usr/share/fifi/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null
+    chmod 600 /root/.ssh/authorized_keys
 
     # Start dropbear: key-only auth (-s), disable port forwarding (-j -k)
     /usr/sbin/dropbear \
@@ -204,6 +303,18 @@ if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
         >>/fifi-data/sshd.log 2>&1 && \
         echo "ssh: dropbear started on port 22" >> /fifi-data/network.log || \
         echo "ssh: dropbear failed to start — check /fifi-data/sshd.log" >> /fifi-data/network.log
+fi
+
+# ── Bluetooth: root-mode system D-Bus + bluetoothd (no-op if not bundled) ─────
+# Enables pairing via `bt` / bluetoothctl and A2DP audio via PipeWire's bluez5
+# plugin. Adapters auto-power-on per /etc/bluetooth/main.conf.
+if [ -x /usr/lib/bluetooth/bluetoothd ] && [ -x /usr/bin/dbus-daemon ]; then
+    [ -f /etc/machine-id ] || /usr/bin/dbus-uuidgen > /etc/machine-id 2>/dev/null || true
+    mkdir -p /run/dbus /var/lib/bluetooth
+    [ -S /run/dbus/system_bus_socket ] || \
+        /usr/bin/dbus-daemon --system --fork >>/fifi-data/bluetooth.log 2>&1 || true
+    /usr/lib/bluetooth/bluetoothd >>/fifi-data/bluetooth.log 2>&1 &
+    echo "bluetooth: dbus + bluetoothd started" >> /fifi-data/network.log
 fi
 
 # ── Bring up ethernet in background (autoneg needs time) ─────────────────────

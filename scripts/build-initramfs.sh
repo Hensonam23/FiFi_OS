@@ -217,6 +217,69 @@ echo "[initramfs] building fifi-appstore..."
     echo "[initramfs] included fifi-appstore"
 } || echo "[initramfs] WARNING: fifi-appstore build failed"
 
+# ── Offline AI runtime (llama.cpp) — the `ai` command / installed model runs on it ──
+# Prebuilt once by scripts/build-llama.sh into build-linux/llama/ (CPU, portable).
+# Optional: if absent the image still builds, but AI models won't run.
+LLAMA_CLI="$REPO_ROOT/build-linux/llama/llama-cli"
+if [ -x "$LLAMA_CLI" ]; then
+    echo "[initramfs] bundling llama.cpp runtime (llama-cli)..."
+    cp "$LLAMA_CLI" "$STAGE/usr/bin/llama-cli"
+    chmod +x "$STAGE/usr/bin/llama-cli"
+    ldd "$LLAMA_CLI" 2>/dev/null | grep '=>' | awk '{print $3}' | while read -r lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest" 2>/dev/null || true
+    done
+    echo "[initramfs] included llama-cli ($(du -h "$LLAMA_CLI" | cut -f1))"
+else
+    echo "[initramfs] NOTE: build-linux/llama/llama-cli not found — run scripts/build-llama.sh for offline AI"
+fi
+
+# ── App-support libraries (baked so downloaded apps run on a FRESH install) ──
+# Chromium/Electron apps (Discord, etc.) expect NSS/NSPR from the system. These
+# were previously only hand-copied to /fifi-data on the test box; bake them (plus
+# each library's ldd closure) into the image so a clean install works out of box.
+echo "[initramfs] bundling app-support libraries (NSS/NSPR)..."
+for lib in libnss3 libnssutil3 libsmime3 libssl3 libnspr4 libplc4 libplds4 \
+           libnssckbi libsoftokn3 libfreebl3 libsqlite3; do
+    for f in /usr/lib/$lib.so*; do
+        [ -e "$f" ] || continue
+        cp -a "$f" "$STAGE/usr/lib/" 2>/dev/null || true
+        real=$(readlink -f "$f" 2>/dev/null)
+        [ -n "$real" ] && ldd "$real" 2>/dev/null | grep '=>' | awk '{print $3}' | while read -r dep; do
+            [ -f "$dep" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$dep")"
+            [ -f "$dest" ] || cp "$dep" "$dest" 2>/dev/null || true
+        done
+    done
+done
+echo "[initramfs] app-support libraries bundled"
+
+# ── GUI runtime libraries (GTK3 / cairo / X11) ───────────────────────────────
+# Apps like LibreWolf and LibreOffice expect the GTK3/cairo/X11 stack FROM the
+# system (they don't bundle it), so a from-scratch image can't launch them.
+# Bake each library + its full ldd closure into /usr/lib (on the default loader
+# search path, so no seeding needed). ~80 libs / ~84MB; negligible RAM on any
+# real machine. Verified on hardware: without these, LibreWolf fails on
+# libgtk-3.so.0 and LibreOffice on libcairo.so.2 / libX11-xcb.so.1.
+echo "[initramfs] bundling GUI runtime libraries (GTK3/cairo/X11)..."
+for lib in libgtk-3.so.0 libgdk-3.so.0 libcairo.so.2 libcairo-gobject.so.2 \
+           libpango-1.0.so.0 libpangocairo-1.0.so.0 libpangoft2-1.0.so.0 \
+           libgdk_pixbuf-2.0.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 \
+           libgtk-x11-2.0.so.0 libgdk-x11-2.0.so.0 libX11-xcb.so.1 \
+           libcups.so.2 libdbus-glib-1.so.2; do
+    for base in /usr/lib /usr/lib64; do
+        f="$base/$lib"; [ -e "$f" ] || continue
+        cp -nL "$f" "$STAGE/usr/lib/$lib" 2>/dev/null || true
+        ldd "$f" 2>/dev/null | awk '/=>/{print $3}' | while read -r d; do
+            [ -f "$d" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$d")"
+            [ -f "$dest" ] || cp -L "$d" "$dest" 2>/dev/null || true
+        done
+    done
+done
+echo "[initramfs] GUI runtime libraries bundled"
+
 # ── Disk installer tools (parted, mkfs.ext4, mkfs.fat, blkid, grub-install) ──
 echo "[initramfs] bundling disk installer tools..."
 cp "$STAGE/bin/fifi-install.sh" "$STAGE/bin/fifi-install.sh" 2>/dev/null || true  # already staged above
@@ -319,8 +382,37 @@ FONT_SRC="$REPO_ROOT/initrd/rootfs/fonts"
 if [ -d "$FONT_SRC" ]; then
     mkdir -p "$STAGE/fifi-data/fonts"
     cp "$FONT_SRC"/*.psf "$STAGE/fifi-data/fonts/" 2>/dev/null || true
+    # Also into the seed source: the mounted data partition shadows the baked
+    # /fifi-data on an installed system, so /init re-seeds .psf from here (the App
+    # Store loads ter16b.psf; missing it = blank text).
+    mkdir -p "$STAGE/usr/share/fifi/fonts"
+    cp "$FONT_SRC"/*.psf "$STAGE/usr/share/fifi/fonts/" 2>/dev/null || true
     echo "[initramfs] included fonts from $FONT_SRC"
 fi
+
+# Scalable TTF/OTF fonts for the Settings font picker. gui_font_scan() reads
+# /fonts (-> /fifi-data/fonts); we bake a curated set into /usr/share/fifi/fonts
+# and /init seeds them onto the data partition on first boot. Curated (not the
+# whole Noto tree) to keep the initramfs from ballooning.
+FIFI_FONT_DST="$STAGE/usr/share/fifi/fonts"
+mkdir -p "$FIFI_FONT_DST"
+for fdir in /usr/share/fonts/TTF \
+            /usr/share/fonts/liberation \
+            /usr/share/fonts/carlito /usr/share/fonts/caladea; do
+    [ -d "$fdir" ] || continue
+    for f in "$fdir"/*.ttf "$fdir"/*.otf "$fdir"/*.ttc; do
+        [ -f "$f" ] || continue
+        cp -n "$f" "$FIFI_FONT_DST/" 2>/dev/null || true
+    done
+done
+# A few core Noto families (Regular weights only) without the full CJK/emoji set.
+for nf in /usr/share/fonts/noto/NotoSans-Regular.ttf \
+          /usr/share/fonts/noto/NotoSerif-Regular.ttf \
+          /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+    [ -f "$nf" ] && cp -n "$nf" "$FIFI_FONT_DST/" 2>/dev/null || true
+done
+_nfonts=$(ls "$FIFI_FONT_DST" 2>/dev/null | wc -l)
+echo "[initramfs] bundled $_nfonts scalable fonts ($(du -sh "$FIFI_FONT_DST" 2>/dev/null | cut -f1)) for the font picker"
 
 # Populate initial fifi-data content for the file browser
 mkdir -p "$STAGE/fifi-data/docs" "$STAGE/fifi-data/config" "$STAGE/fifi-data/images"
@@ -781,6 +873,69 @@ for regdb in /usr/lib/firmware/regulatory.db /lib/firmware/regulatory.db; do
     fi
 done
 
+# ── Bluetooth: BlueZ (bluetoothd + bluetoothctl) over a root-mode system D-Bus;
+#    A2DP audio via PipeWire's bluez5 plugin. Kernel BT is enabled in fifi.config.
+#    Untested without BT hardware — see fifi-pre-install-test-pass memory. ───────
+echo "[initramfs] bundling Bluetooth (BlueZ + D-Bus + firmware)..."
+mkdir -p "$STAGE/usr/lib/bluetooth" "$STAGE/usr/lib/spa-0.2/bluez5" \
+         "$STAGE/etc/bluetooth" "$STAGE/var/lib/bluetooth" \
+         "$STAGE/usr/share/dbus-1/system.d" "$STAGE/run/dbus"
+[ -x /usr/lib/bluetooth/bluetoothd ] && cp /usr/lib/bluetooth/bluetoothd "$STAGE/usr/lib/bluetooth/"
+for b in bluetoothctl dbus-daemon dbus-uuidgen; do
+    src="$(command -v $b 2>/dev/null)"; [ -x "$src" ] && cp "$src" "$STAGE/usr/bin/"
+done
+cp /usr/lib/spa-0.2/bluez5/*.so "$STAGE/usr/lib/spa-0.2/bluez5/" 2>/dev/null || true
+# D-Bus system bus config: the MAIN system.conf is REQUIRED or `dbus-daemon --system`
+# refuses to start (no socket -> bluetoothd can't run). Copy it plus every system.d
+# policy (the BlueZ policy is `bluetooth.conf` on current BlueZ, NOT `org.bluez.conf`)
+# and the bluez activation service file.
+mkdir -p "$STAGE/usr/share/dbus-1/system-services"
+cp /usr/share/dbus-1/system.conf "$STAGE/usr/share/dbus-1/system.conf" 2>/dev/null || true
+cp /usr/share/dbus-1/system.d/*.conf "$STAGE/usr/share/dbus-1/system.d/" 2>/dev/null || true
+cp /usr/share/dbus-1/system-services/org.bluez.service "$STAGE/usr/share/dbus-1/system-services/" 2>/dev/null || true
+[ -f /etc/bluetooth/main.conf ] && cp /etc/bluetooth/main.conf "$STAGE/etc/bluetooth/" 2>/dev/null || true
+# dbus-daemon --system drops privileges to the `dbus` user; the minimal rootfs has
+# no such account, so the bus aborts ("Could not get UID/GID for username dbus").
+# The source rootfs has NO /etc/passwd (init creates a root-only one at boot, but
+# only if absent), so seed root FIRST here, then append dbus — otherwise we'd bake
+# a passwd with dbus but no root and init would leave it (breaking SSH/root).
+mkdir -p "$STAGE/etc"
+[ -s "$STAGE/etc/passwd" ] || echo 'root:x:0:0:root:/root:/bin/sh' > "$STAGE/etc/passwd"
+[ -s "$STAGE/etc/group" ]  || echo 'root:x:0:' > "$STAGE/etc/group"
+grep -q "^dbus:" "$STAGE/etc/passwd" 2>/dev/null || echo "dbus:x:81:81:System Message Bus:/:/sbin/nologin" >> "$STAGE/etc/passwd"
+grep -q "^dbus:" "$STAGE/etc/group"  2>/dev/null || echo "dbus:x:81:" >> "$STAGE/etc/group"
+# A machine-id is required by D-Bus/BlueZ; seed a static one (init regenerates if empty).
+mkdir -p "$STAGE/var/lib/dbus"
+if [ ! -s "$STAGE/etc/machine-id" ]; then
+    dbus-uuidgen 2>/dev/null > "$STAGE/etc/machine-id" || true
+fi
+cp "$STAGE/etc/machine-id" "$STAGE/var/lib/dbus/machine-id" 2>/dev/null || true
+{
+    ldd /usr/lib/bluetooth/bluetoothd
+    ldd "$(command -v bluetoothctl)"
+    ldd "$(command -v dbus-daemon)"
+    for f in /usr/lib/spa-0.2/bluez5/*.so; do [ -f "$f" ] && ldd "$f"; done
+} 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u | while read -r lib; do
+    real=$(realpath "$lib" 2>/dev/null) || continue
+    [ -f "$real" ] || continue
+    dest="$STAGE/usr/lib/$(basename "$real")"
+    [ -f "$dest" ] || cp "$real" "$dest" 2>/dev/null || true
+    ln="$STAGE/usr/lib/$(basename "$lib")"
+    [ -e "$ln" ] || ln -sf "$(basename "$real")" "$ln" 2>/dev/null || true
+done
+# BT controller firmware (Intel ibt-*, Realtek rtl_bt, Qualcomm qca); decompress
+# .zst since the kernel firmware loader expects raw files.
+mkdir -p "$STAGE/lib/firmware/intel" "$STAGE/lib/firmware/rtl_bt" "$STAGE/lib/firmware/qca"
+for fw in /lib/firmware/intel/ibt-* /lib/firmware/rtl_bt/* /lib/firmware/qca/*; do
+    [ -f "$fw" ] || continue
+    rel="${fw#/lib/firmware/}"; dest="$STAGE/lib/firmware/$rel"
+    case "$fw" in
+        *.zst) dest="${dest%.zst}"; zstd -dqf "$fw" -o "$dest" 2>/dev/null || true ;;
+        *)     cp "$fw" "$dest" 2>/dev/null || true ;;
+    esac
+done
+echo "[initramfs] Bluetooth stack bundled"
+
 # Create iwd runtime dirs
 mkdir -p "$STAGE/var/lib/iwd" "$STAGE/etc/iwd" "$STAGE/var/run/wpa_supplicant"
 
@@ -977,7 +1132,10 @@ mknod -m 666 "$STAGE/dev/null"    c 1 3 2>/dev/null || true
 mknod -m 666 "$STAGE/dev/tty"     c 5 0 2>/dev/null || true
 
 # ── Pack into cpio.gz ─────────────────────────────────────────────────────────
-(cd "$STAGE" && find . | cpio -H newc -o 2>/dev/null | gzip -9) > "$OUT_FILE"
+# -R 0:0 forces every file to be owned by root in the archive. Without it the
+# archive keeps the build user's uid/gid (e.g. 1000), and dropbear then refuses
+# SSH because /root is not owned by root ("insecure" home dir, no error logged).
+(cd "$STAGE" && find . | cpio -H newc -o -R 0:0 2>/dev/null | gzip -9) > "$OUT_FILE"
 
 SIZE=$(du -sh "$OUT_FILE" | cut -f1)
 echo "[initramfs] Done. $OUT_FILE ($SIZE)"

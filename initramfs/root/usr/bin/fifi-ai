@@ -1,0 +1,47 @@
+#!/bin/sh
+# fifi-ai — chat with the local, fully offline AI model in a terminal.
+#
+# Reads the model chosen at install time (or added later) from
+# /fifi-data/ai/model.conf and runs it in conversation mode via llama.cpp's
+# llama-cli. Type `ai` in any FiFi terminal to start.
+
+AI_DIR=/fifi-data/ai
+CONF="$AI_DIR/model.conf"
+
+CLI=llama-cli
+command -v "$CLI" >/dev/null 2>&1 || CLI=/usr/bin/llama-cli
+if [ ! -x "$CLI" ] && ! command -v llama-cli >/dev/null 2>&1; then
+    echo "The AI runtime (llama-cli) is not installed in this build."
+    printf "Press Enter to close..."; read _ ; exit 1
+fi
+
+if [ ! -f "$CONF" ]; then
+    echo "No local AI model is installed yet."
+    echo "Download one now with:  fifi-ai-install"
+    echo
+    printf "Press Enter to close..."; read _ ; exit 0
+fi
+
+# model.conf holds:  id=<id>  name=<Name>  file=models/<id>.gguf
+NAME=$(sed -n 's/^name=//p' "$CONF")
+MFILE=$(sed -n 's/^file=//p' "$CONF")
+MODEL="$AI_DIR/$MFILE"
+[ -n "$NAME" ] || NAME="local model"
+
+if [ ! -f "$MODEL" ]; then
+    echo "The model file is missing: $MODEL"
+    echo "Re-download it with:  fifi-ai-install"
+    printf "Press Enter to close..."; read _ ; exit 1
+fi
+
+# Use the online CPU cores, capped so the desktop stays responsive.
+THREADS=$(nproc 2>/dev/null || echo 4)
+[ "$THREADS" -gt 8 ] && THREADS=8
+
+clear
+echo "FiFi AI  -  $NAME  (offline, running locally on this PC)"
+echo "Type a message and press Enter.  Ctrl+C or /exit to quit."
+echo
+exec "$CLI" -m "$MODEL" -cnv \
+    -sys "You are FiFi, a friendly and concise assistant running fully offline on the user's own PC. IMPORTANT: you are a text-only chat model with NO ability to run commands, install software, change settings, update the system, or access files. Never claim to have performed any such action. If asked to do something on the computer, explain that you can only answer questions and give step-by-step instructions the user can follow themselves." \
+    -t "$THREADS" -c 4096 --no-warmup

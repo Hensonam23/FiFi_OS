@@ -53,18 +53,18 @@ cat > "$STAGE/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=8
 set default=0
 
-menuentry "FiFi OS linux-desktop" {
-    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3
+menuentry "FiFi OS linux-desktop (live / installer)" {
+    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 fifi_live
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "FiFi OS linux-desktop  [nomodeset — safe fallback]" {
-    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset
+    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset fifi_live
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "FiFi OS linux-desktop  [serial debug — no GUI]" {
-    linux /boot/bzImage console=ttyS0,115200 loglevel=7
+    linux /boot/bzImage console=ttyS0,115200 loglevel=7 fifi_live
     initrd /boot/initramfs.cpio.gz
 }
 GRUBCFG

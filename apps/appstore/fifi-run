@@ -80,6 +80,26 @@ sandbox_exec() {
     exec "$@"
 }
 
+# Log which shared libraries an executable cannot resolve, so an app that fails
+# to start (the usual cause on a minimal system is a missing .so) leaves a clear
+# breadcrumb instead of dying silently. Diagnostic ONLY: LD_TRACE_LOADED_OBJECTS
+# makes the dynamic loader list libraries and exit WITHOUT running the program,
+# guarded by a timeout, and this always returns success so it can never block or
+# break a real launch. Any missing library can then be dropped into $RT/lib.
+diag_libs() {
+    _b="$1"
+    [ -x "$_b" ] || return 0
+    _miss=$(LD_TRACE_LOADED_OBJECTS=1 timeout 5 "$_b" 2>/dev/null | grep "not found")
+    {
+        echo "[${APP_NAME:-app}] launch: $_b"
+        if [ -n "$_miss" ]; then
+            echo "  MISSING LIBRARIES (drop these into $RT/lib):"
+            echo "$_miss" | sed 's/^/    /'
+        fi
+    } > /fifi-data/apps/last-launch.log 2>/dev/null || true
+    return 0
+}
+
 # True if a process whose comm matches $1 is running.
 proc_running() {
     for _d in /proc/[0-9]*; do
@@ -171,12 +191,14 @@ launch_dir() {
             # is immediate), relaunch — by then XWayland is warm and it starts.
             # Once a launch survives the probe window, wait on it (it is the
             # persistent office process; fifi-run exits when the user closes it).
+            # The cold-X crash is immediate, so a short 4s probe is enough to
+            # confirm health — no need to sit through 8s on a good launch.
             _t=0
             while [ "$_t" -lt 5 ]; do
                 ./soffice.bin --nologo --norestore "$@" &
                 _sopid=$!
                 _w=0
-                while [ "$_w" -lt 8 ]; do
+                while [ "$_w" -lt 4 ]; do
                     kill -0 "$_sopid" 2>/dev/null || break
                     sleep 1; _w=$((_w + 1))
                 done
@@ -235,6 +257,25 @@ launch_dir() {
         # a stale instance/lock and silently exit.
         prof="$(dirname "$dir")/profile"
         mkdir -p "$prof" 2>/dev/null || true
+        # The compositor already draws a FiFi titlebar (server-side decorations),
+        # but Firefox also draws its OWN window controls into the tab strip and a
+        # CSD shadow margin -> duplicate buttons + a transparent border on top of
+        # ours. Tell Firefox not to draw in the titlebar so only the FiFi chrome
+        # shows. Written to user.js so it applies every launch (guarded so we don't
+        # duplicate it).
+        if ! grep -q "browser.tabs.inTitlebar" "$prof/user.js" 2>/dev/null; then
+            {
+              printf 'user_pref("browser.tabs.inTitlebar", 0);\n'
+              printf 'user_pref("browser.tabs.drawInTitlebar", false);\n'
+              # The quit/close-tabs confirmation renders as a transparent, unclosable
+              # dialog on this compositor (its content is on a subsurface we don't
+              # composite). Disable the prompts so Firefox just closes cleanly.
+              printf 'user_pref("browser.warnOnQuit", false);\n'
+              printf 'user_pref("browser.warnOnClose", false);\n'
+              printf 'user_pref("browser.tabs.warnOnClose", false);\n'
+              printf 'user_pref("browser.sessionstore.warnOnQuit", false);\n'
+            } >> "$prof/user.js"
+        fi
         export APPDIR="$dir"; cd "$dir"
         _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
@@ -243,10 +284,10 @@ launch_dir() {
         set -- --no-sandbox --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
         _sb_pid=1   # Electron keeps its main process alive → safe for a PID namespace
     fi
-    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; sandbox_exec "$dir/AppRun" "$@"; fi
+    if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; diag_libs "$dir/AppRun"; sandbox_exec "$dir/AppRun" "$@"; fi
     # fallback: an executable named like the dir's parent
     b=$(ls "$dir" 2>/dev/null | while read f; do [ -x "$dir/$f" ] && [ -f "$dir/$f" ] && echo "$f" && break; done)
-    [ -n "$b" ] && sandbox_exec "$dir/$b" "$@"
+    [ -n "$b" ] && { diag_libs "$dir/$b"; sandbox_exec "$dir/$b" "$@"; }
     echo "fifi-run: no launchable binary in $dir" >&2; exit 1
 }
 
@@ -262,6 +303,7 @@ case "$target" in
         launch_dir "$ext/squashfs-root" "$@"
         ;;
     *)
+        diag_libs "$target"
         sandbox_exec "$target" "$@"
         ;;
 esac

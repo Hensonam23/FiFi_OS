@@ -420,7 +420,26 @@ static IRow g_irows[2 + MAX_INST + MAX_SVC];
 static int  g_nirows = 0;
 static int  g_chkupd_x = 0, g_chkupd_y = 0, g_chkupd_w = 0;  /* Check Updates button rect */
 
-/* True if some process was launched from this AppImage's extracted dir. */
+/* True if some process was launched from this AppImage's extracted dir. Checks
+ * the exe + cwd symlinks (which resolve INTO the app dir even when the app is
+ * run with a relative cmdline, e.g. LibreOffice's "./soffice.bin") as well as
+ * the raw cmdline. */
+static bool proc_matches(const char *pid, const char *needle) {
+    char p[64], link[512];
+    snprintf(p, sizeof p, "/proc/%s/exe", pid);
+    ssize_t ln = readlink(p, link, sizeof link - 1);
+    if (ln > 0) { link[ln] = '\0'; if (strstr(link, needle)) return true; }
+    snprintf(p, sizeof p, "/proc/%s/cwd", pid);
+    ln = readlink(p, link, sizeof link - 1);
+    if (ln > 0) { link[ln] = '\0'; if (strstr(link, needle)) return true; }
+    snprintf(p, sizeof p, "/proc/%s/cmdline", pid);
+    int fd = open(p, O_RDONLY); if (fd < 0) return false;
+    char buf[512]; ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
+    if (n <= 0) return false;
+    for (ssize_t i = 0; i < n; i++) if (!buf[i]) buf[i] = ' ';
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
 static bool proc_scan(const char *needle) {
     DIR *d = opendir("/proc");
     if (!d) return false;
@@ -428,16 +447,22 @@ static bool proc_scan(const char *needle) {
     bool found = false;
     while (!found && (e = readdir(d))) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        char p[64]; snprintf(p, sizeof p, "/proc/%s/cmdline", e->d_name);
-        int fd = open(p, O_RDONLY); if (fd < 0) continue;
-        char buf[512]; ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
-        if (n <= 0) continue;
-        for (ssize_t i = 0; i < n; i++) if (!buf[i]) buf[i] = ' ';
-        buf[n] = '\0';
-        if (strstr(buf, needle)) found = true;
+        if (proc_matches(e->d_name, needle)) found = true;
     }
     closedir(d);
     return found;
+}
+/* Kill every process launched from an app's extracted dir (force close). */
+static int proc_kill_all(const char *needle) {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e; int killed = 0;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        if (proc_matches(e->d_name, needle)) { kill(atoi(e->d_name), SIGKILL); killed++; }
+    }
+    closedir(d);
+    return killed;
 }
 
 static void scan_installed(void) {
@@ -782,16 +807,24 @@ static void render(uint32_t *fb) {
                     draw_str(fb, "RUNNING", WIN_W - BTN_W - 24 - 220,
                              ry + (ITEM_H - g_glyph_h)/2, C_RUN);
                 int bx = WIN_W - BTN_W - PAD_X, by = ry + 3, bh = ITEM_H - 6;
-                uint32_t bcol = in->has_update ? C_UPDATE
-                              : in->running    ? C_BTN_DIS : C_ACCENT;
-                const char *lbl = in->has_update ? "Update"
-                                : in->running    ? "Running" : "Launch";
+                /* Main button always launches (reopens a running app); Update if
+                 * an update is pending. A separate red Close button force-quits a
+                 * running app. */
+                uint32_t bcol = in->has_update ? C_UPDATE : C_ACCENT;
+                const char *lbl = in->has_update ? "Update" : "Launch";
                 fill(fb, bx, by, BTN_W, bh, bcol);
                 draw_str(fb, lbl, bx + (BTN_W - (int)strlen(lbl)*9)/2,
                          ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
                 /* Remove (uninstall) button to the left of Launch */
                 int rmx = bx - 76 - 6;
                 fill(fb, rmx, by, 76, bh, 0x00803038u);
+                /* Close (force-quit) button, left of Remove, only when running */
+                if (in->running) {
+                    int cbx = rmx - 66 - 6;
+                    fill(fb, cbx, by, 66, bh, 0x00b04030u);
+                    draw_str(fb, "Close", cbx + (66 - 5*9)/2,
+                             ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
+                }
                 draw_str(fb, "Remove", rmx + (76 - 6*9)/2,
                          ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
             } else {
@@ -1069,10 +1102,16 @@ int main(void) {
                                                 if (in->has_update) {
                                                     start_update(sock, ai);
                                                     in->has_update = false;  /* optimistic */
-                                                } else if (!in->running) {
+                                                } else {                     /* Launch (reopens if running) */
                                                     launch_app(sock, ai);
                                                     in->running = true;      /* optimistic */
                                                 }
+                                                dirty = true;
+                                            } else if (in->running && mx >= rmx - 66 - 6 && mx < rmx - 6) {
+                                                char nk[224];              /* Close = force-quit */
+                                                snprintf(nk, sizeof nk, "/fifi-data/apps/%s.d/", in->name);
+                                                proc_kill_all(nk);
+                                                in->running = false;       /* optimistic */
                                                 dirty = true;
                                             } else if (mx >= rmx && mx < rmx + 76) {
                                                 start_uninstall(sock, ai);

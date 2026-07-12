@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <time.h>
 
 /* ── Wayland-side hooks (implemented in wayland.c) ───────────────────────────
@@ -337,6 +338,13 @@ static int xwl_spawn(void) {
     if (pid < 0) { close(sv[0]); close(sv[1]); return -1; }
     if (pid == 0) {
         close(sv[0]);
+        /* CRITICAL: the compositor sets SIGCHLD=SIG_IGN (auto-reap). XWayland
+         * inherits it and its internal fork()+waitpid() of xkbcomp then returns
+         * ECHILD, so XWayland concludes "Failed to compile keymap" and aborts
+         * ("Failed to activate virtual core keyboard"), which resets our -wm fd.
+         * Restore default child handling + unblock signals before exec. */
+        signal(SIGCHLD, SIG_DFL);
+        sigset_t _ss; sigfillset(&_ss); sigprocmask(SIG_UNBLOCK, &_ss, NULL);
         fcntl(sv[1], F_SETFD, 0);           /* clear CLOEXEC so XWayland inherits it */
         setenv("WAYLAND_DISPLAY", "wayland-0", 1);
         setenv("XDG_RUNTIME_DIR", "/tmp", 1);
@@ -353,13 +361,19 @@ static int xwl_spawn(void) {
         }
         char fds[16]; snprintf(fds, sizeof fds, "%d", sv[1]);
         char geo[32]; snprintf(geo, sizeof geo, "%dx%d", s_screen_w, s_screen_h);
+        /* Capture XWayland's own stderr — its abort reason (why the -wm handshake
+         * resets) is otherwise invisible. Read /fifi-data/xwayland.log to debug. */
+        { int lf = open("/fifi-data/xwayland.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (lf >= 0) { dup2(lf, 2); close(lf); } }
         /* Rootful (NOT -rootless): rootless presentation does not composite
          * per-window on this hand-rolled compositor, but rootful + -wm renders
          * fine and the WM maximizes the app to fill the screen (no black
-         * border). -wm gives XWayland our WM connection. */
+         * border). -wm gives XWayland our WM connection. xkb dir is the in-image
+         * /usr/share/X11/xkb (the /fifi-data/runtime path is absent on a fresh
+         * install, which aborted XWayland with "Failed to activate keyboard"). */
         execl("/usr/bin/Xwayland", "Xwayland", ":0", "-wm", fds,
               "-geometry", geo,
-              "-xkbdir", "/fifi-data/runtime/share/X11/xkb", (char *)NULL);
+              "-xkbdir", "/usr/share/X11/xkb", (char *)NULL);
         _exit(127);
     }
     close(sv[1]);

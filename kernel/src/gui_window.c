@@ -38,15 +38,6 @@ void raise_win(int slot) {
     z_raise(slot);
 }
 
-/* Filled circle, radius 6 — used for the titlebar traffic-light buttons. */
-static void chrome_circle(uint64_t cx, uint64_t cy, uint32_t col) {
-    static const uint8_t spans[13] = {1,7,9,11,11,11,13,11,11,11,9,7,1};
-    for (int dy = -6; dy <= 6; dy++) {
-        uint8_t sw = spans[dy + 6];
-        console_fill_rect(cx - sw / 2u, cy + (uint64_t)(int64_t)dy, sw, 1u, col);
-    }
-}
-
 /* Fill a horizontal span of the title bar. With glass on, a glossy upper band
  * over a matte lower band reads as frosted glass (opaque — no accumulation on
  * partial repaints); otherwise a plain steel gradient. */
@@ -65,29 +56,43 @@ static void titlebar_fill(window_t *w, uint64_t x, uint64_t span, bool active) {
     }
 }
 
-/* Draw the three titlebar traffic-light circles. The title-bar background is
- * already painted by titlebar_paint(), so this only draws the circles + the
- * hover glyph (macOS/KDE style). */
+/* Draw the three titlebar window buttons in a conventional flat style:
+ * minimize (bottom bar), maximize/restore (square outline), close (X). Each
+ * highlights on hover (close highlights red). Deliberately NOT macOS traffic
+ * lights — drawn from rectangles so no font glyph is needed. */
 static void chrome_buttons(window_t *w, int slot, bool active) {
-    (void)active;
-    uint64_t fw  = console_font_width();
-    uint64_t fh  = console_font_height();
-    uint64_t tpy = w->y + (TITLE_H > fh ? (TITLE_H - fh) / 2u : 0u);
+    uint64_t by  = w->y + 2u;
+    uint64_t bh  = (TITLE_H > 4u) ? TITLE_H - 4u : TITLE_H;
     uint64_t cyc = w->y + TITLE_H / 2u;
 
-    struct { uint64_t bx; int btn; uint32_t col, hcol; char gl; } btns[3] = {
-        { w->btn_min_x, 3, 0x00707a8cu, 0x009aa6bcu, '_' },
-        { w->btn_max_x, 2, 0x005e9e56u, 0x0084cc78u,
-          (w->state == WIN_MAXIMIZED) ? '-' : '+' },
-        { w->btn_cls_x, 1, 0x00c05048u, 0x00ee6a5eu, 'x' },
+    struct { uint64_t bx; int btn; uint32_t hbg; } btns[3] = {
+        { w->btn_min_x, 3, 0x00415068u },
+        { w->btn_max_x, 2, 0x00415068u },
+        { w->btn_cls_x, 1, 0x00c0392bu },
     };
     for (int i = 0; i < 3; i++) {
         bool hov = (g_chrome_win == slot && g_chrome_btn == btns[i].btn);
         uint64_t cxc = btns[i].bx + BTN_W / 2u;
-        chrome_circle(cxc, cyc, hov ? btns[i].hcol : btns[i].col);
-        if (hov)
-            console_render_glyph_fg(cxc - fw / 2u, tpy, (unsigned char)btns[i].gl,
-                                    0x00101418u);
+        if (hov) console_fill_rect(btns[i].bx, by, BTN_W, bh, btns[i].hbg);
+        uint32_t gc = hov ? 0x00ffffffu : (active ? 0x00cbd6e6u : 0x00808c9cu);
+        if (btns[i].btn == 3) {                        /* minimize: bottom bar */
+            console_fill_rect(cxc - 5u, cyc + 4u, 10u, 2u, gc);
+        } else if (btns[i].btn == 2) {                 /* maximize / restore */
+            uint64_t sq = 9u, x0 = cxc - sq / 2u, y0 = cyc - sq / 2u;
+            if (w->state == WIN_MAXIMIZED) {           /* restore: back-square hint */
+                console_fill_rect(x0 + 3u, y0 - 3u, sq - 2u, 1u, gc);
+                console_fill_rect(x0 + sq, y0 - 3u, 1u, sq - 2u, gc);
+            }
+            console_fill_rect(x0,           y0,           sq, 1u, gc);
+            console_fill_rect(x0,           y0 + sq - 1u, sq, 1u, gc);
+            console_fill_rect(x0,           y0,           1u, sq, gc);
+            console_fill_rect(x0 + sq - 1u, y0,           1u, sq, gc);
+        } else {                                       /* close: X */
+            for (uint64_t k = 0; k < 9u; k++) {
+                console_fill_rect(cxc - 4u + k, cyc - 4u + k, 2u, 2u, gc);
+                console_fill_rect(cxc - 4u + k, cyc + 4u - k, 2u, 2u, gc);
+            }
+        }
     }
 }
 

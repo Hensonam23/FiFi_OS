@@ -1,11 +1,12 @@
 #!/bin/sh
 # FiFi OS disk installer
 #
-# Usage: fifi-install.sh <target> <browser> <software>
+# Usage: fifi-install.sh <target> <browser> <software> [ai_model]
 #   target:   whole disk  e.g. /dev/sda  (erased and repartitioned)
 #             OR partition e.g. /dev/sda3 (formatted in place, existing EFI reused)
 #   browser:  librewolf | firefox
 #   software: libreoffice | none
+#   ai_model: none | llama3.2-1b | llama3.2-3b | qwen2.5-7b | llama3.1-8b | qwen2.5-14b
 #
 # Progress is reported via stdout as "PROGRESS:N" (0-100).
 # All other stdout/stderr lines are logged to the installer UI.
@@ -29,6 +30,7 @@ set -e
 TARGET="$1"
 BROWSER="$2"
 SOFTWARE="$3"
+AI_MODEL="${4:-none}"
 
 MNT_EFI="/mnt/fifi-install-efi"
 MNT_DATA="/mnt/fifi-install-data"
@@ -93,6 +95,7 @@ log "Starting FiFi OS installation"
 log "Target: $TARGET"
 log "Browser: $BROWSER"
 log "Software: $SOFTWARE"
+log "AI model: $AI_MODEL"
 
 [ -n "$TARGET" ] || fail "No target specified"
 [ -b "$TARGET" ] || fail "$TARGET is not a block device"
@@ -269,12 +272,24 @@ prog 15
 
 # ── 7. Bootloader (GRUB + kernel) ─────────────────────────────────────────────
 
-log "Copying kernel and initramfs to EFI partition..."
-mkdir -p "$MNT_EFI/boot"
-cp "$KERNEL_SRC" "$MNT_EFI/boot/bzImage"
-cp "$INITRD_SRC" "$MNT_EFI/boot/initramfs.cpio.gz"
-log "Kernel:    $(du -sh "$MNT_EFI/boot/bzImage" 2>/dev/null | cut -f1)"
-log "Initramfs: $(du -sh "$MNT_EFI/boot/initramfs.cpio.gz" 2>/dev/null | cut -f1)"
+# Put the kernel + initramfs on the DATA partition (roomy ext4), not the EFI
+# partition. A dual-boot install reuses the existing (often ~100 MB) Windows ESP,
+# which cannot hold a large initramfs — the copy would truncate and the kernel
+# would fail to unpack it at boot ("Initramfs unpacking failed: read error").
+# GRUB (in the ESP) reads ext4, so it loads them from the data partition instead.
+log "Copying kernel and initramfs to the data partition (ext4, ample space)..."
+mkdir -p "$MNT_DATA/boot"
+cp "$KERNEL_SRC" "$MNT_DATA/boot/bzImage"
+cp "$INITRD_SRC" "$MNT_DATA/boot/initramfs.cpio.gz"
+# Verify the initramfs copied COMPLETELY — a truncated copy is the classic cause
+# of an unbootable install, so fail loudly here instead of at boot.
+_src_sz="$(wc -c < "$INITRD_SRC" 2>/dev/null)"
+_dst_sz="$(wc -c < "$MNT_DATA/boot/initramfs.cpio.gz" 2>/dev/null)"
+if [ "$_src_sz" != "$_dst_sz" ]; then
+    fail "initramfs copy incomplete ($_dst_sz of $_src_sz bytes) — data partition out of space?"
+fi
+log "Kernel:    $(du -sh "$MNT_DATA/boot/bzImage" 2>/dev/null | cut -f1)"
+log "Initramfs: $(du -sh "$MNT_DATA/boot/initramfs.cpio.gz" 2>/dev/null | cut -f1) ($_dst_sz bytes, verified)"
 # Keep the USB mounted — the offline app bundle (apps-bundle/) may be needed
 # in the software step; it is unmounted in section 10.
 prog 22
@@ -367,14 +382,21 @@ mkdir -p "$MNT_EFI/boot/grub"
 cat > "$MNT_EFI/boot/grub/grub.cfg" << GRUBCFG
 set timeout=5
 set default=0
+# Kernel + initramfs live on the DATA partition (ext4), not this EFI partition —
+# switch GRUB's root to it by filesystem UUID before loading them.
+insmod part_gpt
+insmod ext2
+search --no-floppy --fs-uuid --set=root $DATA_UUID
 
 menuentry "FiFi OS" {
+    search --no-floppy --fs-uuid --set=root $DATA_UUID
     linux /boot/bzImage console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID apparmor=1 security=apparmor
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "FiFi OS (safe mode)" {
-    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset fifi_data_uuid=$DATA_UUID
+    search --no-floppy --fs-uuid --set=root $DATA_UUID
+    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset fifi_noswitch fifi_data_uuid=$DATA_UUID
     initrd /boot/initramfs.cpio.gz
 }
 GRUBCFG
@@ -382,13 +404,15 @@ GRUBCFG
 if [ -n "$WIN_CHAINLOAD" ]; then
     cat >> "$MNT_EFI/boot/grub/grub.cfg" << WINCFG
 
-menuentry "Windows" {
+menuentry "Windows Boot Manager" {
     insmod part_gpt
+    insmod part_msdos
     insmod fat
     insmod chain
     insmod search_fs_file
-    search --set=root --file $WIN_CHAINLOAD
+    search --no-floppy --file --set=root $WIN_CHAINLOAD
     chainloader $WIN_CHAINLOAD
+    boot
 }
 WINCFG
     log "GRUB menu: FiFi OS + Windows chainload at $WIN_CHAINLOAD"
@@ -450,6 +474,61 @@ prog 62
 
 if echo "$SOFTWARE" | grep -q "libreoffice"; then
     install_app "url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage" "LibreOffice"
+fi
+prog 88
+
+# ── 9b. Offline AI assistant model (optional) ─────────────────────────────────
+# Download the local model the user chose (a GGUF file) to the data partition.
+# The llama.cpp runtime that executes it ships with the OS; only the model — big
+# and user-chosen — is fetched here. Entirely non-fatal: any failure just logs
+# and the OS install still completes. Model ids match installer.c's catalog.
+if [ "$AI_MODEL" != "none" ] && [ -n "$AI_MODEL" ]; then
+    AI_NAME="$AI_MODEL"; AI_URL=""
+    _HF="https://huggingface.co/bartowski"
+    case "$AI_MODEL" in
+        qwen2.5-0.5b) AI_NAME="Qwen2.5 0.5B"
+            AI_URL="$_HF/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" ;;
+        llama3.2-1b)  AI_NAME="Llama 3.2 1B"
+            AI_URL="$_HF/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf" ;;
+        qwen2.5-1.5b) AI_NAME="Qwen2.5 1.5B"
+            AI_URL="$_HF/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" ;;
+        gemma2-2b)    AI_NAME="Gemma 2 2B"
+            AI_URL="$_HF/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf" ;;
+        llama3.2-3b)  AI_NAME="Llama 3.2 3B"
+            AI_URL="$_HF/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf" ;;
+        phi3.5-mini)  AI_NAME="Phi-3.5 Mini"
+            AI_URL="$_HF/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf" ;;
+        mistral-7b)   AI_NAME="Mistral 7B"
+            AI_URL="$_HF/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf" ;;
+        qwen2.5-7b)   AI_NAME="Qwen2.5 7B"
+            AI_URL="$_HF/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf" ;;
+        llama3.1-8b)  AI_NAME="Llama 3.1 8B"
+            AI_URL="$_HF/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" ;;
+        gemma2-9b)    AI_NAME="Gemma 2 9B"
+            AI_URL="$_HF/gemma-2-9b-it-GGUF/resolve/main/gemma-2-9b-it-Q4_K_M.gguf" ;;
+        qwen2.5-14b)  AI_NAME="Qwen2.5 14B"
+            AI_URL="$_HF/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf" ;;
+        qwen2.5-32b)  AI_NAME="Qwen2.5 32B"
+            AI_URL="$_HF/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf" ;;
+    esac
+    if [ -z "$AI_URL" ]; then
+        log "AI: unknown model id '$AI_MODEL' — skipping"
+    elif [ "$ONLINE" != 1 ]; then
+        log "AI: offline — skipping $AI_NAME download; run fifi-ai-install later to add it"
+    else
+        mkdir -p "$MNT_DATA/ai/models"
+        _mfile="$MNT_DATA/ai/models/$AI_MODEL.gguf"
+        log "AI: downloading $AI_NAME (this can take a while)..."
+        if curl -fL --retry 3 --retry-delay 2 -o "$_mfile.part" "$AI_URL" >>"$DEBUGLOG" 2>&1; then
+            mv "$_mfile.part" "$_mfile"
+            printf 'id=%s\nname=%s\nfile=models/%s.gguf\n' "$AI_MODEL" "$AI_NAME" "$AI_MODEL" \
+                > "$MNT_DATA/ai/model.conf"
+            log "AI: $AI_NAME installed ($(du -sh "$_mfile" 2>/dev/null | cut -f1))"
+        else
+            rm -f "$_mfile.part" 2>/dev/null || true
+            log "WARNING: $AI_NAME download failed — run fifi-ai-install later to add it"
+        fi
+    fi
 fi
 prog 92
 

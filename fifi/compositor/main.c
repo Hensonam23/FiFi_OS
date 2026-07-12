@@ -382,6 +382,12 @@ static void *render_thread_fn(void *arg)
             clock_gettime(CLOCK_MONOTONIC, &t1);
             ipc_blit_all();
             wayland_blit_surfaces();
+            /* Lift a focused IPC window (e.g. the App Store) above Wayland/XWayland
+             * windows when it was raised more recently, matching the cross-layer
+             * input routing. No-op unless an IPC window's z_order beats the Wayland
+             * layer, so it costs nothing in the common case. */
+            { extern bool wayland_any_mapped(void); extern void ipc_overdraw_top(void);
+              if (wayland_any_mapped()) ipc_overdraw_top(); }
             /* Panels stay above app windows (like any desktop shell): repaint the
              * status bar + taskbar over whatever the Wayland layer just blitted. */
             { extern bool wayland_any_mapped(void);

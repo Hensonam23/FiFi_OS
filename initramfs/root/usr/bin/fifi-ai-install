@@ -1,0 +1,55 @@
+#!/bin/sh
+# fifi-ai-install — download a local AI model after installation.
+# Same catalog as the installer; writes /fifi-data/ai/model.conf so `fifi-ai`
+# (type `ai`) picks it up. Run in a terminal: fifi-ai-install
+
+AI_DIR=/fifi-data/ai
+HF=https://huggingface.co/bartowski
+
+# id | Name | size | RAM | GPU | URL
+MODELS="
+qwen2.5-0.5b|Qwen2.5 0.5B|0.4GB|2GB|none|$HF/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+llama3.2-1b|Llama 3.2 1B|0.8GB|4GB|none|$HF/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+qwen2.5-1.5b|Qwen2.5 1.5B|0.9GB|4GB|none|$HF/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+gemma2-2b|Gemma 2 2B|1.6GB|6GB|optional|$HF/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf
+llama3.2-3b|Llama 3.2 3B|2.0GB|8GB|opt 4GB+|$HF/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+phi3.5-mini|Phi-3.5 Mini|2.2GB|8GB|opt 4GB+|$HF/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf
+mistral-7b|Mistral 7B|4.1GB|16GB|6GB+|$HF/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf
+qwen2.5-7b|Qwen2.5 7B|4.7GB|16GB|6GB+|$HF/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+llama3.1-8b|Llama 3.1 8B|4.6GB|16GB|8GB+|$HF/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+gemma2-9b|Gemma 2 9B|5.4GB|16GB|8GB+|$HF/gemma-2-9b-it-GGUF/resolve/main/gemma-2-9b-it-Q4_K_M.gguf
+qwen2.5-14b|Qwen2.5 14B|9.0GB|32GB|12GB+|$HF/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+qwen2.5-32b|Qwen2.5 32B|18.5GB|48GB|24GB+|$HF/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf
+"
+
+echo "Local AI models  (download size / recommended RAM / GPU)"
+echo "-------------------------------------------------------"
+i=0
+echo "$MODELS" | while IFS='|' read -r id name sz ram gpu url; do
+    [ -n "$id" ] || continue
+    i=$((i+1))
+    printf "%2d. %-16s %6s  RAM %-5s  GPU %s\n" "$i" "$name" "$sz" "$ram" "$gpu"
+done
+echo
+printf "Choose a model number (or q to cancel): "
+read choice
+case "$choice" in ''|q|Q) echo "Cancelled."; exit 0 ;; esac
+
+sel=$(echo "$MODELS" | awk -v n="$choice" 'NF{c++} c==n{print; exit}' RS='\n' FS='|')
+[ -z "$sel" ] && { echo "Invalid choice."; exit 1; }
+id=$(echo "$sel" | cut -d'|' -f1)
+name=$(echo "$sel" | cut -d'|' -f2)
+url=$(echo "$sel" | cut -d'|' -f6)
+
+mkdir -p "$AI_DIR/models"
+out="$AI_DIR/models/$id.gguf"
+echo "Downloading $name ..."
+if curl -fL --retry 3 --retry-delay 2 -o "$out.part" "$url"; then
+    mv "$out.part" "$out"
+    printf 'id=%s\nname=%s\nfile=models/%s.gguf\n' "$id" "$name" "$id" > "$AI_DIR/model.conf"
+    echo "Done. $name is ready — type 'ai' to chat."
+else
+    rm -f "$out.part" 2>/dev/null
+    echo "Download failed. Check your network and try again."
+    exit 1
+fi
