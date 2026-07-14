@@ -4,33 +4,19 @@
  *
  * Protocol: fixed 8-byte header + variable payload.
  *   [uint32_t type][uint32_t payload_len][payload...]
- *
- * Message types (compositor ← app):
- *   IPC_APP_CONNECT   — app registration: {uint16_t w, h; char title[60]}
- *   IPC_APP_FRAME     — pixel data: {uint32_t x, y, w, h; uint32_t pixels[w*h]}
- *   IPC_APP_TITLE     — update title: {char title[64]}
- *   IPC_APP_CLOSE     — app is closing (no payload)
- *
- * Message types (compositor → app):
- *   IPC_WIN_CREATED   — window info: {uint32_t id, x, y, w, h}
- *   IPC_INPUT_KEY     — {uint8_t key}
- *   IPC_INPUT_MOUSE   — {int32_t x, y; uint8_t buttons}
- *   IPC_FOCUS         — {uint8_t focused}
- */
+ * Message types and payload layouts: see the IPC_* defines below. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>    /* strcasecmp() */
 #include <stdint.h>
 #include <stdbool.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>   /* chmod() for owner-only IPC socket */
-#include <sys/ioctl.h>
-#include <poll.h>
 #include <time.h>
 
 #include "console.h"
@@ -42,7 +28,6 @@ __attribute__((weak)) void gui_snap_focused(int zone);
 #define FIFI_SOCK     "/tmp/fifi-compositor.sock"
 #define IPC_MAX_APPS  8
 #define IPC_HDR_SZ    8        /* uint32_t type + uint32_t len */
-#define IPC_MAX_PLD   (4096 * 4096 * 4 + 64)   /* worst-case full-screen frame */
 
 /* Message type IDs */
 #define IPC_APP_CONNECT   0x01u
@@ -160,7 +145,7 @@ static void scale_buf(const uint32_t *src, uint32_t sw, uint32_t sh,
     }
 }
 
-/* Apply a snap zone to client i (l=left half, 2=right half, 3=maximize) */
+/* Apply a snap zone to client i (1=left half, 2=right half, 3=maximize) */
 static void ipc_apply_snap(int i, int zone) {
     ipc_client_t *c = &g_clients[i];
     /* Snap within the desktop work area (shared struts) so an IPC app window
@@ -191,7 +176,7 @@ static void ipc_apply_snap(int i, int zone) {
 
     /* Allocate or reallocate scaled display buffer */
     free(c->disp_buf);
-    c->disp_buf = malloc(c->win_w * c->win_h * 4);
+    c->disp_buf = malloc((size_t)c->win_w * c->win_h * 4);
     if (c->disp_buf && c->frame_buf)
         scale_buf(c->frame_buf, c->frame_w, c->frame_h, c->disp_buf, c->win_w, c->win_h);
 
@@ -213,7 +198,7 @@ static void ipc_unsnap(int i) {
     /* If restored size differs from frame, keep scaling via disp_buf */
     if (c->win_w != c->frame_w || c->win_h != c->frame_h) {
         free(c->disp_buf);
-        c->disp_buf = malloc(c->win_w * c->win_h * 4);
+        c->disp_buf = malloc((size_t)c->win_w * c->win_h * 4);
         if (c->disp_buf && c->frame_buf)
             scale_buf(c->frame_buf, c->frame_w, c->frame_h,
                       c->disp_buf, c->win_w, c->win_h);
@@ -464,19 +449,25 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
     }
 }
 
-/* Disconnect a client cleanly: close socket, clear backbuffer region, release memory */
-static void ipc_disconnect_client(ipc_client_t *c) {
-    if (!c->active) return;
-    fprintf(stderr, "[ipc] app '%s' disconnected\n", c->title);
-    close(c->fd); c->fd = -1; c->active = false;
+/* Common teardown: close socket, release memory, clear focus/drag state */
+static void ipc_free_client(ipc_client_t *c) {
+    if (c->fd >= 0) { close(c->fd); c->fd = -1; }
+    c->active = false;
     if (c->payload)   { free(c->payload);   c->payload   = NULL; }
     if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
     if (c->disp_buf)  { free(c->disp_buf);  c->disp_buf  = NULL; }
     c->snapped = false;
-    if (g_focused_idx >= 0 && &g_clients[g_focused_idx] == c) g_focused_idx = -1;
     int i = (int)(c - g_clients);
-    if (g_drag_idx == i) g_drag_idx = -1;
+    if (g_focused_idx == i) g_focused_idx = -1;
+    if (g_drag_idx    == i) g_drag_idx    = -1;
     g_ipc_needs_redraw = true;
+}
+
+/* Disconnect a client cleanly (socket EOF/error or IPC_APP_CLOSE) */
+static void ipc_disconnect_client(ipc_client_t *c) {
+    if (!c->active) return;
+    fprintf(stderr, "[ipc] app '%s' disconnected\n", c->title);
+    ipc_free_client(c);
 }
 
 /* ── Read available data from one client ─────────────────────────────────── */
@@ -529,6 +520,7 @@ static void ipc_read_client(ipc_client_t *c) {
         uint32_t type;
         memcpy(&type, c->hdr, 4);
         ipc_dispatch(c, type, c->payload, c->pld_len);
+        if (!c->active) return;   /* dispatch disconnected the client */
 
         /* Reset for next message */
         c->hdr_got = 0;
@@ -598,7 +590,6 @@ void ipc_poll(void) {
                 memset(&g_clients[i], 0, sizeof(g_clients[i]));
                 g_clients[i].fd     = fd;
                 g_clients[i].active = true;
-                g_clients[i].hdr_got = 0;
                 fprintf(stderr, "[ipc] new app client (slot %d)\n", i);
                 accepted = true;
                 break;
@@ -641,20 +632,12 @@ static inline bool min_btn_hit(const ipc_client_t *c, int32_t mx, int32_t my) {
            (uint32_t)my >= c->win_y && (uint32_t)my < c->win_y + IPC_TITLE_H;
 }
 
-/* Kill a client and clear its screen region */
+/* Kill a client (close button / Alt+F4) */
 static void ipc_kill_client(int i) {
     ipc_client_t *c = &g_clients[i];
     if (!c->active) return;
-    if (c->fd >= 0) { close(c->fd); c->fd = -1; }
-    c->active = false;
-    if (c->payload)   { free(c->payload);   c->payload   = NULL; }
-    if (c->frame_buf) { free(c->frame_buf); c->frame_buf = NULL; }
-    if (c->disp_buf)  { free(c->disp_buf);  c->disp_buf  = NULL; }
-    c->snapped = false;
-    if (g_focused_idx == i) g_focused_idx = -1;
-    if (g_drag_idx    == i) g_drag_idx    = -1;
-    g_ipc_needs_redraw = true;
     fprintf(stderr, "[ipc] closed '%s' via close button\n", c->title);
+    ipc_free_client(c);
 }
 
 /* Check if click lands on any window's close, minimize, or maximize button. */
@@ -735,17 +718,21 @@ static void ipc_draw_chrome(ipc_client_t *c) {
                       focused ? 0x00466492u : 0x002a3446u);
     console_fill_rect(c->win_x, c->win_y + TITLE_H - 1u, c->win_w, 1u, 0x0010192au);
 
-    /* Title text: centered if it fits before the buttons, else left-aligned + clipped. */
+    /* Title text: centered if it fits before the buttons, else left-aligned + clipped.
+     * text_end is computed in 64-bit (min_x wraps in uint32 for windows < 72px wide). */
     if (fw > 0 && fh > 0) {
         size_t tlen = 0; while (tlen < sizeof(c->title) && c->title[tlen]) tlen++;
-        uint64_t avail = (min_x > c->win_x + 8u) ? (uint64_t)min_x - 4u - (c->win_x + 8u) : 0u;
-        uint64_t max_ch = fw > 0u ? avail / fw : 0u;
+        uint64_t right    = (uint64_t)c->win_x + c->win_w;
+        uint64_t text_end = right > (uint64_t)BTN_W * 3u + 4u
+                          ? right - (uint64_t)BTN_W * 3u - 4u : 0u;
+        uint64_t avail  = (text_end > c->win_x + 8u) ? text_end - (c->win_x + 8u) : 0u;
+        uint64_t max_ch = avail / fw;
         uint64_t tx;
         if ((uint64_t)tlen <= max_ch)
             tx = c->win_x + (c->win_w - (uint64_t)tlen * fw) / 2u;   /* centered */
         else
             tx = c->win_x + 8u;                                       /* left, will clip */
-        for (size_t j = 0; j < tlen && tx + fw <= (uint64_t)min_x - 4u; j++, tx += fw)
+        for (size_t j = 0; j < tlen && tx + fw <= text_end; j++, tx += fw)
             console_render_glyph_fg(tx, gy, (unsigned char)c->title[j], C_TITLEFG);
     }
 
@@ -790,13 +777,18 @@ static void ipc_draw_chrome(ipc_client_t *c) {
     }
 }
 
-void ipc_blit_all(void) {
-    /* Build a z-sorted render list so the highest-z window is blitted last (on top) */
+/* Paint visible windows in ascending z-order, each as a unit (body THEN its own
+ * chrome) so a higher-z window fully overpaints every lower window — body AND
+ * chrome. (Two-pass body-then-chrome drawing let a lower window's title bar
+ * bleed over a higher window's body.) If use_floor, windows with
+ * z_order <= z_floor are skipped. */
+static void ipc_paint_zsorted(bool use_floor, uint32_t z_floor) {
     int order[IPC_MAX_APPS];
     int n = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
+        if (use_floor && c->z_order <= z_floor) continue;
         order[n++] = i;
     }
     /* Insertion sort by z_order ascending (lowest z blitted first, highest last = on top) */
@@ -809,11 +801,6 @@ void ipc_blit_all(void) {
         }
         order[b + 1] = key;
     }
-    /* Paint each window as a whole (body THEN its own chrome) in ascending z-order.
-     * Because chrome is drawn right after the body, a higher-z window painted later in
-     * this loop fully overpaints every lower window — body AND chrome. Drawing all bodies
-     * first and all chrome in a second pass (the old design) let a lower window's title
-     * bar and border bleed over a higher window's body where they overlapped. */
     for (int j = 0; j < n; j++) {
         ipc_client_t *c = &g_clients[order[j]];
         if (c->disp_buf)
@@ -822,6 +809,10 @@ void ipc_blit_all(void) {
             console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
         ipc_draw_chrome(c);
     }
+}
+
+void ipc_blit_all(void) {
+    ipc_paint_zsorted(false, 0);
 }
 
 /* Re-blit any IPC window that was raised ABOVE the Wayland layer, so a focused
@@ -834,34 +825,7 @@ void ipc_blit_all(void) {
  * from main.c right after wayland_blit_surfaces(), before the panels repaint. */
 void ipc_overdraw_top(void) {
     extern uint32_t gui_wl_z(void);
-    uint32_t wl_z = gui_wl_z();
-    int order[IPC_MAX_APPS];
-    int n = 0;
-    for (int i = 0; i < IPC_MAX_APPS; i++) {
-        ipc_client_t *c = &g_clients[i];
-        if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || !c->frame_buf) continue;
-        if (c->z_order <= wl_z) continue;   /* not raised above the Wayland layer */
-        order[n++] = i;
-    }
-    if (n == 0) return;
-    /* Insertion sort ascending by z_order (highest painted last = on top) */
-    for (int a = 1; a < n; a++) {
-        int key = order[a];
-        int b = a - 1;
-        while (b >= 0 && g_clients[order[b]].z_order > g_clients[key].z_order) {
-            order[b + 1] = order[b];
-            b--;
-        }
-        order[b + 1] = key;
-    }
-    for (int j = 0; j < n; j++) {
-        ipc_client_t *c = &g_clients[order[j]];
-        if (c->disp_buf)
-            console_paste_rect(c->disp_buf, c->win_x, c->win_y, c->win_w, c->win_h);
-        else
-            console_paste_rect(c->frame_buf, c->win_x, c->win_y, c->frame_w, c->frame_h);
-        ipc_draw_chrome(c);
-    }
+    ipc_paint_zsorted(true, gui_wl_z());
 }
 
 /* Draw transient overlays that must sit above ALL windows: currently just the snap
@@ -981,13 +945,10 @@ bool ipc_drag_update(int32_t mx, int32_t my, bool lbtn) {
     }
 
     /* Determine snap preview zone from cursor position */
-    uint32_t fb_w = (uint32_t)console_fb_width();
-    uint32_t fb_h = (uint32_t)console_fb_height();
     int new_snap = 0;
-    if (mx < IPC_SNAP_ZONE)                       new_snap = 1;  /* left half */
-    else if (mx >= (int32_t)(fb_w - IPC_SNAP_ZONE)) new_snap = 2;  /* right half */
-    else if (my < IPC_SNAP_ZONE)                  new_snap = 3;  /* maximize */
-    (void)fb_h;
+    if (mx < IPC_SNAP_ZONE)                          new_snap = 1;  /* left half */
+    else if (mx >= (int32_t)(fb_w2 - IPC_SNAP_ZONE)) new_snap = 2;  /* right half */
+    else if (my < IPC_SNAP_ZONE)                     new_snap = 3;  /* maximize */
     g_snap_preview = new_snap;
     return true;
 }
@@ -1166,7 +1127,7 @@ bool ipc_resize_update(int32_t mx, int32_t my, bool lbtn) {
         /* Maintain a scaled disp_buf so the content fills the resized window */
         if (c->frame_buf) {
             free(c->disp_buf);
-            c->disp_buf = malloc(c->win_w * c->win_h * 4);
+            c->disp_buf = malloc((size_t)c->win_w * c->win_h * 4);
             if (c->disp_buf)
                 scale_buf(c->frame_buf, c->frame_w, c->frame_h,
                           c->disp_buf, c->win_w, c->win_h);
@@ -1195,7 +1156,11 @@ void ipc_draw_resize_handles(void) {
         ipc_client_t *c = &g_clients[i];
         if (!c->active || c->fd < 0 || c->win_w == 0 || c->minimized || c->snapped) continue;
         bool foc = (g_focused_idx == i);
-        uint32_t hcol = foc ? 0xFF5090d0u : 0xFF344460u;
+        /* Only the focused (topmost) window shows its resize grip — otherwise a
+         * background window's grip is drawn as a final overlay and bleeds through
+         * the window stacked on top of it. */
+        if (!foc) continue;
+        uint32_t hcol = 0xFF5090d0u;
         uint32_t hx = c->win_x + c->win_w - IPC_RESIZE_MARGIN;
         uint32_t hy = c->win_y + c->win_h - IPC_RESIZE_MARGIN;
         console_fill_rect(hx, hy, IPC_RESIZE_MARGIN, IPC_RESIZE_MARGIN, hcol);
@@ -1413,9 +1378,8 @@ int ipc_window_count(void) {
     return n;
 }
 
-/* Fill title (truncated to title_max-1), focused flag, and minimized flag for nth window.
- * Returns false if slot is out of range. (title_max >= 2: title[] gets an extra '~' prefix
- * if minimized, so callers can see the state from the title alone if preferred.) */
+/* Fill title (truncated to title_max-1) and focused flag for the nth window.
+ * Returns false if slot is out of range. A minimized window reports focused=false. */
 bool ipc_window_info(int slot, char *title, int title_max, bool *focused) {
     int found = 0;
     for (int i = 0; i < IPC_MAX_APPS; i++) {

@@ -5,7 +5,9 @@
  * WL_SURFACE_ID so wayland.c can present the Wayland surface XWayland created
  * as an ordinary FiFi window. No XCB/Xlib — the compositor is a static binary. */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "xwm.h"
 
 #include <stdio.h>
@@ -73,7 +75,6 @@ typedef struct {
     bool     up;
     uint32_t root;
     uint32_t id_base, id_mask;
-    uint32_t next_id;        /* rolling XID counter within the id range */
     uint32_t seq;            /* last request sequence number sent */
     /* interned atoms */
     uint32_t a_wl_surface_id, a_wl_surface_serial, a_wm_protocols, a_wm_delete,
@@ -114,13 +115,6 @@ static bool x_write(const void *buf, size_t len) {
 
 /* Every request bumps the server's sequence counter. */
 static uint32_t x_bump_seq(void) { return ++X.seq; }
-
-static uint32_t x_alloc_id(void) {
-    /* XIDs are id_base | (n & id_mask); wrap within the granted range. */
-    uint32_t id = X.id_base | (X.next_id & X.id_mask);
-    X.next_id++;
-    return id;
-}
 
 /* ── Requests ─────────────────────────────────────────────────────────────── */
 static void x_change_event_mask(uint32_t window, uint32_t mask) {
@@ -612,8 +606,10 @@ static void ev_property(const uint8_t *e) {
  * title string. Matched to the window + property atom via the pending table. */
 static void reply_get_property(const uint8_t *rep, const uint8_t *value, uint32_t vlen, uint32_t seq) {
     uint32_t window = 0, atom = 0;
+    /* Wire sequence numbers are 16-bit; compare against the low 16 bits of the
+     * full counter or matching breaks after 65536 requests. */
     for (int i = 0; i < X.n_prop_pend; i++)
-        if (X.prop_pend[i].seq == seq) {
+        if ((X.prop_pend[i].seq & 0xffffu) == seq) {
             window = X.prop_pend[i].window;
             atom   = X.prop_pend[i].atom;
             X.prop_pend[i] = X.prop_pend[--X.n_prop_pend];
@@ -661,8 +657,16 @@ static int x_process_one(void) {
         return (int)(32 + extra);
     }
     if (code == XE_Error) {
+        uint16_t eseq = get16(X.rbuf + 2);
         fprintf(stderr, "[xwm] X error: code=%u seq=%u major=%u\n",
-                X.rbuf[1], get16(X.rbuf + 2), X.rbuf[10]);
+                X.rbuf[1], eseq, X.rbuf[10]);
+        /* Drop any pending GetProperty matching this seq (e.g. window already
+         * destroyed) so the pend table doesn't leak entries until it is full. */
+        for (int i = 0; i < X.n_prop_pend; i++)
+            if ((X.prop_pend[i].seq & 0xffffu) == eseq) {
+                X.prop_pend[i] = X.prop_pend[--X.n_prop_pend];
+                break;
+            }
         return 32;
     }
     switch (code) {

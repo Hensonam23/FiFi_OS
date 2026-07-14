@@ -291,7 +291,6 @@ typedef struct {
 typedef struct {
     uint32_t     buffer_id;   /* 0 = no buffer attached */
     bool         has_new_buffer; /* a new buffer was attached since the last commit */
-    wl_shm_buf_t *buf;        /* transient: client buffer located during commit (not kept) */
     /* Compositor-owned copy of the committed pixels. We copy at commit and release
      * the client buffer immediately, so our rendering never depends on client buffer
      * lifetime (no use-after-free, no premature-release crashes, no stale dims). */
@@ -335,6 +334,7 @@ typedef struct {
     bool         ssd;               /* server-side decorations granted (FiFi chrome) */
     uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
     bool         placed;            /* initial window placement done */
+    bool         size_clamped;      /* over-large first commit already nudged smaller */
     int32_t      restore_x, restore_y, restore_w, restore_h;  /* saved windowed geom */
     /* Pending destroy: set by DESTROY, cleaned up on next COMMIT so Firefox can
      * receive buffer_release before the surface is gone (fixes tab-close crash). */
@@ -454,19 +454,12 @@ static void wl_push_str(wl_client_t *c, const char *s) {
     for (uint32_t i = 0; i < pad; i++) c->send[c->send_used++] = 0;
 }
 
-/* Append raw bytes (must be 4-aligned in length) */
-static void wl_push_bytes(wl_client_t *c, const void *data, uint32_t len) {
-    if (c->send_used + (int)len > WL_SEND_BUF) { c->send_overflow = true; return; }
-    memcpy(c->send + c->send_used, data, len);
-    c->send_used += len;
-}
-
 /* Begin a message header, return offset of size field so we can fill it later */
 static int wl_begin_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode) {
     int off = c->send_used;
     c->send_overflow = false;   /* reset per-message overflow flag */
     wl_push_u32(c, obj_id);
-    wl_push_u32(c, (uint32_t)opcode | 0u);  /* size placeholder, filled by wl_end_msg */
+    wl_push_u32(c, (uint32_t)opcode);  /* size placeholder, filled by wl_end_msg */
     return off;
 }
 
@@ -527,12 +520,40 @@ static bool untrack_buf(void *p) {
     return found;
 }
 
+/* Free every orphaned buffer once NO client is connected: nothing can commit a
+ * cross-client buffer id any more, and keeping the mmaps pins the client's shm
+ * files — a real memory leak across browser restarts. Also prevents a future
+ * client's fresh buffer ids from falsely matching stale orphans. */
+static void orphan_free_if_idle(void) {
+    for (int i = 0; i < MAX_WL_CLIENTS; i++)
+        if (g_wl_clients[i].active) return;
+    for (int i = 0; i < g_n_orphans; i++) {
+        wl_shm_buf_t *b = g_orphan_bufs[i].buf;
+        if (b && untrack_buf(b)) {
+            if (b->data && b->size) munmap(b->data, b->size);
+            if (b->fd >= 0) close(b->fd);
+            free(b);
+        }
+        g_orphan_bufs[i].buf = NULL;
+    }
+    g_n_orphans = 0;
+}
+
 static void free_obj_data(wl_obj_t *o) {
     if (!o->data) return;
     if (o->type == OBJ_SURFACE) {
         wl_surface_t *s = o->data;
-        if (s->own_pix) free(s->own_pix);  /* free the compositor-owned pixel copy */
-        free(o->data);
+        /* Null every role handle (subsurface/decoration/xwayland_surface — any
+         * object whose data ALIASES this surface) in every client, so a later
+         * request on the role object can't dereference the freed surface. */
+        for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+            for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+                wl_obj_t *other = &g_wl_clients[ci].objs[oi];
+                if (other != o && other->data == s) other->data = NULL;
+            }
+        }
+        free(s->own_pix);  /* free the compositor-owned pixel copy */
+        free(s);
     } else if (o->type == OBJ_SHM_POOL || o->type == OBJ_BUFFER) {
         wl_shm_buf_t *b = o->data;
         /* Drop any other reference to this exact pointer (other slots, orphan pool)
@@ -543,8 +564,10 @@ static void free_obj_data(wl_obj_t *o) {
                 if (other != o && other->data == b) { other->data = NULL; other->type = OBJ_NONE; }
             }
         }
-        for (int i = 0; i < g_n_orphans; i++)
-            if (g_orphan_bufs[i].buf == b) g_orphan_bufs[i].buf = NULL;
+        for (int i = 0; i < g_n_orphans; ) {
+            if (g_orphan_bufs[i].buf == b) g_orphan_bufs[i] = g_orphan_bufs[--g_n_orphans];
+            else i++;
+        }
         /* Free exactly once: only if still in the live-set. */
         if (untrack_buf(b)) {
             if (b->data && b->size) { munmap(b->data, b->size); b->data = NULL; }
@@ -885,8 +908,6 @@ static const char s_keymap[] =
     "  xkb_geometry { include \"pc(pc105)\" };\n"
     "};\n";
 
-static void wl_client_flush(wl_client_t *c);   /* defined below */
-
 /* Prefer a fully-resolved keymap file (no include directives) when present:
  * some clients (Chromium/Electron) compile the keymap with an xkb context that
  * cannot resolve includes, end up with no XKB state, and segfault on the first
@@ -940,7 +961,6 @@ static void send_keymap(wl_client_t *c) {
     /* Send keymap event — we need to pass an fd via ancillary data.
      * We use sendmsg() to send the socket fd alongside the message. */
     uint8_t buf[32];
-    int hdr_off = 0;
     uint32_t obj  = c->keyboard_id;
     /* Message size is header(8)+format(4)+size(4)=16. The fd travels out-of-band
      * via SCM_RIGHTS and must NOT be counted here — declaring 24 desyncs the
@@ -952,7 +972,6 @@ static void send_keymap(wl_client_t *c) {
     memcpy(buf + 4,  &hdr2, 4);
     memcpy(buf + 8,  &fmt,  4);
     memcpy(buf + 12, &sz,   4);
-    (void)hdr_off;
 
     /* Drain any buffered events FIRST. The keymap goes out via a raw sendmsg()
      * (below) to carry the fd, bypassing the c->send buffer; if buffered events
@@ -1087,8 +1106,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
     /* Per-request trace (off by default; set FIFI_WL_TRACE=1 to enable). Logs every
      * dispatched request so a client crash can be located from the SERVER's last
-     * processed message — pairs with the "unknown obj" line below for unhandled ops.
-     * Used to debug the LibreWolf startup crash; harmless when the env is unset. */
+     * processed message — pairs with the "unknown obj" line below for unhandled ops. */
     static int s_trace = -1;
     if (s_trace < 0) s_trace = getenv("FIFI_WL_TRACE") ? 1 : 0;
     if (s_trace)
@@ -1182,6 +1200,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         if (opcode == WL_COMPOSITOR_CREATE_SURFACE && args_len >= 4) {
             uint32_t sid; memcpy(&sid, args, 4);
             wl_surface_t *s = calloc(1, sizeof(wl_surface_t));
+            if (!s) break;
             s->surface_id = sid;
             wl_new_obj(c, sid, OBJ_SURFACE, s);
         } else if (opcode == WL_COMPOSITOR_CREATE_REGION && args_len >= 4) {
@@ -1232,6 +1251,25 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                             extern uint32_t console_font_height(void);
                             int32_t fh3  = (int32_t)console_font_height();
                             int32_t top3 = fh3 + 6 + SSD_TITLE_H;
+                            /* Clamp an over-large first commit down to the work area.
+                             * Electron apps (e.g. Bitwarden) ignore the initial
+                             * configure and open at their saved full-output size; they
+                             * DO honour a later resize configure, so nudge them once.
+                             * Guard with size_clamped so we don't fight legitimate
+                             * user resizes on subsequent commits. */
+                            if (!s->maximized && !s->fullscreen && !s->size_clamped) {
+                                extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+                                int32_t aw = (int32_t)desk_availw();
+                                int32_t ah = (int32_t)desk_avail() - SSD_TITLE_H;
+                                int32_t maxw = aw > 200 ? aw : g_w;
+                                int32_t maxh = ah > 200 ? ah : g_h;
+                                if (s->own_w > maxw || s->own_h > maxh) {
+                                    int32_t nw = s->own_w > maxw ? (maxw * 92 / 100) : s->own_w;
+                                    int32_t nh = s->own_h > maxh ? (maxh * 92 / 100) : s->own_h;
+                                    s->size_clamped = true;
+                                    send_toplevel_configure(c, s, nw, nh, 0, 0);
+                                }
+                            }
                             if (s->x + s->own_w > g_w) s->x = g_w - s->own_w;
                             if (s->x < 0) s->x = 0;
                             int32_t bot3 = g_h - (fh3 + 10);
@@ -1273,6 +1311,11 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             uint32_t pool_id; memcpy(&pool_id, args,   4);
             int32_t  sz;      memcpy(&sz,      args+4, 4);
             wl_shm_buf_t *pool = calloc(1, sizeof(wl_shm_buf_t));
+            if (!pool) {                    /* OOM: still consume this pool's fd */
+                int rx = pending_fd_pop();
+                if (rx >= 0) close(rx);
+                break;
+            }
             track_buf(pool);
             pool->size = (size_t)sz;
             pool->fd   = -1;
@@ -1302,6 +1345,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&stride,  args + 16, 4);
             memcpy(&fmt,     args + 20, 4);
             wl_shm_buf_t *buf = calloc(1, sizeof(wl_shm_buf_t));
+            if (!buf) break;
             track_buf(buf);
             buf->fd     = -1;
             buf->width  = w;
@@ -1351,25 +1395,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
 
     /* ── wl_buffer ───────────────────────────────────────────────────── */
     case OBJ_BUFFER:
-        if (opcode == WL_BUFFER_DESTROY) {
-            /* Null out any surface still holding a pointer to this buffer.
-             * We send wl_buffer.release immediately on commit, so the client
-             * is entitled to destroy it at any time — but s->buf may still
-             * point here until the next commit. Clear to avoid use-after-free. */
-            void *dying_buf = obj ? obj->data : NULL;
-            if (dying_buf) {
-                for (int _i = 0; _i < c->n_objs; _i++) {
-                    if (c->objs[_i].type == OBJ_SURFACE && c->objs[_i].data) {
-                        wl_surface_t *_s = c->objs[_i].data;
-                        if (_s->buf == dying_buf) {
-                            _s->buf    = NULL;
-                            _s->mapped = false;
-                        }
-                    }
-                }
-            }
+        /* Safe to free any time: we copy pixels at commit and never keep a
+         * pointer to the client buffer between commits. */
+        if (opcode == WL_BUFFER_DESTROY)
             wl_delete_obj(c, obj_id);
-        }
         break;
 
     /* ── wl_seat ─────────────────────────────────────────────────────── */
@@ -2002,6 +2031,7 @@ static void wl_client_recv(wl_client_t *c) {
             close(c->fd);
             c->fd     = -1;
             c->active = false;
+            orphan_free_if_idle();   /* last client gone → reclaim orphaned buffers */
         }
         return;
     }
@@ -2026,8 +2056,6 @@ static void wl_client_recv(wl_client_t *c) {
 
         wl_handle_msg(c, obj_id, opcode, args, args_len);
 
-        /* fd assignment now happens inside create_pool handler via pending_fd_pop() */
-
         /* Consume message from buffer */
         memmove(c->recv, c->recv + msg_sz, c->recv_used - msg_sz);
         c->recv_used -= msg_sz;
@@ -2042,8 +2070,12 @@ static void wl_client_flush(wl_client_t *c) {
         memmove(c->send, c->send + n, c->send_used - n);
         c->send_used -= n;
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        /* Objects are NOT freed here: flush is called mid-dispatch while callers
+         * still hold pointers into the object pool. The slot is cleaned (buffers
+         * orphan-rescued, objects freed) when it is reused in wayland_poll(). */
         fprintf(stderr, "[wayland] flush error fd=%d: %s\n", c->fd, strerror(errno));
         close(c->fd); c->fd = -1; c->active = false;
+        orphan_free_if_idle();
     }
 }
 
@@ -2294,6 +2326,12 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 else if (nT && nR) e = 1u | 8u;
                 else if (nB && nL) e = 2u | 4u;
                 else if (nB && nR) e = 2u | 8u;
+                /* The min/max/close buttons live at the right end of the titlebar.
+                 * The top-edge / top-right-corner resize reach (M/CN) overlaps them,
+                 * which stole clicks meant for the close button (only a sliver of the
+                 * X was left reachable — the "exact spot" bug). Never start a resize
+                 * from the button strip; let the titlebar handler below claim it. */
+                if (my >= wy0 && my < es->y && mx >= wx1 - 84) e = 0;
                 if (e) { rs = es; rs_ci = ci; rs_sid = cc->objs[oi].id; g_iop_edges = (int)e; }
             }
         }
@@ -3167,20 +3205,44 @@ static void ssd_title_ascii(const char *in, char *out, size_t n) {
     out[o] = '\0';
 }
 
+/* Colour helpers mirroring kernel/src/gui_internal.h (not included here), so the
+ * SSD chrome can derive tints from the theme accent like the built-in windows. */
+static inline uint32_t ssd_col_scale(uint32_t c, uint32_t num, uint32_t den) {
+    if (den == 0u) den = 1u;
+    uint32_t r = ((c >> 16) & 0xffu) * num / den;
+    uint32_t g = ((c >>  8) & 0xffu) * num / den;
+    uint32_t b = ( c        & 0xffu) * num / den;
+    if (r > 255u) r = 255u; if (g > 255u) g = 255u; if (b > 255u) b = 255u;
+    return (r << 16) | (g << 8) | b;
+}
+static inline uint32_t ssd_col_mix(uint32_t a, uint32_t b, uint32_t t) {
+    if (t > 255u) t = 255u;
+    uint32_t it = 255u - t;
+    uint32_t r = (((a >> 16) & 0xffu) * it + ((b >> 16) & 0xffu) * t) / 255u;
+    uint32_t g = (((a >>  8) & 0xffu) * it + ((b >>  8) & 0xffu) * t) / 255u;
+    uint32_t bl = (( a       & 0xffu) * it + ( b        & 0xffu) * t) / 255u;
+    return (r << 16) | (g << 8) | bl;
+}
+
 static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
     extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
     extern void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c0, uint32_t c1);
     extern void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg);
     extern uint32_t console_font_width(void);
     extern uint32_t console_font_height(void);
+    extern uint32_t gui_theme_accent(void);   /* thread the user's accent through the chrome */
     if (by < SSD_TITLE_H) return;
     bool focused = (ci == g_focus_ci);
+    uint32_t accent = gui_theme_accent();
     uint64_t x = (uint64_t)bx, w = (uint64_t)s->own_w;
     uint64_t ty = (uint64_t)(by - SSD_TITLE_H);
-    uint32_t grad_top = focused ? 0x00324a72u : 0x00202836u;
-    uint32_t grad_bot = focused ? 0x001e2c48u : 0x00161c26u;
+    /* Focused bar carries the accent (deep gradient); unfocused stays neutral. */
+    uint32_t grad_top = focused ? ssd_col_mix(0x001e2a40u, accent, 85u) : 0x00202836u;
+    uint32_t grad_bot = focused ? ssd_col_mix(0x00141b28u, accent, 40u) : 0x00161c26u;
     console_fill_vgrad(x, ty, w, SSD_TITLE_H, grad_top, grad_bot);
-    console_fill_rect(x, ty, w, 1u, focused ? 0x00466492u : 0x002a3446u);
+    /* bright accent specular along the top edge (light glancing off the bar) */
+    console_fill_rect(x, ty, w, 1u,
+                      focused ? ssd_col_mix(accent, 0x00ffffffu, 96u) : 0x002a3446u);
     console_fill_rect(x, ty + SSD_TITLE_H - 1u, w, 1u, 0x0010192au);
     /* title text, centered */
     uint64_t fw = console_font_width(), fh = console_font_height();
@@ -3220,15 +3282,16 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
         console_fill_rect(ccx - 4u + k, cyc - 4u + k, 2u, 2u, gc);
         console_fill_rect(ccx - 4u + k, cyc + 4u - k, 2u, 2u, gc);
     }
-    /* frame + focus ring around bar+content */
+    /* frame + focus ring around bar+content — both derived from the accent so the
+     * active window's outline matches the built-in windows and the taskbar. */
     uint64_t th = (uint64_t)SSD_TITLE_H + (uint64_t)s->own_h;
-    uint32_t frame = focused ? 0x00283a58u : 0x001d2634u;
+    uint32_t frame = focused ? ssd_col_scale(accent, 90u, 255u) : 0x001d2634u;
     console_fill_rect(x,          ty,          w, 1u, frame);
     console_fill_rect(x,          ty + th - 1, w, 1u, frame);
     console_fill_rect(x,          ty,          1u, th, frame);
     console_fill_rect(x + w - 1,  ty,          1u, th, frame);
     if (focused) {
-        uint32_t ring = 0x002b4d80u;
+        uint32_t ring = ssd_col_scale(accent, 150u, 255u);
         if (ty > 0)   console_fill_rect(x > 0 ? x-1 : 0, ty - 1, w + 2, 1u, ring);
         console_fill_rect(x > 0 ? x-1 : 0, ty + th, w + 2, 1u, ring);
         if (x > 0)    console_fill_rect(x - 1, ty, 1u, th, ring);
@@ -3238,16 +3301,11 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
 
 /* Called from compositor main after ipc_blit_all() */
 /* Blit one surface at its computed screen position */
-static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log) {
-    extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
-                                    uint64_t w, uint64_t h);
-    extern void console_paste_rect_alpha(const uint32_t *src, uint64_t dx, uint64_t dy,
-                                    uint64_t w, uint64_t h);
-    (void)ci; (void)obj_id; (void)do_log;
+static void blit_one_surface(int ci, wl_surface_t *s) {
     /* Blit from our OWN packed copy (own_w*own_h, tightly packed). Never touches
      * client buffer memory, so it can't fault on a freed/resized client buffer. */
-    if (!s->mapped || !s->own_pix || s->minimized) return 0;
-    if (s->own_w <= 0 || s->own_h <= 0) return 0;
+    if (!s->mapped || !s->own_pix || s->minimized) return;
+    if (s->own_w <= 0 || s->own_h <= 0) return;
     if (s->is_popup) {
         /* Draw mapped popups (menus/dropdowns) that carry opaque content. Grab
          * can't gate this: Firefox's hamburger/PanelUI menu is a real 340x674
@@ -3257,7 +3315,7 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
          * which the blit draws separately. */
         int total = s->own_w * s->own_h, step = total > 4096 ? total / 4096 : 1, opaque = 0;
         for (int i = 0; i < total; i += step) if ((s->own_pix[i] >> 24) != 0) { opaque = 1; break; }
-        if (!opaque) return 0;
+        if (!opaque) return;
     }
     int32_t bx, by;
     if (s->is_popup) {
@@ -3265,7 +3323,7 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
     } else if (s->is_subsurface) {
         wl_obj_t *po = wl_find_obj_any(s->parent_surface_id);
         wl_surface_t *p = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
-        if (!p) return 0;
+        if (!p) return;
         /* Parent origin: a popup parent (e.g. a menu) is positioned via popup_x/y,
          * NOT x/y (which stays 0). Firefox renders menu content as a subsurface of
          * the popup — using p->x here draws it at screen-left instead of at the
@@ -3281,8 +3339,6 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
      * CSD shadow (transparent margin + semi-transparent gradient) is skipped — no
      * shadow at all. Popups (menus) may be legitimately semi-transparent, so they
      * only skip fully-transparent pixels. Toplevels are the opaque base — plain copy. */
-    extern void console_paste_rect_opaque(const uint32_t *src, uint64_t dx, uint64_t dy,
-                                          uint64_t w, uint64_t h);
     extern void console_paste_rect_blend(const uint32_t *src, uint64_t dx, uint64_t dy,
                                          uint64_t w, uint64_t h);
     extern void console_paste_rect(const uint32_t *src, uint64_t dx, uint64_t dy,
@@ -3301,21 +3357,17 @@ static int blit_one_surface(int ci, wl_surface_t *s, uint32_t obj_id, int do_log
     }
     if (ssd_decorated(s))
         ssd_draw_chrome(ci, s, bx, by);
-    return 1;
 }
 
 void wayland_blit_surfaces(void) {
     if (g_wl_minimized) return;   /* browser minimized — draw nothing */
-    static int blit_log_ticker = 0;
-    int do_log = (++blit_log_ticker % 600 == 0);
-    int blitted = 0;
 
     /* Collect mapped toplevels (non-subsurface, non-popup) and draw them in
      * z-order (back to front) so the focused window and its titlebar sit above
      * the others. Newly-mapped toplevels (z==0) get the next z now, so a window
      * opened later appears on top. Each toplevel is followed immediately by its
      * own subsurfaces; popups (menus) are drawn last, above everything. */
-    typedef struct { int ci; wl_surface_t *s; uint32_t oid; } top_ent_t;
+    typedef struct { int ci; wl_surface_t *s; } top_ent_t;
     top_ent_t tops[MAX_WL_CLIENTS * 8];
     int ntop = 0;
     for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
@@ -3328,7 +3380,7 @@ void wayland_blit_surfaces(void) {
             if (xwl_root_empty(s)) continue;   /* don't draw the empty XWayland root */
             if (s->z == 0) s->z = g_wl_z_next++;
             if (ntop < (int)(sizeof tops / sizeof tops[0]))
-                tops[ntop].ci = ci, tops[ntop].s = s, tops[ntop].oid = c->objs[oi].id, ntop++;
+                tops[ntop].ci = ci, tops[ntop].s = s, ntop++;
         }
     }
     /* selection sort by z ascending (few windows) */
@@ -3339,7 +3391,7 @@ void wayland_blit_surfaces(void) {
         if (lo != i) { top_ent_t t = tops[i]; tops[i] = tops[lo]; tops[lo] = t; }
     }
     for (int i = 0; i < ntop; i++) {
-        blitted += blit_one_surface(tops[i].ci, tops[i].s, tops[i].oid, do_log);
+        blit_one_surface(tops[i].ci, tops[i].s);
         /* A minimized toplevel draws nothing — and neither may its content
          * subsurfaces (GTK/Firefox render the page in a subsurface, so drawing
          * them anyway would leave a "minimized" window still fully visible). */
@@ -3357,7 +3409,7 @@ void wayland_blit_surfaces(void) {
                 anc = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
             }
             if (anc == tops[i].s)
-                blitted += blit_one_surface(tops[i].ci, sub, c->objs[oi].id, do_log);
+                blit_one_surface(tops[i].ci, sub);
         }
     }
     /* popups (menus/dropdowns) on top of all windows, each followed by its own
@@ -3373,7 +3425,7 @@ void wayland_blit_surfaces(void) {
             if (c->objs[oi].type != OBJ_SURFACE) continue;
             wl_surface_t *s = c->objs[oi].data;
             if (!s || !s->is_popup) continue;
-            blitted += blit_one_surface(ci, s, c->objs[oi].id, do_log);
+            blit_one_surface(ci, s);
             /* Draw the popup's own content subsurfaces on top of it: Firefox/GTK
              * render a menu's pixels in a subsurface of the popup (like a page is
              * a subsurface of a toplevel), so the popup surface alone is empty. */
@@ -3387,11 +3439,10 @@ void wayland_blit_surfaces(void) {
                     anc = (po && po->type == OBJ_SURFACE) ? po->data : NULL;
                 }
                 if (anc == s)
-                    blitted += blit_one_surface(ci, sub, c->objs[si].id, do_log);
+                    blit_one_surface(ci, sub);
             }
         }
     }
-    (void)blitted;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -3464,15 +3515,23 @@ void wayland_poll(void) {
         bool accepted = false;
         for (int i = 0; i < MAX_WL_CLIENTS; i++) {
             if (!g_wl_clients[i].active) {
-                /* Preserve objects array — Firefox reconnects and reuses object IDs
-                 * from previous sessions. Only reset connection-state fields. */
+                /* The slot can still hold objects if its previous client died on a
+                 * flush error (the recv path frees everything; the flush path must
+                 * not — dispatch may hold pointers into the pool). Free them now,
+                 * rescuing buffers first, so a NEW connection (a fresh object-ID
+                 * space) never inherits another client's stale objects. */
+                if (g_wl_clients[i].n_objs > 0) {
+                    orphan_save_buffers(&g_wl_clients[i]);
+                    for (int oi = 0; oi < g_wl_clients[i].n_objs; oi++)
+                        free_obj_data(&g_wl_clients[i].objs[oi]);
+                    g_wl_clients[i].n_objs = 0;
+                }
                 g_wl_clients[i].fd          = cfd;
                 g_wl_clients[i].active      = true;
                 g_wl_clients[i].serial      = 1;
                 g_wl_clients[i].send_used   = 0;
                 g_wl_clients[i].recv_used   = 0;
                 g_wl_clients[i].send_overflow = false;
-                /* Keep n_objs and objs[] intact for zombie-session object reuse */
                 g_wl_clients[i].compositor_id = 0;
                 g_wl_clients[i].shm_id        = 0;
                 g_wl_clients[i].seat_id       = 0;
@@ -3480,7 +3539,7 @@ void wayland_poll(void) {
                 g_wl_clients[i].pointer_id    = 0;
                 g_wl_clients[i].output_id     = 0;
                 g_wl_clients[i].xdg_wm_id     = 0;
-                fprintf(stderr, "[wayland] new client fd=%d slot=%d (objs=%d from prev)\n", cfd, i, g_wl_clients[i].n_objs);
+                fprintf(stderr, "[wayland] new client fd=%d slot=%d\n", cfd, i);
                 accepted = true;
                 break;
             }

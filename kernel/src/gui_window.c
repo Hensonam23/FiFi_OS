@@ -65,10 +65,11 @@ static void chrome_buttons(window_t *w, int slot, bool active) {
     uint64_t bh  = (TITLE_H > 4u) ? TITLE_H - 4u : TITLE_H;
     uint64_t cyc = w->y + TITLE_H / 2u;
 
+    uint32_t hov_bg = col_mix(0x001c2636u, g_theme.accent, 120u);  /* accent-tinted hover */
     struct { uint64_t bx; int btn; uint32_t hbg; } btns[3] = {
-        { w->btn_min_x, 3, 0x00415068u },
-        { w->btn_max_x, 2, 0x00415068u },
-        { w->btn_cls_x, 1, 0x00c0392bu },
+        { w->btn_min_x, 3, hov_bg },
+        { w->btn_max_x, 2, hov_bg },
+        { w->btn_cls_x, 1, 0x00c0392bu },   /* close stays red (universal) */
     };
     for (int i = 0; i < 3; i++) {
         bool hov = (g_chrome_win == slot && g_chrome_btn == btns[i].btn);
@@ -136,15 +137,19 @@ static void titlebar_paint(window_t *w, int slot, bool active, bool do_capture) 
     }
 
     if (translucent) {
-        /* frosted tint over the restored desktop backdrop — the see-through look */
-        uint32_t tint = active ? 0x0022344fu : 0x00151c27u;
+        /* frosted tint over the restored desktop backdrop — the see-through look.
+         * The focused tint is derived from the accent so the active window's glass
+         * subtly carries the user's palette; unfocused stays neutral+muted. */
+        uint32_t tint = active ? col_mix(0x00182234u, g_theme.accent, 70u) : 0x00151c27u;
         uint8_t  a    = active ? 176u : 198u;
         console_blend_rect(w->x, w->y, w->w, TITLE_H, tint, a);
     } else {
         titlebar_fill(w, w->x, w->w, active);   /* opaque glossy fallback */
     }
-    /* specular top edge + soft highlight (glass catching light) */
-    console_fill_rect(w->x, w->y, w->w, 1u, active ? 0x006a8ec4u : 0x00323d50u);
+    /* specular top edge + soft highlight (glass catching light) — a bright accent
+     * tint on the focused bar reads as light glancing off the glass rim. */
+    console_fill_rect(w->x, w->y, w->w, 1u,
+                      active ? col_mix(g_theme.accent, 0x00ffffffu, 96u) : 0x00323d50u);
     if (g_theme.fx_glass)
         console_blend_rect(w->x, w->y + 1u, w->w, 1u, 0x00ffffffu, active ? 42u : 22u);
     console_fill_rect(w->x, w->y + TITLE_H - 1u, w->w, 1u, 0x0010192au);   /* bottom sep */
@@ -209,15 +214,16 @@ void win_draw_chrome(window_t *w, bool fill_content) {
 
     /* Full repaint path (fill_content=true) ─────────────────────────────── */
 
-    /* Focus ring — a soft accent outline one pixel outside the window. */
+    /* Focus ring — a soft accent outline one pixel outside the window. Derived
+     * from g_theme.accent (darkened) so it tracks the user's palette. */
     if (active) {
         uint64_t fb_w = console_fb_width();
         uint64_t dtop = desk_top();
         uint64_t dbot = desk_bot();
-        uint32_t ring  = 0x002b4d80u;
+        uint32_t ring  = col_scale(g_theme.accent, 150u, 255u);
         uint64_t rx    = w->x > 0u        ? w->x - 1u        : 0u;
         uint64_t rw    = w->w + (w->x > 0u ? 2u : 1u);
-        if (w->x + w->w < fb_w) { /* clamp rw */ } else { rw = fb_w - rx; }
+        if (w->x + w->w >= fb_w) rw = fb_w - rx;   /* clamp rw to screen */
         if (w->y > dtop)
             console_fill_rect(rx, w->y - 1u, rw, 1u, ring);
         if (w->y + w->h < dbot)
@@ -232,24 +238,21 @@ void win_draw_chrome(window_t *w, bool fill_content) {
      * plus specular edge, title text, and traffic-light buttons. */
     titlebar_paint(w, slot, active, true);
 
-    if (fill_content) {
-        /* Neutral thin frame (accent lives in the focus ring, not the border) */
-        uint32_t frame = active ? 0x00283a58u : 0x001d2634u;
-        console_fill_rect(w->x, w->y + TITLE_H,
-                          BORDER, w->h - TITLE_H, frame);
-        console_fill_rect(w->x + w->w - BORDER, w->y + TITLE_H,
-                          BORDER, w->h - TITLE_H, frame);
-        console_fill_rect(w->x, w->y + w->h - BORDER,
-                          w->w, BORDER, frame);
-    }
+    /* Neutral thin frame (accent lives in the focus ring, not the border) */
+    uint32_t frame = active ? 0x00283a58u : 0x001d2634u;
+    console_fill_rect(w->x, w->y + TITLE_H,
+                      BORDER, w->h - TITLE_H, frame);
+    console_fill_rect(w->x + w->w - BORDER, w->y + TITLE_H,
+                      BORDER, w->h - TITLE_H, frame);
+    console_fill_rect(w->x, w->y + w->h - BORDER,
+                      w->w, BORDER, frame);
 
-    if (fill_content) {
-        uint64_t ix = w->x + BORDER;
-        uint64_t iy = w->y + TITLE_H;
-        uint64_t iw = w->w - 2u * BORDER;
-        uint64_t ih = w->h - TITLE_H - BORDER;
-        console_fill_rect(ix, iy, iw, ih, COL_WIN_BG);
-    }
+    /* Content background */
+    uint64_t ix = w->x + BORDER;
+    uint64_t iy = w->y + TITLE_H;
+    uint64_t iw = w->w - 2u * BORDER;
+    uint64_t ih = w->h - TITLE_H - BORDER;
+    console_fill_rect(ix, iy, iw, ih, COL_WIN_BG);
 }
 
 /* ── Terminal viewport helpers ───────────────────────────────────────── */
@@ -397,6 +400,18 @@ void win_round_corners(const window_t *w) {
 /* ── Window open / hide / maximize ──────────────────────────────────── */
 
 void win_show(window_t *w, int slot) {
+#ifdef __linux__
+    /* The legacy built-in Terminal (no tabs, raw boot shell) is fully replaced
+     * by the standalone tabbed /bin/fifi-terminal. Whatever code path tries to
+     * show the built-in window, launch the standalone app instead — this is the
+     * single choke point, so the old terminal can never surface from ANY route
+     * (launcher, taskbar, F-keys, context menus, file flows). */
+    if (w->type == WIN_TERM) {
+        __attribute__((weak)) void gui_spawn_app(const char *path);
+        if (gui_spawn_app) gui_spawn_app("/bin/fifi-terminal");
+        return;
+    }
+#endif
     uint64_t fb_w  = console_fb_width();
     uint64_t avail = desk_avail();
 
@@ -465,8 +480,6 @@ void win_hide(window_t *w, int slot) {
 }
 
 void win_maximize_toggle(window_t *w) {
-    uint64_t fb_w = console_fb_width();
-
     if (w->state == WIN_MAXIMIZED) {
         w->x = w->saved_x; w->y = w->saved_y;
         w->w = w->saved_w; w->h = w->saved_h;
@@ -540,7 +553,6 @@ void win_do_resize(window_t *w, int32_t mx, int32_t my) {
         default: break;
     }
 
-    uint64_t fb_w = console_fb_width();
     /* Per-window type minimum: Settings needs enough width for its content columns */
     uint64_t _fw = console_font_width(), _fh = console_font_height();
     /* Settings minimum: enough for 8 accent swatches + label column + padding */
