@@ -1,0 +1,61 @@
+#!/bin/sh
+# fifi-secctl — toggle firewall / DoH / VPN / Tor from the Settings > Security tab.
+# Keeps the same marker files the Security tab reads (firewall.log, doh-enabled,
+# doh.pid, wg0 iface, tor-enabled, tor.pid) so the status rows stay in sync.
+# Usage: fifi-secctl <firewall|doh|vpn|tor> <on|off>
+what="$1"; act="$2"
+D=/fifi-data
+
+case "$what" in
+  firewall)
+    if [ "$act" = on ]; then
+      if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
+        if /usr/sbin/nft -f /etc/nftables.conf 2>>"$D/firewall.err"; then
+          echo "firewall: active" > "$D/firewall.log"
+        else
+          echo "firewall: failed (kernel nftables support required)" > "$D/firewall.log"
+        fi
+      else
+        echo "firewall: nft or rules not found" > "$D/firewall.log"
+      fi
+    else
+      [ -x /usr/sbin/nft ] && /usr/sbin/nft flush ruleset 2>/dev/null
+      echo "firewall: disabled" > "$D/firewall.log"
+    fi
+    ;;
+
+  doh)
+    if [ "$act" = on ]; then
+      : > "$D/doh-enabled"
+      if [ -x /usr/bin/dnscrypt-proxy ]; then
+        /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml >/dev/null 2>&1 &
+        echo $! > "$D/doh.pid"
+      fi
+    else
+      [ -f "$D/doh.pid" ] && kill "$(cat "$D/doh.pid")" 2>/dev/null
+      rm -f "$D/doh-enabled" "$D/doh.pid"
+    fi
+    ;;
+
+  vpn)
+    if [ "$act" = on ]; then
+      [ -x /bin/wg-up ] && sh /bin/wg-up
+    else
+      [ -x /bin/wg-down ] && sh /bin/wg-down 2>/dev/null
+      ip link del wg0 2>/dev/null
+    fi
+    ;;
+
+  tor)
+    if [ "$act" = on ]; then
+      : > "$D/tor-enabled"
+      if [ -x /usr/bin/tor ] && [ -f "$D/torrc" ]; then
+        /usr/bin/tor -f "$D/torrc" >/dev/null 2>&1 &
+        echo $! > "$D/tor.pid"
+      fi
+    else
+      [ -f "$D/tor.pid" ] && kill "$(cat "$D/tor.pid")" 2>/dev/null
+      rm -f "$D/tor-enabled" "$D/tor.pid"
+    fi
+    ;;
+esac

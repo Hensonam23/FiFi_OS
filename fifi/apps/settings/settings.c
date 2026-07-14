@@ -1,8 +1,23 @@
-/* FiFi Settings — standalone IPC process.
- * Shows system info and controls ALSA volume directly.
- * Theme and display settings are managed by the compositor.
+/* FiFi Settings — modern tabbed "hub" for FiFi OS.
  *
- * Build: gcc -O2 -static -o fifi-settings settings.c
+ * A single window with a left sidebar/tab rail. Each rail item switches the
+ * content pane so the user does not need separate apps:
+ *   Personalize : read/write the compositor's persisted theme config
+ *                 (/fifi-data/fifi-settings.conf — accent, wallpaper, panel
+ *                 position, glass/shadow effects, corner radius). Changes are
+ *                 written to disk and apply on the NEXT login/reboot; this app
+ *                 does NOT (and cannot) hot-reload the running compositor.
+ *   Wi-Fi       : scan / select / connect to networks (shells out to iw +
+ *                 wpa_supplicant + udhcpc, same as the standalone fifi-wifi).
+ *   Network     : live interface / IP / RX-TX throughput (netmon logic).
+ *   System      : live CPU freq / memory / uptime / load / processes + volume.
+ *   Security    : read-only status of firewall / DoH / VPN / Tor / privacy.
+ *   About       : OS version + kernel (uname).
+ *
+ * Deep-linking: `fifi-settings <section>` opens straight on a tab, where
+ * <section> is one of: personalize | wifi | network | system | security | about
+ *
+ * Build: gcc -O2 -static -o fifi-settings settings.c   (see Makefile)
  */
 
 #include <stdio.h>
@@ -13,10 +28,19 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
+#include <poll.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/ioctl.h>
 #include <sys/sysinfo.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/utsname.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <sound/asound.h>
 
@@ -30,40 +54,48 @@
 #define IPC_INPUT_MOUSE  0x12u
 #define IPC_INVALIDATE   0x15u
 #define IPC_NOTIFY       0x16u
+#define IPC_WIN_RESIZE   0x1Bu
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
-#define WIN_W   480
-#define WIN_H   420
-#define TITLE_H  24   /* reserved for compositor title bar */
-#define PAD      14
-#define ROW_H    24
-#define IPC_WIN_RESIZE 0x1Bu
+#define WIN_W       760
+#define WIN_H       560
+#define TITLE_H     24    /* reserved for compositor title bar */
+#define SIDEBAR_W   176
+#define CPAD        18    /* content padding */
+#define ROW_H       24
 
 static int g_win_w = WIN_W;
 static int g_win_h = WIN_H;
 
-/* ── Colours ─────────────────────────────────────────────────────────────── */
-#define C_BG      0x00121820u
-#define C_HDR     0x001a2432u
-#define C_ROW_A   0x00141c28u
-#define C_ROW_B   0x00101820u
-#define C_ACCENT  0x00206090u
-#define C_FILL    0x00307090u
-#define C_BORDER  0x00243448u
-#define C_TITLE   0x00d0e8ffu
-#define C_KEY     0x0060a0c0u
-#define C_VAL     0x00b0c8e0u
-#define C_GREY    0x00506070u
-#define C_BTN_BG  0x001e2c40u
-#define C_BTN_HL  0x00284860u
+/* ── Colours (0x00RRGGBB) ────────────────────────────────────────────────── */
+#define C_BG        0x00141b26u  /* content background */
+#define C_SIDE      0x000d1219u  /* sidebar background */
+#define C_SIDE_HOV  0x00182534u
+#define C_HDR       0x00d6e8ffu  /* section header text */
+#define C_KEY       0x0072a8ceu
+#define C_VAL       0x00b6cce4u
+#define C_GREY      0x00637586u
+#define C_BORDER    0x00243448u
+#define C_ROW_A     0x00161f2bu
+#define C_ROW_B     0x00121a24u
+#define C_ROW_SEL   0x00203858u
+#define C_BTN_BG    0x001d2a3cu
+#define C_WHITE     0x00eef4ffu
+#define C_GREEN     0x0034c070u
+#define C_RED       0x00d24444u
+#define C_YELLOW    0x00c8a828u
 
-/* ── PSF1 font (same as filebrowser) ─────────────────────────────────────── */
+/* Accent colour — read from config so the hub matches the user's theme. */
+static uint32_t g_accent = 0x003060c0u;
+
+/* ── PSF1 font (shared with the other native apps) ───────────────────────── */
 #define PSF1_MAGIC 0x0436u
 typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
 
 static uint8_t *g_glyph   = NULL;
 static int      g_glyph_h = 16;
 static int      g_nglyphs = 256;
+#define CW 9  /* character advance in pixels (8px glyph + 1px gap) */
 
 static bool font_load(const char *path) {
     int fd = open(path, O_RDONLY);
@@ -78,6 +110,42 @@ static bool font_load(const char *path) {
     if (read(fd, g_glyph, tot) < tot) { free(g_glyph); g_glyph = NULL; close(fd); return false; }
     close(fd);
     return true;
+}
+
+/* Decode one UTF-8 sequence at s[*i]; return codepoint, advance *i. The PSF
+ * bitmap font only holds Latin-1, so text is UTF-8 but glyphs beyond it must be
+ * folded (below) — this keeps multi-byte chars from rendering as byte garbage. */
+static uint32_t u8_next(const char *s, size_t *i) {
+    unsigned char c = (unsigned char)s[*i];
+    if (c < 0x80u) { (*i)++; return c; }
+    uint32_t cp; int extra;
+    if      ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu; extra = 1; }
+    else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu; extra = 2; }
+    else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u; extra = 3; }
+    else { (*i)++; return 0xFFFDu; }
+    (*i)++;
+    for (int k = 0; k < extra; k++) {
+        unsigned char cc = (unsigned char)s[*i];
+        if ((cc & 0xC0u) != 0x80u) return 0xFFFDu;
+        cp = (cp << 6) | (cc & 0x3Fu); (*i)++;
+    }
+    return cp;
+}
+
+/* Fold a codepoint the bitmap font can't show to a printable ASCII byte.
+ * Dashes are handled separately (drawn as a bar). Returns 0 to skip. */
+static int fold_cp(uint32_t cp) {
+    if (cp < 0x100u) return (int)cp;                 /* ASCII + Latin-1 */
+    switch (cp) {
+    case 0x2018: case 0x2019: case 0x201B: return '\'';   /* curly single quotes */
+    case 0x201C: case 0x201D: case 0x201F: return '"';    /* curly double quotes */
+    case 0x2022: case 0x2027: case 0x00B7: return '.';    /* bullet / mid-dot */
+    case 0x2026: return '.';                              /* ellipsis (one dot) */
+    case 0x00A0: return ' ';                              /* nbsp */
+    case 0x2039: return '<'; case 0x203A: return '>';
+    case 0x00AB: return '<'; case 0x00BB: return '>';
+    default: return '?';
+    }
 }
 
 static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
@@ -95,17 +163,39 @@ static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
     }
 }
 
+/* Draw an em/en/figure dash as a centred horizontal bar (the PSF font has no
+ * such glyph). em spans the full cell, en/minus a shorter middle run. */
+static void draw_dash(uint32_t *fb, uint32_t cp, int px, int py, uint32_t fg) {
+    int x0 = px, x1 = px + 7;                            /* em-dash: 0x2014 */
+    if (cp != 0x2014) { x0 = px + 1; x1 = px + 6; }      /* en/minus: 0x2013/0x2212 */
+    int y0 = py + g_glyph_h / 2;
+    for (int x = x0; x <= x1; x++)
+        for (int yy = y0; yy < y0 + 1; yy++)
+            if (x >= 0 && x < g_win_w && yy >= 0 && yy < g_win_h)
+                fb[yy * g_win_w + x] = fg;
+}
+
+/* Draw a single codepoint into one cell, folding/synthesising as needed. */
+static void draw_cp(uint32_t *fb, uint32_t cp, int px, int py, uint32_t fg) {
+    if (cp == 0x2014 || cp == 0x2013 || cp == 0x2212) { draw_dash(fb, cp, px, py, fg); return; }
+    int c = fold_cp(cp);
+    if (c > 0) draw_char(fb, c, px, py, fg);
+}
+
 static void draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
-    for (; *s; s++, x += 9) draw_char(fb, (unsigned char)*s, x, y, fg);
+    for (size_t i = 0; s[i]; x += CW) draw_cp(fb, u8_next(s, &i), x, y, fg);
 }
 
 static void draw_str_clip(uint32_t *fb, const char *s, int x, int y,
                           uint32_t fg, int max_px) {
-    for (; *s && max_px > 9; s++, x += 9, max_px -= 9)
-        draw_char(fb, (unsigned char)*s, x, y, fg);
+    for (size_t i = 0; s[i] && max_px > CW; x += CW, max_px -= CW)
+        draw_cp(fb, u8_next(s, &i), x, y, fg);
 }
 
-static int str_w(const char *s) { return (int)strlen(s) * 9; }
+static int str_w(const char *s) {
+    int cols = 0; for (size_t i = 0; s[i]; ) { u8_next(s, &i); cols++; }
+    return cols * CW;
+}
 
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int r = y; r < y + h; r++) {
@@ -115,21 +205,181 @@ static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     }
 }
 
-static void hline(uint32_t *fb, int y, uint32_t col) {
-    if (y < 0 || y >= g_win_h) return;
-    for (int x = 0; x < g_win_w; x++) fb[y * g_win_w + x] = col;
+static void rect_border(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
+    for (int i = x; i < x + w; i++) {
+        if (i < 0 || i >= g_win_w) continue;
+        if (y >= 0 && y < g_win_h)             fb[y * g_win_w + i] = col;
+        if (y+h-1 >= 0 && y+h-1 < g_win_h)     fb[(y+h-1) * g_win_w + i] = col;
+    }
+    for (int j = y; j < y + h; j++) {
+        if (j < 0 || j >= g_win_h) continue;
+        if (x >= 0 && x < g_win_w)             fb[j * g_win_w + x] = col;
+        if (x+w-1 >= 0 && x+w-1 < g_win_w)     fb[j * g_win_w + x+w-1] = col;
+    }
 }
 
-/* ── ALSA volume (direct ioctl — no library) ─────────────────────────────── */
+/* Section header: title + accent-tinted underline. Returns the y for content. */
+static int section_hdr(uint32_t *fb, const char *title, int x, int y) {
+    draw_str(fb, title, x, y, C_HDR);
+    int uy = y + g_glyph_h + 3;
+    if (uy >= 0 && uy < g_win_h)
+        for (int i = x; i < g_win_w - CPAD; i++) fb[uy * g_win_w + i] = C_BORDER;
+    return y + g_glyph_h + 12;
+}
+
+/* Labelled button; highlighted (accent) when selected. */
+static void draw_btn(uint32_t *fb, int x, int y, int w, int h,
+                     const char *label, bool sel) {
+    fill(fb, x, y, w, h, sel ? g_accent : C_BTN_BG);
+    rect_border(fb, x, y, w, h, sel ? C_WHITE : C_BORDER);
+    int tw = str_w(label);
+    draw_str_clip(fb, label, x + (w - tw)/2 < x+4 ? x+4 : x + (w - tw)/2,
+                  y + (h - g_glyph_h)/2, sel ? C_WHITE : C_VAL, w - 8);
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+enum { TAB_PERS = 0, TAB_WIFI, TAB_NET, TAB_SYS, TAB_SEC, TAB_ABOUT, N_TABS };
+static const char *g_tab_labels[N_TABS] = {
+    "Personalize", "Wi-Fi", "Network", "System", "Security", "About"
+};
+static int g_tab = TAB_PERS;
+
+#define SIDE_TOP  (TITLE_H + 46)
+#define SIDE_ROW  40
+
+/* ── Clickable hot-regions (used by the Personalize pane) ────────────────── */
+enum { ACT_ACCENT = 1, ACT_WALL, ACT_PANEL, ACT_GLASS, ACT_SHADOW, ACT_RADIUS, ACT_DOCK, ACT_STATUS,
+       ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR };
+typedef struct { int x, y, w, h, act, arg; } Hot;
+#define MAX_HOTS 64
+static Hot g_hots[MAX_HOTS];
+static int g_nhots = 0;
+static void hot_reset(void) { g_nhots = 0; }
+static void add_hot(int x, int y, int w, int h, int act, int arg) {
+    if (g_nhots < MAX_HOTS) g_hots[g_nhots++] = (Hot){x, y, w, h, act, arg};
+}
+
+/* ── Theme config store (preserves keys we don't manage) ─────────────────── */
+#define CFG_PATH      "/fifi-data/fifi-settings.conf"
+#define MAX_CFG_LINES 48
+static char g_cfg_key[MAX_CFG_LINES][32];
+static char g_cfg_val[MAX_CFG_LINES][160];
+static int  g_cfg_n = 0;
+static char g_pers_note[96] = "Changes apply on next login / reboot.";
+
+static void cfg_load(void) {
+    g_cfg_n = 0;
+    FILE *f = fopen(CFG_PATH, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f) && g_cfg_n < MAX_CFG_LINES) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *val = eq + 1;
+        char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
+        nl = strchr(val, '\r'); if (nl) *nl = '\0';
+        snprintf(g_cfg_key[g_cfg_n], sizeof(g_cfg_key[0]), "%s", line);
+        snprintf(g_cfg_val[g_cfg_n], sizeof(g_cfg_val[0]), "%s", val);
+        g_cfg_n++;
+    }
+    fclose(f);
+}
+
+static int cfg_find(const char *key) {
+    for (int i = 0; i < g_cfg_n; i++)
+        if (strcmp(g_cfg_key[i], key) == 0) return i;
+    return -1;
+}
+static int cfg_get_int(const char *key, int def) {
+    int i = cfg_find(key);
+    return i < 0 ? def : (int)strtol(g_cfg_val[i], NULL, 10);
+}
+static unsigned cfg_get_uint(const char *key, unsigned def) {
+    int i = cfg_find(key);
+    return i < 0 ? def : (unsigned)strtoul(g_cfg_val[i], NULL, 10);
+}
+static void cfg_set_str(const char *key, const char *val) {
+    int i = cfg_find(key);
+    if (i < 0) {
+        if (g_cfg_n >= MAX_CFG_LINES) return;
+        i = g_cfg_n++;
+        snprintf(g_cfg_key[i], sizeof(g_cfg_key[0]), "%s", key);
+    }
+    snprintf(g_cfg_val[i], sizeof(g_cfg_val[0]), "%s", val);
+}
+static void cfg_set_int(const char *key, int v)      { char b[32]; snprintf(b, sizeof b, "%d", v); cfg_set_str(key, b); }
+static void cfg_set_uint(const char *key, unsigned v){ char b[32]; snprintf(b, sizeof b, "%u", v); cfg_set_str(key, b); }
+
+static void cfg_save(void) {
+    FILE *f = fopen(CFG_PATH, "w");
+    if (!f) { snprintf(g_pers_note, sizeof g_pers_note, "ERROR: cannot write %s", CFG_PATH); return; }
+    for (int i = 0; i < g_cfg_n; i++)
+        fprintf(f, "%s=%s\n", g_cfg_key[i], g_cfg_val[i]);
+    fclose(f);
+    snprintf(g_pers_note, sizeof g_pers_note, "Saved \xe2\x80\x94 applied live.");
+}
+
+/* Accent presets mirror the compositor's g_accent_presets[] (gui.c). */
+#define N_ACCENT 16
+static const uint32_t g_accent_presets[N_ACCENT] = {
+    0x003060c0u, 0x00307830u, 0x00802060u, 0x00b04010u,
+    0x00408080u, 0x00606020u, 0x00204060u, 0x00803030u,
+    0x00906010u, 0x00208060u, 0x00601880u, 0x00107888u,
+    0x008040a0u, 0x00505050u, 0x00285870u, 0x006a1a1au,
+};
+static const char *g_wall_names[6]  = { "Gradient", "Solid", "Stars", "Grid", "Waves", "Image" };
+static const char *g_panel_names[4] = { "Bottom", "Top", "Left", "Right" };
+
+/* ── System info (sysmon-style, reused from the original settings app) ───── */
+typedef struct { char key[16]; char val[64]; } InfoRow;
+#define N_INFO 6
+static InfoRow g_info[N_INFO];
+
+static void gather_info(void) {
+    struct sysinfo si; sysinfo(&si);
+
+    snprintf(g_info[0].key, sizeof g_info[0].key, "Uptime");
+    long up = si.uptime;
+    snprintf(g_info[0].val, sizeof g_info[0].val, "%ldh %02ldm %02lds", up/3600, (up%3600)/60, up%60);
+
+    snprintf(g_info[1].key, sizeof g_info[1].key, "Memory");
+    unsigned long total_mb = si.totalram * si.mem_unit / 1024 / 1024;
+    unsigned long free_mb  = si.freeram  * si.mem_unit / 1024 / 1024;
+    snprintf(g_info[1].val, sizeof g_info[1].val, "%lu MB / %lu MB", total_mb - free_mb, total_mb);
+
+    snprintf(g_info[2].key, sizeof g_info[2].key, "CPU Freq");
+    {
+        char buf[32] = {0};
+        int fd = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", O_RDONLY);
+        if (fd >= 0) { read(fd, buf, sizeof(buf)-1); close(fd); }
+        unsigned long khz = (unsigned long)strtol(buf, NULL, 10);
+        if (khz > 0) snprintf(g_info[2].val, sizeof g_info[2].val, "%.2f GHz", khz / 1000000.0);
+        else         snprintf(g_info[2].val, sizeof g_info[2].val, "N/A");
+    }
+
+    snprintf(g_info[3].key, sizeof g_info[3].key, "Load");
+    snprintf(g_info[3].val, sizeof g_info[3].val, "%.2f (1m avg)", (double)si.loads[0] / 65536.0);
+
+    snprintf(g_info[4].key, sizeof g_info[4].key, "Processes");
+    snprintf(g_info[4].val, sizeof g_info[4].val, "%u", si.procs);
+
+    snprintf(g_info[5].key, sizeof g_info[5].key, "Time");
+    time_t now = time(NULL); struct tm *t = localtime(&now);
+    snprintf(g_info[5].val, sizeof g_info[5].val, "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+}
+
+/* ── ALSA volume (direct ioctl, from the original settings app) ──────────── */
 static int   g_ctl    = -1;
 static struct snd_ctl_elem_id g_vid;
 static long  g_vmin   = 0, g_vmax = 100;
 static int   g_vcount = 2;
 static int   g_vol    = 50;
+static int   g_sl_x, g_sl_y, g_sl_w = 240, g_sl_h = 14;
 
 static void alsa_init(void) {
     for (int card = 0; card < 4; card++) {
-        char p[32]; snprintf(p, sizeof(p), "/dev/snd/controlC%d", card);
+        char p[32]; snprintf(p, sizeof p, "/dev/snd/controlC%d", card);
         g_ctl = open(p, O_RDWR);
         if (g_ctl >= 0) break;
     }
@@ -154,8 +404,7 @@ static void alsa_init(void) {
             if (!strcmp((char*)ids[i].name, pref[pi])) { fi = (int)i; break; }
     if (fi < 0)
         for (unsigned i = 0; i < list.used && fi < 0; i++)
-            if (ids[i].iface == SNDRV_CTL_ELEM_IFACE_MIXER &&
-                strstr((char*)ids[i].name, "Volume")) fi = (int)i;
+            if (ids[i].iface == SNDRV_CTL_ELEM_IFACE_MIXER && strstr((char*)ids[i].name, "Volume")) fi = (int)i;
     if (fi < 0) { free(ids); return; }
 
     struct snd_ctl_elem_info info = {0};
@@ -173,14 +422,13 @@ static void alsa_init(void) {
     ev.id = g_vid;
     if (ioctl(g_ctl, SNDRV_CTL_IOCTL_ELEM_READ, &ev) == 0) {
         long range = g_vmax - g_vmin;
-        if (range > 0)
-            g_vol = (int)((ev.value.integer.value[0] - g_vmin) * 100 / range);
+        if (range > 0) g_vol = (int)((ev.value.integer.value[0] - g_vmin) * 100 / range);
     }
-    if (g_ctl < 0 && g_vol == 0) g_vol = 70;  /* default when ALSA unavailable */
 }
 
 static void alsa_set_vol(int v) {
-    if (v < 0) v = 0; if (v > 100) v = 100;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
     g_vol = v;
     if (g_ctl < 0) return;
     long range = g_vmax - g_vmin;
@@ -192,165 +440,776 @@ static void alsa_set_vol(int v) {
     ioctl(g_ctl, SNDRV_CTL_IOCTL_ELEM_WRITE, &ev);
 }
 
-/* ── System info ─────────────────────────────────────────────────────────── */
-typedef struct { char key[16]; char val[64]; } InfoRow;
-#define N_INFO 6
-static InfoRow g_info[N_INFO];
+/* ── Network stats (netmon logic) ────────────────────────────────────────── */
+#define MAX_IFACES 8
+typedef struct {
+    char name[16];
+    uint64_t rx_bytes, tx_bytes, rx_rate, tx_rate;
+    char ip4[20];
+    bool up;
+} iface_t;
+static iface_t g_ifaces[MAX_IFACES];
+static int     g_nifaces = 0;
 
-static void gather_info(void) {
-    struct sysinfo si;
-    sysinfo(&si);
-
-    snprintf(g_info[0].key, sizeof(g_info[0].key), "Uptime");
-    long up = si.uptime;
-    snprintf(g_info[0].val, sizeof(g_info[0].val),
-             "%ldh %02ldm %02lds", up/3600, (up%3600)/60, up%60);
-
-    snprintf(g_info[1].key, sizeof(g_info[1].key), "Memory");
-    unsigned long total_mb = si.totalram * si.mem_unit / 1024 / 1024;
-    unsigned long free_mb  = si.freeram  * si.mem_unit / 1024 / 1024;
-    unsigned long used_mb  = total_mb - free_mb;
-    snprintf(g_info[1].val, sizeof(g_info[1].val),
-             "%lu MB / %lu MB", used_mb, total_mb);
-
-    snprintf(g_info[2].key, sizeof(g_info[2].key), "CPU Freq");
-    {
-        char buf[32] = {0};
-        int cpufd = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", O_RDONLY);
-        if (cpufd >= 0) { read(cpufd, buf, sizeof(buf)-1); close(cpufd); }
-        unsigned long khz = (unsigned long)strtol(buf, NULL, 10);
-        if (khz > 0)
-            snprintf(g_info[2].val, sizeof(g_info[2].val), "%.2f GHz", khz / 1000000.0);
-        else
-            snprintf(g_info[2].val, sizeof(g_info[2].val), "N/A");
+static void net_update_ip(iface_t *ifc) {
+    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sk < 0) return;
+    struct ifreq ifr; memset(&ifr, 0, sizeof ifr);
+    strncpy(ifr.ifr_name, ifc->name, IFNAMSIZ - 1);
+    if (ioctl(sk, SIOCGIFADDR, &ifr) == 0) {
+        struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+        inet_ntop(AF_INET, &sin->sin_addr, ifc->ip4, sizeof ifc->ip4);
+    } else {
+        strncpy(ifc->ip4, "no IP", sizeof ifc->ip4);
     }
-
-    snprintf(g_info[3].key, sizeof(g_info[3].key), "Load");
-    double load = (double)si.loads[0] / 65536.0;
-    snprintf(g_info[3].val, sizeof(g_info[3].val), "%.2f (1m avg)", load);
-
-    snprintf(g_info[4].key, sizeof(g_info[4].key), "Processes");
-    snprintf(g_info[4].val, sizeof(g_info[4].val), "%u", si.procs);
-
-    snprintf(g_info[5].key, sizeof(g_info[5].key), "Time");
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    snprintf(g_info[5].val, sizeof(g_info[5].val),
-             "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+    if (ioctl(sk, SIOCGIFFLAGS, &ifr) == 0)
+        ifc->up = !!(ifr.ifr_flags & IFF_UP) && !!(ifr.ifr_flags & IFF_RUNNING);
+    close(sk);
 }
 
-/* ── Volume slider geometry ───────────────────────────────────────────────── */
-static int  g_sl_x, g_sl_y, g_sl_w = 200, g_sl_h = 14;
-static bool g_dragging = false;
+static void net_update(void) {
+    int fd = open("/proc/net/dev", O_RDONLY);
+    if (fd < 0) return;
+    char buf[4096] = {0};
+    read(fd, buf, sizeof(buf)-1);
+    close(fd);
+    char *line = buf; int skip = 2;
+    while (skip-- > 0) { line = strchr(line, '\n'); if (!line) return; line++; }
 
-/* ── Render ──────────────────────────────────────────────────────────────── */
-static void render(uint32_t *fb) {
-    fill(fb, 0, 0, g_win_w, g_win_h, C_BG);
-    /* Top TITLE_H px left blank — compositor draws the title bar there */
+    iface_t ni[MAX_IFACES]; int nn = 0;
+    while (*line && nn < MAX_IFACES) {
+        char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        char name[16] = {0}; uint64_t rx=0, tx=0, tmp=0;
+        int n = sscanf(line, " %15[^:]: %lu %lu %lu %lu %lu %lu %lu %lu %lu",
+                       name, &rx,&tmp,&tmp,&tmp,&tmp,&tmp,&tmp,&tmp,&tx);
+        bool is_real = false;
+        if (n >= 10 && strcmp(name, "lo") != 0) {
+            char tp[64]; snprintf(tp, sizeof tp, "/sys/class/net/%s/type", name);
+            int tfd = open(tp, O_RDONLY);
+            if (tfd >= 0) { char tb[8]={0}; read(tfd, tb, sizeof(tb)-1); close(tfd);
+                is_real = (tb[0]=='1' && (tb[1]=='\n' || tb[1]=='\0')); }
+        }
+        if (is_real) {
+            iface_t *ifc = &ni[nn++]; memset(ifc, 0, sizeof *ifc);
+            memcpy(ifc->name, name, sizeof ifc->name);
+            ifc->rx_bytes = rx; ifc->tx_bytes = tx;
+            for (int i = 0; i < g_nifaces; i++)
+                if (strcmp(g_ifaces[i].name, name) == 0) {
+                    ifc->rx_rate = rx > g_ifaces[i].rx_bytes ? rx - g_ifaces[i].rx_bytes : 0;
+                    ifc->tx_rate = tx > g_ifaces[i].tx_bytes ? tx - g_ifaces[i].tx_bytes : 0;
+                    break;
+                }
+            net_update_ip(ifc);
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    memcpy(g_ifaces, ni, nn * sizeof(iface_t));
+    g_nifaces = nn;
+}
 
-    int y = TITLE_H + 8;
+static void fmt_rate(uint64_t bps, char *b, int n) {
+    if (bps >= 1024*1024)   snprintf(b, n, "%.1f MB/s", bps / (1024.0*1024.0));
+    else if (bps >= 1024)   snprintf(b, n, "%.1f KB/s", bps / 1024.0);
+    else                    snprintf(b, n, "%llu B/s", (unsigned long long)bps);
+}
+static void fmt_bytes(uint64_t bt, char *b, int n) {
+    if (bt >= 1024ULL*1024*1024) snprintf(b, n, "%.2f GB", bt / (1024.0*1024.0*1024.0));
+    else if (bt >= 1024*1024)    snprintf(b, n, "%.2f MB", bt / (1024.0*1024.0));
+    else if (bt >= 1024)         snprintf(b, n, "%.2f KB", bt / 1024.0);
+    else                         snprintf(b, n, "%llu B", (unsigned long long)bt);
+}
 
-    /* ── System info section ── */
-    draw_str(fb, "System Information", PAD, y, C_KEY);
-    hline(fb, y + g_glyph_h + 2, C_BORDER);
-    y += g_glyph_h + 6;
+/* ── Wi-Fi (scan / connect logic, ported from fifi-wifi) ─────────────────── */
+#define MAX_NETS 32
+typedef struct { char ssid[64]; int signal; char security[16]; bool saved; } NetEntry;
+static NetEntry g_nets[MAX_NETS];
+static int  g_net_count = 0;
+static int  g_sel = 0, g_wscroll = 0, g_list_top = 0;
+typedef enum { ST_IDLE, ST_SCANNING, ST_CONNECTING, ST_CONNECTED } WState;
+static WState g_wstate = ST_IDLE;
+static char g_wstatus[96] = "Open the Wi-Fi tab to scan";
+static char g_conn_ssid[64] = "";
+static bool g_pw_mode = false;
+static char g_pw_buf[128] = ""; static int g_pw_len = 0;
+static char g_wif[32] = "";
+static bool g_wifi_scanned = false;
 
+static pid_t g_scan_pid = -1;
+static int   g_scan_pipe = -1;
+static char  g_scan_buf[65536];
+static int   g_scan_buf_len = 0;
+
+static void find_wifi_if(void) {
+    g_wif[0] = '\0';
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char wp[128];
+        snprintf(wp, sizeof wp, "/sys/class/net/%s/wireless", e->d_name);
+        if (access(wp, F_OK) == 0) { snprintf(g_wif, sizeof g_wif, "%s", e->d_name); break; }
+        snprintf(wp, sizeof wp, "/sys/class/net/%s/phy80211", e->d_name);
+        if (access(wp, F_OK) == 0) { snprintf(g_wif, sizeof g_wif, "%s", e->d_name); break; }
+    }
+    closedir(d);
+}
+
+static int find_net(const char *ssid) {
+    for (int i = 0; i < g_net_count; i++)
+        if (strcmp(g_nets[i].ssid, ssid) == 0) return i;
+    return -1;
+}
+
+static void parse_scan(const char *buf) {
+    g_net_count = 0;
+    const char *p = buf;
+    while (*p) {
+        const char *tag = strstr(p, "\tSSID: ");
+        if (!tag) break;
+        const char *bss = tag;
+        while (bss > buf && !(bss[0]=='B'&&bss[1]=='S'&&bss[2]=='S'&&bss[3]==' ')) bss--;
+        tag += 7;
+        const char *nl = strchr(tag, '\n');
+        int len = nl ? (int)(nl - tag) : (int)strlen(tag);
+        if (len == 0) { p = tag + 1; continue; }
+        if (len > 63) len = 63;
+        char ssid[64] = {0}; memcpy(ssid, tag, len); ssid[len] = '\0';
+
+        int sig = -100;
+        const char *sp = strstr(bss, "\tsignal: ");
+        if (sp && sp < tag + 200) sig = (int)strtof(sp + 9, NULL);
+        char sec[16] = "WPA2";
+        const char *ap = strstr(bss, "Authentication suites:");
+        if (ap && ap < tag + 300 && strstr(ap, "SAE")) snprintf(sec, sizeof sec, "WPA3");
+        const char *cp = strstr(bss, "\tcapability:");
+        if (cp && cp < tag + 100 && !strstr(bss, "RSN:") && !strstr(bss, "WPA:"))
+            snprintf(sec, sizeof sec, "Open");
+
+        int ex = find_net(ssid);
+        if (ex >= 0) { if (sig > g_nets[ex].signal) g_nets[ex].signal = sig; }
+        else if (g_net_count < MAX_NETS) {
+            NetEntry *ne = &g_nets[g_net_count++];
+            snprintf(ne->ssid, sizeof ne->ssid, "%s", ssid);
+            ne->signal = sig;
+            snprintf(ne->security, sizeof ne->security, "%s", sec);
+            char prof[160]; snprintf(prof, sizeof prof, "/var/lib/iwd/%s.psk", ne->ssid);
+            ne->saved = (access(prof, F_OK) == 0);
+        }
+        p = (nl ? nl + 1 : tag + len);
+    }
+}
+
+static void wifi_scan_start(void) {
+    if (g_scan_pid > 0) return;
+    find_wifi_if();
+    if (!g_wif[0]) { snprintf(g_wstatus, sizeof g_wstatus, "No Wi-Fi interface found"); return; }
+
+    pid_t kp = fork();
+    if (kp == 0) { for (int i=3;i<64;i++) close(i);
+        execl("/usr/bin/wpa_cli","wpa_cli","-i",g_wif,"terminate",NULL); _exit(0); }
+    if (kp > 0) { int st; waitpid(kp, &st, 0); }
+    usleep(200000);
+    pid_t up = fork();
+    if (up == 0) { for (int i=3;i<64;i++) close(i);
+        execl("/bin/ip","ip","link","set",g_wif,"up",NULL); _exit(1); }
+    if (up > 0) { int st; waitpid(up, &st, 0); }
+    usleep(200000);
+
+    int pfd[2];
+    if (pipe(pfd) < 0) return;
+    g_scan_pid = fork();
+    if (g_scan_pid == 0) {
+        close(pfd[0]); dup2(pfd[1], STDOUT_FILENO); dup2(pfd[1], STDERR_FILENO); close(pfd[1]);
+        execl("/usr/bin/iw","iw","dev",g_wif,"scan",NULL); _exit(1);
+    }
+    close(pfd[1]);
+    g_scan_pipe = pfd[0];
+    fcntl(g_scan_pipe, F_SETFL, O_NONBLOCK);
+    g_scan_buf_len = 0;
+    g_wstate = ST_SCANNING;
+    snprintf(g_wstatus, sizeof g_wstatus, "Scanning on %s...", g_wif);
+}
+
+static void wifi_scan_poll(void) {
+    if (g_scan_pipe < 0) return;
+    char tmp[4096]; ssize_t n;
+    while ((n = read(g_scan_pipe, tmp, sizeof tmp)) > 0) {
+        if (g_scan_buf_len + (int)n < (int)sizeof(g_scan_buf) - 1) {
+            memcpy(g_scan_buf + g_scan_buf_len, tmp, n);
+            g_scan_buf_len += (int)n; g_scan_buf[g_scan_buf_len] = '\0';
+        }
+    }
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        close(g_scan_pipe); g_scan_pipe = -1;
+        int st; waitpid(g_scan_pid, &st, WNOHANG); g_scan_pid = -1;
+        parse_scan(g_scan_buf);
+        if (g_net_count == 0)
+            snprintf(g_wstatus, sizeof g_wstatus, "No networks found -- press R to rescan");
+        else
+            snprintf(g_wstatus, sizeof g_wstatus, "%d network%s -- click to select, again to connect",
+                     g_net_count, g_net_count == 1 ? "" : "s");
+        g_wstate = ST_IDLE; g_sel = 0; g_wscroll = 0;
+    }
+}
+
+static void wifi_connect(const char *ssid, const char *password) {
+    pid_t kp = fork();
+    if (kp == 0) { for (int i=3;i<64;i++) close(i);
+        execl("/usr/bin/wpa_cli","wpa_cli","-i",g_wif,"terminate",NULL); _exit(0); }
+    if (kp > 0) { int st; waitpid(kp, &st, 0); }
+    usleep(300000);
+
+    FILE *wc = fopen("/fifi-data/wpa.conf", "w");
+    if (!wc) { snprintf(g_wstatus, sizeof g_wstatus, "Error: cannot write config"); return; }
+    fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n    ssid=");
+    for (int i = 0; ssid[i]; i++) fprintf(wc, "%02x", (unsigned char)ssid[i]);
+    fprintf(wc, "\n    psk=\"");
+    for (int i = 0; password[i]; i++) {
+        if (password[i] == '"' || password[i] == '\\') fputc('\\', wc);
+        fputc(password[i], wc);
+    }
+    fprintf(wc, "\"\n    key_mgmt=WPA-PSK SAE\n    ieee80211w=1\n}\n");
+    fclose(wc);
+
+    pid_t pid = fork();
+    if (pid == 0) { for (int i=3;i<64;i++) close(i);
+        execl("/usr/bin/wpa_supplicant","wpa_supplicant","-B","-i",g_wif,
+              "-D","nl80211,wext","-c","/fifi-data/wpa.conf",NULL); _exit(1); }
+    if (pid > 0) { int st; waitpid(pid, &st, 0); }
+
+    pid_t dp = fork();
+    if (dp == 0) { sleep(5); for (int i=3;i<64;i++) close(i);
+        execl("/bin/udhcpc","udhcpc","-i",g_wif,"-q","-n","-t","15",NULL); _exit(1); }
+    signal(SIGCHLD, SIG_IGN);
+
+    FILE *sc = fopen("/fifi-data/wifi.conf", "w");
+    if (sc) {
+        char ss[128]={0}, pw[128]={0}; int si=0, pi=0;
+        for (int i=0; ssid[i] && si<127; i++) if (ssid[i]!='\n'&&ssid[i]!='\r') ss[si++]=ssid[i];
+        for (int i=0; password[i] && pi<127; i++) if (password[i]!='\n'&&password[i]!='\r') pw[pi++]=password[i];
+        fprintf(sc, "SSID=%s\nPASSWORD=%s\n", ss, pw); fclose(sc);
+    }
+    g_wstate = ST_CONNECTING;
+    snprintf(g_wstatus, sizeof g_wstatus, "Connecting to %s... (~10-20s)", ssid);
+}
+
+static void wifi_check_conn(void) {
+    if (g_wstate != ST_CONNECTING && g_wstate != ST_CONNECTED) return;
+    char cmd[128]; snprintf(cmd, sizeof cmd, "/bin/ip -4 addr show %s 2>/dev/null", g_wif);
+    FILE *p = popen(cmd, "r");
+    if (!p) return;
+    char buf[512] = {0}; fread(buf, 1, sizeof(buf)-1, p); pclose(p);
+    if (strstr(buf, "inet ")) {
+        char *s = strstr(buf, "inet ") + 5;
+        char *e = strchr(s, '/'); if (!e) e = strchr(s, ' ');
+        char ip[32] = {0};
+        if (e) { int l = (int)(e - s); if (l>31) l=31; memcpy(ip, s, l); }
+        snprintf(g_conn_ssid, sizeof g_conn_ssid, "%s", g_sel < g_net_count ? g_nets[g_sel].ssid : "");
+        snprintf(g_wstatus, sizeof g_wstatus, "Connected to %s (%s)", g_conn_ssid, ip);
+        g_wstate = ST_CONNECTED;
+        FILE *sf = fopen("/fifi-data/wifi-ssid", "w"); if (sf) { fputs(g_conn_ssid, sf); fclose(sf); }
+    }
+}
+
+static const char *signal_bars(int dbm) {
+    if (dbm >= -50) return "||||";
+    if (dbm >= -65) return "|||.";
+    if (dbm >= -75) return "||..";
+    return "|...";
+}
+
+/* ── Security status (read-only; reuses security-app checks) ─────────────── */
+static bool g_sec_fw_on, g_sec_doh_on, g_sec_vpn_on, g_sec_tor_on;
+static char g_sec_fw[96], g_sec_doh[96], g_sec_vpn[96], g_sec_tor[96];
+static int  g_sec_priv;
+
+static bool pid_alive(const char *pidfile) {
+    int fd = open(pidfile, O_RDONLY);
+    if (fd < 0) return false;
+    char b[16] = {0}; read(fd, b, sizeof(b)-1); close(fd);
+    pid_t pid = (pid_t)atoi(b);
+    return pid > 0 && kill(pid, 0) == 0;
+}
+
+static void sec_update(void) {
+    /* Firewall */
+    g_sec_fw_on = false; snprintf(g_sec_fw, sizeof g_sec_fw, "Not configured");
+    { int fd = open("/fifi-data/firewall.log", O_RDONLY);
+      if (fd >= 0) { char b[512]={0}; read(fd,b,sizeof(b)-1); close(fd);
+          if (strstr(b,"firewall: active")) { g_sec_fw_on=true; snprintf(g_sec_fw,sizeof g_sec_fw,"Active (default-deny inbound)"); }
+          else if (strstr(b,"firewall: failed")) snprintf(g_sec_fw,sizeof g_sec_fw,"Failed (needs kernel nftables)"); } }
+    /* DoH */
+    if (access("/fifi-data/doh-enabled", F_OK) != 0) { g_sec_doh_on=false; snprintf(g_sec_doh,sizeof g_sec_doh,"Disabled"); }
+    else if (pid_alive("/fifi-data/doh.pid")) { g_sec_doh_on=true; snprintf(g_sec_doh,sizeof g_sec_doh,"Active (DNS-over-HTTPS)"); }
+    else { g_sec_doh_on=false; snprintf(g_sec_doh,sizeof g_sec_doh,"Enabled but not running"); }
+    /* VPN */
+    { int fd = open("/sys/class/net/wg0/operstate", O_RDONLY);
+      if (fd >= 0) { close(fd); g_sec_vpn_on=true; snprintf(g_sec_vpn,sizeof g_sec_vpn,"Connected (wg0)"); }
+      else { g_sec_vpn_on=false;
+          snprintf(g_sec_vpn,sizeof g_sec_vpn, access("/fifi-data/wg0.conf",F_OK)==0
+                   ? "Disconnected (config ready)" : "No config"); } }
+    /* Tor */
+    if (access("/fifi-data/tor-enabled", F_OK) != 0) { g_sec_tor_on=false; snprintf(g_sec_tor,sizeof g_sec_tor,"Disabled"); }
+    else if (pid_alive("/fifi-data/tor.pid")) { g_sec_tor_on=true; snprintf(g_sec_tor,sizeof g_sec_tor,"Running (SOCKS5 127.0.0.1:9050)"); }
+    else { g_sec_tor_on=false; snprintf(g_sec_tor,sizeof g_sec_tor,"Enabled but not running"); }
+    /* Privacy: count telemetry blocks in /etc/hosts */
+    g_sec_priv = 0;
+    { int fd = open("/etc/hosts", O_RDONLY);
+      if (fd >= 0) { static char b[65536]; ssize_t n = read(fd,b,sizeof(b)-1); close(fd);
+          if (n > 0) { b[n]='\0'; char *l=b;
+              while (*l) { char *nl=strchr(l,'\n'); if(nl)*nl='\0';
+                  if ((strncmp(l,"0.0.0.0 ",8)==0 || strncmp(l,"127.0.0.1 ",10)==0) &&
+                      !strstr(l,"localhost") && !strstr(l,"fifios")) g_sec_priv++;
+                  if (!nl) break;
+                  l = nl + 1; } } } }
+}
+
+/* ── Content-pane renderers ──────────────────────────────────────────────── */
+#define CX   (SIDEBAR_W + CPAD)   /* content text left edge */
+#define CTOP (TITLE_H + 16)       /* content top */
+
+static void render_personalize(uint32_t *fb) {
+    hot_reset();
+    int x = CX, y = CTOP;
+    unsigned cur_accent = cfg_get_uint("accent", 0x003060c0u);
+    int cur_wall  = cfg_get_int("wallpaper", 0);
+    int cur_panel = cfg_get_int("panel_edge", 0);
+    int glass     = cfg_get_int("fx_glass", 1);
+    int shadow    = cfg_get_int("fx_shadows", 1);
+    int dockf     = cfg_get_int("dock_float", 1);
+    int topbar    = cfg_get_int("statusbar", 1);
+    int radius    = cfg_get_int("corner_radius", 8);
+
+    /* Accent swatches */
+    y = section_hdr(fb, "Accent Color", x, y);
+    { int sw = 30, gap = 8, per = 8;
+      for (int i = 0; i < N_ACCENT; i++) {
+          int col = i % per, row = i / per;
+          int sx = x + col*(sw+gap), sy = y + row*(sw+gap);
+          fill(fb, sx, sy, sw, sw, g_accent_presets[i]);
+          bool sel = (g_accent_presets[i] == cur_accent);
+          rect_border(fb, sx, sy, sw, sw, sel ? C_WHITE : C_BORDER);
+          if (sel) rect_border(fb, sx-1, sy-1, sw+2, sw+2, C_WHITE);
+          add_hot(sx, sy, sw, sw, ACT_ACCENT, i);
+      }
+      y += 2*(sw+gap) + 10;
+    }
+
+    /* Wallpaper */
+    y = section_hdr(fb, "Wallpaper", x, y);
+    { int bw = 84, bh = 30, gap = 6;
+      for (int i = 0; i < 6; i++) {
+          int bx = x + i*(bw+gap);
+          draw_btn(fb, bx, y, bw, bh, g_wall_names[i], i == cur_wall);
+          add_hot(bx, y, bw, bh, ACT_WALL, i);
+      }
+      y += bh + 14;
+    }
+
+    /* Panel position */
+    y = section_hdr(fb, "Panel Position", x, y);
+    { int bw = 100, bh = 30, gap = 8;
+      for (int i = 0; i < 4; i++) {
+          int bx = x + i*(bw+gap);
+          draw_btn(fb, bx, y, bw, bh, g_panel_names[i], i == cur_panel);
+          add_hot(bx, y, bw, bh, ACT_PANEL, i);
+      }
+      y += bh + 14;
+    }
+
+    /* Effects */
+    y = section_hdr(fb, "Effects", x, y);
+    { int bw = 150, bh = 30, gap = 12;
+      char gl[32], sh[32];
+      snprintf(gl, sizeof gl, "Glass: %s",   glass  ? "On" : "Off");
+      snprintf(sh, sizeof sh, "Shadows: %s", shadow ? "On" : "Off");
+      draw_btn(fb, x, y, bw, bh, gl, glass);           add_hot(x, y, bw, bh, ACT_GLASS, 0);
+      draw_btn(fb, x+bw+gap, y, bw, bh, sh, shadow);   add_hot(x+bw+gap, y, bw, bh, ACT_SHADOW, 0);
+      y += bh + 12;
+
+      /* Floating dock: detached rounded dock over the wallpaper vs an
+       * edge-to-edge taskbar — the main next-gen layout switch. */
+      char df[32], tb[32];
+      snprintf(df, sizeof df, "Floating dock: %s", dockf  ? "On" : "Off");
+      snprintf(tb, sizeof tb, "Top bar: %s",       topbar ? "On" : "Off");
+      draw_btn(fb, x, y, bw + 60, bh, df, dockf);              add_hot(x, y, bw + 60, bh, ACT_DOCK, 0);
+      draw_btn(fb, x+bw+60+gap, y, bw, bh, tb, topbar);        add_hot(x+bw+60+gap, y, bw, bh, ACT_STATUS, 0);
+      y += bh + 12;
+
+      /* Corner radius stepper */
+      draw_str(fb, "Corner radius:", x, y + 6, C_KEY);
+      int rx = x + 15*CW;
+      draw_btn(fb, rx, y, 30, bh, "-", false);          add_hot(rx, y, 30, bh, ACT_RADIUS, -1);
+      char rv[16]; snprintf(rv, sizeof rv, "%d px", radius);
+      draw_str(fb, rv, rx + 42, y + 6, C_VAL);
+      draw_btn(fb, rx + 100, y, 30, bh, "+", false);    add_hot(rx + 100, y, 30, bh, ACT_RADIUS, +1);
+      y += bh + 16;
+    }
+
+    /* Note */
+    fill(fb, x, y, g_win_w - x - CPAD, ROW_H, C_ROW_A);
+    draw_str_clip(fb, g_pers_note, x + 8, y + (ROW_H - g_glyph_h)/2, C_YELLOW, g_win_w - x - CPAD - 16);
+}
+
+static void render_system(uint32_t *fb) {
+    int x = CX, y = CTOP;
     gather_info();
+    y = section_hdr(fb, "System Information", x, y);
     for (int i = 0; i < N_INFO; i++) {
         uint32_t bg = (i & 1) ? C_ROW_B : C_ROW_A;
-        fill(fb, 0, y, g_win_w, ROW_H, bg);
-        int ty2 = y + (ROW_H - g_glyph_h)/2;
-        int kw = 10 * 9;  /* 10 chars for longest key ("CPU Freq") + margin */
-        draw_str(fb, g_info[i].key, PAD, ty2, C_KEY);
-        int val_max = g_win_w - (PAD + kw) - PAD;
-        draw_str_clip(fb, g_info[i].val, PAD + kw, ty2, C_VAL, val_max);
+        fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, bg);
+        int ty = y + (ROW_H - g_glyph_h)/2;
+        draw_str(fb, g_info[i].key, x, ty, C_KEY);
+        draw_str_clip(fb, g_info[i].val, x + 11*CW, ty, C_VAL, g_win_w - (x + 11*CW) - CPAD);
         y += ROW_H;
     }
+    y += 16;
 
-    y += 10;
-
-    /* ── Volume section ── */
-    draw_str(fb, "Audio", PAD, y, C_KEY);
-    hline(fb, y + g_glyph_h + 2, C_BORDER);
-    y += g_glyph_h + 6;
-
-    g_sl_x = PAD + 72;
-    g_sl_y = y + (ROW_H - g_sl_h) / 2;
-    draw_str(fb, "Volume:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
-    fill(fb, g_sl_x, g_sl_y, g_sl_w, g_sl_h, C_ACCENT);
+    y = section_hdr(fb, "Audio", x, y);
+    g_sl_x = x + 9*CW;
+    g_sl_y = y + (ROW_H - g_sl_h)/2;
+    draw_str(fb, "Volume:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    fill(fb, g_sl_x, g_sl_y, g_sl_w, g_sl_h, C_BORDER);
     int filled = g_sl_w * g_vol / 100;
-    fill(fb, g_sl_x, g_sl_y, filled, g_sl_h, C_FILL);
-    fill(fb, g_sl_x + filled - 4, g_sl_y - 3, 8, g_sl_h + 6, C_VAL);
-    char pct[8]; snprintf(pct, sizeof(pct), "%d%%", g_vol);
-    draw_str(fb, pct, g_sl_x + g_sl_w + 8, y + (ROW_H - g_glyph_h)/2, C_VAL);
-    y += ROW_H + 8;
+    fill(fb, g_sl_x, g_sl_y, filled, g_sl_h, g_accent);
+    fill(fb, g_sl_x + filled - 4, g_sl_y - 3, 8, g_sl_h + 6, C_WHITE);
+    char pct[8]; snprintf(pct, sizeof pct, "%d%%", g_vol);
+    draw_str(fb, pct, g_sl_x + g_sl_w + 10, y + (ROW_H - g_glyph_h)/2, C_VAL);
+    y += ROW_H + 14;
 
-    /* ── Devices section ── */
-    draw_str(fb, "Devices", PAD, y, C_KEY);
-    hline(fb, y + g_glyph_h + 2, C_BORDER);
-    y += g_glyph_h + 6;
+    y = section_hdr(fb, "Devices", x, y);
+    fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_A);
+    draw_str(fb, "Gamepad:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    { int gp = open("/dev/input/js0", O_RDONLY | O_NONBLOCK);
+      if (gp >= 0) { close(gp); draw_str(fb, "Connected", x + 11*CW, y + (ROW_H - g_glyph_h)/2, C_GREEN); }
+      else          draw_str(fb, "None", x + 11*CW, y + (ROW_H - g_glyph_h)/2, C_GREY); }
+}
 
-    /* Gamepad status */
-    fill(fb, 0, y, g_win_w, ROW_H, C_ROW_A);
-    draw_str(fb, "Gamepad:", PAD, y + (ROW_H - g_glyph_h)/2, C_KEY);
-    {
-        int gpfd = open("/dev/input/js0", O_RDONLY | O_NONBLOCK);
-        if (gpfd >= 0) { close(gpfd); draw_str(fb, "Connected", PAD + 11*9, y + (ROW_H - g_glyph_h)/2, 0x0060d060u); }
-        else            draw_str(fb, "None", PAD + 11*9, y + (ROW_H - g_glyph_h)/2, C_GREY);
+static void render_network(uint32_t *fb) {
+    int x = CX, y = CTOP;
+    y = section_hdr(fb, "Network Interfaces", x, y);
+    if (g_nifaces == 0) {
+        draw_str(fb, "No interfaces detected", x, y, C_GREY);
+        return;
     }
-    y += ROW_H + 10;
+    for (int i = 0; i < g_nifaces && i < 4; i++) {
+        iface_t *ifc = &g_ifaces[i];
+        char rxr[16], txr[16], rxt[16], txt[16];
+        fmt_rate(ifc->rx_rate, rxr, sizeof rxr); fmt_rate(ifc->tx_rate, txr, sizeof txr);
+        fmt_bytes(ifc->rx_bytes, rxt, sizeof rxt); fmt_bytes(ifc->tx_bytes, txt, sizeof txt);
 
-    /* ── Status hint ── */
-    fill(fb, PAD, y, g_win_w - 2*PAD, ROW_H - 4, C_ROW_B);
-    draw_str_clip(fb, "Press Q to close   Volume: drag slider above",
-             PAD + 6, y + (ROW_H - 4 - g_glyph_h)/2, C_GREY,
-             g_win_w - 2*PAD - 12);
+        char nm[32]; snprintf(nm, sizeof nm, "%-10.15s", ifc->name);
+        draw_str(fb, nm, x, y, C_WHITE);
+        draw_str(fb, ifc->up ? "UP" : "DOWN", x + 11*CW, y, ifc->up ? C_GREEN : C_RED);
+        draw_str(fb, ifc->ip4[0] ? ifc->ip4 : "---", x + 16*CW, y, C_VAL);
+        y += g_glyph_h + 3;
+        char rl[80]; snprintf(rl, sizeof rl, "  RX %-12s  TX %-12s", rxr, txr);
+        draw_str(fb, rl, x, y, C_KEY); y += g_glyph_h + 3;
+        char tl[80]; snprintf(tl, sizeof tl, "  Total RX %-10s  TX %-10s", rxt, txt);
+        draw_str(fb, tl, x, y, C_GREY); y += g_glyph_h + 8;
+        if (i < g_nifaces - 1 && i < 3) { fill(fb, x, y, g_win_w - x - CPAD, 1, C_BORDER); y += 8; }
+    }
+}
+
+static void render_wifi(uint32_t *fb) {
+    int x = CX, y = CTOP;
+    int ww = g_win_w;
+    /* Status bar */
+    fill(fb, SIDEBAR_W, y - 4, ww - SIDEBAR_W, ROW_H, C_ROW_A);
+    draw_str_clip(fb, g_wstatus, x, y + (ROW_H - g_glyph_h)/2 - 4, C_VAL, ww - x - CPAD);
+    y += ROW_H + 4;
+    fill(fb, x, y, ww - x - CPAD, 1, C_BORDER); y += 6;
+
+    /* Column headers */
+    draw_str(fb, "Sig  Network", x, y, C_KEY);
+    draw_str(fb, "Security", ww - CPAD - 8*CW, y, C_KEY);
+    y += g_glyph_h + 4;
+    fill(fb, x, y, ww - x - CPAD, 1, C_BORDER); y += 4;
+
+    g_list_top = y;
+    int foot_reserve = g_pw_mode ? (ROW_H*3 + 16) : (g_glyph_h + 14);
+    int rows_visible = (g_win_h - y - foot_reserve) / ROW_H;
+    if (rows_visible < 1) rows_visible = 1;
+    if (g_sel < g_wscroll) g_wscroll = g_sel;
+    if (g_sel >= g_wscroll + rows_visible) g_wscroll = g_sel - rows_visible + 1;
+    if (g_wscroll < 0) g_wscroll = 0;
+
+    if (g_net_count == 0 && g_wstate == ST_IDLE) {
+        draw_str(fb, "No networks -- press R to scan", x, y, C_GREY);
+    } else {
+        for (int i = g_wscroll; i < g_net_count && i < g_wscroll + rows_visible; i++) {
+            bool sel = (i == g_sel);
+            fill(fb, SIDEBAR_W, y, ww - SIDEBAR_W, ROW_H, sel ? C_ROW_SEL : ((i&1)?C_ROW_A:C_ROW_B));
+            int ty = y + (ROW_H - g_glyph_h)/2;
+            draw_str(fb, signal_bars(g_nets[i].signal), x, ty,
+                     g_nets[i].signal >= -65 ? C_GREEN : C_YELLOW);
+            if (g_nets[i].saved) draw_char(fb, '*', x + 5*CW, ty, C_GREEN);
+            int sx = x + 6*CW;
+            draw_str_clip(fb, g_nets[i].ssid, sx, ty, sel ? C_WHITE : C_VAL,
+                          ww - CPAD - sx - 9*CW);
+            draw_str(fb, g_nets[i].security, ww - CPAD - (int)strlen(g_nets[i].security)*CW, ty, C_GREY);
+            y += ROW_H;
+        }
+    }
+
+    /* Password overlay */
+    if (g_pw_mode && g_sel < g_net_count) {
+        int py = g_win_h - ROW_H*3 - 12;
+        fill(fb, SIDEBAR_W, py - 4, ww - SIDEBAR_W, ROW_H*3 + 16, 0x000e1828u);
+        fill(fb, SIDEBAR_W, py - 4, ww - SIDEBAR_W, 1, C_BORDER);
+        char prompt[96]; snprintf(prompt, sizeof prompt, "Connect to: %s", g_nets[g_sel].ssid);
+        draw_str_clip(fb, prompt, x, py + (ROW_H - g_glyph_h)/2, C_KEY, ww - x - CPAD);
+        py += ROW_H + 2;
+        char stars[130]; int sl = g_pw_len < 128 ? g_pw_len : 128;
+        for (int i = 0; i < sl; i++) stars[i] = '*';
+        stars[sl] = '|'; stars[sl+1] = '\0';
+        char pl[160]; snprintf(pl, sizeof pl, "Password: %s", stars);
+        draw_str_clip(fb, pl, x, py + (ROW_H - g_glyph_h)/2, C_YELLOW, ww - x - CPAD);
+        py += ROW_H + 2;
+        draw_str_clip(fb, "Enter=connect  Esc=cancel", x, py + (ROW_H - g_glyph_h)/2, C_GREY, ww - x - CPAD);
+    } else {
+        int fy = g_win_h - g_glyph_h - 6;
+        draw_str_clip(fb, "R=scan  click=select  click-again/Enter=connect  D=disconnect",
+                      x, fy, C_GREY, ww - x - CPAD);
+    }
+}
+
+static void render_security(uint32_t *fb) {
+    hot_reset();
+    int x = CX, y = CTOP;
+    y = section_hdr(fb, "Security", x, y);
+    int btn_w = 90, btn_h = ROW_H - 8;
+    int btn_x = g_win_w - CPAD - btn_w;
+/* One toggleable protection row: status dot + name + detail + Enable/Disable button. */
+#define SEC_ROW(name, on, txt, act) do { \
+        fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_A); \
+        int ty = y + (ROW_H - g_glyph_h)/2; \
+        draw_str(fb, (on) ? "[ON] " : "[OFF]", x, ty, (on) ? C_GREEN : C_RED); \
+        draw_str(fb, (name), x + 6*CW, ty, C_KEY); \
+        draw_str_clip(fb, (txt), x + 16*CW, ty, C_VAL, btn_x - (x+16*CW) - 8); \
+        draw_btn(fb, btn_x, y + 4, btn_w, btn_h, (on) ? "Disable" : "Enable", false); \
+        add_hot(btn_x, y + 4, btn_w, btn_h, (act), (on) ? 0 : 1); \
+        y += ROW_H + 4; \
+    } while (0)
+
+    SEC_ROW("Firewall", g_sec_fw_on, g_sec_fw, ACT_FW);
+    SEC_ROW("DoH", g_sec_doh_on, g_sec_doh, ACT_DOH);
+    SEC_ROW("VPN", g_sec_vpn_on, g_sec_vpn, ACT_VPN);
+    SEC_ROW("Tor", g_sec_tor_on, g_sec_tor, ACT_TOR);
+#undef SEC_ROW
+    /* Privacy row is status-only (managed via the hosts blocklist). */
+    { char pv[64];
+      fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_A);
+      int ty = y + (ROW_H - g_glyph_h)/2;
+      bool on = g_sec_priv > 0;
+      draw_str(fb, on ? "[ON] " : "[OFF]", x, ty, on ? C_GREEN : C_RED);
+      draw_str(fb, "Privacy", x + 6*CW, ty, C_KEY);
+      snprintf(pv, sizeof pv, on ? "%d telemetry domains blocked" : "No telemetry blocking", g_sec_priv);
+      draw_str_clip(fb, pv, x + 16*CW, ty, C_VAL, g_win_w - (x+16*CW) - CPAD);
+      y += ROW_H + 4;
+    }
+    y += 10;
+    draw_str_clip(fb, "Toggle each protection above. Changes apply immediately.",
+                  x, y, C_GREY, g_win_w - x - CPAD);
+}
+
+static void render_about(uint32_t *fb) {
+    int x = CX, y = CTOP;
+    y = section_hdr(fb, "About FiFi OS", x, y);
+
+    char ver[96] = "FiFi OS (linux-desktop)";
+    int vfd = open("/etc/fifi-version", O_RDONLY);
+    if (vfd >= 0) { ssize_t n = read(vfd, ver, sizeof(ver)-1); close(vfd);
+        if (n > 0) { ver[n]='\0'; char *nl=strchr(ver,'\n'); if(nl)*nl='\0'; } }
+
+    struct utsname u; bool have_uts = (uname(&u) == 0);
+    struct { const char *k, *v; } rows[] = {
+        { "Version",  ver },
+        { "Kernel",   have_uts ? u.release : "?" },
+        { "Machine",  have_uts ? u.machine : "?" },
+        { "Hostname", have_uts ? u.nodename : "?" },
+    };
+    for (int i = 0; i < (int)(sizeof(rows)/sizeof(rows[0])); i++) {
+        fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, (i&1)?C_ROW_B:C_ROW_A);
+        int ty = y + (ROW_H - g_glyph_h)/2;
+        draw_str(fb, rows[i].k, x, ty, C_KEY);
+        draw_str_clip(fb, rows[i].v, x + 11*CW, ty, C_VAL, g_win_w - (x+11*CW) - CPAD);
+        y += ROW_H;
+    }
+    y += 16;
+    draw_str_clip(fb, "A hand-built Linux distro with a native C Wayland compositor.",
+                  x, y, C_GREY, g_win_w - x - CPAD); y += g_glyph_h + 4;
+    draw_str_clip(fb, "Update: flash a new USB from github.com/Hensonam23/FiFi_OS",
+                  x, y, C_GREY, g_win_w - x - CPAD);
+}
+
+/* ── Sidebar + top-level render ──────────────────────────────────────────── */
+static void render(uint32_t *fb) {
+    fill(fb, 0, 0, g_win_w, g_win_h, C_BG);
+    /* Sidebar */
+    fill(fb, 0, 0, SIDEBAR_W, g_win_h, C_SIDE);
+    fill(fb, SIDEBAR_W - 1, 0, 1, g_win_h, C_BORDER);
+    draw_str(fb, "Settings", 18, TITLE_H + 14, C_HDR);
+    for (int i = 0; i < N_TABS; i++) {
+        int ty = SIDE_TOP + i*SIDE_ROW;
+        bool active = (i == g_tab);
+        if (active) {
+            fill(fb, 0, ty, SIDEBAR_W - 1, SIDE_ROW, C_SIDE_HOV);
+            fill(fb, 0, ty, 4, SIDE_ROW, g_accent);   /* accent marker */
+        }
+        draw_str(fb, g_tab_labels[i], 20, ty + (SIDE_ROW - g_glyph_h)/2,
+                 active ? C_WHITE : C_VAL);
+    }
+
+    /* Content */
+    switch (g_tab) {
+        case TAB_PERS:  render_personalize(fb); break;
+        case TAB_WIFI:  render_wifi(fb);        break;
+        case TAB_NET:   render_network(fb);     break;
+        case TAB_SYS:   render_system(fb);      break;
+        case TAB_SEC:   render_security(fb);    break;
+        case TAB_ABOUT: render_about(fb);       break;
+    }
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
-
-/* Write all bytes, retrying on EAGAIN (non-blocking socket partial writes). */
 static bool write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
+    const uint8_t *p = buf;
     while (len > 0) {
         ssize_t n = write(fd, p, len);
         if (n > 0) { p += n; len -= (size_t)n; }
         else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct timespec ts = {0, 1000000}; /* 1ms */
-            nanosleep(&ts, NULL);
-        } else if (n < 0 && errno == EINTR) {
-            /* retry */
-        } else {
-            return false;
-        }
+            struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL);
+        } else if (n < 0 && errno == EINTR) { /* retry */ }
+        else return false;
     }
     return true;
 }
-
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
+    uint8_t hdr[8]; memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
     write_all(fd, hdr, 8);
     if (len && data) write_all(fd, data, len);
 }
-
 static void send_frame(int fd, uint32_t *px) {
-    uint32_t fw2 = (uint32_t)g_win_w, fh2 = (uint32_t)g_win_h;
-    uint32_t frm[4] = {0, 0, fw2, fh2};
-    uint32_t total  = 16 + fw2 * fh2 * 4;
-    uint8_t *msg    = malloc(total);
+    uint32_t w = (uint32_t)g_win_w, h = (uint32_t)g_win_h;
+    uint32_t frm[4] = {0, 0, w, h};
+    /* Compute in size_t: 16 + w*h*4 overflows uint32 for large windows */
+    size_t pxsz  = (size_t)w * (size_t)h * 4;
+    size_t total = 16 + pxsz;
+    if (total > 0xFFFFFFFFu) return;   /* len field is 32-bit */
+    uint8_t *msg = malloc(total);
     if (!msg) return;
     memcpy(msg, frm, 16);
-    memcpy(msg+16, px, fw2 * fh2 * 4);
-    ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
+    memcpy(msg+16, px, pxsz);
+    ipc_send_msg(fd, IPC_APP_FRAME, msg, (uint32_t)total);
     free(msg);
 }
 
+/* ── Message parser state ────────────────────────────────────────────────── */
+typedef struct { uint8_t hdr[8]; int hgot; uint32_t type, plen, pgot; uint8_t *pld; } MsgState;
+static bool msg_feed(MsgState *m, const uint8_t *buf, int n, int *pos) {
+    while (*pos < n) {
+        if (m->hgot < 8) {
+            m->hdr[m->hgot++] = buf[(*pos)++];
+            if (m->hgot == 8) {
+                memcpy(&m->type, m->hdr, 4); memcpy(&m->plen, m->hdr+4, 4);
+                if (m->plen > 4*1024*1024u) { m->hgot = 0; return false; }
+                m->pgot = 0; free(m->pld); m->pld = NULL;
+                /* On malloc failure pld stays NULL: payload is skipped in sync */
+                if (m->plen > 0) m->pld = malloc(m->plen);
+                else return true;
+            }
+        } else {
+            uint32_t need = m->plen - m->pgot, have = (uint32_t)(n - *pos);
+            uint32_t take = need < have ? need : have;
+            if (m->pld) memcpy(m->pld + m->pgot, buf + *pos, take);
+            m->pgot += take; *pos += (int)take;
+            if (m->pgot >= m->plen) return true;
+        }
+    }
+    return false;
+}
+static void msg_reset(MsgState *m) { free(m->pld); m->pld = NULL; m->hgot = 0; m->plen = 0; m->pgot = 0; }
+
+/* ── Tab switching ───────────────────────────────────────────────────────── */
+static void switch_tab(int t) {
+    if (t < 0 || t >= N_TABS) return;
+    g_tab = t;
+    g_pw_mode = false; g_pw_len = 0;
+    if (t == TAB_WIFI && !g_wifi_scanned) { g_wifi_scanned = true; wifi_scan_start(); }
+    if (t == TAB_NET)  net_update();
+    if (t == TAB_SEC)  sec_update();
+}
+
+/* ── Personalize click handling ──────────────────────────────────────────── */
+static void pers_click(int mx, int my) {
+    for (int i = 0; i < g_nhots; i++) {
+        Hot *h = &g_hots[i];
+        if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
+        switch (h->act) {
+            case ACT_ACCENT: cfg_set_uint("accent", g_accent_presets[h->arg]);
+                             g_accent = g_accent_presets[h->arg]; break;
+            case ACT_WALL:   cfg_set_int("wallpaper", h->arg); break;
+            case ACT_PANEL:  cfg_set_int("panel_edge", h->arg); break;
+            case ACT_GLASS:  cfg_set_int("fx_glass", cfg_get_int("fx_glass", 1) ? 0 : 1); break;
+            case ACT_SHADOW: cfg_set_int("fx_shadows", cfg_get_int("fx_shadows", 1) ? 0 : 1); break;
+            case ACT_DOCK:   cfg_set_int("dock_float", cfg_get_int("dock_float", 1) ? 0 : 1); break;
+            case ACT_STATUS: cfg_set_int("statusbar", cfg_get_int("statusbar", 1) ? 0 : 1); break;
+            case ACT_RADIUS: { int r = cfg_get_int("corner_radius", 8) + h->arg;
+                               if (r < 0) r = 0;
+                               if (r > 12) r = 12;
+                               cfg_set_int("corner_radius", r); } break;
+        }
+        cfg_save();
+        return;
+    }
+}
+
+/* ── Security click handling ─────────────────────────────────────────────── */
+static void secctl(const char *what, int on) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 3; i < 64; i++) close(i);
+        execl("/bin/fifi-secctl", "fifi-secctl", what, on ? "on" : "off", (char *)NULL);
+        _exit(1);
+    }
+}
+static void sec_click(int mx, int my) {
+    for (int i = 0; i < g_nhots; i++) {
+        Hot *h = &g_hots[i];
+        if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
+        switch (h->act) {
+            case ACT_FW:  secctl("firewall", h->arg); break;
+            case ACT_DOH: secctl("doh",      h->arg); break;
+            case ACT_VPN: secctl("vpn",      h->arg); break;
+            case ACT_TOR: secctl("tor",      h->arg); break;
+            default: continue;
+        }
+        return;
+    }
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        if      (!strcmp(argv[1], "wifi"))        g_tab = TAB_WIFI;
+        else if (!strcmp(argv[1], "network"))     g_tab = TAB_NET;
+        else if (!strcmp(argv[1], "system"))      g_tab = TAB_SYS;
+        else if (!strcmp(argv[1], "security"))    g_tab = TAB_SEC;
+        else if (!strcmp(argv[1], "about"))       g_tab = TAB_ABOUT;
+        else if (!strcmp(argv[1], "personalize") ||
+                 !strcmp(argv[1], "personalization")) g_tab = TAB_PERS;
+    }
+
     font_load("/fifi-data/fonts/ter16b.psf");
     if (!g_glyph) { g_glyph = calloc(256*16, 1); g_glyph_h = 16; }
     alsa_init();
+    cfg_load();
+    g_accent = cfg_get_uint("accent", 0x003060c0u);
+    net_update();
+    sec_update();
 
     uint32_t *fb = malloc((size_t)g_win_w * g_win_h * 4);
     if (!fb) return 1;
@@ -360,123 +1219,171 @@ int main(void) {
     struct sockaddr_un addr = {0};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("connect"); return 1;
-    }
+    if (connect(sock, (struct sockaddr*)&addr, sizeof addr) < 0) { perror("connect"); return 1; }
 
     uint8_t conn[68] = {0};
     uint16_t cw = WIN_W, ch = WIN_H;
     memcpy(conn, &cw, 2); memcpy(conn+2, &ch, 2);
-    snprintf((char*)(conn+4), 64, "System Info");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
+    snprintf((char*)(conn+4), 64, "Settings");
+    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof conn);
 
-    uint8_t hdr8[8] = {0};
-    read(sock, hdr8, 8);
-    uint32_t type, plen;
-    memcpy(&type, hdr8, 4); memcpy(&plen, hdr8+4, 4);
-    if (type == IPC_WIN_CREATED && plen >= 20) {
-        uint8_t r[20]; read(sock, r, 20);
-    }
+    { uint8_t hdr[8]; if (read(sock, hdr, 8) == 8) {
+        uint32_t pl; memcpy(&pl, hdr+4, 4);
+        if (pl > 0 && pl < 64) { uint8_t r[64]; read(sock, r, pl); } } }
 
-    render(fb);
-    send_frame(sock, fb);
-
+    signal(SIGPIPE, SIG_IGN);
+    if (g_tab == TAB_WIFI && !g_wifi_scanned) { g_wifi_scanned = true; wifi_scan_start(); }
+    render(fb); send_frame(sock, fb);
     fcntl(sock, F_SETFL, O_NONBLOCK);
 
-    uint8_t ibuf[8]; int igot = 0;
-    uint8_t *ipld = NULL; uint32_t iplen = 0, ipgot = 0;
-    bool running = true;
-    bool prev_lb = false;
+    MsgState ms = {0};
+    bool running = true, prev_lb = false;
     time_t last_refresh = 0;
+    struct timespec last_conn = {0,0}; clock_gettime(CLOCK_MONOTONIC, &last_conn);
 
     while (running) {
-        uint8_t tbuf[256];
-        ssize_t n = read(sock, tbuf, sizeof(tbuf));
-        if (n == 0) break;
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        struct pollfd pfds[2];
+        pfds[0].fd = sock;                                    pfds[0].events = POLLIN;
+        pfds[1].fd = g_scan_pipe >= 0 ? g_scan_pipe : -1;     pfds[1].events = POLLIN;
+        poll(pfds, 2, 150);
 
-        if (n > 0) {
-            ssize_t pos = 0;
-            while (pos < n) {
-                if (igot < 8) {
-                    ibuf[igot++] = tbuf[pos++];
-                    if (igot == 8) {
-                        memcpy(&type,  ibuf,   4);
-                        memcpy(&iplen, ibuf+4, 4);
-                        if (iplen > 65536) { igot = 0; break; }
-                        if (iplen) { ipld = malloc(iplen); ipgot = 0; }
-                    }
-                } else if (iplen > 0 && ipgot < iplen) {
-                    uint32_t need = iplen - ipgot, have = (uint32_t)(n - pos);
-                    uint32_t take = need < have ? need : have;
-                    if (ipld) memcpy(ipld + ipgot, tbuf + pos, take);
-                    ipgot += take; pos += take;
-                    if (ipgot >= iplen) {
-                        if (type == IPC_INPUT_KEY && iplen >= 1) {
-                            uint8_t k = ipld ? ipld[0] : 0;
-                            if (k == 'q' || k == 'Q' || k == 0x1B) running = false;
-                        } else if (type == IPC_INPUT_MOUSE && iplen >= 9) {
-                            int32_t mx, my; uint8_t btns;
-                            memcpy(&mx, ipld, 4); memcpy(&my, ipld+4, 4);
-                            btns = ipld[8];
-                            bool lb = (btns & 1);
+        bool dirty = false;
 
-                            /* Volume slider drag */
-                            if (lb && my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
-                                mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
-                                int newvol = (mx - g_sl_x) * 100 / g_sl_w;
-                                if (newvol < 0) newvol = 0;
-                                if (newvol > 100) newvol = 100;
-                                alsa_set_vol(newvol);
-                                render(fb);
-                                send_frame(sock, fb);
+        /* Wi-Fi scan pipe */
+        if (g_scan_pipe >= 0 && (pfds[1].revents & (POLLIN|POLLHUP|POLLERR))) {
+            bool was = (g_wstate == ST_SCANNING);
+            wifi_scan_poll();
+            if (was && g_wstate != ST_SCANNING) dirty = true;
+        }
+
+        /* Wi-Fi connection progress */
+        if (g_wstate == ST_CONNECTING) {
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            long ms_el = (now.tv_sec-last_conn.tv_sec)*1000 + (now.tv_nsec-last_conn.tv_nsec)/1000000;
+            if (ms_el >= 1000) { last_conn = now; wifi_check_conn(); dirty = true; }
+        }
+
+        /* Socket messages */
+        if (pfds[0].revents & POLLIN) {
+            uint8_t tbuf[2048];
+            ssize_t n = read(sock, tbuf, sizeof tbuf);
+            if (n == 0) break;
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
+            if (n > 0) {
+                int pos = 0;
+                while (pos < (int)n) {
+                    if (!msg_feed(&ms, tbuf, (int)n, &pos)) break;
+                    if (ms.type == IPC_INPUT_KEY && ms.plen >= 1 && ms.pld) {
+                        uint8_t k = ms.pld[0];
+                        if (g_tab == TAB_WIFI && g_pw_mode) {
+                            if (k == 0x1Bu) { g_pw_mode = false; g_pw_len = 0; }
+                            else if (k == 0x0Du || k == '\n') {
+                                g_pw_buf[g_pw_len] = '\0'; g_pw_mode = false;
+                                if (g_sel < g_net_count) wifi_connect(g_nets[g_sel].ssid, g_pw_buf);
+                                clock_gettime(CLOCK_MONOTONIC, &last_conn);
+                            } else if ((k == 0x08u || k == 0x7Fu) && g_pw_len > 0) g_pw_len--;
+                            else if (k >= 0x20u && k < 0x7Fu && g_pw_len < 127) g_pw_buf[g_pw_len++] = (char)k;
+                            dirty = true;
+                        } else if (k >= '1' && k <= '6') {
+                            switch_tab(k - '1'); dirty = true;
+                        } else if (k == 'q' || k == 'Q' || k == 0x1Bu) {
+                            running = false;
+                        } else if (g_tab == TAB_WIFI) {
+                            if (k == 'r' || k == 'R') { if (g_wstate != ST_SCANNING) wifi_scan_start(); dirty = true; }
+                            else if (k == 0x82u) { if (g_net_count) { if (--g_sel < 0) g_sel = g_net_count-1; dirty = true; } }
+                            else if (k == 0x83u) { if (g_net_count) { if (++g_sel >= g_net_count) g_sel = 0; dirty = true; } }
+                            else if (k == 0x0Du || k == '\n') {
+                                if (g_sel < g_net_count) {
+                                    if (!strcmp(g_nets[g_sel].security, "Open")) {
+                                        wifi_connect(g_nets[g_sel].ssid, "");
+                                        clock_gettime(CLOCK_MONOTONIC, &last_conn);
+                                    } else { g_pw_mode = true; g_pw_len = 0; memset(g_pw_buf, 0, sizeof g_pw_buf); }
+                                    dirty = true;
+                                }
+                            } else if (k == 'd' || k == 'D') {
+                                pid_t pid = fork();
+                                if (pid == 0) { for(int i=3;i<64;i++) close(i);
+                                    execl("/usr/bin/iwctl","iwctl","station",g_wif,"disconnect",NULL); _exit(1); }
+                                if (pid > 0) { int st; waitpid(pid, &st, 0); }
+                                g_wstate = ST_IDLE; g_conn_ssid[0] = '\0';
+                                snprintf(g_wstatus, sizeof g_wstatus, "Disconnected -- press R to scan");
+                                dirty = true;
                             }
-                            /* Volume slider release → toast notification */
-                            if (!lb && prev_lb &&
-                                my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
-                                mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
-                                char ntxt[24];
-                                int nlen = snprintf(ntxt, sizeof(ntxt), "Volume: %d%%", g_vol);
-                                if (nlen > 0)
-                                    ipc_send_msg(sock, IPC_NOTIFY, ntxt, (uint32_t)nlen);
-                            }
-                            prev_lb = lb;
-                        } else if (type == IPC_WIN_RESIZE && iplen >= 4 && ipld) {
-                            uint16_t nw, nh;
-                            memcpy(&nw, ipld, 2); memcpy(&nh, ipld+2, 2);
-                            if (nw >= 200 && nh >= 100) {
-                                uint32_t *nb = realloc(fb, (size_t)nw * nh * 4);
-                                if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
-                            }
-                            render(fb); send_frame(sock, fb);
                         }
-                        free(ipld); ipld = NULL;
-                        igot = 0; iplen = 0; ipgot = 0;
-                    }
-                } else {
-                    if (type == IPC_INVALIDATE) {
-                        render(fb);
-                        send_frame(sock, fb);
-                    } else if (type == IPC_APP_CLOSE) {
+                    } else if (ms.type == IPC_INPUT_MOUSE && ms.plen >= 9 && ms.pld) {
+                        int32_t mx, my; memcpy(&mx, ms.pld, 4); memcpy(&my, ms.pld+4, 4);
+                        uint8_t btns = ms.pld[8];
+                        int8_t wheel = ms.plen >= 10 ? (int8_t)ms.pld[9] : 0;
+                        bool lb = (btns & 1);
+
+                        /* Sidebar tab selection */
+                        if (lb && !prev_lb && mx < SIDEBAR_W && my >= SIDE_TOP) {
+                            int t = (my - SIDE_TOP) / SIDE_ROW;
+                            if (t >= 0 && t < N_TABS) { switch_tab(t); dirty = true; }
+                        } else if (mx >= SIDEBAR_W) {
+                            /* Content-area input, per active tab */
+                            if (g_tab == TAB_PERS && lb && !prev_lb) { pers_click(mx, my); dirty = true; }
+                            else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }
+                            else if (g_tab == TAB_SYS && lb &&
+                                     my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                     mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
+                                int nv = (mx - g_sl_x) * 100 / g_sl_w;
+                                alsa_set_vol(nv < 0 ? 0 : nv > 100 ? 100 : nv); dirty = true;
+                            }
+                            else if (g_tab == TAB_WIFI) {
+                                if (wheel != 0 && g_net_count > 0) {
+                                    g_sel -= wheel;
+                                    if (g_sel < 0) g_sel = 0;
+                                    if (g_sel >= g_net_count) g_sel = g_net_count-1;
+                                    dirty = true;
+                                }
+                                if (lb && !prev_lb && g_net_count > 0 && g_list_top > 0 &&
+                                    my >= g_list_top && !g_pw_mode) {
+                                    int clicked = (my - g_list_top) / ROW_H + g_wscroll;
+                                    if (clicked >= 0 && clicked < g_net_count) {
+                                        if (clicked == g_sel) {
+                                            if (!strcmp(g_nets[g_sel].security, "Open")) {
+                                                wifi_connect(g_nets[g_sel].ssid, "");
+                                                clock_gettime(CLOCK_MONOTONIC, &last_conn);
+                                            } else { g_pw_mode = true; g_pw_len = 0; memset(g_pw_buf, 0, sizeof g_pw_buf); }
+                                        } else g_sel = clicked;
+                                        dirty = true;
+                                    }
+                                }
+                            }
+                        }
+                        prev_lb = lb;
+                    } else if (ms.type == IPC_WIN_RESIZE && ms.plen >= 4 && ms.pld) {
+                        uint16_t nw, nh; memcpy(&nw, ms.pld, 2); memcpy(&nh, ms.pld+2, 2);
+                        if (nw >= 480 && nh >= 320 && nw <= 8192 && nh <= 8192) {
+                            uint32_t *nb = realloc(fb, (size_t)nw * nh * 4);
+                            if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
+                        }
+                        dirty = true;
+                    } else if (ms.type == IPC_INVALIDATE) {
+                        dirty = true;
+                    } else if (ms.type == IPC_APP_CLOSE) {
                         running = false;
                     }
-                    igot = 0; iplen = 0; ipgot = 0;
+                    msg_reset(&ms);
                 }
             }
         }
 
-        /* Refresh system info every second */
+        /* Periodic refresh of live panes */
         time_t now = time(NULL);
         if (now != last_refresh) {
             last_refresh = now;
-            render(fb);
-            send_frame(sock, fb);
+            if (g_tab == TAB_NET) net_update();
+            if (g_tab == TAB_SEC) sec_update();
+            if (g_tab == TAB_SYS || g_tab == TAB_NET || g_tab == TAB_SEC || g_tab == TAB_WIFI)
+                dirty = true;
         }
 
-        struct timespec ts = {0, 16000000}; /* 60Hz */
-        nanosleep(&ts, NULL);
+        if (dirty && running) { render(fb); send_frame(sock, fb); }
     }
 
+    if (g_scan_pid > 0) kill(g_scan_pid, SIGTERM);
     ipc_send_msg(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
