@@ -45,6 +45,12 @@
 #define DEF_WIN_H  540
 #define TAB_BAR_H   28
 #define PAD          4
+/* The compositor draws its own SSD titlebar over the top TITLE_H px of every
+ * native window's buffer (same convention as fifi-settings/filebrowser). Draw
+ * our tab bar and grid BELOW that reserved strip so the compositor title never
+ * hides the tabs. */
+#define TITLE_H     24
+#define CONTENT_Y   (TITLE_H + TAB_BAR_H)   /* terminal grid top */
 
 /* ── Font paths (smallest → largest) ────────────────────────────────────── */
 static const char *FONT_PATHS[3] = {
@@ -95,6 +101,15 @@ static bool font_load(Font *f, const char *path) {
         memcpy(&width,      raw+28, 4);
         (void)version;
 
+        /* Validate header fields against the file size (64-bit math: the u32
+         * products can wrap) so a truncated/corrupt font can't OOB-read. */
+        uint64_t gtotal = (uint64_t)length * glyph_size;
+        if (!length || !glyph_size || !width || !height ||
+            hdr_size < 32 || (uint64_t)hdr_size + gtotal > (uint64_t)st.st_size ||
+            (uint64_t)height * ((width + 7) / 8) > glyph_size) {
+            free(raw); return false;
+        }
+
         f->n  = (int)length;
         f->sz = (int)glyph_size;
         f->w  = (int)width;
@@ -104,13 +119,17 @@ static bool font_load(Font *f, const char *path) {
         memcpy(f->data, raw + hdr_size, (size_t)length * glyph_size);
 
         /* Parse Unicode table if present */
-        if ((flags & 1) && hdr_size + length * glyph_size < (uint32_t)st.st_size) {
-            size_t tpos = hdr_size + length * glyph_size;
+        if ((flags & 1) && hdr_size + gtotal < (uint64_t)st.st_size) {
+            size_t tpos = (size_t)(hdr_size + gtotal);
             /* First pass: count entries */
             int cap = 2048, cnt = 0;
             uint32_t *tcps = malloc((size_t)cap * sizeof(uint32_t));
             uint16_t *tgis = malloc((size_t)cap * sizeof(uint16_t));
-            if (!tcps || !tgis) { free(tcps); free(tgis); free(raw); return false; }
+            if (!tcps || !tgis) {
+                free(tcps); free(tgis); free(raw);
+                free(f->data); memset(f, 0, sizeof(*f));
+                return false;
+            }
 
             uint16_t gi = 0;
             while (tpos < (size_t)st.st_size && gi < (uint16_t)length) {
@@ -128,9 +147,12 @@ static bool font_load(Font *f, const char *path) {
                 tpos += seq;
                 if (cnt >= cap) {
                     cap *= 2;
-                    tcps = realloc(tcps, (size_t)cap * sizeof(uint32_t));
-                    tgis = realloc(tgis, (size_t)cap * sizeof(uint16_t));
-                    if (!tcps || !tgis) break;
+                    uint32_t *ncps = realloc(tcps, (size_t)cap * sizeof(uint32_t));
+                    if (ncps) tcps = ncps;
+                    uint16_t *ngis = realloc(tgis, (size_t)cap * sizeof(uint16_t));
+                    if (ngis) tgis = ngis;
+                    /* on failure keep the entries parsed so far */
+                    if (!ncps || !ngis) break;
                 }
                 tcps[cnt] = cp;
                 tgis[cnt] = gi;
@@ -156,6 +178,7 @@ static bool font_load(Font *f, const char *path) {
         f->sz = charsize;
         f->w  = 8;
         f->h  = charsize;
+        if (4 + (int64_t)f->n * f->sz > (int64_t)st.st_size) { free(raw); return false; }
         f->data = malloc((size_t)f->n * f->sz);
         if (!f->data) { free(raw); return false; }
         memcpy(f->data, raw + 4, (size_t)f->n * f->sz);
@@ -218,6 +241,7 @@ typedef struct {
     Cell     scrollback[SCROLLBACK][MAX_COLS];
     int      sb_w, sb_n, sb_off;  /* ring write ptr, line count, scroll offset */
     int      rows, cols, cx, cy;
+    bool     wrap;   /* VT100 deferred wrap: last column written, wrap before next glyph */
     uint32_t fg, bg;
     bool     bold;
     bool     cur_vis, cur_hide, dirty;
@@ -243,9 +267,13 @@ static int g_active = 0;
 static int       g_win_w  = DEF_WIN_W;
 static int       g_win_h  = DEF_WIN_H;
 static uint32_t *g_fb     = NULL;
-static uint32_t  g_tick   = 0;
 static int       g_ipc_fd = -1;
 static uint8_t   g_prev_btns = 0;
+/* Last known cursor position — used to draw hover feedback on the tab-bar
+ * controls (+ / × / A- / A+). Updated on every IPC_INPUT_MOUSE event. */
+static int       g_mouse_x   = -1;
+static int       g_mouse_y   = -1;
+static bool      g_in_tabbar = false;  /* cursor was over the tab bar last event */
 
 /* ── FB helpers ──────────────────────────────────────────────────────────── */
 static inline void fb_set(int x, int y, uint32_t c) {
@@ -255,7 +283,8 @@ static inline void fb_set(int x, int y, uint32_t c) {
 
 static void fb_fill(int x, int y, int w, int h, uint32_t c) {
     int x1 = x + w, y1 = y + h;
-    if (x < 0) x = 0; if (y < 0) y = 0;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
     if (x1 > g_win_w) x1 = g_win_w;
     if (y1 > g_win_h) y1 = g_win_h;
     for (int r = y; r < y1; r++)
@@ -263,7 +292,6 @@ static void fb_fill(int x, int y, int w, int h, uint32_t c) {
             g_fb[r * g_win_w + cc] = c;
 }
 
-static void fb_hline(int x, int y, int w, uint32_t c) { fb_fill(x, y, w, 1, c); }
 static void fb_vline(int x, int y, int h, uint32_t c) { fb_fill(x, y, 1, h, c); }
 
 /* Render one glyph at pixel position (px,py) using g_font */
@@ -309,17 +337,6 @@ static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg) {
             fb_set(px + col, py + row, px2);
         }
     }
-}
-
-/* Render a string using the font at pixel (px,py); return width used */
-static int fb_str(int px, int py, const char *s, uint32_t fg, uint32_t bg) {
-    int x = px;
-    while (*s) {
-        fb_glyph(x, py, (uint8_t)*s, fg, bg);
-        x += g_font.w + 1;
-        s++;
-    }
-    return x - px;
 }
 
 /* Render a string, centered in a box of width bw at pixel (bx,by,bw,bh) */
@@ -475,14 +492,15 @@ static void tab_handle_csi(Tab *t) {
         row = atoi(buf); if (sc) col = atoi(sc+1);
         t->cx = (col>1?col-1:0); if (t->cx>=t->cols) t->cx=t->cols-1;
         t->cy = (row>1?row-1:0); if (t->cy>=t->rows) t->cy=t->rows-1;
-    } else if (cmd=='A') { int n=atoi(buf); t->cy -= n?n:1; if(t->cy<0) t->cy=0; }
-      else if (cmd=='B') { int n=atoi(buf); t->cy += n?n:1; if(t->cy>=t->rows) t->cy=t->rows-1; }
-      else if (cmd=='C') { int n=atoi(buf); t->cx += n?n:1; if(t->cx>=t->cols) t->cx=t->cols-1; }
-      else if (cmd=='D') { int n=atoi(buf); t->cx -= n?n:1; if(t->cx<0) t->cx=0; }
-      else if (cmd=='G') { int n=atoi(buf); t->cx=(n>1?n-1:0); if(t->cx>=t->cols) t->cx=t->cols-1; }
-      else if (cmd=='d') { int n=atoi(buf); t->cy=(n>1?n-1:0); if(t->cy>=t->rows) t->cy=t->rows-1; }
-      else if (cmd=='E') { int n=atoi(buf); t->cy += n?n:1; if(t->cy>=t->rows) t->cy=t->rows-1; t->cx=0; }
-      else if (cmd=='F') { int n=atoi(buf); t->cy -= n?n:1; if(t->cy<0) t->cy=0; t->cx=0; }
+        t->wrap = false;
+    } else if (cmd=='A') { int n=atoi(buf); t->cy -= n?n:1; if(t->cy<0) t->cy=0; t->wrap=false; }
+      else if (cmd=='B') { int n=atoi(buf); t->cy += n?n:1; if(t->cy>=t->rows) t->cy=t->rows-1; t->wrap=false; }
+      else if (cmd=='C') { int n=atoi(buf); t->cx += n?n:1; if(t->cx>=t->cols) t->cx=t->cols-1; t->wrap=false; }
+      else if (cmd=='D') { int n=atoi(buf); t->cx -= n?n:1; if(t->cx<0) t->cx=0; t->wrap=false; }
+      else if (cmd=='G') { int n=atoi(buf); t->cx=(n>1?n-1:0); if(t->cx>=t->cols) t->cx=t->cols-1; t->wrap=false; }
+      else if (cmd=='d') { int n=atoi(buf); t->cy=(n>1?n-1:0); if(t->cy>=t->rows) t->cy=t->rows-1; t->wrap=false; }
+      else if (cmd=='E') { int n=atoi(buf); t->cy += n?n:1; if(t->cy>=t->rows) t->cy=t->rows-1; t->cx=0; t->wrap=false; }
+      else if (cmd=='F') { int n=atoi(buf); t->cy -= n?n:1; if(t->cy<0) t->cy=0; t->cx=0; t->wrap=false; }
     else if (cmd == 'P') {
         int n = atoi(buf); if (!n) n=1;
         int rem = t->cols - t->cx - n;
@@ -549,7 +567,8 @@ static void tab_putc(Tab *t, uint8_t c) {
         if (!t->in_csi && c=='(') { t->in_esc=false; return; } /* charset designation — ignore */
         if (!t->in_csi && c==')') { t->in_esc=false; return; }
         if (t->in_csi) {
-            if ((c>=0x40 && c<=0x7E) || t->csilen >= (int)sizeof(t->csibuf)-1) {
+            /* -2: room for this byte + NUL (csilen-1 would write csibuf[64]) */
+            if ((c>=0x40 && c<=0x7E) || t->csilen >= (int)sizeof(t->csibuf)-2) {
                 t->csibuf[t->csilen++] = c;
                 t->csibuf[t->csilen]   = '\0';
                 tab_handle_csi(t);
@@ -563,10 +582,11 @@ static void tab_putc(Tab *t, uint8_t c) {
     }
 
     if (c == 0x1B) { t->in_esc = true; t->in_csi = false; t->csilen = 0; return; }
-    if (c == '\r') { t->cx = 0; return; }
-    if (c == '\n') { tab_newline(t); return; }
-    if (c == '\t') { t->cx = (t->cx + 8) & ~7; if (t->cx >= t->cols) t->cx = t->cols-1; return; }
+    if (c == '\r') { t->cx = 0; t->wrap = false; return; }
+    if (c == '\n') { t->wrap = false; tab_newline(t); return; }
+    if (c == '\t') { t->wrap = false; t->cx = (t->cx + 8) & ~7; if (t->cx >= t->cols) t->cx = t->cols-1; return; }
     if (c == 0x08 || c == 0x7F) {
+        t->wrap = false;
         if (t->cx > 0) { t->cx--; t->cells[t->cy][t->cx] = (Cell){' ', t->fg, t->bg}; }
         return;
     }
@@ -584,15 +604,22 @@ static void tab_putc(Tab *t, uint8_t c) {
             if (--t->utf8r == 0) {
                 int w = cp_width(t->utf8cp);
                 if (w != 0) {
-                    if (w == 2 && t->cx + 1 >= t->cols) {
+                    if (t->wrap) {   /* deferred wrap from the previous glyph */
+                        t->cx = 0; t->wrap = false;
+                        if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
+                    }
+                    if (w == 2 && t->cx + 1 >= t->cols) {   /* wide glyph won't fit last col */
                         t->cx = 0;
                         if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
                     }
                     t->cells[t->cy][t->cx] = (Cell){ t->utf8cp, t->fg, t->bg };
-                    if (++t->cx >= t->cols) { t->cx = 0; if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); } }
                     if (w == 2) {
-                        t->cells[t->cy][t->cx] = (Cell){ 0, t->fg, t->bg };
-                        if (++t->cx >= t->cols) { t->cx = 0; if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); } }
+                        if (t->cx + 1 < t->cols) t->cells[t->cy][t->cx+1] = (Cell){ 0, t->fg, t->bg };
+                        if (t->cx + 2 >= t->cols) { t->cx = t->cols - 1; t->wrap = true; }
+                        else t->cx += 2;
+                    } else {
+                        if (t->cx + 1 >= t->cols) t->wrap = true;
+                        else t->cx++;
                     }
                 }
             }
@@ -601,11 +628,13 @@ static void tab_putc(Tab *t, uint8_t c) {
     }
 
     /* Plain ASCII */
-    t->cells[t->cy][t->cx] = (Cell){ c, t->fg, t->bg };
-    if (++t->cx >= t->cols) {
-        t->cx = 0;
+    if (t->wrap) {   /* deferred wrap from the previous glyph at the last column */
+        t->cx = 0; t->wrap = false;
         if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
     }
+    t->cells[t->cy][t->cx] = (Cell){ c, t->fg, t->bg };
+    if (t->cx + 1 >= t->cols) t->wrap = true;   /* stay in last col; wrap pending */
+    else t->cx++;
 }
 
 /* ── Rendering ───────────────────────────────────────────────────────────── */
@@ -614,95 +643,173 @@ static void tab_putc(Tab *t, uint8_t c) {
 #define COL_TABBAR_BG    0xFF0D1319u
 #define COL_TAB_INACTIVE 0xFF14202Cu
 #define COL_TAB_ACTIVE   0xFF1E3250u
+#define COL_TAB_HOVER    0xFF203448u
 #define COL_TAB_TEXT     0xFFb0c8e0u
 #define COL_TAB_TEXTACT  0xFFe8f0f8u
 #define COL_TAB_BORDER   0xFF2a4060u
-#define COL_CLOSE_BTN    0xFF506070u
+#define COL_CLOSE_BTN    0xFF7c8ea0u
 #define COL_CLOSE_HOVER  0xFFcc4444u
 #define COL_BTN_BG       0xFF14202Cu
 #define COL_BTN_TEXT     0xFF8090a0u
+#define COL_ACCENT       0xFF409cffu   /* active-tab / hover accent */
+#define COL_SEP          0xFF0a1018u
+
+/* ── Tab-bar layout ──────────────────────────────────────────────────────────
+ * Control geometry is computed in ONE place so rendering and hit-testing can
+ * never drift apart. Widths chosen for comfortable, obvious click targets. */
+#define TABBTN_PLUS_W  32   /* [+] new-tab button */
+#define TABBTN_FONT_W  22   /* [A-] / [A+] each */
+#define TAB_CLOSE_W    22   /* [×] hit region inside each tab (generous) */
+#define TAB_MIN_W      48
+#define TAB_MAX_W     180
+
+typedef struct {
+    int tw;         /* per-tab width */
+    int close_w;    /* [×] hit width at the right of each tab */
+    int plus_x;     /* left edge of [+] */
+    int plus_w;     /* width of [+] */
+    int fontdec_x;  /* left edge of [A-] */
+    int fontinc_x;  /* left edge of [A+] */
+    int fontbtn_w;  /* width of each font button */
+} TabLayout;
+
+static TabLayout tabbar_layout(void) {
+    TabLayout L;
+    L.plus_w    = TABBTN_PLUS_W;
+    L.fontbtn_w = TABBTN_FONT_W;
+    L.close_w   = TAB_CLOSE_W;
+    int reserve = L.plus_w + 2 * L.fontbtn_w;
+    int avail   = g_win_w - reserve;
+    if (avail < 0) avail = 0;
+    int tw = (g_n_tabs > 0) ? (avail / g_n_tabs) : TAB_MAX_W;
+    if (tw > TAB_MAX_W) tw = TAB_MAX_W;
+    if (tw < TAB_MIN_W) tw = TAB_MIN_W;
+    L.tw        = tw;
+    L.plus_x    = g_n_tabs * tw;
+    L.fontinc_x = g_win_w - L.fontbtn_w;
+    L.fontdec_x = g_win_w - 2 * L.fontbtn_w;
+    return L;
+}
+
+/* Crisp 2px-thick × centered at (cx,cy) with arm radius r — drawn from lines so
+ * it reads as a real close button regardless of the loaded bitmap font. */
+static void draw_cross(int cx, int cy, int r, uint32_t col) {
+    for (int i = -r; i <= r; i++) {
+        fb_set(cx + i,     cy + i, col);
+        fb_set(cx + i + 1, cy + i, col);
+        fb_set(cx + i,     cy - i, col);
+        fb_set(cx + i + 1, cy - i, col);
+    }
+}
+
+/* Crisp 2px-thick + centered at (cx,cy) with arm radius r. */
+static void draw_plus(int cx, int cy, int r, uint32_t col) {
+    for (int i = -r; i <= r; i++) {
+        fb_set(cx + i, cy,     col);
+        fb_set(cx + i, cy + 1, col);
+        fb_set(cx,     cy + i, col);
+        fb_set(cx + 1, cy + i, col);
+    }
+}
 
 static void render_tabbar(void) {
-    fb_fill(0, 0, g_win_w, TAB_BAR_H, COL_TABBAR_BG);
+    /* Fill the whole top strip (reserved title area + tab bar). The compositor
+     * paints its SSD titlebar over rows [0, TITLE_H); our tabs live below it. */
+    fb_fill(0, 0, g_win_w, CONTENT_Y, COL_TABBAR_BG);
 
-    /* Tab width: divide available space (leave 28px for [+] and 44px for [A-][A+]) */
-    int reserve = 28 + 44;
-    int avail   = g_win_w - reserve;
-    int max_tw  = 160;
-    int tw      = (g_n_tabs > 0) ? (avail / g_n_tabs) : max_tw;
-    if (tw > max_tw) tw = max_tw;
-    if (tw < 32) tw = 32;
+    TabLayout L = tabbar_layout();
+    int tw      = L.tw;
+    int close_w = L.close_w;
+    bool bar_hot = (g_mouse_y >= TITLE_H && g_mouse_y < CONTENT_Y);
+    int cy = TITLE_H + TAB_BAR_H / 2;
 
     int x = 0;
     for (int i = 0; i < g_n_tabs; i++) {
-        uint32_t tbg = (i == g_active) ? COL_TAB_ACTIVE : COL_TAB_INACTIVE;
-        uint32_t tfg = (i == g_active) ? COL_TAB_TEXTACT : COL_TAB_TEXT;
-        fb_fill(x, 0, tw, TAB_BAR_H, tbg);
-        /* Top highlight bar for active tab */
-        if (i == g_active) fb_hline(x, 0, tw, COL_TAB_BORDER);
-        /* Right separator */
-        fb_vline(x + tw - 1, 0, TAB_BAR_H, 0xFF0a1018u);
+        bool tab_hover   = bar_hot && g_mouse_x >= x && g_mouse_x < x + tw;
+        int  close_x     = x + tw - close_w;
+        bool close_hover = tab_hover && g_mouse_x >= close_x;
 
-        /* Title text — truncated */
+        uint32_t tbg = (i == g_active) ? COL_TAB_ACTIVE
+                     : tab_hover       ? COL_TAB_HOVER
+                                       : COL_TAB_INACTIVE;
+        uint32_t tfg = (i == g_active) ? COL_TAB_TEXTACT : COL_TAB_TEXT;
+        fb_fill(x, TITLE_H, tw, TAB_BAR_H, tbg);
+        /* Accent top bar for the active tab */
+        if (i == g_active) fb_fill(x, TITLE_H, tw, 2, COL_ACCENT);
+        /* Right separator */
+        fb_vline(x + tw - 1, TITLE_H, TAB_BAR_H, COL_SEP);
+
+        /* Title text — truncated to the space left of the close button */
         const char *title = g_tabs[i].title[0] ? g_tabs[i].title : "Terminal";
         int cw = g_font.w + 1;
-        int close_w = 14;
         int text_w = tw - close_w - 4;
         int max_chars = text_w / cw;
         if (max_chars < 1) max_chars = 1;
         char label[65];
         strncpy(label, title, 64); label[64] = '\0';
         if ((int)strlen(label) > max_chars) { label[max_chars-1]='.'; label[max_chars]='\0'; }
-        int ty = (TAB_BAR_H - g_font.h) / 2;
-        /* Clip text to tab area */
-        for (int ci = 0; label[ci] && x + 2 + ci * cw + cw <= x + tw - close_w; ci++)
-            fb_glyph(x + 2 + ci * cw, ty, (uint8_t)label[ci], tfg, tbg);
+        int ty = TITLE_H + (TAB_BAR_H - g_font.h) / 2;
+        for (int ci = 0; label[ci] && x + 4 + ci * cw + cw <= close_x; ci++)
+            fb_glyph(x + 4 + ci * cw, ty, (uint8_t)label[ci], tfg, tbg);
 
-        /* [×] close button */
-        int cx2 = x + tw - close_w;
-        fb_fill(cx2, 1, close_w - 1, TAB_BAR_H - 2, tbg);
-        /* Draw × */
-        int bx = cx2 + (close_w - 1 - g_font.w) / 2;
-        int by = ty;
-        fb_glyph(bx, by, 'x', (i == g_active) ? 0xFFcc6666u : COL_CLOSE_BTN, tbg);
+        /* [×] close button — generous hit area, red highlight on hover */
+        if (close_hover) {
+            fb_fill(close_x + 3, TITLE_H + 4, close_w - 6, TAB_BAR_H - 8, COL_CLOSE_HOVER);
+            draw_cross(close_x + close_w / 2, cy, 4, 0xFFffffffu);
+        } else {
+            uint32_t xcol = (i == g_active) ? COL_TAB_TEXTACT : COL_CLOSE_BTN;
+            draw_cross(close_x + close_w / 2, cy, 4, xcol);
+        }
 
         x += tw;
     }
 
-    /* [+] new tab button */
-    fb_fill(x, 0, 28, TAB_BAR_H, COL_BTN_BG);
-    fb_vline(x, 0, TAB_BAR_H, 0xFF0a1018u);
+    /* [+] new-tab button */
     {
-        int bx = x + (28 - g_font.w) / 2;
-        int by = (TAB_BAR_H - g_font.h) / 2;
-        fb_glyph(bx, by, '+', COL_BTN_TEXT, COL_BTN_BG);
+        bool hov = bar_hot && g_mouse_x >= L.plus_x && g_mouse_x < L.plus_x + L.plus_w;
+        uint32_t bg  = hov ? COL_TAB_HOVER : COL_BTN_BG;
+        uint32_t col = hov ? COL_ACCENT    : COL_BTN_TEXT;
+        fb_fill(L.plus_x, TITLE_H, L.plus_w, TAB_BAR_H, bg);
+        fb_vline(L.plus_x, TITLE_H, TAB_BAR_H, COL_SEP);
+        draw_plus(L.plus_x + L.plus_w / 2, cy, 5, col);
     }
-    x += 28;
 
-    /* Spacer */
-    fb_fill(x, 0, g_win_w - x - 44, TAB_BAR_H, COL_TABBAR_BG);
+    /* Spacer between [+] and the font buttons */
+    {
+        int sp_x = L.plus_x + L.plus_w;
+        if (L.fontdec_x > sp_x)
+            fb_fill(sp_x, TITLE_H, L.fontdec_x - sp_x, TAB_BAR_H, COL_TABBAR_BG);
+    }
 
     /* [A-] font size decrease */
-    int bx1 = g_win_w - 44;
-    fb_fill(bx1, 0, 22, TAB_BAR_H, COL_BTN_BG);
-    fb_vline(bx1, 0, TAB_BAR_H, 0xFF0a1018u);
-    fb_str_center(bx1, 0, 22, TAB_BAR_H, "A-", COL_BTN_TEXT, COL_BTN_BG);
+    {
+        bool hov = bar_hot && g_mouse_x >= L.fontdec_x && g_mouse_x < L.fontinc_x;
+        uint32_t bg  = hov ? COL_TAB_HOVER : COL_BTN_BG;
+        uint32_t col = hov ? COL_ACCENT    : COL_BTN_TEXT;
+        fb_fill(L.fontdec_x, TITLE_H, L.fontbtn_w, TAB_BAR_H, bg);
+        fb_vline(L.fontdec_x, TITLE_H, TAB_BAR_H, COL_SEP);
+        fb_str_center(L.fontdec_x, TITLE_H, L.fontbtn_w, TAB_BAR_H, "A-", col, bg);
+    }
 
     /* [A+] font size increase */
-    int bx2 = g_win_w - 22;
-    fb_fill(bx2, 0, 22, TAB_BAR_H, COL_BTN_BG);
-    fb_vline(bx2, 0, TAB_BAR_H, 0xFF0a1018u);
-    fb_str_center(bx2, 0, 22, TAB_BAR_H, "A+", COL_BTN_TEXT, COL_BTN_BG);
+    {
+        bool hov = bar_hot && g_mouse_x >= L.fontinc_x;
+        uint32_t bg  = hov ? COL_TAB_HOVER : COL_BTN_BG;
+        uint32_t col = hov ? COL_ACCENT    : COL_BTN_TEXT;
+        fb_fill(L.fontinc_x, TITLE_H, L.fontbtn_w, TAB_BAR_H, bg);
+        fb_vline(L.fontinc_x, TITLE_H, TAB_BAR_H, COL_SEP);
+        fb_str_center(L.fontinc_x, TITLE_H, L.fontbtn_w, TAB_BAR_H, "A+", col, bg);
+    }
 }
 
 static void render_content(Tab *t) {
     int cw = g_font.w + 1;
     int ch = g_font.h + 1;
     int ox = PAD;
-    int oy = TAB_BAR_H + PAD;
-    int content_h = g_win_h - TAB_BAR_H;
+    int oy = CONTENT_Y + PAD;
+    int content_h = g_win_h - CONTENT_Y;
 
-    fb_fill(0, TAB_BAR_H, g_win_w, content_h, t->bg);
+    fb_fill(0, CONTENT_Y, g_win_w, content_h, t->bg);
 
     for (int row = 0; row < t->rows; row++) {
         for (int col = 0; col < t->cols; col++) {
@@ -723,18 +830,25 @@ static void render_content(Tab *t) {
         }
     }
 
-    /* Cursor */
-    if (t->cur_vis && t->sb_off == 0) {
+    /* Cursor: a full-height vertical bar (I-beam) at the LEFT edge of the cell.
+     * Drawn solid (not gated on the blink flag) so it is always visible while
+     * the prompt is on-screen — a blinking cursor is easy to miss and reads as
+     * "no cursor". A bar rather than a filled block so it never covers the glyph
+     * underneath (a block hid the character the cursor sat on, so arrowing left
+     * over text looked like the characters were disappearing). */
+    if (t->sb_off == 0 && !t->cur_hide &&
+        t->cy >= 0 && t->cy < t->rows && t->cx >= 0 && t->cx < t->cols) {
         int px = ox + t->cx * cw;
         int py = oy + t->cy * ch;
-        fb_fill(px, py + ch - 2, cw, 2, t->fg);
+        if (px + cw <= g_win_w - 14)
+            fb_fill(px, py, 2, ch, t->fg);
     }
 
     /* Scrollbar */
     {
         int sb_x = g_win_w - 14;
-        int sb_y = TAB_BAR_H + 4;
-        int sb_h = g_win_h - TAB_BAR_H - 8;
+        int sb_y = CONTENT_Y + 4;
+        int sb_h = g_win_h - CONTENT_Y - 8;
         fb_fill(sb_x, sb_y, 14, sb_h, 0xFF1a2a3au);
         if (t->sb_n > 0) {
             int total = t->rows + t->sb_n;
@@ -777,21 +891,16 @@ static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
 
 static void send_frame(int fd) {
     if (!g_fb) return;
+    size_t npix  = (size_t)g_win_w * g_win_h;    /* size_t: W*H*4 overflows u32 */
+    size_t total = 16 + npix * 4;
+    if (total > 0xFFFFFFFFu) return;             /* won't fit the u32 length field */
     uint32_t frm[4] = { 0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h };
-    uint32_t total  = 16 + (uint32_t)g_win_w * (uint32_t)g_win_h * 4;
     uint8_t *msg    = malloc(total);
     if (!msg) return;
     memcpy(msg,      frm,  16);
-    memcpy(msg + 16, g_fb, (size_t)g_win_w * g_win_h * 4);
-    ipc_send(fd, IPC_APP_FRAME, msg, total);
+    memcpy(msg + 16, g_fb, npix * 4);
+    ipc_send(fd, IPC_APP_FRAME, msg, (uint32_t)total);
     free(msg);
-}
-
-static void send_title(int fd) {
-    char buf[72] = {0};
-    const char *t = (g_n_tabs > 0 && g_tabs[g_active].title[0]) ? g_tabs[g_active].title : "Terminal";
-    snprintf(buf, sizeof(buf), "%s", t);
-    ipc_send(fd, IPC_APP_TITLE, buf, (uint32_t)strlen(buf));
 }
 
 /* ── Font size change ────────────────────────────────────────────────────── */
@@ -801,7 +910,7 @@ static void font_change(int delta);  /* forward decl */
 static void tab_recalc_grid(Tab *t) {
     int cw = g_font.w + 1, ch = g_font.h + 1;
     int new_cols = (g_win_w - 14 - 2*PAD) / cw;
-    int new_rows = (g_win_h - TAB_BAR_H - 2*PAD) / ch;
+    int new_rows = (g_win_h - CONTENT_Y - 2*PAD) / ch;
     if (new_cols < 10) new_cols = 10;
     if (new_rows <  3) new_rows  = 3;
     if (new_cols > MAX_COLS) new_cols = MAX_COLS;
@@ -847,8 +956,15 @@ static int tab_spawn(Tab *t) {
         dup2(sl, 0); dup2(sl, 1); dup2(sl, 2);
         if (sl > 2) close(sl);
         setenv("TERM",  "xterm-256color", 1);
-        setenv("LANG",  "en_US.UTF-8",    1);
-        setenv("LC_ALL","en_US.UTF-8",    1);
+        /* Use C.UTF-8 — always present in glibc, so bash never prints
+         * "setlocale: LC_ALL: cannot change locale (en_US.UTF-8)". Override
+         * (overwrite=1) any inherited en_US.UTF-8 and clear the per-category
+         * LC_* / LANGUAGE vars so nothing stale re-triggers the warning. */
+        unsetenv("LANGUAGE");
+        unsetenv("LC_CTYPE");   unsetenv("LC_MESSAGES"); unsetenv("LC_COLLATE");
+        unsetenv("LC_NUMERIC"); unsetenv("LC_TIME");     unsetenv("LC_MONETARY");
+        setenv("LANG",  "C.UTF-8", 1);
+        setenv("LC_ALL","C.UTF-8", 1);
         setenv("HOME",  "/root",          1);
         setenv("PATH",  "/usr/local/bin:/fifi-data/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
         setenv("USER",  "fifi",           1);
@@ -875,7 +991,7 @@ static void tab_new(void) {
     /* Calculate grid */
     int cw = g_font.w + 1, ch = g_font.h + 1;
     t->cols = (g_win_w - 14 - 2*PAD) / cw;
-    t->rows = (g_win_h - TAB_BAR_H - 2*PAD) / ch;
+    t->rows = (g_win_h - CONTENT_Y - 2*PAD) / ch;
     if (t->cols < 10) t->cols = 10;
     if (t->rows <  3) t->rows  = 3;
     if (t->cols > MAX_COLS) t->cols = MAX_COLS;
@@ -910,29 +1026,23 @@ static void tab_close(int idx) {
 static void handle_tabbar_click(int rx, int ry, uint8_t btns) {
     bool click = (btns & 1) && !(g_prev_btns & 1);
     if (!click) return;
-    if (ry < 0 || ry >= TAB_BAR_H) return;
+    if (ry < TITLE_H || ry >= CONTENT_Y) return;
 
-    /* Tab width (same formula as render_tabbar) */
-    int reserve = 28 + 44;
-    int avail   = g_win_w - reserve;
-    int max_tw  = 160;
-    int tw = (g_n_tabs > 0) ? (avail / g_n_tabs) : max_tw;
-    if (tw > max_tw) tw = max_tw;
-    if (tw < 32) tw = 32;
+    /* Same geometry the tab bar was drawn with — no drift possible. */
+    TabLayout L = tabbar_layout();
 
-    /* Check [A-] and [A+] buttons */
-    if (rx >= g_win_w - 44 && rx < g_win_w - 22) { font_change(-1); return; }
-    if (rx >= g_win_w - 22)                       { font_change(+1); return; }
+    /* [A-] / [A+] font buttons (checked first: they sit at the far right) */
+    if (rx >= L.fontdec_x && rx < L.fontinc_x) { font_change(-1); return; }
+    if (rx >= L.fontinc_x)                      { font_change(+1); return; }
 
-    /* Check [+] button */
-    int plus_x = g_n_tabs * tw;
-    if (rx >= plus_x && rx < plus_x + 28) { tab_new(); return; }
+    /* [+] new-tab button */
+    if (rx >= L.plus_x && rx < L.plus_x + L.plus_w) { tab_new(); return; }
 
-    /* Check tab labels and × buttons */
+    /* Tab labels and [×] close buttons */
     for (int i = 0; i < g_n_tabs; i++) {
-        int tx0 = i * tw;
-        if (rx >= tx0 && rx < tx0 + tw) {
-            int close_x = tx0 + tw - 14;
+        int tx0 = i * L.tw;
+        if (rx >= tx0 && rx < tx0 + L.tw) {
+            int close_x = tx0 + L.tw - L.close_w;
             if (rx >= close_x) {
                 tab_close(i);
             } else {
@@ -955,12 +1065,11 @@ static void font_change(int delta) {
     free(g_font.data); free(g_font.cps); free(g_font.gis);
     g_font = nf;
     g_font_idx = new_idx;
-    /* Recalculate all tabs */
-    for (int i = 0; i < g_n_tabs; i++) tab_recalc_grid(&g_tabs[i]);
-    /* Reallocate framebuffer */
-    free(g_fb);
-    g_fb = malloc((size_t)g_win_w * g_win_h * 4);
-    for (int i = 0; i < g_n_tabs; i++) g_tabs[i].dirty = true;
+    /* Recalculate all tabs (fb size is unchanged; render repaints it fully) */
+    for (int i = 0; i < g_n_tabs; i++) {
+        tab_recalc_grid(&g_tabs[i]);
+        g_tabs[i].dirty = true;
+    }
 }
 
 /* ── Resize all tabs ─────────────────────────────────────────────────────── */
@@ -1077,11 +1186,12 @@ int main(void) {
         /* Build poll fd set: compositor + all active PTY fds */
         struct pollfd pfds[MAX_TABS + 1];
         int nfds = 0;
-        pfds[nfds].fd = sock; pfds[nfds].events = POLLIN; nfds++;
+        pfds[nfds].fd = sock; pfds[nfds].events = POLLIN; pfds[nfds].revents = 0; nfds++;
         int tab_pfd_base = nfds;
         for (int i = 0; i < g_n_tabs; i++) {
             pfds[nfds].fd = (g_tabs[i].pty >= 0) ? g_tabs[i].pty : -1;
             pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
             nfds++;
         }
 
@@ -1102,6 +1212,13 @@ int main(void) {
                         memcpy(&in_plen, in_hdr + 4, 4);
                         if (in_plen > 262144) { in_got = 0; break; }
                         if (in_plen > 0) { free(in_pld); in_pld = malloc(in_plen); in_pgot = 0; }
+                        else {
+                            /* zero-payload message: handle now (the compositor
+                             * sends INVALIDATE with no payload; it was dropped) */
+                            if (in_type == IPC_INVALIDATE && g_n_tabs > 0)
+                                g_tabs[g_active].dirty = true;
+                            in_got = 0;
+                        }
                     }
                 } else if (in_plen > 0 && in_pgot < in_plen) {
                     uint32_t need = in_plen - in_pgot;
@@ -1144,28 +1261,41 @@ int main(void) {
                                     key_to_pty(at, key);
                                 }
                             }
-                        } else if (in_type == IPC_INPUT_MOUSE && in_plen >= 10) {
+                        } else if (in_type == IPC_INPUT_MOUSE && in_plen >= 10 && in_pld) {
                             int32_t rx, ry; uint8_t btns; int8_t wheel;
                             memcpy(&rx, in_pld, 4); memcpy(&ry, in_pld+4, 4);
                             btns  = in_pld[8];
                             wheel = (int8_t)in_pld[9];
 
-                            if (ry < TAB_BAR_H) {
+                            /* Track cursor for tab-bar hover feedback */
+                            g_mouse_x = rx; g_mouse_y = ry;
+
+                            if (ry >= TITLE_H && ry < CONTENT_Y) {
                                 handle_tabbar_click(rx, ry, btns);
+                                /* Repaint so hover state on +/×/A-/A+ updates */
                                 for (int i = 0; i < g_n_tabs; i++) g_tabs[i].dirty = true;
-                            } else if (wheel != 0 && at) {
-                                at->sb_off += wheel * 3;
-                                if (at->sb_off < 0) at->sb_off = 0;
-                                if (at->sb_off > at->sb_n) at->sb_off = at->sb_n;
-                                at->dirty = true;
+                                g_in_tabbar = true;
+                            } else {
+                                /* Just left the tab bar — repaint once to clear hover */
+                                if (g_in_tabbar) {
+                                    for (int i = 0; i < g_n_tabs; i++) g_tabs[i].dirty = true;
+                                    g_in_tabbar = false;
+                                }
+                                if (wheel != 0 && at) {
+                                    at->sb_off += wheel * 3;
+                                    if (at->sb_off < 0) at->sb_off = 0;
+                                    if (at->sb_off > at->sb_n) at->sb_off = at->sb_n;
+                                    at->dirty = true;
+                                }
                             }
                             g_prev_btns = btns;
                         } else if (in_type == IPC_CLIP_DATA && in_plen > 0 && at && at->pty >= 0) {
                             if (in_pld) write(at->pty, in_pld, in_plen);
-                        } else if (in_type == IPC_WIN_RESIZE && in_plen >= 4) {
+                        } else if (in_type == IPC_WIN_RESIZE && in_plen >= 4 && in_pld) {
                             uint16_t nw, nh;
                             memcpy(&nw, in_pld, 2); memcpy(&nh, in_pld+2, 2);
-                            resize_to((int)nw, (int)nh);
+                            if (nw <= 16384 && nh <= 16384)
+                                resize_to((int)nw, (int)nh);
                         } else if (in_type == IPC_INVALIDATE) {
                             if (at) at->dirty = true;
                         }
@@ -1203,21 +1333,8 @@ int main(void) {
             }
         }
 
-        /* ── Cursor blink ── */
-        g_tick++;
-        if ((g_tick % 30) == 0) {
-            for (int i = 0; i < g_n_tabs; i++) {
-                if (!g_tabs[i].cur_hide) {
-                    g_tabs[i].cur_vis = !g_tabs[i].cur_vis;
-                    if (i == g_active) g_tabs[i].dirty = true;
-                }
-            }
-        }
-
-        /* ── Redraw if any active tab is dirty ── */
+        /* ── Redraw if any tab is dirty (titles show in the tab bar) ── */
         bool need_render = false;
-        if (g_n_tabs > 0 && g_tabs[g_active].dirty) need_render = true;
-        /* Also redraw if any tab changed (title etc.) */
         for (int i = 0; i < g_n_tabs; i++) if (g_tabs[i].dirty) { need_render = true; break; }
 
         if (need_render && g_fb) {
