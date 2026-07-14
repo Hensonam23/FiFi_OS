@@ -217,6 +217,12 @@ echo "[initramfs] building fifi-appstore..."
     echo "[initramfs] included fifi-appstore"
 } || echo "[initramfs] WARNING: fifi-appstore build failed"
 
+echo "[initramfs] building fifi-aichat..."
+(cd "$REPO_ROOT/fifi/apps/aichat" && make -s) && {
+    cp "$REPO_ROOT/fifi/apps/aichat/fifi-aichat" "$STAGE/bin/"
+    echo "[initramfs] included fifi-aichat"
+} || echo "[initramfs] WARNING: fifi-aichat build failed"
+
 # ── Offline AI runtime (llama.cpp) — the `ai` command / installed model runs on it ──
 # Prebuilt once by scripts/build-llama.sh into build-linux/llama/ (CPU, portable).
 # Optional: if absent the image still builds, but AI models won't run.
@@ -231,6 +237,18 @@ if [ -x "$LLAMA_CLI" ]; then
         [ -f "$dest" ] || cp "$lib" "$dest" 2>/dev/null || true
     done
     echo "[initramfs] included llama-cli ($(du -h "$LLAMA_CLI" | cut -f1))"
+    # Resident server (keeps the model warm across turns; used by fifi-agent and
+    # the GUI AI chat app via fifi-ai-serve, loopback-only).
+    LLAMA_SRV="$REPO_ROOT/build-linux/llama/llama-server"
+    if [ -x "$LLAMA_SRV" ]; then
+        cp "$LLAMA_SRV" "$STAGE/usr/bin/llama-server"; chmod +x "$STAGE/usr/bin/llama-server"
+        ldd "$LLAMA_SRV" 2>/dev/null | grep '=>' | awk '{print $3}' | while read -r lib; do
+            [ -f "$lib" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$lib")"
+            [ -f "$dest" ] || cp "$lib" "$dest" 2>/dev/null || true
+        done
+        echo "[initramfs] included llama-server ($(du -h "$LLAMA_SRV" | cut -f1))"
+    fi
 else
     echo "[initramfs] NOTE: build-linux/llama/llama-cli not found — run scripts/build-llama.sh for offline AI"
 fi
@@ -388,6 +406,22 @@ if [ -d "$FONT_SRC" ]; then
     mkdir -p "$STAGE/usr/share/fifi/fonts"
     cp "$FONT_SRC"/*.psf "$STAGE/usr/share/fifi/fonts/" 2>/dev/null || true
     echo "[initramfs] included fonts from $FONT_SRC"
+fi
+
+# Bundle the C.UTF-8 locale. The image's glibc ships no locale files and has no
+# built-in C.UTF-8, so bash/programs print "setlocale: LC_ALL: cannot change
+# locale (C.UTF-8)". Compile it into the archive the runtime glibc reads (same
+# glibc as the host, so the archive is compatible). Without this the terminal
+# shows a locale warning at every prompt.
+if command -v localedef >/dev/null 2>&1; then
+    mkdir -p "$STAGE/usr/lib/locale"
+    if localedef --prefix="$STAGE" -i C -f UTF-8 C.UTF-8 2>/dev/null; then
+        echo "[initramfs] generated C.UTF-8 locale ($(du -h "$STAGE/usr/lib/locale/locale-archive" 2>/dev/null | cut -f1))"
+    else
+        echo "[initramfs] WARNING: localedef failed — terminal may warn about locale"
+    fi
+else
+    echo "[initramfs] WARNING: localedef not found — terminal may warn about locale"
 fi
 
 # Scalable TTF/OTF fonts for the Settings font picker. gui_font_scan() reads

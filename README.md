@@ -82,7 +82,7 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 
 ## Current State
 
-**Phase 5 complete. Phase 6 (Full System) in progress.**
+**Beta 1.0 — Phases 5 and 6 (Full System) complete, followed by a full-codebase audit + optimization pass.**
 
 FiFi desktop runs on Linux with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 app support (Steam, browsers), WiFi via wpa_supplicant + iwd, and a full security suite in the Security Center.
 
@@ -193,13 +193,18 @@ USB flashing signs the EFI binaries with your Secure Boot key and exports the ce
 - [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
 - [x] OS update command: `update` copies new kernel+initramfs from USB without reinstalling
 - [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
-- [ ] Bluetooth: pairing UI, A2DP audio via PipeWire
-- [ ] Browser: Firefox or LibreWolf in a FiFi window (user chooses at install time)
-- [ ] LibreOffice: installed by default during installation
-- [ ] Desktop shortcuts, image viewer
-- [ ] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
-- [ ] Desktop themes: optional theme system with selectable styles
-- [ ] Built-in AI assistant: local model (Ollama/llama.cpp), no internet required, completely offline
+- [x] Bluetooth: dbus + bluetoothd autostart at boot, pairing via `bt`/bluetoothctl, A2DP audio via PipeWire bluez5
+- [x] Browser: LibreWolf in a FiFi window (chrome-text rendering and typing fixed)
+- [x] LibreOffice: installed by default during installation
+- [x] Desktop shortcuts, image viewer
+- [x] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
+- [x] Desktop themes: optional theme system with selectable styles
+- [x] Built-in AI assistant: local model (llama.cpp), no internet required, completely offline — `ai`/`fifi-ai` chat, `fifi-agent` agentic mode, resident llama-server via `fifi-ai-serve`
+- [x] AI chat app: windowed "FiFi AI" GUI client for the offline model, in the launcher
+- [x] Unified Settings: single tabbed hub (Personalize, Wi-Fi, Network, System, Security, About) with a theme/wallpaper personalization tab; `fifi-settings <tab>` deep-links
+- [x] Modernized desktop: accent-themed titlebars/dock/launcher/menus, rounded corners, glass, centered dock
+- [x] Live trial: "Try FiFi OS (Live)" boot entry; LibreWolf + LibreOffice auto-provision on first boot
+- [x] Full-codebase audit + optimization pass: correctness bugs fixed (integer-overflow heap writes, use-after-free, resource leaks), dead code and redundant comments removed, across the compositor and every app
 
 ### v1.0
 
@@ -283,9 +288,9 @@ FiFi OS is built with three equal priorities: gaming performance, security, and 
 
 ---
 
-## Built-in AI (coming later)
+## Built-in AI
 
-The plan is a local AI assistant with no cloud, no account, and no data leaving the machine. It runs a small language model (via llama.cpp) entirely on your hardware. Useful for help with the terminal, writing, and security analysis. Completely optional and completely offline.
+A local AI assistant with no cloud, no account, and no data leaving the machine. It runs a small language model (via llama.cpp) entirely on your hardware. Useful for help with the terminal, writing, and security analysis. Completely optional and completely offline. Chat from the terminal with `ai` or `fifi-ai`, run the agentic mode with `fifi-agent`, or keep a resident model loaded with `fifi-ai-serve`.
 
 ---
 

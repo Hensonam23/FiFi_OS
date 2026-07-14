@@ -1116,7 +1116,7 @@ if (streq_simple(argv[0], "clear") || streq_simple(argv[0], "cls")) {
     }
 
     if (streq_simple(argv[0], "version")) {
-        kprintf("FiFi OS Alpha v5.0 build %s %s\n", __DATE__, __TIME__);
+        kprintf("FiFi OS Beta 1.0 build %s %s\n", __DATE__, __TIME__);
         return;
     }
 
