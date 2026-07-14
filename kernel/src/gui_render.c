@@ -3,13 +3,13 @@
 /* ── Status bar (top strip, 0..STATUS_H-1) ───────────────────────────── */
 
 void draw_status_bar(void) {
+    /* No status bar when disabled — the desktop simply extends over the strip. */
+    if (!g_theme.statusbar) return;
+
     uint64_t fb_w = console_fb_width();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint32_t bar_bg = 0x0008101cu;
-
-    /* No status bar when disabled — the desktop simply extends over the strip. */
-    if (!g_theme.statusbar) return;
 
     /* Status bar sits at the top, or at the bottom when the panel is on top. */
     uint64_t sby  = statusbar_y();
@@ -77,7 +77,6 @@ void draw_status_bar(void) {
 
     /* Right side: clock | mem | uptime */
     uint32_t info_col = 0x00506878u;
-    /* clk_len was set when building clk[] above */
     uint64_t mem_len  = (uint64_t)gui_strlen(membuf);
     uint64_t up_len   = (uint64_t)gui_strlen(up);
     uint64_t right_w  = (clk_len + 3u + mem_len + 3u + up_len) * fw + 12u;
@@ -350,7 +349,6 @@ int desk_icon_at(int mx, int my) {
 
 void draw_desktop_info(void) {
     if (!g_theme.desktop_info) return;
-    uint64_t fbw  = console_fb_width();
     uint64_t dbot = desk_bot();
     uint64_t dt   = desk_top();
     uint64_t fw   = console_font_width();
@@ -396,7 +394,7 @@ void draw_desktop_info(void) {
     const char *kern_str = (platform_kernel_str && platform_kernel_str())
                          ? platform_kernel_str() : "freestanding";
     struct { const char *key; const char *val; } rows[] = {
-        { "OS",       "FiFi OS Alpha v5.0" },
+        { "OS",       "FiFi OS Beta 1.0"   },
         { "Arch",     "x86_64"             },
         { "Kernel",   kern_str             },
         { "Memory",   mem_str              },
@@ -437,7 +435,7 @@ void draw_desktop_info(void) {
     gui_draw_str(tx, ty2, "FiFi OS", g_theme.accent, panel_bg);
     /* version dim text */
     uint64_t ver_x = tx + 8u * fw;
-    gui_draw_str(ver_x, ty2, "Alpha v5.0", 0x00384858u, panel_bg);
+    gui_draw_str(ver_x, ty2, "Beta 1.0", 0x00384858u, panel_bg);
 
     /* Separator */
     console_fill_rect(px + 4u, ty2 + fh + 2u, panel_w - 8u, 1u, 0x00182838u);
@@ -450,7 +448,6 @@ void draw_desktop_info(void) {
         gui_draw_str(vx, ry2, rows[i].val, 0x0090a8bcu, panel_bg);
         ry2 += row_h2;
     }
-    (void)fbw;
 }
 
 /* ── Desktop background — wallpaper presets ──────────────────────────── */
@@ -459,8 +456,8 @@ void draw_desktop_info(void) {
  * old flat blue: a touch brighter at the top and noticeably deeper at the
  * bottom gives the desktop real depth. Shared so corner-rounding can sample the
  * exact backdrop colour instead of guessing. */
-#define WALL_GRAD_TOP  0x00213f69u
-#define WALL_GRAD_BOT  0x000d1626u
+#define WALL_GRAD_TOP  0x00294a8fu
+#define WALL_GRAD_BOT  0x00070a14u
 
 /* Wallpaper colour at absolute row y — used by window corner rounding so the
  * punched-out corners reveal the true backdrop for any wallpaper/palette. For
@@ -539,11 +536,18 @@ void draw_desktop_bg(void) {
             uint32_t base = (uint32_t)((r2 << 16) | (g2 << 8) | b2);
             console_fill_rect(0, dt + y, fb_w, 1u, base);
         }
-        /* Diagonal stripes overlay */
+        /* Diagonal stripes overlay — coalesced into horizontal runs so each
+         * lit band is a single fill_rect instead of per-pixel 1x1 fills (the
+         * old form issued fb_w*dav fill calls every frame). The stripe test
+         * ((x+y)/6)%4==0 is constant across runs of up to 6 pixels. */
         for (uint64_t y = 0; y < dav; y++) {
-            for (uint64_t x = 0; x < fb_w; x++) {
-                if (((x + y) / 6u) % 4u == 0u)
-                    console_fill_rect(x, dt + y, 1u, 1u, 0x00181828u);
+            uint64_t x = 0;
+            while (x < fb_w) {
+                bool on = (((x + y) / 6u) % 4u == 0u);
+                uint64_t x2 = x;
+                while (x2 < fb_w && ((((x2 + y) / 6u) % 4u == 0u) == on)) x2++;
+                if (on) console_fill_rect(x, dt + y, x2 - x, 1u, 0x00181828u);
+                x = x2;
             }
         }
         break;
@@ -626,11 +630,9 @@ void full_redraw(void) {
         s_last_src = g_redraw_src;
     }
 #endif
-    uint64_t fb_w = console_fb_width();
     draw_desktop_bg();
     draw_status_bar();
     bool suppress_term = false;
-    /* (Window drop shadows removed by design — flat windows, no shadow.) */
     /* Snap-to-half preview: draw before windows so the dragged window appears on top */
     if (g_snap_preview && g_dragging) {
         uint64_t dl = desk_left(), dw = desk_availw();
@@ -736,46 +738,7 @@ void full_redraw(void) {
             console_set_viewport(0, 0, 0, 0);
     }
     taskbar_draw();
-    if (g_launcher_open)
-        launcher_draw();
-    if (g_vol_popup_open)
-        vol_popup_draw();
-    if (g_cal_popup_open)
-        cal_popup_draw();
-    if (g_tray_hover >= 0)
-        tray_tip_draw();
-    if (g_ctx_open)
-        ctx_draw();
-    if (g_fb_ctx_open)
-        fb_ctx_draw();
-    if (g_txt_ctx_open)
-        txt_ctx_draw();
-    if (g_icon_ctx_open)
-        icon_ctx_draw();
-    if (g_icon_props_open)
-        icon_props_draw();
-
-    /* Toast notification overlay */
-    if (g_toast_ticks > 0 && g_toast_msg[0]) {
-        uint64_t fw = console_font_width();
-        uint64_t fh = console_font_height();
-        uint64_t th = fh + 10u;
-        uint64_t ty = desk_bot() - th - 8u;
-        uint64_t tlen = (uint64_t)gui_strlen(g_toast_msg);
-        uint64_t tw   = tlen * fw + 24u;
-        uint64_t tx   = (fb_w > tw) ? (fb_w - tw) / 2u : 0u;
-        uint32_t tbg  = 0x000e1622u;
-        console_fill_rect(tx,     ty,     tw, th, tbg);
-        console_fill_rect(tx,     ty,     tw, 1u, 0x00283448u);
-        console_fill_rect(tx,     ty+th-1,tw, 1u, 0x00283448u);
-        console_fill_rect(tx,     ty,     1u, th, 0x00283448u);
-        console_fill_rect(tx+tw-1,ty,     1u, th, 0x00283448u);
-        console_fill_rect(tx+1u, ty+1u, 3u, th-2u, g_toast_color);
-        gui_draw_str(tx + 12u, ty + (th - fh) / 2u, g_toast_msg, g_toast_color, tbg);
-    }
-
-    if (g_help_open)
-        help_draw();
+    gui_draw_popups();   /* same overlay set main.c redraws above IPC windows */
 }
 
 /* ── Keyboard-shortcuts overlay (Super+/) ─────────────────────────────── */

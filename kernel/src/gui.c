@@ -1,6 +1,7 @@
 #include "gui_internal.h"
 #ifdef __linux__
 #include "font_ttf.h"   /* ttf_family_name for the font scanner */
+#include <sys/stat.h>   /* stat() for the live settings-config watch */
 #endif
 
 /* Forward declarations for public API functions used inside gui_on_tick */
@@ -16,12 +17,20 @@ void gui_term_scroll_page(int dir);
 /* ── Global variable definitions ─────────────────────────────────────── */
 
 gui_theme_t g_theme = {
-    0x003060c0u, WALLPAPER_GRADIENT, true, true, true, true, 0,
-    /* panel: bottom edge, left-aligned, always visible, base thickness */
-    PANEL_BOTTOM, PALIGN_START, false, 0,
-    /* effects: frosted glass panels ON, window shadows ON, 5px corners */
-    true, true, 5,
+    0x00409cffu, WALLPAPER_GRADIENT, true, true, true, true, 0,
+    /* panel: bottom edge, centered (modern dock), always visible, base thickness */
+    PANEL_BOTTOM, PALIGN_CENTER, false, 0,
+    /* dock_float ON: detached, rounded, floating dock over the wallpaper (next-gen default) */
+    true,
+    /* effects: frosted glass panels ON, window shadows ON, 9px corners */
+    true, true, 9,
 };
+
+/* Theme accessors for translation units that don't include gui_internal.h
+ * (e.g. the Wayland/XWayland platform layer), so the SSD chrome can thread the
+ * user's accent colour + honour the glass toggle like the built-in windows. */
+uint32_t gui_theme_accent(void) { return g_theme.accent; }
+int      gui_theme_glass(void)  { return g_theme.fx_glass ? 1 : 0; }
 
 uint32_t *g_wall_img   = NULL;
 uint32_t  g_wall_img_w = 0;
@@ -352,6 +361,20 @@ const char * const g_launcher_items[LAUNCHER_ITEMS] = {
     "Shutdown",
 };
 
+/* ── Desktop context menu model (hover + keyboard nav + clicks) ──────────
+ * NULL entries are separators. Must match the labels drawn by ctx_draw()
+ * in gui_widgets.c. */
+static const char *k_ctx_items[CTX_ITEMS] = {
+    "Terminal", "Files", "Settings", "Viewer",
+    NULL, "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
+    NULL, "Lock Screen", "Show Desktop",
+};
+/* Spawn paths for context-menu items 5..9. */
+static const char *k_ctx_spawn[] = {
+    "/bin/fifi-filebrowser", "/bin/fifi-sysmon",
+    "/bin/fifi-netmon", "/bin/fifi-terminal", "/bin/fifi-editor",
+};
+
 
 
 /* Map a launcher item index to the standalone binary that implements it, or
@@ -422,24 +445,29 @@ uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my) {
  * theme/customizations there and reload them at startup. */
 #ifdef __linux__
 #define FIFI_SETTINGS_PATH "/fifi-data/fifi-settings.conf"
+/* mtime of the config as of the last load, so the live watch below only reloads
+ * on an actual change (and detects the file first appearing on a live boot). */
+static long g_settings_mtime = -1;
 void gui_settings_save(void) {
     FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
     if (!f) return;
     fprintf(f, "accent=%u\nwallpaper=%d\nclock_12h=%d\nanimations=%d\n"
                "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
                "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
-               "fx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
+               "dock_float=%d\nfx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
                "font_file=%s\nfont_px=%d\n",
             (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.clock_12h,
             (int)g_theme.animations, (int)g_theme.statusbar,
             (int)g_theme.desktop_info, (int)g_theme.utc_offset,
             (int)g_theme.panel_edge, (int)g_theme.panel_align,
             (int)g_theme.panel_autohide, (int)g_theme.panel_size,
+            (int)g_theme.dock_float,
             (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius,
             (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px);
     fclose(f);
 }
 void gui_settings_load(void) {
+    { struct stat st; if (stat(FIFI_SETTINGS_PATH, &st) == 0) g_settings_mtime = (long)st.st_mtime; }
     FILE *f = fopen(FIFI_SETTINGS_PATH, "r");
     if (!f) return;
     char line[128];
@@ -456,6 +484,7 @@ void gui_settings_load(void) {
         else if (sscanf(line, "panel_align=%d", &v) == 1)   { if (v >= 0 && v <= 2) g_theme.panel_align = (uint8_t)v; }
         else if (sscanf(line, "panel_autohide=%d", &v) == 1) g_theme.panel_autohide = (v != 0);
         else if (sscanf(line, "panel_size=%d", &v) == 1)    { if (v >= 0 && v <= 64) g_theme.panel_size = (uint8_t)v; }
+        else if (sscanf(line, "dock_float=%d", &v) == 1)    g_theme.dock_float = (v != 0);
         else if (sscanf(line, "fx_glass=%d", &v) == 1)      g_theme.fx_glass = (v != 0);
         else if (sscanf(line, "fx_shadows=%d", &v) == 1)    g_theme.fx_shadows = (v != 0);
         else if (sscanf(line, "corner_radius=%d", &v) == 1) { if (v >= 0 && v <= 12) g_theme.corner_radius = (uint8_t)v; }
@@ -467,6 +496,21 @@ void gui_settings_load(void) {
         else if (sscanf(line, "font_px=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
     }
     fclose(f);
+}
+
+/* Live-apply the Settings app's Personalize changes WITHOUT a reboot. The
+ * standalone Settings app writes FIFI_SETTINGS_PATH; the compositor used to read
+ * it only at startup, so on the live USB (where /fifi-data is tmpfs and wiped on
+ * reboot) personalization never took effect. Called on a throttle from
+ * gui_on_tick: when the file's mtime changes (a save, or the file first
+ * appearing on a live boot), reload the theme and repaint. */
+void gui_settings_poll_reload(void) {
+    struct stat st;
+    if (stat(FIFI_SETTINGS_PATH, &st) != 0) return;
+    if ((long)st.st_mtime == g_settings_mtime) return;
+    gui_settings_load();          /* re-reads keys into g_theme + updates g_settings_mtime */
+    extern void full_redraw(void);
+    full_redraw();
 }
 
 /* ── Desktop shortcut persistence ────────────────────────────────────────
@@ -710,10 +754,16 @@ static void desk_icon_launch(int idx, bool force) {
 
 void gui_on_tick(void) {
     g_gui_tick++;
+
 #ifdef __linux__
-    struct timespec _st0, _stA, _stB, _stC;
-    clock_gettime(CLOCK_MONOTONIC, &_st0);
-#define _SUB_MS(a,b) (((b).tv_sec-(a).tv_sec)*1000L+((b).tv_nsec-(a).tv_nsec)/1000000L)
+    /* Live-apply Personalize changes + re-read the hardware volume the Settings
+     * app may have changed, so the taskbar stays in sync (~2x/sec). */
+    if ((g_gui_tick % 30u) == 0u) {
+        extern void gui_settings_poll_reload(void);
+        __attribute__((weak)) void hda_refresh_volume(void);
+        gui_settings_poll_reload();
+        if (hda_refresh_volume) hda_refresh_volume();
+    }
 #endif
 
     /* ── Once-per-second: redraw status bar and live settings if open ── */
@@ -921,7 +971,6 @@ void gui_on_tick(void) {
     }
     /* "in the panel strip", edge-aware and (when auto-hiding) only while shown. */
     bool in_panel = (!g_theme.panel_autohide || g_panel_revealed) && in_strip;
-    (void)ty_end;
 
     /* ── Taskbar favorite drag-to-reorder / click-to-launch ──────────────
      * A left-press on a favorite records it (g_fav_drag_idx) and defers the
@@ -1209,25 +1258,20 @@ void gui_on_tick(void) {
 
     /* ── Context menu hover tracking ── */
     if (g_ctx_open) {
-        static const char *_ci_arr[CTX_ITEMS] = {
-            "Terminal", "Files", "Settings", "Viewer",
-            NULL, "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
-            NULL, "Lock Screen", "Show Desktop",
-        };
         uint64_t ctx_x = (uint64_t)g_ctx_x;
         uint64_t ctx_y = (uint64_t)g_ctx_y;
         uint64_t tot_h = 2u;
         for (int _k = 0; _k < (int)CTX_ITEMS; _k++)
-            tot_h += _ci_arr[_k] ? CTX_ITEM_H : 8u;
+            tot_h += k_ctx_items[_k] ? CTX_ITEM_H : 8u;
         int new_chov = -1;
         if ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + ctx_w() &&
             (uint64_t)my >= ctx_y + 1u && (uint64_t)my < ctx_y + tot_h) {
             uint64_t dy = (uint64_t)my - (ctx_y + 1u);
             uint64_t yoff = 0;
             for (int _k = 0; _k < (int)CTX_ITEMS; _k++) {
-                uint64_t item_h = _ci_arr[_k] ? CTX_ITEM_H : 8u;
+                uint64_t item_h = k_ctx_items[_k] ? CTX_ITEM_H : 8u;
                 if (dy < yoff + item_h) {
-                    if (_ci_arr[_k]) new_chov = _k;
+                    if (k_ctx_items[_k]) new_chov = _k;
                     break;
                 }
                 yoff += item_h;
@@ -1272,10 +1316,6 @@ void gui_on_tick(void) {
     }
 
 
-#ifdef __linux__
-    clock_gettime(CLOCK_MONOTONIC, &_stA);
-#endif
-
     /* ── Keyboard capture + input for focused non-terminal window ── */
     {
         /* Find frontmost non-terminal visible window using z-order */
@@ -1307,35 +1347,16 @@ void gui_on_tick(void) {
             bool changed = false;
             bool closed  = false;
             while ((ch = keyboard_gui_try_getchar()) != -1) {
-                /* ── F1-F4: toggle Terminal / Files / Settings / Viewer ── */
+                /* ── F1-F4: launch Terminal / Files / Settings / Viewer ──
+                 * These spawn the standalone apps (same as the launcher, taskbar
+                 * and desktop shortcuts) so there is NO path left to the legacy
+                 * built-in windows — the tabbed /bin/fifi-terminal is the only
+                 * terminal the user can ever reach. */
                 if ((uint8_t)ch >= KEY_F1 && (uint8_t)ch <= KEY_F4) {
                     int slot = (uint8_t)ch - KEY_F1;
-                    if (slot < MAX_WINS && (slot < 3 || g_wins[3].active)) {
-                        window_t *fw = &g_wins[slot];
-                        if (fw->state == WIN_HIDDEN) {
-                            raise_win(slot);
-                            win_show(fw, slot);
-                        } else {
-                            /* Toggle behaviour: if this window is the GLOBALLY topmost
-                             * window, hide it; otherwise bring it to the front. "Globally
-                             * topmost" compares raise_z across every built-in AND IPC window. */
-                            extern uint32_t ipc_topmost_z(void);
-                            uint32_t my_z = g_wins[slot].raise_z;
-                            uint32_t top = ipc_topmost_z();
-                            for (int _j = 0; _j < MAX_WINS; _j++) {
-                                window_t *_ow = &g_wins[_j];
-                                if (!_ow->active || _ow->state == WIN_HIDDEN || _ow->anim_phase == ANIM_CLOSE) continue;
-                                if (_ow->raise_z > top) top = _ow->raise_z;
-                            }
-                            if (my_z >= top) {
-                                win_hide(fw, slot);
-                            } else {
-                                raise_win(slot);
-                                full_redraw();
-                                full_redraw();
-                            }
-                        }
-                    }
+                    const char *p = gui_launcher_app_path(slot);
+                    __attribute__((weak)) void gui_spawn_app(const char *path);
+                    if (p && gui_spawn_app) gui_spawn_app(p);
                     continue;
                 }
                 /* ── F5: launch Sys Monitor; F6: launch Net Monitor ── */
@@ -1459,15 +1480,8 @@ void gui_on_tick(void) {
                             raise_win(_ci);
                             if (_cw->state == WIN_HIDDEN) win_show(_cw, _ci); else full_redraw();
                         } else if (_ci >= 5 && _ci <= 9) {
-                            static const char *_cc[] = {
-                                "/bin/fifi-filebrowser",
-                                "/bin/fifi-sysmon",
-                                "/bin/fifi-netmon",
-                                "/bin/fifi-terminal",
-                                "/bin/fifi-editor",
-                            };
                             __attribute__((weak)) void gui_spawn_app(const char *path);
-                            if (gui_spawn_app) gui_spawn_app(_cc[_ci - 5]);
+                            if (gui_spawn_app) gui_spawn_app(k_ctx_spawn[_ci - 5]);
                             full_redraw();
                         } else if (_ci == 11) {
                             __attribute__((weak)) void compositor_lock(void);
@@ -1569,7 +1583,7 @@ void gui_on_tick(void) {
                         console_set_suppress_draw(g_term_scroll > 0);
                         full_redraw();
                         continue;
-                    } else if (g_term_scroll > 0 && (uint8_t)ch != KEY_PGUP && (uint8_t)ch != KEY_PGDN) {
+                    } else if (g_term_scroll > 0) {
                         /* Any non-scroll key: snap back to live view */
                         g_term_scroll = 0;
                         console_set_suppress_draw(false);
@@ -1852,7 +1866,6 @@ void gui_on_tick(void) {
                                 focused->fb.input_len        = elen;
                                 focused->fb.input_cursor     = elen;
                                 /* Remember original name for vfs_rename */
-                                /* Remember original name for vfs_rename */
                                 for (int _k = 0; _k <= elen; _k++)
                                     focused->fb.input_orig[_k] = focused->fb.input_buf[_k];
                                 changed = true;
@@ -2054,7 +2067,9 @@ void gui_on_tick(void) {
                             /* List directory and find matches */
                             static char _lbuf[2048];
                             size_t _lsz = vfs_listdir(_dir, _lbuf, sizeof(_lbuf));
-                            (void)_lsz;
+                            /* Terminate at the returned size: a failed/empty listing must
+                             * not expose stale contents from a previous completion. */
+                            _lbuf[_lsz < sizeof(_lbuf) - 1u ? _lsz : sizeof(_lbuf) - 1u] = '\0';
                             int _pfxlen = 0; while (_pfx[_pfxlen]) _pfxlen++;
                             /* Collect up to 16 matches */
                             const char *_matches[16]; int _nm = 0;
@@ -2352,7 +2367,6 @@ void gui_on_tick(void) {
                         } else if (ch == 15) { /* Ctrl+O: open file by path */
                             ts->undo_in_group = false;
                             ts->srch_active    = false;
-                            ts->save_as_active = false;
                             ts->save_as_active = false;
                             ts->open_bar_active = true;
                             ts->open_bar_len    = 0;
@@ -2854,7 +2868,6 @@ void gui_on_tick(void) {
                             }
                             changed = true;
                         } else if (ch == KEY_HOME) {
-                        } else if (ch == KEY_HOME) {
                             ts->scroll   = 0;
                             ts->h_scroll = 0;
                             changed = true;
@@ -2927,9 +2940,6 @@ void gui_on_tick(void) {
             }
         }
     }
-#ifdef __linux__
-    clock_gettime(CLOCK_MONOTONIC, &_stB);
-#endif
 
     /* ── Mouse scroll wheel ── */
     {
@@ -3021,7 +3031,7 @@ void gui_on_tick(void) {
             uint64_t ly = vpanel_logo_y();
             on_logo = ((uint64_t)my >= ly && (uint64_t)my < ly + (TASKBAR_H - 6u));
         } else {
-            on_logo = (mx >= (int32_t)LOGO_X && mx < (int32_t)(LOGO_X + logo_eff_w()));
+            on_logo = (mx >= (int32_t)logo_x() && mx < (int32_t)(logo_x() + logo_eff_w()));
         }
         if (on_logo) {
             g_vol_popup_open = false;
@@ -3091,10 +3101,15 @@ void gui_on_tick(void) {
             if (fav_i >= 0) {
                 int bslot = favbar_builtin_slot(fav_i);
                 if (bslot >= 0) {
-                    window_t *w = &g_wins[bslot];
-                    if (w->state == WIN_HIDDEN)      { raise_win(bslot); win_show(w, bslot); }
-                    else if (g_z[MAX_WINS - 1] == bslot) win_hide(w, bslot);
-                    else                             { raise_win(bslot); full_redraw(); }
+                    /* Built-in favbar entries now launch the STANDALONE app
+                     * (/bin/fifi-terminal, /bin/fifi-settings, ...) — the current
+                     * versions — instead of the compositor's legacy built-in
+                     * window. */
+                    extern void gui_spawn_app(const char *path);
+                    extern const char *favbar_builtin_exec(int idx);
+                    const char *p = favbar_builtin_exec(fav_i);
+                    if (gui_spawn_app && p) gui_spawn_app(p);
+                    full_redraw();
                 } else {
                     g_fav_drag_idx    = fav_i;
                     g_fav_press_x     = mx;
@@ -3603,17 +3618,12 @@ void gui_on_tick(void) {
 
     /* ── Context menu clicks ── */
     if (btn_pressed && g_ctx_open) {
-        static const char *_ctx_a[CTX_ITEMS] = {
-            "Terminal", "Files", "Settings", "Viewer",
-            NULL, "File Browser", "Sys Monitor", "Net Monitor", "New Term", "Editor",
-            NULL, "Lock Screen", "Show Desktop",
-        };
         int32_t cx, cy;
         uint64_t ctx_x = (uint64_t)g_ctx_x;
         uint64_t ctx_y = (uint64_t)g_ctx_y;
         uint64_t total_h = 2u;
         for (int _k = 0; _k < (int)CTX_ITEMS; _k++)
-            total_h += _ctx_a[_k] ? CTX_ITEM_H : 8u;
+            total_h += k_ctx_items[_k] ? CTX_ITEM_H : 8u;
         bool inside = ((uint64_t)mx >= ctx_x && (uint64_t)mx < ctx_x + ctx_w() &&
                        (uint64_t)my >= ctx_y + 1u &&
                        (uint64_t)my < ctx_y + total_h);
@@ -3623,22 +3633,21 @@ void gui_on_tick(void) {
             int item = -1;
             uint64_t yoff = 0;
             for (int _k = 0; _k < (int)CTX_ITEMS; _k++) {
-                uint64_t ih = _ctx_a[_k] ? CTX_ITEM_H : 8u;
-                if (dy < yoff + ih) { if (_ctx_a[_k]) item = _k; break; }
+                uint64_t ih = k_ctx_items[_k] ? CTX_ITEM_H : 8u;
+                if (dy < yoff + ih) { if (k_ctx_items[_k]) item = _k; break; }
                 yoff += ih;
             }
             if (item >= 0 && item < 4) {
-                window_t *w = &g_wins[item];
-                raise_win(item);
-                if (w->state == WIN_HIDDEN) win_show(w, item);
-                else full_redraw();
-            } else if (item >= 5 && item <= 9) {
-                static const char *_cp[] = {
-                    "/bin/fifi-filebrowser", "/bin/fifi-sysmon",
-                    "/bin/fifi-netmon", "/bin/fifi-terminal", "/bin/fifi-editor"
-                };
+                /* Spawn the standalone app (tabbed terminal, tabbed settings, …)
+                 * rather than the legacy built-in window — same as every other
+                 * launch path, so no route reaches the old built-ins. */
+                const char *p = gui_launcher_app_path(item);
                 __attribute__((weak)) void gui_spawn_app(const char *path);
-                if (gui_spawn_app) gui_spawn_app(_cp[item - 5]);
+                if (p && gui_spawn_app) gui_spawn_app(p);
+                full_redraw();
+            } else if (item >= 5 && item <= 9) {
+                __attribute__((weak)) void gui_spawn_app(const char *path);
+                if (gui_spawn_app) gui_spawn_app(k_ctx_spawn[item - 5]);
                 full_redraw();
             } else if (item == 11) {
                 __attribute__((weak)) void compositor_lock(void);
@@ -4042,7 +4051,6 @@ void gui_on_tick(void) {
                             } else {
                                 /* Track click: jump */
                                 int ns = max_sc_t - (int)(((uint64_t)my - tcy) * (uint64_t)max_sc_t / sb_h_t);
-                                if (ns < 0) ns = 0;
                                 if (ns < 0) ns = 0;
                                 if (ns > max_sc_t) ns = max_sc_t;
                                 g_term_scroll = ns;
@@ -4695,9 +4703,6 @@ void gui_on_tick(void) {
         int32_t cx, cy;
         mouse_consume_click(&cx, &cy);
     }
-#ifdef __linux__
-    clock_gettime(CLOCK_MONOTONIC, &_stC);
-#endif
 
     /* ── Inertial scroll tick ── */
     bool inertial_dirty = false;
@@ -4870,19 +4875,6 @@ void gui_on_tick(void) {
             }
         }
     }
-
-#ifdef __linux__
-    {
-        long _ms_hover = _SUB_MS(_st0, _stA);
-        long _ms_kbd   = _SUB_MS(_stA, _stB);
-        long _ms_click = _SUB_MS(_stB, _stC);
-        long _ms_max   = _ms_hover > _ms_kbd ? _ms_hover : _ms_kbd;
-        if (_ms_click > _ms_max) _ms_max = _ms_click;
-        (void)_ms_max;
-    }
-#undef _SUB_MS
-#endif
-
 }
 
 /* ── Public helpers callable from platform code ─────────────────────────── */

@@ -28,6 +28,10 @@ int favbar_count(void) { return FAVBAR_BUILTINS + g_fav_count; }
 int favbar_builtin_slot(int idx) {
     return (idx >= 0 && idx < FAVBAR_BUILTINS) ? g_fav_builtin[idx].slot : -1;
 }
+/* Exec path for a built-in favbar entry — the standalone app it launches. */
+const char *favbar_builtin_exec(int idx) {
+    return (idx >= 0 && idx < FAVBAR_BUILTINS) ? g_fav_builtin[idx].icon : (const char *)0;
+}
 
 uint64_t fav_btn_w(void)     { return TASKBAR_H; }                 /* square icon button */
 uint64_t favbar_w(void) {
@@ -37,10 +41,8 @@ uint64_t favbar_w(void) {
  * panel_align on a horizontal panel: START = left after the logo (Windows),
  * CENTER = the favorites+pills run centered on screen (macOS dock), END =
  * right-justified before the tray. Everything (draw + hit) derives from this. */
-uint64_t favbar_start_x(void) {
-    uint64_t base = LOGO_X + logo_eff_w() + 8u;
-    if (g_theme.panel_align == PALIGN_START || panel_is_vertical()) return base;
-    /* run = favorites + open window pills */
+/* Width of the app-dock run: favorites + open-window pills (no logo/tray). */
+uint64_t favbar_run_w(void) {
     int npill = 0;
     __attribute__((weak)) int ipc_window_count(void);
     if (ipc_window_count) { int n = ipc_window_count(); npill += n < 8 ? n : 8; }
@@ -48,7 +50,30 @@ uint64_t favbar_start_x(void) {
     __attribute__((weak)) int wayland_toplevel_count(void);
     if (wayland_toplevel_count) npill += wayland_toplevel_count();
 #endif
-    uint64_t run  = favbar_w() + (uint64_t)npill * (taskbtn_w() + TASKBTN_GAP);
+    return favbar_w() + (uint64_t)npill * (taskbtn_w() + TASKBTN_GAP);
+}
+
+/* Launcher (logo) left X. For a CENTERED dock the launcher is the first item of
+ * the centered group (logo + favorites + pills), so it moves with the rest of
+ * the dock instead of staying pinned to the left edge. Otherwise it hugs the
+ * left edge as usual. */
+uint64_t logo_x(void) {
+    if (panel_is_vertical() || g_theme.panel_align != PALIGN_CENTER) return LOGO_X;
+    uint64_t fb_w  = console_fb_width();
+    uint64_t fw    = console_font_width();
+    uint64_t group = logo_eff_w() + 8u + favbar_run_w();   /* logo + gap + dock run */
+    uint64_t avail_right = g_tray_left_x > LOGO_X ? g_tray_left_x - 8u
+                         : (fb_w > 30u * fw ? fb_w - 30u * fw : LOGO_X);
+    if (avail_right <= LOGO_X) return LOGO_X;
+    uint64_t region = avail_right - LOGO_X;
+    if (group >= region) return LOGO_X;              /* doesn't fit → left-align */
+    return LOGO_X + (region - group) / 2u;
+}
+
+uint64_t favbar_start_x(void) {
+    uint64_t base = LOGO_X + logo_eff_w() + 8u;
+    if (g_theme.panel_align == PALIGN_START || panel_is_vertical()) return base;
+    uint64_t run  = favbar_run_w();   /* favorites + open window pills */
     uint64_t fb_w = console_fb_width();
     /* Right boundary = actual tray left edge (clock/vol/net/battery), captured
      * by the previous tray draw; fall back to a wide reserve on the first frame
@@ -59,8 +84,8 @@ uint64_t favbar_start_x(void) {
     uint64_t region = avail_right - base;
     if (run >= region) return base;                 /* doesn't fit → left-align */
     if (g_theme.panel_align == PALIGN_CENTER) {
-        uint64_t s = base + (region - run) / 2u;
-        return s > base ? s : base;                 /* centered between logo and tray */
+        /* Favorites sit just right of the centered launcher (whole group centers). */
+        return logo_x() + logo_eff_w() + 8u;
     }
     /* PALIGN_END: right-justify against the tray. */
     return avail_right - run;
@@ -123,8 +148,12 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t ph = TASKBAR_H - 6u;
-    uint32_t top = focused ? 0x003f74c8u : hov ? 0x002c3a52u : vis ? 0x00242f44u : 0x001a2232u;
-    uint32_t bot = focused ? 0x002a55a0u : hov ? 0x00202c40u : vis ? 0x001a2434u : 0x00141a28u;
+    /* Focused pill picks up the theme accent (bright→deep gradient); other states
+     * stay in the neutral panel tones. */
+    uint32_t top = focused ? col_scale(g_theme.accent, 210u, 255u)
+                           : hov ? 0x002c3a52u : vis ? 0x00242f44u : 0x001a2232u;
+    uint32_t bot = focused ? col_scale(g_theme.accent, 140u, 255u)
+                           : hov ? 0x00202c40u : vis ? 0x001a2434u : 0x00141a28u;
     console_fill_vgrad(bx, ty + 3u, tbw, ph, top, bot);
     /* corner softening: notch the 4 pill corners back to the bar base */
     uint32_t base = 0x000b0f1au;
@@ -141,7 +170,8 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
         uint64_t uw = focused ? tbw - 8u : tbw / 3u;
         uint64_t ux = bx + (tbw - uw) / 2u;
         console_fill_rect(ux, ty + TASKBAR_H - 3u, uw, 2u,
-                          focused ? 0x0078b4ffu : 0x00446a9cu);
+                          focused ? col_mix(g_theme.accent, 0x00ffffffu, 70u)
+                                  : col_scale(g_theme.accent, 170u, 255u));
     }
     uint64_t llen     = (uint64_t)gui_strlen(lbl);
     uint64_t max_ch   = tbw / fw;
@@ -153,7 +183,6 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
 }
 
 void taskbar_draw_btn(int slot, const char *label) {
-    uint64_t fb_h = console_fb_height();
     uint64_t ty   = panel_y();
     uint64_t tbw  = taskbtn_w();
     uint64_t bx   = taskbtn_start_x() + (uint64_t)slot * (tbw + TASKBTN_GAP);
@@ -170,11 +199,9 @@ void taskbar_draw_btn(int slot, const char *label) {
  *   [HH:MM] [mem bar] */
 void taskbar_draw_tray(void) {
     uint64_t fb_w = console_fb_width();
-    uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
-    uint32_t bg   = COL_TASKBAR;
 
     /* ── Clock ── */
     uint8_t rh = 0, rm = 0, rs = 0;
@@ -215,7 +242,6 @@ void taskbar_draw_tray(void) {
     /* expose the clock hit region so a click opens the calendar */
     g_clk_x = clk_x > 4u ? clk_x - 4u : 0u;
     g_clk_w = clk_w + 8u;
-    (void)bg;
 
     /* (Memory usage bar removed per user request — it read as a separator bar.) */
 
@@ -469,13 +495,10 @@ static bool ci_related(const char *a, const char *b) {
     return false;
 }
 
-/* Is the app behind favbar entry `i` currently open? Built-ins map to a window
- * slot (exact); user favorites match by title against open IPC/browser windows. */
+/* Is the app behind favbar entry `i` currently open? Every favbar entry now
+ * launches a standalone IPC app (built-ins included), so match by title against
+ * open IPC/browser windows. */
 static bool favbar_running(int i) {
-    if (i < FAVBAR_BUILTINS) {
-        int s = g_fav_builtin[i].slot;
-        return g_wins[s].active && g_wins[s].state != WIN_HIDDEN;
-    }
     const char *lbl = favbar_label(i);
     __attribute__((weak)) int  ipc_window_count(void);
     __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
@@ -499,11 +522,20 @@ static bool favbar_running(int i) {
 #endif
     return false;
 }
-/* Built-in window that is the topmost (focused) window. */
+/* True if the favbar entry's app is the focused IPC window (matched by title). */
 static bool favbar_focused(int i) {
-    if (i >= FAVBAR_BUILTINS) return false;
-    int s = g_fav_builtin[i].slot;
-    return g_wins[s].active && g_wins[s].state != WIN_HIDDEN && g_z[MAX_WINS - 1] == s;
+    const char *lbl = favbar_label(i);
+    __attribute__((weak)) int  ipc_window_count(void);
+    __attribute__((weak)) bool ipc_window_info(int slot, char *title, int max, bool *focused);
+    if (ipc_window_count && ipc_window_info) {
+        int n = ipc_window_count();
+        for (int wi = 0; wi < n && wi < 8; wi++) {
+            char t[24] = ""; bool f = false;
+            ipc_window_info(wi, t, (int)sizeof(t), &f);
+            if (f && ci_related(t, lbl)) return true;
+        }
+    }
+    return false;
 }
 
 /* Favorite app icons, decoded once and cached by resolved path. Falls back to a
@@ -544,9 +576,12 @@ void favbar_draw(void) {
         bool     hov = (g_fav_hover == i);
         bool     run = favbar_running(i);
         bool     foc = favbar_focused(i);
-        /* Background: brighter when focused, then hovered, then merely running. */
-        uint32_t top = foc ? 0x00335a94u : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
-        uint32_t bot = foc ? 0x00244572u : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
+        /* Background: brighter when focused, then hovered, then merely running.
+         * Focused derives from the theme accent for a cohesive highlight. */
+        uint32_t top = foc ? col_scale(g_theme.accent, 190u, 255u)
+                           : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
+        uint32_t bot = foc ? col_scale(g_theme.accent, 125u, 255u)
+                           : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
         console_fill_vgrad(bx, ty + 3u, fbw, TASKBAR_H - 6u, top, bot);
         /* icon or lettered fallback */
         uint64_t isz = (TASKBAR_H > 14u) ? TASKBAR_H - 12u : 8u;
@@ -573,7 +608,8 @@ void favbar_draw(void) {
             uint64_t uw = foc ? fbw - 10u : fbw / 2u;
             uint64_t ux = bx + (fbw > uw ? (fbw - uw) / 2u : 0u);
             console_fill_rect(ux, ty + TASKBAR_H - 3u, uw, 2u,
-                              foc ? 0x0078b4ffu : 0x00507fb0u);
+                              foc ? col_mix(g_theme.accent, 0x00ffffffu, 70u)
+                                  : col_scale(g_theme.accent, 165u, 255u));
         }
     }
 }
@@ -614,8 +650,10 @@ void taskbar_draw_vertical(void) {
 
     /* Logo square (opens the launcher) */
     uint64_t ly = vpanel_logo_y();
-    uint32_t lg_top = g_launcher_open ? 0x00548ae0u : 0x002d54a8u;
-    uint32_t lg_bot = g_launcher_open ? 0x003a6cc4u : 0x001f3c80u;
+    uint32_t lg_top = g_launcher_open ? col_scale(g_theme.accent, 230u, 255u)
+                                      : col_scale(g_theme.accent, 160u, 255u);
+    uint32_t lg_bot = g_launcher_open ? col_scale(g_theme.accent, 170u, 255u)
+                                      : col_scale(g_theme.accent, 110u, 255u);
     console_fill_vgrad(px + 3u, ly, thick - 6u, thick - 6u, lg_top, lg_bot);
     gui_draw_str_fg(px + (thick > fw ? (thick - fw) / 2u : 0u),
                     ly + ((thick - 6u) > fh ? ((thick - 6u) - fh) / 2u : 0u),
@@ -628,8 +666,10 @@ void taskbar_draw_vertical(void) {
         uint64_t by = fy + (uint64_t)i * (thick + TASKBTN_GAP);
         if (by + thick > top + ph) break;
         bool hov = (g_fav_hover == i), run = favbar_running(i), foc = favbar_focused(i);
-        uint32_t bt = foc ? 0x00335a94u : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
-        uint32_t bb = foc ? 0x00244572u : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
+        uint32_t bt = foc ? col_scale(g_theme.accent, 190u, 255u)
+                          : hov ? 0x002c3a52u : run ? 0x00243a52u : 0x00202a3cu;
+        uint32_t bb = foc ? col_scale(g_theme.accent, 125u, 255u)
+                          : hov ? 0x00202c40u : run ? 0x0019283au : 0x00161d2cu;
         console_fill_vgrad(px + 3u, by + 3u, thick - 6u, thick - 6u, bt, bb);
         uint64_t isz = (thick > 14u) ? thick - 12u : 8u;
         uint64_t ix = px + (thick > isz ? (thick - isz) / 2u : 0u);
@@ -650,7 +690,9 @@ void taskbar_draw_vertical(void) {
             uint64_t bar = foc ? thick - 10u : thick / 2u;
             uint64_t bar_y = by + (thick > bar ? (thick - bar) / 2u : 0u);
             uint64_t bar_x = (g_theme.panel_edge == PANEL_LEFT) ? (px + thick - 3u) : (px + 1u);
-            console_fill_rect(bar_x, bar_y, 2u, bar, foc ? 0x0078b4ffu : 0x00507fb0u);
+            console_fill_rect(bar_x, bar_y, 2u, bar,
+                              foc ? col_mix(g_theme.accent, 0x00ffffffu, 70u)
+                                  : col_scale(g_theme.accent, 165u, 255u));
         }
     }
 }
@@ -686,7 +728,6 @@ void taskbar_draw(void) {
     /* Left/right edges use the vertical dock layout instead. */
     if (panel_is_vertical()) { taskbar_draw_vertical(); return; }
     uint64_t fb_w = console_fb_width();
-    uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
@@ -695,7 +736,41 @@ void taskbar_draw(void) {
      * strip, then blend a translucent dark panel so the desktop tone shows
      * through — done backdrop-then-blend in one call so alpha never accumulates
      * across frames. Otherwise a solid subtle gradient. Hairline accent on top. */
-    if (g_theme.fx_glass) {
+    if (g_theme.dock_float) {
+        /* Floating dock: wallpaper across the whole strip, then a detached,
+         * rounded, glassy card behind the content — the launcher + app dock +
+         * tray then read as a bar floating over the desktop, not an edge-to-edge
+         * taskbar. Content x/y positions are UNCHANGED, so hit-testing is intact. */
+        for (uint64_t r = 0; r < TASKBAR_H; r++)
+            console_fill_rect(0, ty + r, fb_w, 1u, desktop_bg_at(ty + r));
+        /* Compact dock: the card hugs the launcher + app run (centered by the
+         * default align), leaving wallpaper gaps on both sides and the tray
+         * floating separately on the right — a real dock, not an edge-to-edge
+         * Windows-style bar. Content x positions are unchanged (hit-test intact). */
+        uint64_t pad   = 12u;
+        uint64_t rstart = favbar_start_x();
+        uint64_t lgx    = logo_x();
+        uint64_t left   = (lgx < rstart ? lgx : rstart);         /* include launcher */
+        uint64_t right  = rstart + favbar_run_w();
+        uint64_t cardx  = left > pad ? left - pad : 0u;
+        uint64_t cardw  = (right + pad > cardx) ? (right + pad - cardx) : 0u;
+        if (cardx + cardw > fb_w) cardw = fb_w - cardx;          /* clamp to screen */
+        uint64_t cardy = ty + 2u, cardh = TASKBAR_H - 6u;   /* 2px top / 4px bottom gap */
+        console_blend_rect(cardx, cardy, cardw, cardh, 0x0016202eu, 214u);
+        console_blend_rect(cardx, cardy, cardw, 1u, 0x00ffffffu, 26u);   /* top sheen */
+        int R = 7;
+        for (int r = 0; r < R; r++) {
+            int dy = R - r, rr = R * R - dy * dy; if (rr < 0) rr = 0;
+            int s = 0; while ((s + 1) * (s + 1) <= rr) s++;
+            int n = R - s; if (n <= 0) continue;
+            uint32_t ct = desktop_bg_at(cardy + (uint64_t)r);
+            uint32_t cb = desktop_bg_at(cardy + cardh - 1u - (uint64_t)r);
+            console_fill_rect(cardx,                       cardy + (uint64_t)r,          (uint64_t)n, 1u, ct);
+            console_fill_rect(cardx + cardw - (uint64_t)n, cardy + (uint64_t)r,          (uint64_t)n, 1u, ct);
+            console_fill_rect(cardx,                       cardy + cardh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
+            console_fill_rect(cardx + cardw - (uint64_t)n, cardy + cardh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
+        }
+    } else if (g_theme.fx_glass) {
         for (uint64_t r = 0; r < TASKBAR_H; r++)
             console_fill_rect(0, ty + r, fb_w, 1u, desktop_bg_at(ty + r));
         console_blend_rect(0, ty, fb_w, TASKBAR_H, 0x00121b2eu, 202u);  /* ~79% */
@@ -703,30 +778,36 @@ void taskbar_draw(void) {
     } else {
         console_fill_vgrad(0, ty, fb_w, TASKBAR_H, 0x00101624u, 0x00080b14u);
     }
-    /* accent hairline on the INNER edge (the side facing the desktop) */
-    uint64_t hair_y = (g_theme.panel_edge == PANEL_TOP) ? ty + TASKBAR_H - 1u : ty;
-    console_fill_rect(0, hair_y, fb_w, 1u, 0x00223350u);
+    /* accent hairline on the INNER edge — only for the edge-to-edge bar (a
+     * floating dock has no edge to hairline). */
+    if (!g_theme.dock_float) {
+        uint64_t hair_y = (g_theme.panel_edge == PANEL_TOP) ? ty + TASKBAR_H - 1u : ty;
+        console_fill_rect(0, hair_y, fb_w, 1u, 0x00223350u);
+    }
 
     /* Launcher button: accent gradient pill */
     uint64_t lw = logo_eff_w();
-    uint32_t lg_top = g_launcher_open ? 0x00548ae0u : 0x002d54a8u;
-    uint32_t lg_bot = g_launcher_open ? 0x003a6cc4u : 0x001f3c80u;
-    console_fill_vgrad(LOGO_X, ty + 3u, lw, TASKBAR_H - 6u, lg_top, lg_bot);
+    uint32_t lg_top = g_launcher_open ? col_scale(g_theme.accent, 230u, 255u)
+                                      : col_scale(g_theme.accent, 160u, 255u);
+    uint32_t lg_bot = g_launcher_open ? col_scale(g_theme.accent, 170u, 255u)
+                                      : col_scale(g_theme.accent, 110u, 255u);
+    uint64_t lx = logo_x();
+    console_fill_vgrad(lx, ty + 3u, lw, TASKBAR_H - 6u, lg_top, lg_bot);
     {   /* pill corner softening */
         uint32_t base = 0x000b0f1au;
         uint64_t ph = TASKBAR_H - 6u;
-        console_fill_rect(LOGO_X,           ty + 3u,      2u, 1u, base);
-        console_fill_rect(LOGO_X,           ty + 4u,      1u, 1u, base);
-        console_fill_rect(LOGO_X + lw - 2u, ty + 3u,      2u, 1u, base);
-        console_fill_rect(LOGO_X + lw - 1u, ty + 4u,      1u, 1u, base);
-        console_fill_rect(LOGO_X,           ty + 2u + ph, 2u, 1u, base);
-        console_fill_rect(LOGO_X,           ty + 1u + ph, 1u, 1u, base);
-        console_fill_rect(LOGO_X + lw - 2u, ty + 2u + ph, 2u, 1u, base);
-        console_fill_rect(LOGO_X + lw - 1u, ty + 1u + ph, 1u, 1u, base);
+        console_fill_rect(lx,           ty + 3u,      2u, 1u, base);
+        console_fill_rect(lx,           ty + 4u,      1u, 1u, base);
+        console_fill_rect(lx + lw - 2u, ty + 3u,      2u, 1u, base);
+        console_fill_rect(lx + lw - 1u, ty + 4u,      1u, 1u, base);
+        console_fill_rect(lx,           ty + 2u + ph, 2u, 1u, base);
+        console_fill_rect(lx,           ty + 1u + ph, 1u, 1u, base);
+        console_fill_rect(lx + lw - 2u, ty + 2u + ph, 2u, 1u, base);
+        console_fill_rect(lx + lw - 1u, ty + 1u + ph, 1u, 1u, base);
     }
     const char *logo = "FiFi OS";
     uint64_t llen = (uint64_t)gui_strlen(logo);
-    uint64_t lpx  = LOGO_X + (lw - llen * fw) / 2u;
+    uint64_t lpx  = lx + (lw - llen * fw) / 2u;
     uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
     gui_draw_str_fg(lpx, lpy, logo, 0x00f2f7ffu);
 
@@ -812,7 +893,6 @@ static void popup_glass_bg(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint3
 
 void vol_popup_draw(void) {
     uint64_t fb_w = console_fb_width();
-    uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
@@ -939,7 +1019,6 @@ static int cal_days_in_month(int m, int y) {
 
 void cal_popup_draw(void) {
     uint64_t fb_w = console_fb_width();
-    uint64_t fb_h = console_fb_height();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
@@ -1034,7 +1113,7 @@ void cal_popup_draw(void) {
             uint64_t cx = g_cal_mgrid_x + (uint64_t)col * mcell_w;
             uint64_t cy = mg_y + (uint64_t)row * mcell_h;
             bool cur = ((m + 1) == vmon);
-            if (cur) console_fill_vgrad(cx + 2u, cy + 1u, mcell_w - 4u, mcell_h - 2u, 0x003a6cc8u, 0x002a4f9cu);
+            if (cur) console_fill_vgrad(cx + 2u, cy + 1u, mcell_w - 4u, mcell_h - 2u, col_scale(g_theme.accent, 200u, 255u), col_scale(g_theme.accent, 135u, 255u));
             const char *ab = cal_month_abbr[m];
             uint64_t al = (uint64_t)gui_strlen(ab) * fw;
             gui_draw_str_fg(cx + (mcell_w > al ? (mcell_w - al) / 2u : 0u),
@@ -1070,7 +1149,7 @@ void cal_popup_draw(void) {
             bool today = (view_is_now && day == (int)td);
             if (today)
                 console_fill_vgrad(cx + 1u, cy + 1u, cell_w - 2u, cell_h - 2u,
-                                   0x003a6cc8u, 0x002a4f9cu);
+                                   col_scale(g_theme.accent, 200u, 255u), col_scale(g_theme.accent, 135u, 255u));
             char ds[3];
             if (day >= 10) { ds[0] = (char)('0' + day / 10); ds[1] = (char)('0' + day % 10); ds[2] = '\0'; }
             else           { ds[0] = (char)('0' + day); ds[1] = '\0'; }

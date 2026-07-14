@@ -90,6 +90,14 @@ void settings_render(window_t *w) {
                        + (uint64_t)tog_rows   * (SET_ROW_H + 8u)
                        + (fh + 6u) + 4u + 5u;
     uint64_t h_audio = (uint64_t)(SET_SEC_H + 4u) + (fh + 6u) + 4u + (fh + 6u) + 4u + 5u;
+    /* Gaming section (shown only when a gamepad is connected) — must be counted
+     * in total_h or the scroll clamp cuts off the bottom of the page. */
+    uint64_t h_gaming = 0u;
+    {
+        extern bool input_gamepad_connected(void);
+        if (input_gamepad_connected())
+            h_gaming = (uint64_t)(SET_SEC_H + 4u) + SET_ROW_H + 2u * ((fh + 6u) + 4u) + 5u;
+    }
     uint64_t h_net   = (uint64_t)(SET_SEC_H + 4u) + 6u * SET_ROW_H + 2u * SET_ROW_H + 5u;
     /* shortcuts table — defined here so we can count it for total_h */
     struct { const char *key; const char *desc; } shortcuts[] = {
@@ -194,7 +202,7 @@ void settings_render(window_t *w) {
     uint64_t h_vpn     = (uint64_t)(SET_SEC_H + 4u) + 4u * SET_ROW_H + 5u;
     /* WiFi section: header + status + optional hint row + separator */
     uint64_t h_wifi    = (uint64_t)(SET_SEC_H + 4u) + 2u * SET_ROW_H + 5u;
-    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_net + h_vpn + h_wifi + h_privacy + h_sc + (uint64_t)SET_PAD;
+    uint64_t total_h = h_sys + h_disp + h_theme + h_audio + h_gaming + h_net + h_vpn + h_wifi + h_privacy + h_sc + (uint64_t)SET_PAD;
     g_settings_total_h = (int)total_h;
     /* Clamp scroll */
     if ((int64_t)total_h > (int64_t)ih) {
@@ -973,7 +981,6 @@ void settings_render(window_t *w) {
                          "VPN (WireGuard)", COL_SET_SEC_FG, COL_SET_SEC_BG);
         }
         cy += SET_SEC_H + 4u;
-        SADVBOT;
 
         /* Status row */
         SADVBOT;
@@ -1069,7 +1076,6 @@ void settings_render(window_t *w) {
                          "WiFi", COL_SET_SEC_FG, COL_SET_SEC_BG);
         }
         cy += SET_SEC_H + 4u;
-        SADVBOT;
 
         /* Status row */
         SADVBOT;

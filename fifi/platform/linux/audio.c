@@ -177,6 +177,19 @@ fail:
 bool hda_is_ready(void) { return g_ready; }
 int  hda_get_volume(void) { return g_vol; }
 
+/* Re-read the live hardware volume into g_vol. The Settings app changes the ALSA
+ * mixer through its own ioctls, so without this the taskbar's cached g_vol would
+ * never reflect a volume change made in Settings. Called on a throttle. */
+void hda_refresh_volume(void) {
+    if (!g_ready || g_ctl_fd < 0) return;
+    struct snd_ctl_elem_value ev = {0};
+    ev.id = g_vol_id;
+    if (ioctl(g_ctl_fd, SNDRV_CTL_IOCTL_ELEM_READ, &ev) == 0) {
+        long range = g_vol_max - g_vol_min;
+        if (range > 0) g_vol = (int)((ev.value.integer.value[0] - g_vol_min) * 100 / range);
+    }
+}
+
 void hda_set_volume(int v) {
     if (v < 0) v = 0;
     if (v > 100) v = 100;
@@ -252,7 +265,7 @@ static void play_tone_child(int freq_hz, int duration_ms) {
     int card_order[8] = { g_pcm_card, 0, 1, 2, 3, -1, -1, -1 };
     for (int ci = 0; ci < 8 && pcm_fd < 0; ci++) {
         int card = card_order[ci];
-        if (card < 0) break;
+        if (card < 0) continue;  /* skip sentinel (and g_pcm_card=-1 when init failed) */
         /* Skip duplicates */
         bool dup = false;
         for (int j = 0; j < ci; j++) if (card_order[j] == card) { dup = true; break; }

@@ -127,29 +127,32 @@ void launcher_open_reset(void) {
     /* Drop any stale frosted-glass backdrop so this open recaptures a fresh one. */
     if (g_launcher_bg) { kfree(g_launcher_bg); g_launcher_bg = 0; }
 
-    /* Built-in windows: exec is set only so the icon resolver finds a logo;
-     * launcher_do_launch checks .builtin first, so these still open the window. */
-    launch_add("Terminal",        "/bin/fifi-terminal",    0, 0);
-    launch_add("Files",           "/bin/fifi-filebrowser", 1, 0);
-    launch_add("Settings",        "/bin/fifi-settings",    2, 0);
-    launch_add("Image Viewer",    "/bin/fifi-imageviewer", 3, 0);
+    /* Launch the STANDALONE apps (builtin = -1), not the compositor's legacy
+     * built-in windows: the standalone Terminal (tabs + block cursor), the tabbed
+     * Settings hub, the restyled Files and Image Viewer are the current versions.
+     * The old built-in windows opened by the previous builtin>=0 entries were a
+     * separate, stale implementation — which is why the menu looked "not updated". */
+    launch_add("Terminal",        "/bin/fifi-terminal",    -1, 0);
+    launch_add("Files",           "/bin/fifi-filebrowser", -1, 0);
+    launch_add("Settings",        "/bin/fifi-settings",    -1, 0);
+    launch_add("Image Viewer",    "/bin/fifi-imageviewer", -1, 0);
     /* App Store ships in the OS image at /bin; older deploys have it on the
      * data partition only, so keep that as a fallback. */
     {
         FILE *asf = fopen("/bin/fifi-appstore", "rb");
+        bool in_bin = (asf != NULL);
         if (asf) fclose(asf);
         launch_add("App Store",
-                   asf ? "/bin/fifi-appstore" : "/fifi-data/apps/fifi-appstore",
+                   in_bin ? "/bin/fifi-appstore" : "/fifi-data/apps/fifi-appstore",
                    -1, 0);
     }
+    launch_add("AI Chat",         "/bin/fifi-aichat",    -1, 0);
     launch_add("Text Editor",     "/bin/fifi-editor",    -1, 0);
     launch_add("Calculator",      "/bin/fifi-calc",      -1, 0);
-    launch_add("System Monitor",  "/bin/fifi-sysmon",    -1, 0);
-    launch_add("Network Monitor", "/bin/fifi-netmon",    -1, 0);
-    launch_add("Security",        "/bin/fifi-security",  -1, 0);
-    launch_add("WiFi",            "/bin/fifi-wifi",      -1, 0);
     launch_add("Gamepad",         "/bin/fifi-gamepad",   -1, 0);
-    launch_add("Proton Config",   "/bin/fifi-proton",    -1, 0);
+    /* System Monitor / Network Monitor / Security / Wi-Fi / Proton are now tabs
+     * inside the unified Settings app, so they are no longer separate start-menu
+     * entries — open Settings and pick the tab. */
 
 #ifdef __linux__
     /* Installed App Store apps: each is /fifi-data/apps/<Name>.sh */
@@ -319,6 +322,9 @@ void launcher_pin_taskbar(int filt_row) {
 int g_launchctx_row   = -1;   /* filtered row the menu targets; -1 = closed */
 int g_launchctx_hover = -1;
 static int32_t g_lcx = 0, g_lcy = 0;
+/* Shared frosted-glass backdrop helper (defined below, near the desktop menu). */
+static void menu_glass_bg(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+                          uint32_t opaque_top, uint32_t opaque_bot);
 
 static uint64_t launchctx_w(void)      { return 16u * console_font_width() + 24u; }
 static uint64_t launchctx_item_h(void) { return console_font_height() + 12u; }
@@ -331,6 +337,7 @@ void launchctx_open(int filt_row, int32_t mx, int32_t my) {
     g_lcx = mx; g_lcy = my;
     if ((uint64_t)g_lcx + w >= fbw) g_lcx = (int32_t)(fbw - w - 2u);
     if ((uint64_t)g_lcy + h >= fbh) g_lcy = (int32_t)(fbh - h - 2u);
+    menu_glass_invalidate();   /* recapture a fresh frosted backdrop for the menu */
 }
 
 /* -1 = outside, 0 = Pin to Taskbar, 1 = Add to Desktop */
@@ -348,8 +355,9 @@ void launchctx_draw(void) {
     uint64_t fh = console_font_height();
     uint64_t w = launchctx_w(), ih = launchctx_item_h(), h = 2u * ih + 8u;
     uint64_t x = (uint64_t)g_lcx, y = (uint64_t)g_lcy;
-    console_fill_vgrad(x, y, w, h, 0x001a2338u, 0x000e1220u);
-    console_fill_rect(x, y, w, 1u, 0x003a5688u);
+    /* Frosted glass (matches the desktop context menu) + accent hairline. */
+    menu_glass_bg(x, y, w, h, 0x001a2338u, 0x000e1220u);
+    console_fill_rect(x, y, w, 1u, col_scale(g_theme.accent, 170u, 255u));
     console_fill_rect(x, y + h - 1u, w, 1u, 0x00223048u);
     console_fill_rect(x, y, 1u, h, 0x00223048u);
     console_fill_rect(x + w - 1u, y, 1u, h, 0x00223048u);
@@ -357,7 +365,7 @@ void launchctx_draw(void) {
     for (int i = 0; i < 2; i++) {
         uint64_t iy = y + 4u + (uint64_t)i * ih;
         if (i == g_launchctx_hover)
-            console_fill_rect(x + 4u, iy, w - 8u, ih, 0x002a4a80u);
+            console_fill_rect(x + 4u, iy, w - 8u, ih, col_scale(g_theme.accent, 175u, 255u));
         gui_draw_str_fg(x + 12u, iy + (ih - fh) / 2u, items[i], 0x00dce8f8u);
     }
 }
@@ -417,7 +425,8 @@ void launcher_draw(void) {
     } else {
         gui_draw_str_fg(tx, tyy, g_launch_q, 0x00e6ecf7u);
         uint64_t cxp = tx + (uint64_t)g_launch_qlen * fw + 1u;
-        if ((g_gui_tick / 8u) % 2u == 0) console_fill_rect(cxp, tyy, 2u, fh, 0x0080b4ffu);
+        if ((g_gui_tick / 8u) % 2u == 0)
+            console_fill_rect(cxp, tyy, 2u, fh, col_mix(g_theme.accent, 0x00ffffffu, 80u));
     }
 
     /* Body rows */
@@ -434,7 +443,9 @@ void launcher_draw(void) {
         uint64_t ry = by + r * rh;
         bool sel = (idx == g_launcher_hover);
         if (sel)
-            console_fill_vgrad(lx + 3u, ry + 1u, w - 6u, rh - 2u, 0x003a6cc8u, 0x002a4f9cu);
+            console_fill_vgrad(lx + 3u, ry + 1u, w - 6u, rh - 2u,
+                               col_scale(g_theme.accent, 200u, 255u),
+                               col_scale(g_theme.accent, 135u, 255u));
         /* Icon column: real app logo when present, colored dot otherwise. */
         uint64_t iconsz = (rh > 20u) ? rh - 10u : 12u;
         uint64_t icx = lx + 12u, icy = ry + (rh > iconsz ? (rh - iconsz) / 2u : 0u);
@@ -512,7 +523,6 @@ static void menu_glass_bg(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
 }
 
 void ctx_draw(void) {
-    uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t cw = ctx_w();
     /* 0-3: built-in windows; 4: sep; 5-9: IPC apps; 10: sep; 11-12: desktop actions */
@@ -531,7 +541,7 @@ void ctx_draw(void) {
     for (int _i = 0; _i < (int)CTX_ITEMS; _i++)
         total_h += ctx_items[_i] ? CTX_ITEM_H : 8u;
     menu_glass_bg((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, 0x003a5688u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, col_scale(g_theme.accent, 170u, 255u));
     console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, 0x00223048u);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, 0x00223048u);
     console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, 0x00223048u);
@@ -546,13 +556,12 @@ void ctx_draw(void) {
         bool hov = (g_ctx_hover == i);
         if (hov)
             console_fill_vgrad((uint64_t)cx + 3u, ry + 1u, cw - 6u, CTX_ITEM_H - 2u,
-                               0x003a6cc8u, 0x002a4f9cu);
+                               col_scale(g_theme.accent, 200u, 255u), col_scale(g_theme.accent, 135u, 255u));
         uint64_t spx  = (uint64_t)cx + 14u;
         uint64_t spy  = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str_fg(spx, spy, ctx_items[i], hov ? 0x00f2f7ffu : COL_LAUNCH_FG);
         ry += CTX_ITEM_H;
     }
-    (void)fw;
 }
 
 /* ── Desktop icon right-click menu ──────────────────────────────────────── */
@@ -589,7 +598,7 @@ void icon_ctx_draw(void) {
     icon_ctx_rect(&cx, &cy, &cw, &total_h);
 
     menu_glass_bg((uint64_t)cx, (uint64_t)cy, cw, total_h, 0x00161d30u, 0x000d111du);
-    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, 0x003a5688u);
+    console_fill_rect((uint64_t)cx, (uint64_t)cy, cw, 1u, col_scale(g_theme.accent, 170u, 255u));
     console_fill_rect((uint64_t)cx, (uint64_t)cy + total_h - 1u, cw, 1u, 0x00223048u);
     console_fill_rect((uint64_t)cx, (uint64_t)cy, 1u, total_h, 0x00223048u);
     console_fill_rect((uint64_t)cx + cw - 1u, (uint64_t)cy, 1u, total_h, 0x00223048u);
@@ -599,7 +608,7 @@ void icon_ctx_draw(void) {
         bool hov = (g_icon_ctx_hover == i);
         if (hov)
             console_fill_vgrad((uint64_t)cx + 3u, ry + 1u, cw - 6u, CTX_ITEM_H - 2u,
-                               0x003a6cc8u, 0x002a4f9cu);
+                               col_scale(g_theme.accent, 200u, 255u), col_scale(g_theme.accent, 135u, 255u));
         uint64_t spx = (uint64_t)cx + 14u;
         uint64_t spy = ry + (CTX_ITEM_H > fh ? (CTX_ITEM_H - fh) / 2u : 0u);
         gui_draw_str_fg(spx, spy, icon_ctx_items[i], hov ? 0x00f2f7ffu : COL_LAUNCH_FG);
@@ -653,7 +662,7 @@ void icon_props_draw(void) {
     struct { const char *k; const char *v; } rows[4];
     char tbuf[64];
     if (is_exec)              strncpy(tbuf, "Application", sizeof tbuf - 1);
-    else if (ext) { tbuf[0] = '\0'; strncpy(tbuf, ext, sizeof tbuf - 1); strncat(tbuf, " document", sizeof tbuf - 1 - gui_strlen(tbuf)); }
+    else if (ext) { strncpy(tbuf, ext, sizeof tbuf - 1); tbuf[sizeof tbuf - 1] = '\0'; strncat(tbuf, " document", sizeof tbuf - 1 - gui_strlen(tbuf)); }
     else                      strncpy(tbuf, "File", sizeof tbuf - 1);
     tbuf[sizeof tbuf - 1] = '\0';
     rows[0].k = "Name";     rows[0].v = label;
