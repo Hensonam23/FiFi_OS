@@ -193,17 +193,22 @@ launch_dir() {
             # persistent office process; fifi-run exits when the user closes it).
             # The cold-X crash is immediate, so a short 4s probe is enough to
             # confirm health — no need to sit through 8s on a good launch.
+            # soffice.bin forks and RE-PARENTS itself, so the pid we launch
+            # exits within a second or two even on a healthy start. Gating the
+            # retry on that pid made the loop think it died and relaunch — the
+            # user saw LibreOffice "reappear" several times. Track soffice.bin by
+            # NAME instead: healthy once any exists; done (no relaunch) once none.
             _t=0
             while [ "$_t" -lt 5 ]; do
                 ./soffice.bin --nologo --norestore "$@" &
-                _sopid=$!
                 _w=0
-                while [ "$_w" -lt 4 ]; do
-                    kill -0 "$_sopid" 2>/dev/null || break
+                while [ "$_w" -lt 5 ]; do
                     sleep 1; _w=$((_w + 1))
+                    pidof soffice.bin >/dev/null 2>&1 && break
                 done
-                if kill -0 "$_sopid" 2>/dev/null; then
-                    wait "$_sopid"; exit $?
+                if pidof soffice.bin >/dev/null 2>&1; then
+                    while pidof soffice.bin >/dev/null 2>&1; do sleep 2; done
+                    exit 0
                 fi
                 _t=$((_t + 1))
                 rm -f "$HOME"/.config/libreoffice/*/.lock 2>/dev/null || true
@@ -257,25 +262,46 @@ launch_dir() {
         # a stale instance/lock and silently exit.
         prof="$(dirname "$dir")/profile"
         mkdir -p "$prof" 2>/dev/null || true
-        # The compositor already draws a FiFi titlebar (server-side decorations),
-        # but Firefox also draws its OWN window controls into the tab strip and a
-        # CSD shadow margin -> duplicate buttons + a transparent border on top of
-        # ours. Tell Firefox not to draw in the titlebar so only the FiFi chrome
-        # shows. Written to user.js so it applies every launch (guarded so we don't
-        # duplicate it).
-        if ! grep -q "browser.tabs.inTitlebar" "$prof/user.js" 2>/dev/null; then
-            {
-              printf 'user_pref("browser.tabs.inTitlebar", 0);\n'
-              printf 'user_pref("browser.tabs.drawInTitlebar", false);\n'
-              # The quit/close-tabs confirmation renders as a transparent, unclosable
-              # dialog on this compositor (its content is on a subsurface we don't
-              # composite). Disable the prompts so Firefox just closes cleanly.
-              printf 'user_pref("browser.warnOnQuit", false);\n'
-              printf 'user_pref("browser.warnOnClose", false);\n'
-              printf 'user_pref("browser.tabs.warnOnClose", false);\n'
-              printf 'user_pref("browser.sessionstore.warnOnQuit", false);\n'
-            } >> "$prof/user.js"
+        # FiFi-managed prefs, rewritten from scratch EVERY launch (not guarded on
+        # a marker) so EXISTING profiles created before a fix also get it — an
+        # earlier guard on browser.tabs.inTitlebar skipped the whole block for old
+        # profiles, so the chrome-font fix never applied on reboot. We isolate our
+        # prefs in fifi.js and merge them into user.js each launch.
+        #  - inTitlebar: FiFi draws the titlebar (SSD); stop Firefox drawing its own.
+        #  - warnOn*: the quit/close confirmation renders as a transparent, unclosable
+        #    dialog on this compositor -> disable the prompts so it closes cleanly.
+        #  - font.name.*: pin content generics to bundled fonts.
+        #  - legacyUserProfileCustomizations.stylesheets: REQUIRED for userChrome.css.
+        #  - startup.page=0: skip the "trouble getting your pages back" restore page.
+        {
+          printf 'user_pref("browser.tabs.inTitlebar", 0);\n'
+          printf 'user_pref("browser.tabs.drawInTitlebar", false);\n'
+          printf 'user_pref("browser.warnOnQuit", false);\n'
+          printf 'user_pref("browser.warnOnClose", false);\n'
+          printf 'user_pref("browser.tabs.warnOnClose", false);\n'
+          printf 'user_pref("browser.sessionstore.warnOnQuit", false);\n'
+          printf 'user_pref("font.name.sans-serif.x-western", "DejaVu Sans");\n'
+          printf 'user_pref("font.name.serif.x-western", "DejaVu Serif");\n'
+          printf 'user_pref("font.name.monospace.x-western", "DejaVu Sans Mono");\n'
+          printf 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);\n'
+          printf 'user_pref("browser.startup.page", 0);\n'
+        } > "$prof/fifi.js"
+        # user.js = our prefs + any non-FiFi prefs the profile already had.
+        if [ -f "$prof/user.js" ]; then
+            # || true: grep exits 1 when it filters out EVERY line (profile had only
+            # FiFi prefs); under `set -e` that non-zero would abort fifi-run before
+            # the browser ever launches.
+            grep -vE 'inTitlebar|drawInTitlebar|warnOn(Quit|Close)|tabs.warnOnClose|sessionstore.warnOnQuit|font.name.(sans-serif|serif|monospace).x-western|legacyUserProfileCustomizations.stylesheets|browser.startup.page' \
+                "$prof/user.js" 2>/dev/null >> "$prof/fifi.js" || true
         fi
+        mv "$prof/fifi.js" "$prof/user.js"
+        # userChrome.css forces the chrome UI font to a bundled family so tab titles
+        # and the URL bar always render. Rewritten each launch so old profiles get it.
+        mkdir -p "$prof/chrome" 2>/dev/null || true
+        # Force family, a concrete pixel size, AND a dark colour: on this box the
+        # chrome inherited a zero/unset font size (glyphs laid out but invisible),
+        # so family alone was not enough — size + colour make chrome text render.
+        printf '* { font-family: "DejaVu Sans", sans-serif !important; font-size: 15px !important; color: #101010 !important; }\n' > "$prof/chrome/userChrome.css"
         export APPDIR="$dir"; cd "$dir"
         _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"

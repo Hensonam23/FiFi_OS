@@ -35,10 +35,13 @@ resolve() {
 
 check_one() {
     n="$1"
-    [ -f "$APPS/$n.src" ] || return
+    [ -f "$APPS/$n.src" ] || return 0
     cur=$(cat "$APPS/$n.url" 2>/dev/null)
     new=$(resolve "$(cat "$APPS/$n.src")")
-    if [ -n "$new" ] && [ "$new" != "$cur" ]; then
+    # Resolution failed (offline / API error): keep any existing marker rather
+    # than wrongly clearing a previously detected update.
+    [ -n "$new" ] || return 0
+    if [ "$new" != "$cur" ]; then
         printf '%s' "$new" > "$APPS/$n.update"
         echo "update available: $n"
     else
