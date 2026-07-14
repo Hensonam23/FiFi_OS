@@ -43,7 +43,8 @@ log() {
     echo "[fifi-install] $*" >> "$DEBUGLOG"
 }
 prog() { echo "PROGRESS:$1"; }
-fail() { log "FATAL: $*"; _save_debug_log; exit 1; }
+# fail relies on the EXIT trap (cleanup -> _save_debug_log) to dump/save the log
+fail() { log "FATAL: $*"; exit 1; }
 
 _save_debug_log() {
     # Always dump log to stdout — visible in installer progress pane
@@ -69,15 +70,6 @@ _save_debug_log() {
         fi
         rmdir /mnt/fifi-usb-log 2>/dev/null || true
     fi
-}
-
-# Log a command's output to both stdout and the log file (sh-compatible)
-logcmd() {
-    "$@" 2>&1 | while IFS= read -r line; do
-        echo "  $line"
-        echo "  $line" >> "$DEBUGLOG"
-    done
-    return "${PIPESTATUS:-0}"
 }
 
 cleanup() {
@@ -141,26 +133,44 @@ USB_MNT_SRC=""
 [ -f "/boot/bzImage" ] && KERNEL_SRC="/boot/bzImage"
 [ -z "$KERNEL_SRC"  ] && fail "Kernel not found at /boot/bzImage — initramfs was not built correctly"
 
-# Initramfs: probe every FAT/vfat partition for boot/initramfs.cpio.gz
-log "Searching for initramfs on all partitions..."
-for _dev in /dev/sda1 /dev/sda /dev/sdb1 /dev/sdb /dev/sdc1 /dev/sdc \
-            /dev/sdd1 /dev/sde1 /dev/mmcblk0p1 /dev/vda1; do
-    [ -b "$_dev" ] || continue
-    _probe_mnt="/mnt/fifi-probe"
-    mkdir -p "$_probe_mnt"
-    if mount -o ro "$_dev" "$_probe_mnt" 2>/dev/null; then
-        if [ -f "$_probe_mnt/boot/initramfs.cpio.gz" ]; then
-            log "Found initramfs on $_dev"
-            INITRD_SRC="$_probe_mnt/boot/initramfs.cpio.gz"
-            USB_MNT_SRC="$_probe_mnt"
-            break
-        fi
-        umount "$_probe_mnt" 2>/dev/null || true
-    fi
-    rmdir "$_probe_mnt" 2>/dev/null || true
-done
+# Initramfs to install: REPACK THE RUNNING ROOT rather than probe partitions.
+# The live system IS the OS we just booted (the USB's initramfs, unpacked into
+# RAM), so repacking it guarantees the installed system is identical to what's
+# running. The old approach probed partitions for boot/initramfs.cpio.gz and
+# used the FIRST match — on a machine that already had FiFi installed, that was
+# often the OLD internal initramfs (probed before the USB), so every reinstall
+# silently "reverted" to the previous version. -xdev keeps the pack on the root
+# filesystem only (never descends into the mounted /fifi-data, /proc, etc.).
+log "Packing the running system into an installable initramfs..."
+INITRD_SRC="/tmp/fifi-install-initramfs.cpio.gz"
+( cd / && find . -xdev \
+      ! -path './proc/*' ! -path './sys/*'  ! -path './dev/*' \
+      ! -path './run/*'  ! -path './tmp/*'  ! -path './mnt/*' \
+      ! -path './fifi-data' ! -path './fifi-data/*' ! -path './newroot/*' \
+    | cpio -o -H newc 2>/dev/null | gzip -1 ) > "$INITRD_SRC" 2>/dev/null || true
 
-[ -n "$INITRD_SRC" ] || fail "Cannot find initramfs.cpio.gz on any partition"
+if [ ! -s "$INITRD_SRC" ] || ! gzip -t "$INITRD_SRC" 2>/dev/null; then
+    # Fallback: probe partitions, but NEVER the disk we're about to format, and
+    # try the removable USB slots first so we don't grab a stale internal copy.
+    log "Repack unavailable; probing partitions (target excluded) for initramfs..."
+    INITRD_SRC=""
+    for _dev in /dev/sdd1 /dev/sde1 /dev/mmcblk0p1 /dev/vda1 \
+                /dev/sda1 /dev/sda /dev/sdb1 /dev/sdb /dev/sdc1 /dev/sdc; do
+        [ -b "$_dev" ] || continue
+        case "$_dev" in "$TARGET"*) continue ;; esac
+        _probe_mnt="/mnt/fifi-probe"; mkdir -p "$_probe_mnt"
+        if mount -o ro "$_dev" "$_probe_mnt" 2>/dev/null; then
+            if [ -f "$_probe_mnt/boot/initramfs.cpio.gz" ]; then
+                log "Found initramfs on $_dev"
+                INITRD_SRC="$_probe_mnt/boot/initramfs.cpio.gz"; USB_MNT_SRC="$_probe_mnt"; break
+            fi
+            umount "$_probe_mnt" 2>/dev/null || true
+        fi
+        rmdir "$_probe_mnt" 2>/dev/null || true
+    done
+fi
+
+[ -n "$INITRD_SRC" ] || fail "Cannot obtain an initramfs to install"
 
 log "Kernel:    $KERNEL_SRC  ($(du -sh "$KERNEL_SRC" 2>/dev/null | cut -f1))"
 log "Initramfs: $INITRD_SRC  ($(du -sh "$INITRD_SRC" 2>/dev/null | cut -f1))"

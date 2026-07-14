@@ -209,11 +209,13 @@ for _a in $(busybox --list); do
 done
 
 # ── App platform: seed fifi-run / App Store / keymap into /fifi-data ─────────
-# First-boot only (never overwrites newer copies already on the data partition).
+# These are OS-MANAGED files (not user data), so ALWAYS refresh them from the
+# image copy on every boot — a "first-boot only" copy would let a stale copy on
+# an existing data partition shadow shipped fixes after an update/reinstall.
 mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
 for f in fifi-run appstore-install.sh appstore-sync.sh \
          appstore-uninstall.sh appstore-update-check.sh; do
-    if [ ! -f "/fifi-data/apps/$f" ] && [ -f "/usr/share/fifi/$f" ]; then
+    if [ -f "/usr/share/fifi/$f" ]; then
         cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"
         chmod +x "/fifi-data/apps/$f"
     fi
@@ -230,10 +232,25 @@ done
   # (offline-safe: fails quietly, retries next boot).
   [ -s /fifi-data/apps/catalog.tsv ] || \
       { [ -f /fifi-data/apps/appstore-sync.sh ] && sh /fifi-data/apps/appstore-sync.sh >/dev/null 2>&1; }
+  # Trial provisioning: on a fresh/live system the desktop has LibreWolf +
+  # LibreOffice ICONS but not the AppImages (those download on demand). Fetch the
+  # two flagship apps in the background so a fresh install / live trial is usable
+  # out of the box. Only when missing AND the network is reachable; offline-safe
+  # (fails quietly, retries next boot). Each is ~130MB / ~330MB so this runs
+  # detached and the apps simply appear once downloaded.
+  if [ -f /fifi-data/apps/appstore-install.sh ] && \
+     curl -fsI --max-time 10 https://gitlab.com >/dev/null 2>&1; then
+      [ -f /fifi-data/apps/LibreWolf.AppImage ] || \
+          sh /fifi-data/apps/appstore-install.sh 'gitlab:librewolf-community%2Fbrowser%2Fappimage' LibreWolf >/dev/null 2>&1
+      [ -f /fifi-data/apps/LibreOffice.AppImage ] || \
+          sh /fifi-data/apps/appstore-install.sh 'url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage' LibreOffice >/dev/null 2>&1
+  fi
   [ -f /fifi-data/apps/appstore-update-check.sh ] && \
       sh /fifi-data/apps/appstore-update-check.sh >/dev/null 2>&1 ) &
-[ -f /fifi-data/fifi-keymap.txt ] || cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
-[ -f /fifi-data/runtime/etc/fonts/fonts.conf ] || cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
+# OS-managed too — always refresh so keymap/fontconfig fixes are never shadowed
+# by a stale copy on an existing data partition.
+cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
+cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
 
 # Bundled app icons (built-in + standalone apps) — copy any missing into /fifi-data/icons.
 mkdir -p /fifi-data/icons
@@ -455,27 +472,6 @@ IWDCONF
     echo "disconnected" > /fifi-data/wifi-status
 ) &
 
-# ── DEV DEBUG ONLY — stream logs to dev machine — REMOVE BEFORE DISTRIBUTION ─
-# Sends a snapshot of dmesg + compositor.log to 10.0.0.65:9999 every 10s.
-# On dev machine run: ~/tools/fifi-watch.sh
-(
-    sleep 10
-    while true; do
-        {
-            dmesg
-            echo '=== input-devices ==='
-            cat /fifi-data/input-devices.txt 2>/dev/null
-            echo '=== compositor.log ==='
-            cat /fifi-data/compositor.log 2>/dev/null
-            echo '=== END ==='
-        } | nc -w 5 10.0.0.65 9999 2>/dev/null
-        sleep 10
-    done
-) &
-# Telnet shell on port 2323 for interactive remote access (same — REMOVE BEFORE DISTRIBUTION)
-busybox telnetd -l /bin/sh -p 2323 2>/dev/null &
-# ── END DEV DEBUG ─────────────────────────────────────────────────────────────
-
 # ── AppArmor — load profiles in complain mode ────────────────────────────────
 if [ -x /usr/bin/apparmor_parser ] && [ -d /etc/apparmor.d ]; then
     # Mount securityfs so AppArmor can load profiles
@@ -490,7 +486,6 @@ else
 fi
 
 # ── Phase 5: Firewall — apply nftables default-deny inbound rules ─────────────
-mkdir -p /fifi-data
 if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
     /usr/sbin/nft -f /etc/nftables.conf 2>/fifi-data/firewall.log && \
         echo "firewall: active" >> /fifi-data/firewall.log || \
