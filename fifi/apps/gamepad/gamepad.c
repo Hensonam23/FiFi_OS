@@ -49,21 +49,23 @@
 
 static uint32_t g_fb[WIN_W * WIN_H];
 
-/* Colors */
-#define COL_BG      0xFF0D1117u
-#define COL_PANEL   0xFF161B22u
-#define COL_BORDER  0xFF30363Du
-#define COL_BTN_OFF 0xFF21262Du
-#define COL_BTN_ON  0xFF1F6FEBu
-#define COL_A_ON    0xFF3FB950u
-#define COL_B_ON    0xFFFF7B72u
-#define COL_X_ON    0xFF79C0FFu
-#define COL_Y_ON    0xFFE3B341u
-#define COL_STICK   0xFF8B949Eu
-#define COL_STICK_D 0xFF58A6FFu
-#define COL_TEXT    0xFFC9D1D9u
-#define COL_DIM     0xFF484F58u
-#define COL_TITLE   0xFF58A6FFu
+/* Colors (shared FiFi design language) */
+#define COL_BG      0xFF0E1620u   /* window background   */
+#define COL_PANEL   0xFF16202Eu   /* panels / cards      */
+#define COL_HEADER  0xFF1A2740u   /* header / pill bg    */
+#define COL_BORDER  0xFF243448u   /* subtle divider      */
+#define COL_BTN_OFF 0xFF18232Fu   /* unpressed control   */
+#define COL_TRACK   0xFF0C141Eu   /* recessed inner well */
+#define COL_BTN_ON  0xFF409CFFu   /* accent / pressed    */
+#define COL_A_ON    0xFF40CC80u   /* A (green)           */
+#define COL_B_ON    0xFFE05545u   /* B (red)             */
+#define COL_X_ON    0xFF409CFFu   /* X (blue/accent)     */
+#define COL_Y_ON    0xFFE0A030u   /* Y (amber)           */
+#define COL_STICK   0xFF6A8098u   /* muted               */
+#define COL_STICK_D 0xFF409CFFu   /* accent stick dot    */
+#define COL_TEXT    0xFFD8E8F8u   /* primary text        */
+#define COL_DIM     0xFF6A8098u   /* muted text          */
+#define COL_TITLE   0xFF409CFFu   /* accent title        */
 
 /* Current gamepad state */
 static uint16_t g_btns = 0;
@@ -81,7 +83,6 @@ static uint32_t g_pld_len = 0;
 static uint32_t g_pld_got = 0;
 
 static int g_sock = -1;
-static int32_t g_win_x = 0, g_win_y = 0;
 
 /* ── Drawing primitives ──────────────────────────────────────────────────── */
 
@@ -92,6 +93,26 @@ static void fill_rect(int x, int y, int w, int h, uint32_t col) {
             if (rx < 0 || rx >= WIN_W) continue;
             g_fb[ry * WIN_W + rx] = col;
         }
+    }
+}
+
+/* Filled rectangle with softened (rounded) corners — radius r. */
+static void fill_round_rect(int x, int y, int w, int h, uint32_t col, int r) {
+    if (r < 1) { fill_rect(x, y, w, h, col); return; }
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
+    for (int row = 0; row < h; row++) {
+        int dy = (row < r) ? (r - 1 - row)
+               : (row >= h - r) ? (row - (h - r)) : -1;
+        int inset = 0;
+        if (dy >= 0) {
+            while (inset < r) {
+                int dx = r - 1 - inset;
+                if (dx*dx + dy*dy <= (r-1)*(r-1)) break;
+                inset++;
+            }
+        }
+        fill_rect(x + inset, y + row, w - 2*inset, 1, col);
     }
 }
 
@@ -121,12 +142,6 @@ static void draw_ring(int cx, int cy, int r, int thickness, uint32_t col) {
     }
 }
 
-/* Tiny 6×10 bitmap font, digits + uppercase + some special chars */
-static const uint8_t font6x10[][10] = {
-    [' ']={'$','$','$','$','$','$','$','$','$','$'},  /* placeholder, unused */
-};
-
-/* Simpler: draw a tiny character from a 5-wide 7-tall font using pixel segments */
 static void put_pixel(int x, int y, uint32_t c) {
     if (x>=0 && x<WIN_W && y>=0 && y<WIN_H) g_fb[y*WIN_W+x]=c;
 }
@@ -233,7 +248,10 @@ static void draw_button(int cx, int cy, int r, bool pressed, uint32_t on_col, co
 static void draw_stick(int cx, int cy, int radius, int16_t sx, int16_t sy, bool clicked) {
     /* Background circle */
     draw_ring(cx, cy, radius, 2, COL_BORDER);
-    fill_circle(cx, cy, radius - 2, 0xFF0D1117u);
+    fill_circle(cx, cy, radius - 2, COL_TRACK);
+    /* Crosshair guides */
+    draw_hline(cx - radius + 4, cy, (radius - 4) * 2, COL_PANEL);
+    draw_vline(cx, cy - radius + 4, (radius - 4) * 2, COL_PANEL);
 
     /* Dot position */
     int dx = (int)sx * (radius - 6) / 32767;
@@ -247,12 +265,9 @@ static void draw_trigger(int x, int y, int w, int h, int16_t val, const char *lb
     int filled = (int)((int32_t)(val + 32767) * w / 65534);
     if (filled < 0) filled = 0;
     if (filled > w) filled = w;
-    fill_rect(x, y, w, h, COL_BTN_OFF);
-    if (filled > 0) fill_rect(x, y, filled, h, COL_STICK_D);
-    fill_rect(x, y, w, 1, COL_BORDER);
-    fill_rect(x, y+h-1, w, 1, COL_BORDER);
-    fill_rect(x, y, 1, h, COL_BORDER);
-    fill_rect(x+w-1, y, 1, h, COL_BORDER);
+    int r = h >= 6 ? 2 : 1;
+    fill_round_rect(x, y, w, h, COL_TRACK, r);
+    if (filled > 0) fill_round_rect(x, y, filled < r*2 ? r*2 : filled, h, COL_STICK_D, r);
     if (lbl) draw_str_micro(x + w/2 - 4, y + h/2 - 2, lbl, COL_TEXT);
 }
 
@@ -279,11 +294,7 @@ static void draw_dpad(int cx, int cy, uint16_t btns) {
 /* Draw shoulder button row */
 static void draw_shoulder(int x, int y, int w, int h, bool pressed, const char *lbl) {
     uint32_t bg = pressed ? COL_BTN_ON : COL_BTN_OFF;
-    fill_rect(x, y, w, h, bg);
-    fill_rect(x, y, w, 1, COL_BORDER);
-    fill_rect(x, y+h-1, w, 1, COL_BORDER);
-    fill_rect(x, y, 1, h, COL_BORDER);
-    fill_rect(x+w-1, y, 1, h, COL_BORDER);
+    fill_round_rect(x, y, w, h, bg, 3);
     draw_str_micro(x + w/2 - 4, y + h/2 - 2, lbl, pressed ? COL_BG : COL_DIM);
 }
 
@@ -291,10 +302,16 @@ static void render(void) {
     /* Background — top TITLE_H px left blank for compositor title bar */
     fill_rect(0, 0, WIN_W, WIN_H, COL_BG);
 
-    /* Status badge in the content area */
+    /* Status pill — centered at the top of the content area */
     const char *status = g_connected ? "CONNECTED" : "NO GAMEPAD";
-    uint32_t status_col = g_connected ? 0xFF3FB950u : COL_DIM;
-    draw_str_micro(WIN_W - (int)(strlen(status) * 4) - 8, TITLE_H + 5, status, status_col);
+    uint32_t status_col = g_connected ? COL_A_ON : COL_Y_ON;
+    int st_tw = (int)strlen(status) * 4;
+    int pill_w = st_tw + 22;
+    int pill_x = WIN_W/2 - pill_w/2;
+    int pill_y = TITLE_H + 2;
+    fill_round_rect(pill_x, pill_y, pill_w, 12, COL_HEADER, 4);
+    fill_round_rect(pill_x + 6, pill_y + 4, 4, 4, status_col, 2);
+    draw_str_micro(pill_x + 14, pill_y + 4, status, status_col);
 
     if (!g_connected) {
         /* 20 chars × 8px/char = 160px wide; center in 480px window */
@@ -347,6 +364,7 @@ static void render(void) {
     /* Axis value readouts at bottom */
     char buf[16];
     int row_y = WIN_H - 18;
+    fill_round_rect(6, row_y - 4, WIN_W - 12, 15, COL_PANEL, 4);
     draw_str_micro(8, row_y, "LX:", COL_DIM);
     snprintf(buf, sizeof(buf), "%6d", (int)g_lx);
     draw_str_micro(24, row_y, buf, COL_TEXT);
@@ -410,9 +428,8 @@ static void push_frame(int fd) {
 }
 
 static void dispatch_msg(uint32_t type, const uint8_t *pld, uint32_t len) {
-    if (type == IPC_WIN_CREATED && len >= 20) {
-        memcpy(&g_win_x, pld + 4,  4);
-        memcpy(&g_win_y, pld + 8,  4);
+    if (type == IPC_APP_CLOSE) {
+        exit(0);
     } else if (type == IPC_INPUT_KEY) {
         if (len >= 1 && (pld[0] == 'q' || pld[0] == 27))
             exit(0);
@@ -435,7 +452,8 @@ static bool ipc_read_once(int fd) {
     /* Phase 1: header */
     if (g_hdr_got < 8) {
         ssize_t n = read(fd, g_hdr + g_hdr_got, 8 - g_hdr_got);
-        if (n <= 0) return false;
+        if (n == 0) exit(0);   /* compositor closed the socket */
+        if (n < 0) return false;
         g_hdr_got += (int)n;
         if (g_hdr_got < 8) return false;
         memcpy(&g_pld_len, g_hdr + 4, 4);
@@ -449,7 +467,8 @@ static bool ipc_read_once(int fd) {
     /* Phase 2: payload */
     if (g_pld_len > 0 && g_pld_got < g_pld_len) {
         ssize_t n = read(fd, g_payload + g_pld_got, g_pld_len - g_pld_got);
-        if (n <= 0) return false;
+        if (n == 0) exit(0);   /* compositor closed the socket */
+        if (n < 0) return false;
         g_pld_got += (uint32_t)n;
         if (g_pld_got < g_pld_len) return false;
     }
@@ -479,7 +498,7 @@ int main(void) {
     }
 
     /* Register window */
-    uint8_t conn_pld[68];
+    uint8_t conn_pld[68] = {0};
     uint16_t ww = WIN_W, wh = WIN_H;
     memcpy(conn_pld,     &ww, 2);
     memcpy(conn_pld + 2, &wh, 2);
@@ -489,7 +508,7 @@ int main(void) {
     /* Make socket non-blocking */
     fcntl(g_sock, F_SETFL, O_NONBLOCK);
 
-    /* Wait for IPC_WIN_CREATED — use a blocking poll+read without touching g_sock flags */
+    /* Wait for (and consume) IPC_WIN_CREATED */
     {
         struct pollfd pf = {g_sock, POLLIN, 0};
         poll(&pf, 1, 2000);
@@ -499,7 +518,6 @@ int main(void) {
 
     /* Main loop */
     bool needs_render = true;
-    struct timespec last_render = {0, 0};
 
     for (;;) {
         struct pollfd pf = {g_sock, POLLIN, 0};

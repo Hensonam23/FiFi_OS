@@ -32,22 +32,25 @@
 #define WIN_H   380
 #define TITLE_H  24
 
-/* ── Colours ─────────────────────────────────────────────────────────────── */
-#define C_BG        0xFF0E1620u
-#define C_DISP_BG   0xFF060C14u
-#define C_DISP_FG   0xFFC8E8FFu
-#define C_DISP_SM   0xFF506880u
-#define C_BTN_NUM   0xFF182434u
-#define C_BTN_OPS   0xFF1C3050u
-#define C_BTN_EQ    0xFF1A4878u
-#define C_BTN_CLR   0xFF3A1818u
-#define C_BTN_HOV   0xFF2A3C54u
-#define C_BTN_EQ_H  0xFF2460A0u
-#define C_BTN_CLR_H 0xFF5A2020u
-#define C_BTN_FG    0xFFB8D0ECu
-#define C_BTN_OPS_FG 0xFF78B8E8u
-#define C_BTN_EQ_FG 0xFFE0F0FFu
-#define C_BORDER    0xFF1C2C40u
+/* ── Colours (shared FiFi design language) ───────────────────────────────── */
+#define C_BG         0xFF0E1620u   /* window background */
+#define C_CARD       0xFF16202Eu   /* panels / cards */
+#define C_DISP_BG    0xFF0B1220u   /* display well (recessed) */
+#define C_DISP_FG    0xFFD8E8F8u   /* primary text */
+#define C_DISP_SM    0xFF6A8098u   /* muted / secondary */
+#define C_BTN_NUM    0xFF16202Eu   /* number keys (card) */
+#define C_BTN_OPS    0xFF1A2740u   /* operator keys (toolbar tone) */
+#define C_BTN_EQ     0xFF409CFFu   /* equals — primary accent */
+#define C_BTN_CLR    0xFF33202Cu   /* clear (muted warm) */
+#define C_BTN_HOV    0xFF243448u   /* number hover */
+#define C_BTN_OPS_H  0xFF2F6BBFu   /* operator hover (accent-dim) */
+#define C_BTN_EQ_H   0xFF5AABFFu   /* equals hover */
+#define C_BTN_CLR_H  0xFF5A2838u   /* clear hover */
+#define C_BTN_FG     0xFFD8E8F8u   /* number label */
+#define C_BTN_OPS_FG 0xFF409CFFu   /* operator label (accent) */
+#define C_BTN_EQ_FG  0xFFFFFFFFu   /* on-accent */
+#define C_BTN_CLR_FG 0xFFFF8899u   /* clear label */
+#define C_BORDER     0xFF243448u   /* subtle divider */
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -79,6 +82,21 @@ static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int row = y; row < y + h; row++)
         for (int col2 = x; col2 < x + w; col2++)
             put_pixel(fb, col2, row, col);
+}
+
+/* Filled rect with softened (notched) corners — reads as a rounded card. */
+static void fill_round(uint32_t *fb, int x, int y, int w, int h,
+                       uint32_t col, uint32_t bg) {
+    fill(fb, x, y, w, h, col);
+    const int r = 3;
+    for (int i = 0; i < r; i++)
+        for (int j = 0; j < r; j++)
+            if (i + j < r) {
+                put_pixel(fb, x + i,         y + j,         bg);
+                put_pixel(fb, x + w - 1 - i, y + j,         bg);
+                put_pixel(fb, x + i,         y + h - 1 - j, bg);
+                put_pixel(fb, x + w - 1 - i, y + h - 1 - j, bg);
+            }
 }
 
 /* Draw a character at 8×g_glyph_h using font */
@@ -155,6 +173,7 @@ static int g_hov_r = -1, g_hov_c = -1;  /* hover button */
 /* Which (r,c) is the mouse over? -1 if not in grid */
 static void btn_hit(int mx, int my, int *r, int *c) {
     *r = *c = -1;
+    if (mx < 0 || mx >= WIN_W) return;
     if (my < BTN_Y0 || my >= BTN_Y0 + ROWS * BTN_H) return;
     int row = (my - BTN_Y0) / BTN_H;
     if (row < 0 || row >= ROWS) return;
@@ -170,24 +189,30 @@ static void btn_hit(int mx, int my, int *r, int *c) {
 }
 
 /* ── Render ──────────────────────────────────────────────────────────────── */
+#define GAP 4   /* gap between keys / around cards */
+
 static void render(uint32_t *fb) {
     fill(fb, 0, 0, WIN_W, WIN_H, C_BG);
 
-    /* ── Display area ── */
-    int disp_y  = TITLE_H + 4;
-    int disp_h  = BTN_Y0 - disp_y - 4;
-    fill(fb, 2, disp_y, WIN_W - 4, disp_h, C_DISP_BG);
-    fill(fb, 2, disp_y, WIN_W - 4, 1, C_BORDER);
-    fill(fb, 2, disp_y + disp_h, WIN_W - 4, 1, C_BORDER);
+    /* ── Display area (recessed card) ── */
+    int disp_y = TITLE_H + GAP + 2;
+    int disp_h = BTN_Y0 - disp_y - GAP;
+    fill_round(fb, GAP, disp_y, WIN_W - 2 * GAP, disp_h, C_DISP_BG, C_BG);
 
     /* expression hint (small, above main display) */
     if (g_expr[0]) {
-        draw_str_r(fb, g_expr, WIN_W - 6, disp_y + 4, C_DISP_SM);
+        draw_str_r(fb, g_expr, WIN_W - GAP - 8, disp_y + 8, C_DISP_SM);
     }
 
     /* main display — right-aligned, vertically centred */
-    int disp_val_y = disp_y + disp_h - g_glyph_h - 6;
-    draw_str_r(fb, g_disp, WIN_W - 6, disp_val_y, g_error ? 0xFFFF6040u : C_DISP_FG);
+    int disp_val_y = disp_y + disp_h - g_glyph_h - 8;
+    draw_str_r(fb, g_disp, WIN_W - GAP - 8, disp_val_y, g_error ? 0xFFFF6040u : C_DISP_FG);
+
+    /* Memory indicator (accent pill top-left of display) */
+    if (g_mem != 0.0) {
+        fill_round(fb, GAP + 6, disp_y + 6, 16, g_glyph_h + 2, C_BTN_OPS, C_DISP_BG);
+        draw_str(fb, "M", GAP + 10, disp_y + 7, C_BTN_OPS_FG);
+    }
 
     /* ── Buttons ── */
     for (int row = 0; row < ROWS; row++) {
@@ -208,17 +233,15 @@ static void render(uint32_t *fb) {
 
             uint32_t bg, fg;
             int typ = g_btn_type[row][col];
-            if (typ == 1)      { bg = hov ? C_BTN_HOV : C_BTN_NUM; fg = C_BTN_FG; }
-            else if (typ == 2) { bg = hov ? C_BTN_HOV : C_BTN_OPS; fg = C_BTN_OPS_FG; }
-            else if (typ == 3) { bg = hov ? C_BTN_EQ_H : C_BTN_EQ; fg = C_BTN_EQ_FG; }
-            else               { bg = hov ? C_BTN_CLR_H : C_BTN_CLR; fg = 0xFFFF8080u; }
+            if (typ == 1)      { bg = hov ? C_BTN_HOV  : C_BTN_NUM; fg = C_BTN_FG; }
+            else if (typ == 2) { bg = hov ? C_BTN_OPS_H: C_BTN_OPS; fg = hov ? C_BTN_EQ_FG : C_BTN_OPS_FG; }
+            else if (typ == 3) { bg = hov ? C_BTN_EQ_H : C_BTN_EQ;  fg = C_BTN_EQ_FG; }
+            else               { bg = hov ? C_BTN_CLR_H: C_BTN_CLR; fg = C_BTN_CLR_FG; }
 
-            fill(fb, bx, by, bw, BTN_H, bg);
-            /* border */
-            fill(fb, bx, by, bw, 1, C_BORDER);
-            fill(fb, bx, by + BTN_H - 1, bw, 1, C_BORDER);
-            fill(fb, bx, by, 1, BTN_H, C_BORDER);
-            fill(fb, bx + bw - 1, by, 1, BTN_H, C_BORDER);
+            /* inset each key by GAP so the keys read as separated rounded tiles */
+            int kx = bx + GAP, ky = by + GAP;
+            int kw = bw - 2 * GAP, kh = BTN_H - 2 * GAP;
+            fill_round(fb, kx, ky, kw, kh, bg, C_BG);
 
             const char *lbl = g_btn_labels[row][col];
             if (row == ROWS - 1 && col == 2) lbl = "=";
@@ -226,11 +249,6 @@ static void render(uint32_t *fb) {
             int ly = by + (BTN_H - g_glyph_h) / 2;
             draw_str(fb, lbl, lx, ly, fg);
         }
-    }
-
-    /* Memory indicator */
-    if (g_mem != 0.0) {
-        draw_str(fb, "M", 4, TITLE_H + 4 + 2, C_BTN_OPS_FG);
     }
 }
 

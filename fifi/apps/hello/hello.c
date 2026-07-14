@@ -64,7 +64,7 @@ static void draw_char(uint32_t *fb, int fw, char c, int x, int y, uint32_t fg) {
             if (bits & (0x80u >> col)) {
                 int px = x + col, py = y + row;
                 if (px >= 0 && px < fw && py >= 0 && py < WIN_H)
-                    fb[py * WIN_W + px] = fg;
+                    fb[py * fw + px] = fg;
             }
         }
     }
@@ -131,6 +131,7 @@ int main(void) {
     uint32_t frm_hdr[4] = {0, 0, WIN_W, WIN_H};
     uint32_t total = 16 + WIN_W * WIN_H * 4;
     uint8_t *msg = malloc(total);
+    if (!msg) { free(pixels); close(fd); return 1; }
     memcpy(msg,      frm_hdr, 16);
     memcpy(msg + 16, pixels, WIN_W * WIN_H * 4);
     send_msg(fd, IPC_APP_FRAME, msg, total);

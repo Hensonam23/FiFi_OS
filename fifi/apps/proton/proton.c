@@ -37,22 +37,24 @@
 static int g_win_w = WIN_W;
 static int g_win_h = WIN_H;
 
-/* ── Colours ─────────────────────────────────────────────────────────────── */
-#define C_BG      0x00101820u
-#define C_ROW_A   0x00141c28u
-#define C_ROW_B   0x00101820u
-#define C_BORDER  0x00243448u
-#define C_KEY     0x0060a0c0u
-#define C_VAL     0x00b0c8e0u
-#define C_GREY    0x00506070u
-#define C_OK      0x0040b060u
-#define C_WARN    0x00c09020u
-#define C_ERR     0x00c04030u
-#define C_BTN     0x001e3050u
-#define C_BTN_HOV 0x00285070u
-#define C_SEC_HDR 0x001a2432u
-#define C_ACCENT  0x003060c0u
-#define C_WHITE   0x00e0e8f0u
+/* ── Colours (shared FiFi design language) ───────────────────────────────── */
+#define C_BG      0x000e1620u   /* window background   */
+#define C_CARD    0x0016202eu   /* panels / cards      */
+#define C_HEADER  0x001a2740u   /* header / toolbar    */
+#define C_ROW_A   0x0018232fu   /* zebra row (lighter) */
+#define C_ROW_B   0x00131d29u   /* zebra row (darker)  */
+#define C_BORDER  0x00243448u   /* subtle divider      */
+#define C_KEY     0x006a8098u   /* key / secondary text*/
+#define C_VAL     0x00d8e8f8u   /* primary text        */
+#define C_GREY    0x006a8098u   /* muted text          */
+#define C_OK      0x0040cc80u   /* ok state            */
+#define C_WARN    0x00e0a030u   /* warning state       */
+#define C_ERR     0x00e05545u   /* error state         */
+#define C_BTN     0x00409cffu   /* primary button      */
+#define C_BTN_HOV 0x002f6bbfu   /* button hover (dim)  */
+#define C_SEC_HDR 0x001a2740u   /* section header band */
+#define C_ACCENT  0x00409cffu   /* accent              */
+#define C_WHITE   0x00ffffffu   /* on-accent text      */
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -110,6 +112,26 @@ static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     }
 }
 
+/* Filled rectangle with softened (rounded) corners — radius r. */
+static void fill_round(uint32_t *fb, int x, int y, int w, int h, uint32_t col, int r) {
+    if (r < 1) { fill(fb, x, y, w, h, col); return; }
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
+    for (int row = 0; row < h; row++) {
+        int dy = (row < r) ? (r - 1 - row)
+               : (row >= h - r) ? (row - (h - r)) : -1;
+        int inset = 0;
+        if (dy >= 0) {
+            while (inset < r) {
+                int dx = r - 1 - inset;
+                if (dx*dx + dy*dy <= (r-1)*(r-1)) break;
+                inset++;
+            }
+        }
+        fill(fb, x + inset, y + row, w - 2*inset, 1, col);
+    }
+}
+
 /* ── IPC helpers (modern 8-byte header protocol) ─────────────────────────── */
 static int g_sock = -1;
 
@@ -147,13 +169,15 @@ static bool ipc_connect(void) {
 
 static void ipc_send_frame(uint32_t *fb) {
     uint32_t fw = (uint32_t)g_win_w, fh = (uint32_t)g_win_h;
-    uint32_t total = 16 + fw * fh * 4;
+    size_t pix = (size_t)fw * fh * 4;   /* size_t: avoid 32-bit overflow */
+    size_t total = 16 + pix;
+    if (total > 0xFFFFFFFFu) return;
     uint8_t *msg = malloc(total);
     if (!msg) return;
     uint32_t frm[4] = {0, 0, fw, fh};
     memcpy(msg, frm, 16);
-    memcpy(msg+16, fb, fw * fh * 4);
-    ipc_send_msg(g_sock, IPC_APP_FRAME, msg, total);
+    memcpy(msg+16, fb, pix);
+    ipc_send_msg(g_sock, IPC_APP_FRAME, msg, (uint32_t)total);
     free(msg);
 }
 
@@ -214,9 +238,7 @@ static void btn_add(int x, int y, int w, int h, const char *label) {
 static void draw_btn(uint32_t *fb, int idx, bool hover) {
     btn_t *b = &g_btns[idx];
     uint32_t bg = hover ? C_BTN_HOV : C_BTN;
-    fill(fb, b->x, b->y, b->w, b->h, bg);
-    fill(fb, b->x, b->y, b->w, 1, C_ACCENT);
-    fill(fb, b->x, b->y + b->h - 1, b->w, 1, C_BORDER);
+    fill_round(fb, b->x, b->y, b->w, b->h, bg, 3);
     int lw = (int)strlen(b->label) * 9;
     int tx = b->x + (b->w > lw ? (b->w - lw) / 2 : 4);
     int ty = b->y + (b->h - g_glyph_h) / 2;
@@ -227,9 +249,9 @@ static void draw_btn(uint32_t *fb, int idx, bool hover) {
 static uint32_t *g_fb = NULL;
 
 static void section(int y, const char *title) {
-    fill(g_fb, PAD, y, g_win_w - PAD * 2, g_glyph_h + 4, C_SEC_HDR);
-    fill(g_fb, PAD, y + g_glyph_h + 4, g_win_w - PAD * 2, 1, C_ACCENT);
-    draw_str(g_fb, title, PAD + 6, y + 2, C_ACCENT);
+    fill(g_fb, PAD, y + 1, 3, g_glyph_h, C_ACCENT);            /* accent tick */
+    draw_str(g_fb, title, PAD + 8, y, C_ACCENT);
+    fill(g_fb, PAD, y + g_glyph_h + 3, g_win_w - PAD * 2, 1, C_BORDER);
 }
 
 /* Longest key is "XWayland  (X11 compat)" = 22 chars = 198px; value starts after + gap */
@@ -248,14 +270,15 @@ static void row_kv(int y, const char *key, const char *val, uint32_t vcol) {
 static void render(void) {
     if (!g_fb) return;
     fill(g_fb, 0, 0, g_win_w, g_win_h, C_BG);
-    fill(g_fb, 0, 0, g_win_w, 1, C_ACCENT);
-    fill(g_fb, 0, 0, 1, g_win_h, C_ACCENT);
-    fill(g_fb, g_win_w - 1, 0, 1, g_win_h, C_ACCENT);
-    fill(g_fb, 0, g_win_h - 1, g_win_w, 1, C_ACCENT);
 
-    int y = TITLE_H + PAD;
-    draw_str(g_fb, "Proton Gaming Setup", PAD + 4, y, C_WHITE);
-    y += g_glyph_h + 10;
+    /* Header band with title + accent tick */
+    int hdr_h = g_glyph_h + 12;
+    fill(g_fb, 0, TITLE_H, g_win_w, hdr_h, C_HEADER);
+    fill(g_fb, 0, TITLE_H + hdr_h, g_win_w, 1, C_BORDER);
+    fill(g_fb, PAD, TITLE_H + 6, 3, g_glyph_h, C_ACCENT);
+    draw_str(g_fb, "Proton Gaming Setup", PAD + 8, TITLE_H + 6, C_VAL);
+
+    int y = TITLE_H + hdr_h + 10;
 
     /* ── System prerequisites ── */
     section(y, "System Prerequisites"); y += g_glyph_h + 6;
@@ -380,7 +403,7 @@ int main(void) {
                         if (iplen >= 4) {
                             uint16_t nw, nh;
                             memcpy(&nw, payload, 2); memcpy(&nh, payload+2, 2);
-                            if (nw >= 300 && nh >= 200) {
+                            if (nw >= 300 && nh >= 200 && nw <= 8192 && nh <= 8192) {
                                 uint32_t *nb = realloc(g_fb, (size_t)nw * nh * 4);
                                 if (nb) { g_fb = nb; g_win_w = nw; g_win_h = nh; }
                             }

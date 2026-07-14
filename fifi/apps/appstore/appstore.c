@@ -257,7 +257,7 @@ static void rebuild_view(void) {
 /* ── App icons (PNG logos extracted at install time) ─────────────────────── */
 #include "../../platform/linux/vendor/lodepng.h"
 
-typedef struct { char name[64]; uint32_t *img; unsigned w, h; bool tried; } AppIcon;
+typedef struct { char name[64]; uint32_t *img; unsigned w, h; } AppIcon;
 #define MAX_ICONS 512
 static AppIcon g_icons[MAX_ICONS];
 static int g_nicons = 0;
@@ -307,7 +307,6 @@ static AppIcon *app_icon(const char *name) {
         snprintf(path, sizeof path, ICON_DIR "/%s.png", name);
         ic->img = decode_icon(path, &ic->w, &ic->h);
     }
-    ic->tried = true;
     return ic->img ? ic : NULL;
 }
 
@@ -325,9 +324,28 @@ static void app_icon_forget(const char *name) {
 /* ── Lazy feed-icon downloads (for browse rows + detail view) ────────────── */
 static int g_icon_dl = 0;   /* curls in flight */
 
+/* Reject strings with shell-dangerous characters. The catalog is fetched over
+ * the network, and a->name / a->icon get embedded in an sh -c command below; a
+ * name like  x';rm -rf ~;'  would otherwise break out of the quotes and run
+ * arbitrary commands. Allow only characters that legitimately appear in an app
+ * name or a URL path. */
+static bool field_shell_safe(const char *s) {
+    for (; *s; s++) {
+        char c = *s;
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= 'A' && c <= 'Z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == ' ' || c == '.' || c == '_' || c == '-' ||
+            c == '/' || c == ':' || c == '+' || c == '(' || c == ')') continue;
+        return false;   /* anything else (quotes, ; | & $ ` < > \ newline ...) */
+    }
+    return true;
+}
+
 /* Start fetching an app's feed icon in the background (max 4 at once). */
 static void icon_dl_start(App *a) {
     if (a->icon_state != 0 || !a->icon[0] || g_icon_dl >= 4) return;
+    if (!field_shell_safe(a->name) || !field_shell_safe(a->icon)) { a->icon_state = 2; return; }
     char fin[224], fail[240];
     snprintf(fin, sizeof fin, ICON_DIR "/%s.png", a->name);
     snprintf(fail, sizeof fail, "%s.fail", fin);
@@ -771,6 +789,7 @@ static void render(uint32_t *fb) {
 
     if (g_installed_mode) {
         /* Installed apps + running services */
+        g_chkupd_w = 0;   /* only valid while the header row is on-screen */
         int lt = list_top(), vis = visible_rows();
         for (int r = 0; r < vis; r++) {
             int vi = g_scroll + r;
@@ -792,8 +811,6 @@ static void render(uint32_t *fb) {
                     fill(fb, g_chkupd_x, g_chkupd_y, g_chkupd_w, ITEM_H - 6, C_BTN);
                     draw_str(fb, "Check Updates", g_chkupd_x + 7,
                              ry + (ITEM_H - g_glyph_h)/2, C_WHITE);
-                } else if (ir->kind == 0) {
-                    g_chkupd_w = 0;
                 }
             } else if (ir->kind == 1) {
                 Inst *in = &g_inst[ir->idx];
@@ -905,10 +922,13 @@ static void send_msg(int fd, uint32_t type, const void *d, uint32_t len) {
     write(fd, h, 8); if (len && d) write(fd, d, len);
 }
 static void send_frame(int fd, uint32_t *px) {
-    uint32_t frm[4] = {0,0,WIN_W,WIN_H}; uint32_t total = 16 + WIN_W*WIN_H*4;
+    size_t npix = (size_t)WIN_W * WIN_H;         /* size_t: W*H*4 overflows int */
+    size_t total = 16 + npix * 4;
+    if (total > 0xFFFFFFFFu) return;             /* won't fit the u32 length field */
+    uint32_t frm[4] = {0,0,(uint32_t)WIN_W,(uint32_t)WIN_H};
     uint8_t *m = malloc(total); if (!m) return;
-    memcpy(m, frm, 16); memcpy(m+16, px, WIN_W*WIN_H*4);
-    send_msg(fd, IPC_APP_FRAME, m, total); free(m);
+    memcpy(m, frm, 16); memcpy(m+16, px, npix * 4);
+    send_msg(fd, IPC_APP_FRAME, m, (uint32_t)total); free(m);
 }
 
 /* Kick off install of app index i (fork the install script). */
@@ -962,7 +982,10 @@ static bool poll_installs(int fd) {
 }
 
 int main(void) {
-    if (!font_load("/fifi-data/fonts/ter16b.psf")) { g_glyph = calloc(256*16,1); g_glyph_h = 16; }
+    if (!font_load("/fifi-data/fonts/ter16b.psf")) {
+        /* blank fallback; reset dims in case font_load died mid-parse */
+        g_glyph = calloc(256*16,1); g_glyph_h = 16; g_n_glyphs = 256;
+    }
     load_catalog();
     rebuild_view();
     if (g_napps == 0) {
@@ -1006,8 +1029,6 @@ int main(void) {
 
     while (running) {
         uint8_t tbuf[512];
-        /* non-blocking-ish read via short timeout using poll would be ideal; the
-         * socket is blocking, so we rely on periodic input. Use MSG_DONTWAIT. */
         ssize_t n = recv(sock, tbuf, sizeof tbuf, MSG_DONTWAIT);
         if (n == 0) break;
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
@@ -1021,6 +1042,12 @@ int main(void) {
                         memcpy(&type, in_hdr, 4); memcpy(&in_plen, in_hdr+4, 4);
                         if (in_plen > 65536) { in_got = 0; break; }
                         if (in_plen > 0) { in_pld = malloc(in_plen); in_pgot = 0; }
+                        else {
+                            /* zero-payload message (e.g. INVALIDATE): act now —
+                             * waiting for the next byte would delay/drop it */
+                            if (type == IPC_INVALIDATE) dirty = true;
+                            in_got = 0;
+                        }
                     }
                 } else if (in_plen > 0 && in_pgot < in_plen) {
                     uint32_t need = in_plen - in_pgot, have = (uint32_t)(n - pos);
@@ -1046,7 +1073,7 @@ int main(void) {
                                 else rebuild_view();
                                 dirty = true;
                             }
-                        } else if (type == IPC_INPUT_MOUSE && in_plen >= 9) {
+                        } else if (type == IPC_INPUT_MOUSE && in_plen >= 9 && in_pld) {
                             int32_t mx, my; memcpy(&mx, in_pld, 4); memcpy(&my, in_pld+4, 4);
                             uint8_t btns = in_pld[8];
                             int8_t scroll = (in_plen >= 10) ? (int8_t)in_pld[9] : 0;
@@ -1140,7 +1167,7 @@ int main(void) {
                         } else if (type == IPC_WIN_RESIZE && in_plen >= 4 && in_pld) {
                             uint16_t nw, nh;
                             memcpy(&nw, in_pld, 2); memcpy(&nh, in_pld + 2, 2);
-                            if (nw >= 300 && nh >= 220 &&
+                            if (nw >= 300 && nh >= 220 && nw <= 16384 && nh <= 16384 &&
                                 ((int)nw != g_win_w || (int)nh != g_win_h)) {
                                 uint32_t *nfb = realloc(fb, (size_t)nw * nh * 4u);
                                 if (nfb) { fb = nfb; g_win_w = nw; g_win_h = nh; clamp_scroll(); }
@@ -1152,8 +1179,7 @@ int main(void) {
                         free(in_pld); in_pld = NULL; in_got = 0; in_plen = 0; in_pgot = 0;
                     }
                 } else {
-                    if (type == IPC_INVALIDATE) dirty = true;
-                    in_got = 0; in_plen = 0; in_pgot = 0;
+                    in_got = 0; in_plen = 0; in_pgot = 0;   /* unreachable safety */
                 }
             }
         }

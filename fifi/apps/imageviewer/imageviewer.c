@@ -33,17 +33,22 @@
 static int g_win_w = 720;
 static int g_win_h = 520;
 #define TITLE_H  24
-#define INFO_H   20
+#define INFO_H   22
+#define PAD_X    10
 
-/* ── Colors ──────────────────────────────────────────────────────────────── */
-#define C_BG      0xFF0E1218u
-#define C_CHECK_A 0xFF282828u
-#define C_CHECK_B 0xFF323232u
-#define C_INFO_BG 0xFF090B10u
-#define C_INFO_FG 0xFF607890u
-#define C_HINT_FG 0xFF3A4C60u
-#define C_ERR_BG  0xFF180808u
-#define C_ERR_FG  0xFFFF6040u
+/* ── Colors (shared FiFi design language) ────────────────────────────────── */
+#define C_BG       0xFF0E1620u   /* window background */
+#define C_CHECK_A  0xFF161E2Au   /* transparency checker (dark) */
+#define C_CHECK_B  0xFF1E2836u   /* transparency checker (light) */
+#define C_INFO_BG  0xFF1A2740u   /* info/toolbar bar */
+#define C_INFO_FG  0xFFD8E8F8u   /* primary text */
+#define C_INFO_SM  0xFF6A8098u   /* muted / hints */
+#define C_ACCENT   0xFF409CFFu   /* accent */
+#define C_ONACCENT 0xFFFFFFFFu   /* on-accent text */
+#define C_BORDER   0xFF243448u   /* subtle divider */
+#define C_HINT_FG  0xFF6A8098u
+#define C_ERR_BG   0xFF1A1018u
+#define C_ERR_FG   0xFFFF6A50u
 
 /* ── Image state ─────────────────────────────────────────────────────────── */
 static uint32_t *g_img   = NULL;
@@ -97,6 +102,21 @@ static void fill_rect(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int r = y; r < y + h; r++)
         for (int c = x; c < x + w; c++)
             put_pixel(fb, c, r, col);
+}
+
+/* Filled rect with softened (notched) corners — reads as a rounded pill. */
+static void fill_round(uint32_t *fb, int x, int y, int w, int h,
+                       uint32_t col, uint32_t bg) {
+    fill_rect(fb, x, y, w, h, col);
+    const int r = 3;
+    for (int i = 0; i < r; i++)
+        for (int j = 0; j < r; j++)
+            if (i + j < r) {
+                put_pixel(fb, x + i,         y + j,         bg);
+                put_pixel(fb, x + w - 1 - i, y + j,         bg);
+                put_pixel(fb, x + i,         y + h - 1 - j, bg);
+                put_pixel(fb, x + w - 1 - i, y + h - 1 - j, bg);
+            }
 }
 
 static void draw_char(uint32_t *fb, int x, int y, unsigned char ch, uint32_t fg, uint32_t bg) {
@@ -165,8 +185,10 @@ static int ppm_read_int(const uint8_t *d, size_t sz, size_t *p) {
         while (*p < sz && d[*p] != '\n') (*p)++;
     }
     int v = 0;
-    while (*p < sz && d[*p] >= '0' && d[*p] <= '9')
+    while (*p < sz && d[*p] >= '0' && d[*p] <= '9') {
+        if (v > 214748363) return -1;   /* would overflow int */
         v = v * 10 + (int)(d[(*p)++] - '0');
+    }
     return v;
 }
 
@@ -268,8 +290,9 @@ static void render(uint32_t *fb) {
     int content_h = g_win_h - TITLE_H - INFO_H;
     if (content_h < 1) content_h = 1;
 
-    /* Info bar background */
+    /* Info bar background + top divider */
     fill_rect(fb, 0, g_win_h - INFO_H, g_win_w, INFO_H, C_INFO_BG);
+    fill_rect(fb, 0, g_win_h - INFO_H, g_win_w, 1, C_BORDER);
 
     /* Error state */
     if (g_img_err[0]) {
@@ -283,7 +306,7 @@ static void render(uint32_t *fb) {
         draw_str(fb, hx, ty + g_glyph_h + 4, hint, C_HINT_FG, C_ERR_BG);
 
         /* Info bar */
-        draw_str(fb, 4, g_win_h - INFO_H + (INFO_H - g_glyph_h) / 2,
+        draw_str(fb, PAD_X, g_win_h - INFO_H + (INFO_H - g_glyph_h) / 2,
                  g_img_name, C_INFO_FG, C_INFO_BG);
         return;
     }
@@ -301,9 +324,6 @@ static void render(uint32_t *fb) {
     int disp_w, disp_h;
     if (g_fit_mode) {
         /* Scale to fit content area while preserving aspect ratio */
-        int scale_x = (content_h * g_img_w > g_win_w * g_img_h) ?
-                      content_h * g_img_w / g_img_h : g_win_w;
-        /* simpler: use integer fit */
         int fw = g_win_w;
         int fh = content_h;
         if (g_img_w * fh > fw * g_img_h) {
@@ -315,7 +335,6 @@ static void render(uint32_t *fb) {
         }
         if (disp_w < 1) disp_w = 1;
         if (disp_h < 1) disp_h = 1;
-        (void)scale_x;
     } else {
         disp_w = g_img_w * g_zoom_pct / 100;
         disp_h = g_img_h * g_zoom_pct / 100;
@@ -354,22 +373,36 @@ static void render(uint32_t *fb) {
         }
     }
 
-    /* Info bar content */
-    char info[128];
-    if (g_fit_mode) {
-        snprintf(info, sizeof(info), "%s  %d\xc3\x97%d  fit  | W=wallpaper  F=fit  +/-=zoom",
-                 g_img_fmt, g_img_w, g_img_h);
-    } else {
-        snprintf(info, sizeof(info), "%s  %d\xc3\x97%d  %d%%  | W=wallpaper  F=fit  +/-=zoom",
-                 g_img_fmt, g_img_w, g_img_h, g_zoom_pct);
+    /* ── Info bar content ── */
+    int bar_y = g_win_h - INFO_H;
+    int ty    = bar_y + (INFO_H - g_glyph_h) / 2;
+    int x     = PAD_X;
+
+    /* Format badge (accent pill) */
+    if (g_img_fmt[0]) {
+        int bw = str_px(g_img_fmt) + 10;
+        fill_round(fb, x, bar_y + 3, bw, INFO_H - 6, C_ACCENT, C_INFO_BG);
+        draw_str(fb, x + 5, ty, g_img_fmt, C_ONACCENT, C_ACCENT);
+        x += bw + 10;
     }
-    /* Just use ASCII × since PSF might not have UTF-8 */
-    snprintf(info, sizeof(info), g_fit_mode ?
-             "%s  %dx%d  fit  | W=wallpaper F=fit +/-=zoom" :
-             "%s  %dx%d  %d%%  | W=wallpaper F=fit +/-=zoom",
-             g_img_fmt, g_img_w, g_img_h, g_zoom_pct);
-    draw_str(fb, 4, g_win_h - INFO_H + (INFO_H - g_glyph_h) / 2,
-             info, C_INFO_FG, C_INFO_BG);
+
+    /* Dimensions (primary text) */
+    char dims[48];
+    snprintf(dims, sizeof(dims), "%dx%d", g_img_w, g_img_h);
+    draw_str(fb, x, ty, dims, C_INFO_FG, C_INFO_BG);
+    x += str_px(dims) + 12;
+
+    /* Zoom level (accent) */
+    char zoom[24];
+    if (g_fit_mode) snprintf(zoom, sizeof(zoom), "fit");
+    else            snprintf(zoom, sizeof(zoom), "%d%%", g_zoom_pct);
+    draw_str(fb, x, ty, zoom, C_ACCENT, C_INFO_BG);
+
+    /* Hints (muted, right-aligned) */
+    const char *hint = "W wallpaper   F fit   +/- zoom";
+    int hx = g_win_w - PAD_X - str_px(hint);
+    if (hx > x + 12)
+        draw_str(fb, hx, ty, hint, C_INFO_SM, C_INFO_BG);
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
@@ -382,12 +415,15 @@ static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) 
 
 static void send_frame(int sock, uint32_t *fb) {
     uint32_t hdr[4] = {0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h};
-    uint32_t pld_sz = 16 + (uint32_t)g_win_w * (uint32_t)g_win_h * 4;
+    /* Compute in size_t: 16 + w*h*4 overflows uint32 for large windows */
+    size_t px     = (size_t)g_win_w * (size_t)g_win_h * 4;
+    size_t pld_sz = 16 + px;
+    if (pld_sz > 0xFFFFFFFFu) return;   /* len field is 32-bit */
     uint8_t *msg = malloc(pld_sz);
     if (!msg) return;
     memcpy(msg, hdr, 16);
-    memcpy(msg + 16, fb, (size_t)g_win_w * g_win_h * 4);
-    ipc_send_msg(sock, IPC_APP_FRAME, msg, pld_sz);
+    memcpy(msg + 16, fb, px);
+    ipc_send_msg(sock, IPC_APP_FRAME, msg, (uint32_t)pld_sz);
     free(msg);
 }
 
@@ -424,7 +460,8 @@ static bool msg_feed(MsgState *m, const uint8_t *buf, int n, int *pos) {
                 if (m->plen > 128 * 1024 * 1024u) { m->hdr_got = 0; return false; }
                 m->pgot = 0;
                 free(m->pld); m->pld = NULL;
-                if (m->plen > 0) { m->pld = malloc(m->plen); if (!m->pld) return false; }
+                /* On malloc failure pld stays NULL: payload is skipped in sync */
+                if (m->plen > 0) m->pld = malloc(m->plen);
                 if (m->plen == 0) return true;
             }
         } else {
@@ -504,15 +541,15 @@ int main(int argc, char **argv) {
             if (n <= 0) break;
             int pos = 0;
             while (pos < (int)n) {
-                if (!msg_feed(&ms, tbuf, (int)n, &pos)) { msg_reset(&ms); continue; }
+                /* false = message incomplete; keep state and wait for more data
+                 * (resetting here would discard partially-received messages) */
+                if (!msg_feed(&ms, tbuf, (int)n, &pos)) break;
 
                 switch (ms.type) {
 
                 case IPC_INPUT_KEY:
                     if (ms.plen >= 1 && ms.pld) {
                         uint8_t key = ms.pld[0];
-                        bool shift = ms.plen >= 2 && (ms.pld[1] & 0x01);
-                        (void)shift;
 
                         if (key == 0x1Bu || key == 'q' || key == 'Q') {
                             running = false; break;
@@ -595,7 +632,7 @@ int main(int argc, char **argv) {
                         uint16_t nw, nh;
                         memcpy(&nw, ms.pld, 2);
                         memcpy(&nh, ms.pld + 2, 2);
-                        if (nw >= 200 && nh >= 150 &&
+                        if (nw >= 200 && nh >= 150 && nw <= 8192 && nh <= 8192 &&
                             ((int)nw != g_win_w || (int)nh != g_win_h)) {
                             free(fb);
                             g_win_w = (int)nw; g_win_h = (int)nh;

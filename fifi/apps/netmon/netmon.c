@@ -87,6 +87,33 @@ static void fill_rect(uint32_t *fb, int win_w, int win_h,
         }
 }
 
+/* Filled rectangle with softened (rounded) corners — radius r. */
+static void fill_round(uint32_t *fb, int win_w, int win_h,
+                       int x, int y, int w, int h, uint32_t col, int r) {
+    if (r < 1) { fill_rect(fb, win_w, win_h, x, y, w, h, col); return; }
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
+    for (int row = 0; row < h; row++) {
+        int dy = (row < r) ? (r - 1 - row)
+               : (row >= h - r) ? (row - (h - r)) : -1;
+        int inset = 0;
+        if (dy >= 0) {
+            while (inset < r) {
+                int dx = r - 1 - inset;
+                if (dx*dx + dy*dy <= (r-1)*(r-1)) break;
+                inset++;
+            }
+        }
+        fill_rect(fb, win_w, win_h, x + inset, y + row, w - 2*inset, 1, col);
+    }
+}
+
+/* Card panel (rounded). */
+static void draw_card(uint32_t *fb, int win_w, int win_h,
+                      int x, int y, int w, int h) {
+    fill_round(fb, win_w, win_h, x, y, w, h, 0xFF16202Eu, 4);
+}
+
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
 static void write_all(int fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
@@ -104,13 +131,15 @@ static int g_win_w = WIN_W, g_win_h = WIN_H;
 
 static void send_frame(int sock, uint32_t *fb) {
     uint32_t w = (uint32_t)g_win_w, h = (uint32_t)g_win_h;
-    uint32_t pld_sz = 16 + w * h * 4;
+    size_t pix = (size_t)w * h * 4;   /* size_t: avoid 32-bit overflow */
+    size_t pld_sz = 16 + pix;
+    if (pld_sz > 0xFFFFFFFFu) return;
     uint8_t *msg = malloc(pld_sz);
     if (!msg) return;
     uint32_t hdr[4] = {0, 0, w, h};
     memcpy(msg, hdr, 16);
-    memcpy(msg + 16, fb, w * h * 4);
-    ipc_send_msg(sock, IPC_APP_FRAME, msg, pld_sz);
+    memcpy(msg + 16, fb, pix);
+    ipc_send_msg(sock, IPC_APP_FRAME, msg, (uint32_t)pld_sz);
     free(msg);
 }
 
@@ -165,8 +194,8 @@ static void update_stats(void) {
         if (nl) *nl = '\0';
 
         char name[16] = {0};
-        uint64_t rx=0, tx=0, tmp=0;
-        int n = sscanf(line, " %15[^:]: %lu %lu %lu %lu %lu %lu %lu %lu %lu",
+        unsigned long long rx=0, tx=0, tmp=0;
+        int n = sscanf(line, " %15[^:]: %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                        name, &rx, &tmp, &tmp, &tmp, &tmp, &tmp, &tmp, &tmp, &tx);
         /* Skip loopback and virtual tunnel interfaces; only show real Ethernet (type=1) */
         bool is_real = false;
@@ -223,82 +252,131 @@ static void fmt_bytes(uint64_t b, char *buf, int bufsz) {
         snprintf(buf, bufsz, "%6llu  B", (unsigned long long)b);
 }
 
-/* ── Render ──────────────────────────────────────────────────────────────── */
-#define C_BG      0xFF0C1018u
-#define C_SEP     0xFF1E3050u
-#define C_ACCENT  0xFF3878D8u
-#define C_FG      0xFFC8D4F0u
-#define C_MUTED   0xFF405868u
-#define C_UP      0xFF40C878u
-#define C_DOWN    0xFFE05040u
+/* ── Render (shared FiFi design language) ────────────────────────────────── */
+#define C_BG      0xFF0E1620u   /* window background */
+#define C_CARD    0xFF16202Eu   /* interface card    */
+#define C_HEADER  0xFF1A2740u   /* header / footer   */
+#define C_SEP     0xFF243448u   /* subtle divider    */
+#define C_ACCENT  0xFF409CFFu   /* primary / RX meter*/
+#define C_ACCENT2 0xFF2F6BBFu   /* dim accent / TX   */
+#define C_FG      0xFFD8E8F8u   /* primary text      */
+#define C_MUTED   0xFF6A8098u   /* secondary text    */
+#define C_TRACK   0xFF0C141Eu   /* meter track       */
+#define C_UP      0xFF40CC80u   /* link up           */
+#define C_DOWN    0xFFE0A030u   /* link down (warn)  */
+
+/* Small throughput meter: track + accent fill for `frac` (0..1). */
+static void meter(uint32_t *fb, int ww, int wh, int x, int y, int w, int h,
+                  double frac, uint32_t col) {
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    int r = h >= 6 ? 2 : 1;
+    fill_round(fb, ww, wh, x, y, w, h, C_TRACK, r);
+    int fw = (int)(w * frac);
+    if (fw < r*2 && fw > 0) fw = r*2;
+    if (fw > w) fw = w;
+    if (fw > 0) fill_round(fb, ww, wh, x, y, fw, h, col, r);
+}
 
 static void render(uint32_t *fb) {
     int ww = g_win_w, wh = g_win_h;
     fill_rect(fb, ww, wh, 0, 0, ww, wh, C_BG);
+    int fh = (int)g_fh, fw = (int)g_fw;
 
-    int y = TITLE_H + 6;
-    fill_rect(fb, ww, wh, 0, y, ww, 1, C_SEP);
-    y += 3;
-    draw_str(fb, ww, wh, 8, y, "NETWORK INTERFACES", C_ACCENT, C_BG);
-    y += (int)g_fh + 4;
-    fill_rect(fb, ww, wh, 0, y, ww, 1, C_SEP);
-    y += 4;
+    /* Header bar */
+    int hdr_h = fh + 12;
+    fill_rect(fb, ww, wh, 0, TITLE_H, ww, hdr_h, C_HEADER);
+    fill_rect(fb, ww, wh, 0, TITLE_H + hdr_h, ww, 1, C_SEP);
+    fill_rect(fb, ww, wh, 12, TITLE_H + 6, 3, fh, C_ACCENT);
+    draw_str(fb, ww, wh, 20, TITLE_H + 6, "Network Interfaces", C_FG, C_HEADER);
+
+    int y = TITLE_H + hdr_h + 10;
+    int cx = 10, cw = ww - 20;
 
     if (g_nifaces == 0) {
-        draw_str(fb, ww, wh, 8, y, "No interfaces detected", C_MUTED, C_BG);
+        draw_str(fb, ww, wh, cx + 4, y, "No interfaces detected", C_MUTED, C_BG);
     } else {
+        /* Rolling scale for the throughput meters (floor 128 KB/s). */
+        uint64_t peak = 128 * 1024;
+        for (int i = 0; i < g_nifaces; i++) {
+            if (g_ifaces[i].rx_rate > peak) peak = g_ifaces[i].rx_rate;
+            if (g_ifaces[i].tx_rate > peak) peak = g_ifaces[i].tx_rate;
+        }
+
+        int card_h = fh*3 + 26;
+        int foot_reserve = fh + 12;
         for (int i = 0; i < g_nifaces && i < 4; i++) {
+            if (y + card_h > wh - foot_reserve) break;
             iface_t *ifc = &g_ifaces[i];
 
-            uint32_t status_col = ifc->up ? C_UP : C_DOWN;
-            char namebuf[32];
-            snprintf(namebuf, sizeof(namebuf), "%-10.15s", ifc->name);
-            draw_str(fb, ww, wh, 8, y, namebuf, C_FG, C_BG);
-            draw_str(fb, ww, wh, 8 + 11 * (int)g_fw, y,
-                     ifc->up ? "UP" : "DOWN", status_col, C_BG);
-            draw_str(fb, ww, wh, 8 + 15 * (int)g_fw, y,
-                     ifc->ip4[0] ? ifc->ip4 : "---", C_FG, C_BG);
-            y += (int)g_fh + 2;
+            draw_card(fb, ww, wh, cx, y, cw, card_h);
+            int ix = cx + 12;
+            int row = y + 8;
+
+            /* Name + IP + status pill */
+            draw_str(fb, ww, wh, ix, row, ifc->name, C_FG, C_CARD);
+            char ipbuf[24];
+            snprintf(ipbuf, sizeof(ipbuf), "%s", ifc->ip4[0] ? ifc->ip4 : "---");
+            draw_str(fb, ww, wh, ix + 9*fw, row, ipbuf, C_MUTED, C_CARD);
+
+            const char *st = ifc->up ? "UP" : "DOWN";
+            uint32_t stc = ifc->up ? C_UP : C_DOWN;
+            int pill_w = (int)strlen(st) * fw + 14;
+            int pill_x = cx + cw - pill_w - 10;
+            fill_round(fb, ww, wh, pill_x, row - 2, pill_w, fh + 4, C_HEADER, 3);
+            fill_round(fb, ww, wh, pill_x + 5, row + fh/2 - 2, 4, 4, stc, 2);
+            draw_str(fb, ww, wh, pill_x + 12, row, st, stc, C_HEADER);
+            row += fh + 6;
+
+            /* RX / TX meters */
+            int lbl_w = 3 * fw;
+            int val_w = 11 * fw;
+            int mx = ix + lbl_w + 4;
+            int mw = cw - (lbl_w + 4) - val_w - 24;
+            if (mw < 20) mw = 20;
 
             char rx_rate[16], tx_rate[16];
             fmt_rate(ifc->rx_rate, rx_rate, sizeof(rx_rate));
             fmt_rate(ifc->tx_rate, tx_rate, sizeof(tx_rate));
-            char ratebuf[80];
-            snprintf(ratebuf, sizeof(ratebuf),
-                     "  RX: %-12s  TX: %-12s", rx_rate, tx_rate);
-            draw_str(fb, ww, wh, 8, y, ratebuf, C_MUTED, C_BG);
-            y += (int)g_fh + 2;
 
+            draw_str(fb, ww, wh, ix, row, "RX", C_MUTED, C_CARD);
+            meter(fb, ww, wh, mx, row + 2, mw, fh - 3,
+                  (double)ifc->rx_rate / (double)peak, C_ACCENT);
+            draw_str(fb, ww, wh, mx + mw + 8, row, rx_rate, C_FG, C_CARD);
+            row += fh + 2;
+
+            draw_str(fb, ww, wh, ix, row, "TX", C_MUTED, C_CARD);
+            meter(fb, ww, wh, mx, row + 2, mw, fh - 3,
+                  (double)ifc->tx_rate / (double)peak, C_ACCENT2);
+            draw_str(fb, ww, wh, mx + mw + 8, row, tx_rate, C_FG, C_CARD);
+
+            /* Totals (muted, right under the name row area) */
             char rx_tot[16], tx_tot[16];
             fmt_bytes(ifc->rx_bytes, rx_tot, sizeof(rx_tot));
             fmt_bytes(ifc->tx_bytes, tx_tot, sizeof(tx_tot));
-            char totbuf[80];
-            snprintf(totbuf, sizeof(totbuf),
-                     "  Total RX: %-10s TX: %-10s", rx_tot, tx_tot);
-            draw_str(fb, ww, wh, 8, y, totbuf, C_MUTED, C_BG);
-            y += (int)g_fh + 8;
+            char totbuf[64];
+            snprintf(totbuf, sizeof(totbuf), "%s / %s total", rx_tot, tx_tot);
+            int tw = (int)strlen(totbuf) * fw;
+            draw_str(fb, ww, wh, cx + cw - tw - 12, y + 8, totbuf, C_MUTED, C_CARD);
 
-            if (i < g_nifaces - 1)
-                fill_rect(fb, ww, wh, 8, y, ww - 16, 1, C_SEP);
-            y += 6;
+            y += card_h + 8;
         }
     }
 
-    /* Bottom hint bar */
-    int bar_y = wh - (int)g_fh - 6;
-    if (bar_y > y) {
-        fill_rect(fb, ww, wh, 0, bar_y - 2, ww, 1, C_SEP);
-        fill_rect(fb, ww, wh, 0, bar_y - 1, ww, (int)g_fh + 8, 0xFF0A0E14u);
-        draw_str(fb, ww, wh, 8, bar_y + 2, "Updates every second", C_MUTED, 0xFF0A0E14u);
-        char time_buf[16];
-        time_t now = time(NULL);
-        struct tm *tm = localtime(&now);
-        if (tm) snprintf(time_buf, sizeof(time_buf),
-                         "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
-        else time_buf[0] = '\0';
-        int tx = ww - (int)strlen(time_buf) * (int)g_fw - 8;
-        draw_str(fb, ww, wh, tx, bar_y + 2, time_buf, C_ACCENT, 0xFF0A0E14u);
-    }
+    /* Bottom status bar */
+    int bar_h = fh + 12;
+    int bar_y = wh - bar_h;
+    fill_rect(fb, ww, wh, 0, bar_y, ww, bar_h, C_HEADER);
+    fill_rect(fb, ww, wh, 0, bar_y, ww, 1, C_SEP);
+    draw_str(fb, ww, wh, 12, bar_y + 6, "Updating every second", C_MUTED, C_HEADER);
+    char time_buf[16];
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    if (tm) snprintf(time_buf, sizeof(time_buf),
+                     "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    else time_buf[0] = '\0';
+    int txp = ww - (int)strlen(time_buf) * fw - 12;
+    draw_str(fb, ww, wh, txp, bar_y + 6, time_buf, C_ACCENT, C_HEADER);
 }
 
 /* ── IPC message state ────────────────────────────────────────────────────── */
@@ -412,7 +490,7 @@ int main(void) {
                         if (ms.plen >= 4 && ms.pld) {
                             uint16_t nw, nh;
                             memcpy(&nw, ms.pld, 2); memcpy(&nh, ms.pld + 2, 2);
-                            if (nw >= 200 && nh >= 100) {
+                            if (nw >= 200 && nh >= 100 && nw <= 8192 && nh <= 8192) {
                                 uint32_t *nb = realloc(fb, (size_t)nw * nh * 4);
                                 if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
                             }

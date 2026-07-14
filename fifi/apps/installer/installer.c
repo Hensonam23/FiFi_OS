@@ -1142,10 +1142,11 @@ static void write_all(int fd, const void *buf, size_t n) {
 }
 
 static void send_frame(app_t *a, int sock) {
-    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=16+(uint32_t)(a->win_w*a->win_h*4);
+    size_t pxbytes = (size_t)a->win_w * (size_t)a->win_h * 4u;
+    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=(uint32_t)(16+pxbytes);
     memcpy(th,&t,4); memcpy(th+4,&l,4); write_all(sock,th,8);
     uint32_t fh[4]={0,0,(uint32_t)a->win_w,(uint32_t)a->win_h};
-    write_all(sock,fh,16); write_all(sock,a->fb,(size_t)(a->win_w*a->win_h*4));
+    write_all(sock,fh,16); write_all(sock,a->fb,pxbytes);
 }
 
 static void ipc_send(int sock, uint32_t type, const void *data, uint32_t len) {

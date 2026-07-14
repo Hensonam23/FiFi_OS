@@ -40,17 +40,19 @@
 static int g_win_w = WIN_W;
 static int g_win_h = WIN_H;
 
-/* ── Colours ─────────────────────────────────────────────────────────────── */
-#define C_BG      0x00101820u
-#define C_ROW_A   0x00141c28u
-#define C_ROW_B   0x00101820u
-#define C_BORDER  0x00243448u
-#define C_KEY     0x0060a0c0u
-#define C_VAL     0x00b0c8e0u
-#define C_GREY    0x00506070u
-#define C_GREEN   0x0030b060u
-#define C_RED     0x00cc3333u
-#define C_YELLOW  0x00c0a020u
+/* ── Colours (shared FiFi design language) ───────────────────────────────── */
+#define C_BG      0x000e1620u   /* window background   */
+#define C_CARD    0x0016202eu   /* panels / cards      */
+#define C_HEADER  0x001a2740u   /* header / footer bar */
+#define C_ROW_A   0x0018232fu   /* zebra row (lighter) */
+#define C_ROW_B   0x00131d29u   /* zebra row (darker)  */
+#define C_BORDER  0x00243448u   /* subtle divider      */
+#define C_KEY     0x00409cffu   /* accent / headers    */
+#define C_VAL     0x00d8e8f8u   /* primary text        */
+#define C_GREY    0x006a8098u   /* muted / secondary   */
+#define C_GREEN   0x0040cc80u   /* ok state            */
+#define C_RED     0x00e05545u   /* alert / off state   */
+#define C_YELLOW  0x00e0a030u   /* warning state       */
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -149,16 +151,6 @@ static void update_firewall(void) {
         g_fw_active = false;
         snprintf(g_fw_status, sizeof(g_fw_status), "Not configured");
     }
-}
-
-/* ── Refresh timestamp ───────────────────────────────────────────────────── */
-static char g_refresh_time[24] = "--:--:--";
-
-static void update_refresh_time(void) {
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    if (tm) snprintf(g_refresh_time, sizeof(g_refresh_time), "%02d:%02d:%02d",
-                     tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
 /* ── Section: DNS over HTTPS ─────────────────────────────────────────────── */
@@ -616,7 +608,7 @@ static bool g_pw_mode       = false;
 static char g_pw_buf[128]   = "";
 static int  g_pw_len        = 0;
 static char g_pw_result[128] = "";
-static uint32_t g_pw_color  = 0x00b0c8e0u;
+static uint32_t g_pw_color  = 0x00d8e8f8u;
 
 static int pw_strength(const char *pw, int len) {
     if (len == 0) return 0;
@@ -642,20 +634,19 @@ static int pw_strength(const char *pw, int len) {
 static void evaluate_password(void) {
     if (g_pw_len == 0) {
         snprintf(g_pw_result, sizeof(g_pw_result), "No password entered");
-        g_pw_color = 0x00506070u;
+        g_pw_color = 0x006a8098u;
         return;
     }
     int score = pw_strength(g_pw_buf, g_pw_len);
     const char *label = (score <= 2) ? "Weak" :
                         (score <= 4) ? "Fair" :
                         (score <= 6) ? "Strong" : "Very Strong";
-    g_pw_color = (score <= 2) ? 0x00cc3333u :
-                 (score <= 4) ? 0x00c0a020u :
-                 (score <= 6) ? 0x0030b060u : 0x0050e880u;
+    g_pw_color = (score <= 2) ? 0x00e05545u :
+                 (score <= 4) ? 0x00e0a030u :
+                 (score <= 6) ? 0x0040cc80u : 0x0040cc80u;
     /* Build feedback string */
     char fb[64] = "";
     if (g_pw_len < 8)  { strncat(fb, "too short, ", sizeof(fb)-strlen(fb)-1); }
-    if (g_pw_len < 12) { /* hint below 12 */ }
     bool has_upper = false, has_lower = false, has_digit = false, has_special = false;
     for (int i = 0; i < g_pw_len; i++) {
         unsigned char c = (unsigned char)g_pw_buf[i];
@@ -828,9 +819,12 @@ static void render(uint32_t *fb) {
     int vy = TITLE_H + 6 - g_scroll * ROW_H;
 
 #define SECTION(label)  do { \
-        if (vy > TITLE_H && vy < wh) draw_str(fb, (label), PAD, vy, C_KEY); \
+        if (vy > TITLE_H && vy < wh) { \
+            fill(fb, PAD, vy + 1, 3, g_glyph_h - 1, C_KEY); \
+            draw_str(fb, (label), PAD + 8, vy, C_KEY); \
+        } \
         vy += g_glyph_h + 2; \
-        if (vy > TITLE_H && vy < wh) hline(fb, vy, C_BORDER); \
+        if (vy > TITLE_H && vy < wh) fill(fb, PAD, vy, ww - PAD*2, 1, C_BORDER); \
         vy += 4; \
     } while (0)
 
@@ -1066,18 +1060,7 @@ static void render(uint32_t *fb) {
     /* ── Encrypted Storage ─── */
     SECTION("Encrypted Storage (LUKS2)");
     {
-        /* Check if cryptsetup is available and if any LUKS devices exist */
-        bool luks_found = (access("/sys/class/block", F_OK) == 0);
-        char luks_msg[96] = "Not active";
-        /* Quick check: if /proc/crypto mentions aes and there's a dm-crypt device */
-        FILE *crypt_f = fopen("/proc/devices", "r");
-        if (crypt_f) {
-            char cline[128];
-            while (fgets(cline, sizeof(cline), crypt_f)) {
-                if (strstr(cline, "device-mapper")) { luks_found = true; break; }
-            }
-            fclose(crypt_f);
-        }
+        char luks_msg[96];
         if (access("/usr/bin/cryptsetup", X_OK) == 0)
             snprintf(luks_msg, sizeof(luks_msg),
                      "cryptsetup ready -- use installer to encrypt storage");
@@ -1146,7 +1129,7 @@ static void render(uint32_t *fb) {
 
     /* ── Help footer (fixed at bottom) — key bindings only, no timestamp ── */
     int foot_y = wh - g_glyph_h - 6;
-    fill(fb, 0, foot_y - 2, ww, g_glyph_h + 8, 0x000c1420u);
+    fill(fb, 0, foot_y - 2, ww, g_glyph_h + 8, C_HEADER);
     hline(fb, foot_y - 2, C_BORDER);
     /* Clip the footer text to the window width so it never overflows */
     int max_footer_ch = (ww - 2 * PAD) / (g_char_w + 1);
@@ -1195,12 +1178,13 @@ static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) 
 static void send_frame(int fd, uint32_t *px) {
     uint32_t fw = (uint32_t)g_win_w, fh = (uint32_t)g_win_h;
     uint32_t frm[4] = {0, 0, fw, fh};
-    uint32_t total = 16 + fw * fh * 4;
+    size_t pxbytes = (size_t)fw * (size_t)fh * 4u;
+    size_t total = 16 + pxbytes;
     uint8_t *msg = malloc(total);
     if (!msg) return;
     memcpy(msg, frm, 16);
-    memcpy(msg+16, px, fw * fh * 4);
-    ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
+    memcpy(msg+16, px, pxbytes);
+    ipc_send_msg(fd, IPC_APP_FRAME, msg, (uint32_t)total);
     free(msg);
 }
 
@@ -1212,7 +1196,6 @@ static void do_refresh(void) {
     update_privacy();
     update_connections();
     update_ids();
-    update_refresh_time();
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
@@ -1324,7 +1307,7 @@ int main(void) {
                                     snprintf(g_vs_target, sizeof(g_vs_target), "%s", g_vs_buf);
                                     g_vs_mode = false;
                                     /* Run nmap service/version scan */
-                                    static char vs_label[80], vs_host[128];
+                                    static char vs_label[160], vs_host[128];
                                     snprintf(vs_host, sizeof(vs_host), "%s", g_vs_target);
                                     snprintf(vs_label, sizeof(vs_label), "vuln-scan %s", vs_host);
                                     char *vs_args[] = {

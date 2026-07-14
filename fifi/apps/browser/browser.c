@@ -156,7 +156,10 @@ static bool load_font(app_t *a, const char *path) {
     uint32_t height     = psf2_u32(buf, 24);
     uint32_t width      = psf2_u32(buf, 28);
 
-    if (height == 0 || width == 0 || charsize == 0) { free(buf); return false; }
+    /* Reject malformed headers: glyph table for 256 chars must fit the file */
+    if (height == 0 || width == 0 || charsize == 0 || headersize < 32 ||
+        (uint64_t)headersize + 256ull * charsize > (uint64_t)total)
+        { free(buf); return false; }
 
     /* Point glyph data past the header */
     uint8_t *glyphs = malloc((size_t)(total - (int)headersize));
@@ -413,8 +416,6 @@ static layout_t compute_layout(const app_t *a) {
     l.btn_w         = 220;   /* "Download & Install" = 18 chars × 9px + 48px padding */
     l.btn_x         = a->win_w - l.btn_w - 20;
     l.btn_y         = a->win_h - l.btn_h - 16;
-    /* Distribute vertical space between header bottom and button area */
-    int avail       = l.btn_y - 14 - hdr_bottom - 8;
     l.instr_y       = hdr_bottom + 10;
     int cards_top   = l.instr_y + g_fh + 10;
     int cards_avail = l.btn_y - 14 - cards_top - 20;  /* 20px for note + gap */
@@ -424,7 +425,6 @@ static layout_t compute_layout(const app_t *a) {
     l.card1_y       = cards_top;
     l.card2_y       = l.card1_y + l.card_h + 10;
     l.note_y        = l.card2_y + l.card_h + 10;
-    (void)avail;
     return l;
 }
 
@@ -471,7 +471,7 @@ static void start_download(app_t *a) {
     FILE *cf = fopen(BROWSER_CHOICE, "w");
     if (cf) { fputs(a->browser==BROWSER_LIBREWOLF?"librewolf":"firefox", cf); fclose(cf); }
     const char *url = a->browser==BROWSER_LIBREWOLF ? URL_LIBREWOLF : URL_FIREFOX;
-    int pfd[2]; pipe(pfd);
+    int pfd[2]; if (pipe(pfd) < 0) return;
     a->dl_pipe = pfd[0]; fcntl(a->dl_pipe, F_SETFL, O_NONBLOCK);
     a->dl_pid = fork();
     if (a->dl_pid == 0) {
@@ -509,11 +509,15 @@ static void poll_download(app_t *a) {
     char buf[512]; ssize_t n = read(a->dl_pipe, buf, sizeof(buf)-1);
     if (n > 0) {
         buf[n] = '\0';
-        for (int i = 0; i < n-1; i++) {
+        for (int i = 0; i < n; i++) {
             if (buf[i]>='0' && buf[i]<='9') {
                 int v = 0, j = i;
                 while (j<n && buf[j]>='0' && buf[j]<='9') v=v*10+(buf[j++]-'0');
-                if (j<n && buf[j]=='%' && v<=100) a->progress = v;
+                int e = j;
+                /* allow a fractional part, e.g. curl's "45.0%" */
+                if (e<n && buf[e]=='.') { e++; while (e<n && buf[e]>='0' && buf[e]<='9') e++; }
+                if (e<n && buf[e]=='%' && v<=100) a->progress = v;
+                i = e - 1;   /* skip past the integer AND fractional digits just parsed */
             }
         }
         char *last = buf;
@@ -678,7 +682,7 @@ static void on_click(app_t *a, int mx, int my, int sock) {
                             if (tmp[0] && tmp[0] != '\n') {
                                 int l2 = slen(tmp);
                                 while (l2 > 0 && (tmp[l2-1]=='\n'||tmp[l2-1]=='\r')) tmp[--l2]='\0';
-                                if (tmp[0]) { int i=0; while(tmp[i]&&i<191) line[i]=tmp[i++]; line[i]='\0'; }
+                                if (tmp[0]) snprintf(line, sizeof(line), "%s", tmp);
                             }
                         fclose(lf);
                         if (line[0]) snprintf(a->error, sizeof(a->error), "%s", line);
@@ -709,11 +713,12 @@ static void write_all(int fd, const void *buf, size_t n) {
 }
 
 static void send_frame(app_t *a, int sock) {
-    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=16+(uint32_t)(a->win_w*a->win_h*4);
+    size_t fbsz = (size_t)a->win_w * (size_t)a->win_h * 4;
+    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=(uint32_t)(16+fbsz);
     memcpy(th,&t,4); memcpy(th+4,&l,4); write_all(sock,th,8);
     uint32_t fh[4]={0,0,(uint32_t)a->win_w,(uint32_t)a->win_h};
     write_all(sock,fh,16);
-    write_all(sock,a->fb,(size_t)(a->win_w*a->win_h*4));
+    write_all(sock,a->fb,fbsz);
 }
 
 static void ipc_send(int sock, uint32_t type, const void *data, uint32_t len) {
@@ -795,8 +800,8 @@ int main(void) {
 
     while (running) {
         struct pollfd pfds[2];
-        pfds[0].fd=sock; pfds[0].events=POLLIN;
-        pfds[1].fd=a.dl_pipe; pfds[1].events=POLLIN;
+        pfds[0].fd=sock; pfds[0].events=POLLIN; pfds[0].revents=0;
+        pfds[1].fd=a.dl_pipe; pfds[1].events=POLLIN; pfds[1].revents=0;
         int nfds = (a.dl_pipe>=0) ? 2 : 1;
         poll(pfds,(nfds_t)nfds, a.view==VIEW_DOWNLOAD ? 100 : 16);
 
@@ -811,14 +816,19 @@ int main(void) {
                     ibuf[igot++]=tbuf[pos++];
                     if (igot==8) {
                         memcpy(&itype,ibuf,4); memcpy(&iplen,ibuf+4,4);
-                        if (iplen>sizeof(payload)) iplen=sizeof(payload);
                         ipgot=0;
                     }
-                } else if (iplen>0&&ipgot<iplen) {
+                } else if (ipgot<iplen) {
+                    /* consume the full payload; store only what fits */
                     uint32_t take=iplen-ipgot;
                     if ((int)take>(int)n-pos) take=(uint32_t)((int)n-pos);
-                    for (uint32_t k=0;k<take;k++) payload[ipgot++]=tbuf[pos++];
-                } else {
+                    for (uint32_t k=0;k<take;k++) {
+                        if (ipgot<sizeof(payload)) payload[ipgot]=tbuf[pos];
+                        ipgot++; pos++;
+                    }
+                }
+                /* dispatch as soon as the message is complete */
+                if (igot==8 && ipgot>=iplen) {
                     igot=0;
                     switch(itype) {
                     case IPC_INPUT_KEY:
@@ -844,7 +854,7 @@ int main(void) {
                         if (iplen >= 4) {
                             uint16_t nw, nh;
                             memcpy(&nw, payload, 2); memcpy(&nh, payload+2, 2);
-                            if (nw >= 300 && nh >= 200) {
+                            if (nw >= 300 && nh >= 200 && nw <= 8192 && nh <= 8192) {
                                 uint32_t *nb = realloc(a.fb, (size_t)nw*nh*4);
                                 if (nb) { a.fb = nb; a.win_w = nw; a.win_h = nh; }
                             }

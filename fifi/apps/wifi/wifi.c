@@ -350,6 +350,7 @@ static void do_connect(const char *ssid, const char *password) {
     /* Write wpa_supplicant config — key_mgmt=WPA-PSK SAE covers both WPA2 and WPA3 */
     FILE *wc = fopen("/fifi-data/wpa.conf", "w");
     if (!wc) { snprintf(g_status, sizeof(g_status), "Error: cannot write config"); return; }
+    fchmod(fileno(wc), 0600);   /* contains the plaintext PSK — owner-only */
     fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n");
     /* Write SSID as hex to avoid quoting issues with special chars */
     fprintf(wc, "    ssid=");
@@ -389,6 +390,7 @@ static void do_connect(const char *ssid, const char *password) {
     /* Save credentials for boot auto-connect via init script */
     FILE *sc = fopen("/fifi-data/wifi.conf", "w");
     if (sc) {
+        fchmod(fileno(sc), 0600);   /* contains the plaintext PSK — owner-only */
         /* Sanitize: strip any newlines from SSID/password to keep key=value format valid */
         char safe_ssid[128] = {0}, safe_pw[128] = {0};
         int si = 0, pi = 0;
@@ -564,12 +566,15 @@ static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
 
 static void send_frame(int fd, uint32_t *fb) {
     uint32_t frm[4] = {0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h};
-    uint32_t total  = 16 + (uint32_t)g_win_w * (uint32_t)g_win_h * 4;
-    uint8_t *msg    = malloc(total);
+    /* Compute in size_t: 16 + w*h*4 overflows uint32 for large windows */
+    size_t px    = (size_t)g_win_w * (size_t)g_win_h * 4;
+    size_t total = 16 + px;
+    if (total > 0xFFFFFFFFu) return;   /* len field is 32-bit */
+    uint8_t *msg = malloc(total);
     if (!msg) return;
     memcpy(msg, frm, 16);
-    memcpy(msg+16, fb, (size_t)g_win_w * g_win_h * 4);
-    ipc_send(fd, IPC_APP_FRAME, msg, total);
+    memcpy(msg+16, fb, px);
+    ipc_send(fd, IPC_APP_FRAME, msg, (uint32_t)total);
     free(msg);
 }
 
@@ -780,7 +785,7 @@ int main(void) {
                     }
                 } else if (itype == IPC_WIN_RESIZE && iplen >= 4) {
                     uint16_t nw, nh; memcpy(&nw, payload, 2); memcpy(&nh, payload+2, 2);
-                    if (nw >= 200 && nh >= 150) {
+                    if (nw >= 200 && nh >= 150 && nw <= 8192 && nh <= 8192) {
                         uint32_t *nb = realloc(fb, (size_t)nw*nh*4);
                         if (nb) { fb = nb; g_win_w = nw; g_win_h = nh; }
                     }
