@@ -109,8 +109,14 @@ int vfs_read(const char *path, const void **data, uint64_t *size) {
     if (!g_rbufs[slot].data) { fclose(f); return -1; }
     g_rbufs[slot].size = (uint64_t)sz;
     g_rbufs[slot].data[sz] = 0;
-    fread(g_rbufs[slot].data, 1, (size_t)sz, f);
+    size_t rd = fread(g_rbufs[slot].data, 1, (size_t)sz, f);
     fclose(f);
+    if (rd != (size_t)sz) {
+        free(g_rbufs[slot].data);
+        g_rbufs[slot].data = NULL;
+        g_rbufs[slot].size = 0;
+        return -1;
+    }
     g_rbuf_next++;
 
     if (data) *data = g_rbufs[slot].data;

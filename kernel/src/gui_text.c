@@ -6,6 +6,11 @@ syn_lang_t detect_lang(const char *path);  /* forward declaration */
 
 void recent_add(const char *path) {
     if (!path || !path[0]) return;
+    /* Local copy: path may alias a g_recent[] entry, which the shift loops
+     * below would overwrite before the final insert. */
+    char tmp[128];
+    fb_str_copy(tmp, path, 128);
+    path = tmp;
     for (int i = 0; i < g_recent_count; i++) {
         if (gui_streq(g_recent[i], path)) {
             for (int j = i; j < g_recent_count - 1; j++)
@@ -123,7 +128,7 @@ void edit_copy_to_clip(text_state_t *ts) {
     int32_t lo, hi; edit_sel_range(ts, &lo, &hi);
     uint32_t len = (uint32_t)(hi - lo);
     if (len == 0) return;
-    if (g_clipboard) { kfree(g_clipboard); g_clipboard = NULL; }
+    if (g_clipboard) { kfree(g_clipboard); g_clipboard = NULL; g_clipboard_len = 0; }
     g_clipboard = (uint8_t *)kmalloc(len + 1u);
     if (!g_clipboard) return;
     for (uint32_t k = 0; k < len; k++) g_clipboard[k] = ts->edit_buf[lo + k];
@@ -181,12 +186,12 @@ void edit_recount(window_t *w) {
     if (ts->total_lines == 0) ts->total_lines = 1;  /* empty file = 1 empty line */
 }
 
-/* Map mouse position to edit byte offset.
+/* Map mouse position to a byte offset in (data,dsize).
  * Rows outside the visible area are allowed so edit_scroll_to_cursor() can
  * auto-scroll the view when dragging beyond the top or bottom edge. */
-uint32_t text_xy_to_offset(window_t *w, int32_t mx, int32_t my) {
+static uint32_t text_xy_to_offset_buf(window_t *w, int32_t mx, int32_t my,
+                                      const uint8_t *data, uint32_t dsize) {
     text_state_t *ts = &w->text;
-    if (!ts->edit_buf) return 0;
     uint64_t fiy  = w->y + TITLE_H;
     uint64_t fh   = console_font_height();
     uint64_t fw   = console_font_width();
@@ -207,45 +212,28 @@ uint32_t text_xy_to_offset(window_t *w, int32_t mx, int32_t my) {
     if (target_line >= ts->total_lines) target_line = ts->total_lines - 1;
     int ln = 0;
     uint32_t bi = 0;
-    while (bi < ts->edit_size && ln < target_line) {
-        if (ts->edit_buf[bi] == '\n') ln++;
+    while (bi < dsize && ln < target_line) {
+        if (data[bi] == '\n') ln++;
         bi++;
     }
     int cl = 0;
-    while (bi < ts->edit_size && ts->edit_buf[bi] != '\n' && cl < click_col) {
-        bi++; cl++;
-    }
+    while (bi < dsize && data[bi] != '\n' && cl < click_col) { bi++; cl++; }
     return bi;
 }
 
-/* text_xy_to_offset variant for read-only mode (uses ts->data/ts->size). */
+/* Edit-mode variant (uses edit_buf). */
+uint32_t text_xy_to_offset(window_t *w, int32_t mx, int32_t my) {
+    text_state_t *ts = &w->text;
+    if (!ts->edit_buf) return 0;
+    return text_xy_to_offset_buf(w, mx, my, ts->edit_buf, ts->edit_size);
+}
+
+/* Read-only variant (uses ts->data/ts->size). */
 uint32_t text_xy_to_offset_ro(window_t *w, int32_t mx, int32_t my) {
     text_state_t *ts = &w->text;
-    const uint8_t *data = (const uint8_t *)ts->data;
-    uint32_t dsize = (uint32_t)ts->size;
-    if (!data || dsize == 0) return 0;
-    uint64_t fiy  = w->y + TITLE_H;
-    uint64_t fh   = console_font_height();
-    uint64_t fw   = console_font_width();
-    uint64_t gtot = ts->total_lines > 0 ? (uint64_t)ts->total_lines : 1u;
-    uint64_t gw = 1; { uint64_t t=gtot; while(t>=10){t/=10;gw++;} gw=(gw+2u)*fw; }
-    uint64_t tx = w->x + BORDER + gw + 1u;
-    int64_t rel_y = (int64_t)my - (int64_t)(fiy + PAD);
-    int click_row;
-    if (rel_y >= 0) click_row = (int)(rel_y / (int64_t)fh);
-    else            click_row = (int)((rel_y - (int64_t)fh + 1) / (int64_t)fh);
-    int64_t rel_x = (int64_t)mx - (int64_t)(tx + PAD);
-    if (rel_x < 0) rel_x = 0;
-    int click_col = (int)(rel_x / (int64_t)fw) + ts->h_scroll;
-    if (click_col < 0) click_col = 0;
-    int target_line = ts->scroll + click_row;
-    if (target_line < 0) target_line = 0;
-    if (target_line >= ts->total_lines) target_line = ts->total_lines - 1;
-    int ln = 0; uint32_t bi = 0;
-    while (bi < dsize && ln < target_line) { if (data[bi] == '\n') ln++; bi++; }
-    int cl = 0;
-    while (bi < dsize && data[bi] != '\n' && cl < click_col) { bi++; cl++; }
-    return bi;
+    if (!ts->data || ts->size == 0) return 0;
+    return text_xy_to_offset_buf(w, mx, my, (const uint8_t *)ts->data,
+                                 (uint32_t)ts->size);
 }
 
 /* Scroll the text viewer to ensure the cursor is visible. */
@@ -253,7 +241,7 @@ void edit_scroll_to_cursor(window_t *w) {
     text_state_t *ts = &w->text;
     uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
-    uint64_t ih = w->h - TITLE_H - BORDER;
+    uint64_t ih = w->h > TITLE_H + BORDER ? w->h - TITLE_H - BORDER : 1u;
     uint64_t tv_status_h = fh + 4u;
     uint64_t ih_text = ih > tv_status_h ? ih - tv_status_h : 1u;
     uint64_t max_rows = ih_text > 2u * PAD ? (ih_text - 2u * PAD) / fh : 1u;
@@ -715,11 +703,7 @@ void edit_toggle_comment(window_t *w) {
                     || ts->lang == SYN_LANG_MAKE) ? "# "
                     : (ts->lang == SYN_LANG_LUA || ts->lang == SYN_LANG_SQL) ? "-- "
                     : "// ";
-    uint32_t plen = (ts->lang == SYN_LANG_SH  || ts->lang == SYN_LANG_PY  || ts->lang == SYN_LANG_ASM
-                  || ts->lang == SYN_LANG_YAML || ts->lang == SYN_LANG_TOML || ts->lang == SYN_LANG_INI
-                  || ts->lang == SYN_LANG_MAKE) ? 2u
-                  : (ts->lang == SYN_LANG_LUA || ts->lang == SYN_LANG_SQL) ? 3u
-                  : 3u;
+    uint32_t plen = (pfx[2] == '\0') ? 2u : 3u;  /* "# " is 2 chars; "-- "/"// " are 3 */
 
     int32_t lo, hi;
     if (ts->sel_anchor >= 0) { edit_sel_range(ts, &lo, &hi); }
@@ -746,8 +730,9 @@ void edit_toggle_comment(window_t *w) {
         if (sp < ts->edit_size) sp++;
     }
 
-    /* Apply to each line */
-    while ((int32_t)p <= hi && p <= ts->edit_size) {
+    /* Apply to each line (p < edit_size: a p == edit_size iteration is a no-op
+     * and cannot advance p, which hung when the last line had no newline) */
+    while ((int32_t)p <= hi && p < ts->edit_size) {
         uint32_t wp = p;
         while (wp < ts->edit_size && (ts->edit_buf[wp] == ' ' || ts->edit_buf[wp] == '\t')) wp++;
         bool nonempty = (wp < ts->edit_size && ts->edit_buf[wp] != '\n');
@@ -1359,10 +1344,10 @@ syn_lang_t detect_lang(const char *path) {
     if (len>=4 && path[len-4]=='.' && path[len-3]=='c' && path[len-2]=='p' && path[len-1]=='p') return SYN_LANG_C;
     if (len>=4 && path[len-4]=='.' && path[len-3]=='h' && path[len-2]=='p' && path[len-1]=='p') return SYN_LANG_C;
     /* Shell: .sh .bash */
-    if (path[len-3]=='.' && path[len-2]=='s' && path[len-1]=='h') return SYN_LANG_SH;
+    if (len>=3 && path[len-3]=='.' && path[len-2]=='s' && path[len-1]=='h') return SYN_LANG_SH;
     if (len>=5 && path[len-5]=='.' && path[len-4]=='b' && path[len-3]=='a' && path[len-2]=='s' && path[len-1]=='h') return SYN_LANG_SH;
     /* Python: .py */
-    if (path[len-3]=='.' && path[len-2]=='p' && path[len-1]=='y') return SYN_LANG_PY;
+    if (len>=3 && path[len-3]=='.' && path[len-2]=='p' && path[len-1]=='y') return SYN_LANG_PY;
     /* Assembly: .s .asm */
     if (path[len-2]=='.' && path[len-1]=='s') return SYN_LANG_ASM;
     if (len>=4 && path[len-4]=='.' && path[len-3]=='a' && path[len-2]=='s' && path[len-1]=='m') return SYN_LANG_ASM;
@@ -1371,8 +1356,8 @@ syn_lang_t detect_lang(const char *path) {
     /* Lua: .lua */
     if (len>=4 && path[len-4]=='.' && path[len-3]=='l' && path[len-2]=='u' && path[len-1]=='a') return SYN_LANG_LUA;
     /* JavaScript/TypeScript: .js .ts .mjs .jsx .tsx */
-    if (path[len-3]=='.' && path[len-2]=='j' && path[len-1]=='s') return SYN_LANG_JS;
-    if (path[len-3]=='.' && path[len-2]=='t' && path[len-1]=='s') return SYN_LANG_JS;
+    if (len>=3 && path[len-3]=='.' && path[len-2]=='j' && path[len-1]=='s') return SYN_LANG_JS;
+    if (len>=3 && path[len-3]=='.' && path[len-2]=='t' && path[len-1]=='s') return SYN_LANG_JS;
     if (len>=4 && path[len-4]=='.' && path[len-3]=='m' && path[len-2]=='j' && path[len-1]=='s') return SYN_LANG_JS;
     if (len>=4 && path[len-4]=='.' && path[len-3]=='j' && path[len-2]=='s' && path[len-1]=='x') return SYN_LANG_JS;
     if (len>=4 && path[len-4]=='.' && path[len-3]=='t' && path[len-2]=='s' && path[len-1]=='x') return SYN_LANG_JS;
@@ -2044,7 +2029,7 @@ void text_render(window_t *w) {
             if (lx == LS_CMT_L || lx == LS_CMT_B) {
                 /* Check for block comment end */
                 if (lx == LS_CMT_B && c == '*' &&
-                    pos+1 < sz && d[pos+1] == '/' && d[pos+1] != '\n') {
+                    pos+1 < sz && d[pos+1] == '/') {
                     if (ww && col >= max_cols) {
                         col = 0; row++;
                         if ((uint64_t)row < max_rows) { py = iy + PAD + (uint64_t)row * fh; console_fill_rect(ix, py, gutter_w, fh, gutter_bg); }
@@ -2492,10 +2477,9 @@ void text_render(window_t *w) {
             prev_c = c;
             pos++;
         }
-        /* Advance past remainder of line */
+        /* Advance past remainder of line (pos <= sz here, so always step) */
         while (pos < sz && d[pos] != '\n') pos++;
-        if (pos < sz) pos++;
-        else if (pos == sz) pos++;
+        pos++;
         log_row++;
         row++;
     }
@@ -2705,8 +2689,6 @@ void text_render(window_t *w) {
     {
         uint64_t sfy  = iy + ih_text;
         uint64_t sfbg = 0x00070b12u;
-        uint64_t sfsp = iy + ih_text + tv_status_h;  /* top of search bar */
-        (void)sfsp;
         console_fill_rect(ix, sfy, iw, tv_status_h, sfbg);
         console_fill_rect(ix, sfy, iw, 1u, 0x00181f2cu);
 

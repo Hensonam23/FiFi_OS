@@ -596,28 +596,21 @@ void input_rescan(void) {
         snprintf(path, sizeof(path), "/dev/input/%.60s", de->d_name);
         int fd = open(path, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
-        /* Skip if already tracked */
+        /* Skip if already tracked — compare by inode (fd values differ on re-open) */
         bool known = false;
-        for (int i = 0; i < g_kbd_cnt && !known; i++) known = (g_kbd_fds[i] == fd);
-        for (int i = 0; i < g_ptr_cnt && !known; i++) known = (g_ptr_fds[i] == fd);
-        for (int i = 0; i < g_abs_cnt && !known; i++) known = (g_abs_devs[i].fd == fd);
-        /* Check by inode instead of fd (fd values differ on re-open) */
-        if (!known) {
-            struct stat sa, sb;
-            if (fstat(fd, &sa) == 0) {
-                for (int i = 0; i < g_kbd_cnt && !known; i++)
-                    if (fstat(g_kbd_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
-                for (int i = 0; i < g_ptr_cnt && !known; i++)
-                    if (fstat(g_ptr_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
-                for (int i = 0; i < g_abs_cnt && !known; i++)
-                    if (fstat(g_abs_devs[i].fd, &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
-            }
+        struct stat sa, sb;
+        if (fstat(fd, &sa) == 0) {
+            for (int i = 0; i < g_kbd_cnt && !known; i++)
+                if (fstat(g_kbd_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
+            for (int i = 0; i < g_ptr_cnt && !known; i++)
+                if (fstat(g_ptr_fds[i], &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
+            for (int i = 0; i < g_abs_cnt && !known; i++)
+                if (fstat(g_abs_devs[i].fd, &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
         }
         if (known) { close(fd); continue; }
-        /* New device — try to register it by re-running the same classification logic */
+        /* New device — classify like input_init (simplified) */
         bool has_key = evdev_has_bit(fd, 0, EV_KEY);
         bool has_rel = evdev_has_bit(fd, 0, EV_REL);
-        (void)has_rel;
         bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
         if (has_key && evdev_has_bit(fd, EV_KEY, KEY_A) && g_kbd_cnt < MAX_EVDEV) {
             g_kbd_fds[g_kbd_cnt++] = fd;
@@ -782,10 +775,6 @@ void input_poll(void) {
                 /* MT tracking ID = -1 means finger lifted */
                 case ABS_MT_TRACKING_ID:
                     if (cur_slot == 0) {
-#ifdef __linux__
-                        fprintf(stderr, "[mt_id] id=%d prev_x=%d abs_x=%d\n",
-                                ev.value, dev->prev_x, abs_x);
-#endif
                         if (ev.value == -1) {
                             /* Finger lifted — check BTN_TOUCH first.
                              * If BTN_TOUCH=1 the finger is still physically on
@@ -837,10 +826,6 @@ void input_poll(void) {
                     if (ev.code == BTN_TOUCH) {
                         bool was = dev->btn_touch;
                         dev->btn_touch = (ev.value != 0);
-#ifdef __linux__
-                        fprintf(stderr, "[btn_touch] %d->%d prev_x=%d\n",
-                                was, dev->btn_touch, dev->prev_x);
-#endif
                         if (!dev->btn_touch) {
                             /* Finger lifted — start debounce before resetting origin. */
                             if (dev->lift_cooldown == 0)

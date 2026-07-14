@@ -10,7 +10,6 @@ void fb_str_copy(char *dst, const char *src, int maxlen) {
 
 void fb_path_join(char *out, const char *parent, const char *child) {
     int plen = (int)gui_strlen(parent);
-    (void)gui_strlen(child);
     if (plen == 1 && parent[0] == '/') {
         out[0] = '/';
         fb_str_copy(out + 1, child, 126);
@@ -103,6 +102,11 @@ static const char *fb_file_icon(const char *name, uint32_t *col) {
     *col = COL_FB_TXT; return "[ ]";
 }
 
+/* Sidebar "Places" — labels and target paths, kept in sync (shared by render,
+ * hit-test, and click handling). */
+static const char *const fb_sb_labels[] = { "Root /", "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL };
+static const char *const fb_sb_paths[]  = { "/",     "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL };
+
 static char s_listbuf[4096];
 
 void fb_load(fb_state_t *fb, const char *path) {
@@ -137,7 +141,6 @@ void fb_load(fb_state_t *fb, const char *path) {
                 p = nl + 1; continue;
             }
             fb_str_copy(fb->entries[fb->entry_count], p, len + 1);
-            fb->entries[fb->entry_count][len] = '\0';
             char full[256];
             fb_path_join(full, path, fb->entries[fb->entry_count]);
             fb->is_dir[fb->entry_count] = (vfs_isdir(full) == 1);
@@ -354,7 +357,8 @@ static void fb_render_toolbar(window_t *w) {
         uint32_t pi_bg = 0x00001830u;
         console_fill_rect(pi_x2, r2_y + (r2_h - btn_h)/2u, pi_w, btn_h, pi_bg);
         console_fill_rect(pi_x2, r2_y + (r2_h - btn_h)/2u, pi_w, 1u, 0x004488ccu);
-        uint64_t piq_max = (pi_w > 2*fw) ? (pi_w - 2*fw) / fw - 1u : 0;
+        /* >= 3*fw so the -1u below cannot wrap when the quotient is 0 */
+        uint64_t piq_max = (pi_w >= 3u*fw) ? (pi_w - 2u*fw) / fw - 1u : 0;
         /* scroll so cursor stays in view */
         int pi_scroll = w->fb.input_cursor - (int)piq_max + 1;
         if (pi_scroll < 0) pi_scroll = 0;
@@ -385,7 +389,8 @@ static void fb_render_toolbar(window_t *w) {
         console_fill_rect(sb_x, r2_y + (r2_h - btn_h)/2u, srch_w, btn_h, sb_bg);
         console_fill_rect(sb_x, r2_y + (r2_h - btn_h)/2u, srch_w, 1,
                           w->fb.search_active ? COL_FB_SEARCH_CUR : 0x00253545u);
-        uint64_t sq_max = (srch_w > 2*fw) ? (srch_w - 2*fw) / fw - 1u : 0;
+        /* >= 3*fw so the -1u below cannot wrap when the quotient is 0 */
+        uint64_t sq_max = (srch_w >= 3u*fw) ? (srch_w - 2u*fw) / fw - 1u : 0;
         if (w->fb.search_len > 0) {
             gui_draw_str_clip(sb_x + fw, r2_y + (r2_h - btn_h)/2u + (btn_h - fh)/2u,
                               w->fb.search_query, COL_FB_SEARCH_FG, sb_bg, sq_max);
@@ -425,20 +430,18 @@ void fb_render(window_t *w) {
     console_fill_rect(ix, body_y, sb_w, fh + 4u, COL_FB_TOOLBAR);
     gui_draw_str(ix + 4u, body_y + 2u, "Places", 0x00506878u, COL_FB_TOOLBAR);
 
-    static const char *sb_labels[] = { "Root /", "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL };
-    static const char *sb_paths[]  = { "/",     "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL };
     uint64_t sb_row_h = fh + 6u;
     uint64_t sb_row_y = body_y + fh + 4u;
-    for (int i = 0; sb_labels[i] != NULL; i++) {
+    for (int i = 0; fb_sb_labels[i] != NULL; i++) {
         if (sb_row_y + sb_row_h > body_y + sb_h_avail) break;
-        bool active = gui_streq(w->fb.path, sb_paths[i]);
+        bool active = gui_streq(w->fb.path, fb_sb_paths[i]);
         uint32_t bg = active ? COL_FB_SB_SEL : COL_FB_SIDEBAR;
         uint32_t fg = active ? COL_FB_SB_SEL_FG : COL_FB_SB_FG;
         console_fill_rect(ix, sb_row_y, sb_w, sb_row_h, bg);
         if (active)
             console_fill_rect(ix, sb_row_y, 3, sb_row_h, COL_FB_BTN_ACT);
         gui_draw_str(ix + 7u, sb_row_y + (sb_row_h - fh) / 2u,
-                     sb_labels[i], fg, bg);
+                     fb_sb_labels[i], fg, bg);
         sb_row_y += sb_row_h;
     }
     /* fill remainder of sidebar */
@@ -461,7 +464,6 @@ void fb_render(window_t *w) {
     uint64_t name_col_x = lx + icon_col_w + 4u;
     uint64_t size_col_w = (uint64_t)w->fb.size_col_chars * fw;
     uint64_t size_col_x = lx + lw - size_col_w - 8u;
-    (void)name_col_x;
     {
         bool name_active = (w->fb.sort_by == 0);
         bool size_active = (w->fb.sort_by == 1);
@@ -595,8 +597,9 @@ void fb_render(window_t *w) {
         console_fill_rect(sb_x, sb_y, 6u, sb_th, 0x000a0e16u);
         uint64_t thumb_h = (max_rows * sb_th) / (uint64_t)w->fb.entry_count;
         if (thumb_h < 8) thumb_h = 8;
+        /* Same geometry as fb_sb_thumb() so the drawn thumb matches click hit-testing */
         uint64_t thumb_y = sb_y + ((uint64_t)w->fb.scroll * (sb_th - thumb_h))
-                           / (uint64_t)(w->fb.entry_count - (int)max_rows + 1);
+                           / (uint64_t)(w->fb.entry_count - (int)max_rows);
         {
             int32_t _fmx, _fmy; bool _flb, _frb;
             mouse_get_state(&_fmx, &_fmy, &_flb, &_frb);
@@ -922,9 +925,8 @@ static int fb_hit_sidebar(window_t *w, int32_t mx, int32_t my) {
 
     if ((uint64_t)my < sb_start) return -1;
     int item = (int)((uint64_t)my - sb_start) / (int)sb_row_h;
-    static const char *sb_paths[] = {"/", "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL};
     int count = 0;
-    while (sb_paths[count]) count++;
+    while (fb_sb_paths[count]) count++;
     if (item < 0 || item >= count) return -1;
     return item;
 }
@@ -1205,8 +1207,6 @@ static void fb_click_pathbar(window_t *w, int32_t mx) {
 }
 
 void fb_on_click(window_t *w, int32_t mx, int32_t my) {
-    static const char *sb_paths[] = {"/", "/bin", "/etc", "/dev", "/usr", "/tmp", "/home", NULL};
-
     /* Toolbar buttons */
     int tb = fb_hit_toolbar(w, mx, my);
     if (tb == 0) { fb_back(&w->fb); fb_render(w); return; }
@@ -1242,9 +1242,9 @@ void fb_on_click(window_t *w, int32_t mx, int32_t my) {
 
     /* Sidebar */
     int sb = fb_hit_sidebar(w, mx, my);
-    if (sb >= 0 && sb_paths[sb] != NULL) {
-        if (!gui_streq(w->fb.path, sb_paths[sb]))
-            fb_navigate(&w->fb, sb_paths[sb]);
+    if (sb >= 0 && fb_sb_paths[sb] != NULL) {
+        if (!gui_streq(w->fb.path, fb_sb_paths[sb]))
+            fb_navigate(&w->fb, fb_sb_paths[sb]);
         fb_render(w);
         return;
     }

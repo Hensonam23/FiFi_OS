@@ -217,7 +217,8 @@ int cpu_usage_percent(void) {
     p_total = total; p_idle = idle_all;
     if (dt == 0) return -1;
     int pct = (int)(100ULL * (dt - di) / dt);
-    if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
     return pct;
 }
 
@@ -650,7 +651,6 @@ void kvprintf(const char *fmt, va_list ap) {
 
 /* ── Image loader: BMP (24/32-bit BI_RGB) + PPM P6 ───────────────────────── */
 /* Returns heap-allocated XRGB pixels (top-down). Caller frees with free(). */
-#include <fcntl.h>
 #include <sys/stat.h>
 
 static int ppm_read_int(const uint8_t *d, size_t sz, size_t *p) {

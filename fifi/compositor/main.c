@@ -152,7 +152,7 @@ static bool g_lock_bad      = false;  /* last PIN attempt was wrong */
 static bool g_lock_pin_dirty = false; /* PIN input changed, overlay needs redraw */
 
 int  compositor_lock_pin_len(void)   { return g_lock_buf_len; }
-bool compositor_lock_bad_pin(void)   { bool v = g_lock_bad; return v; }
+bool compositor_lock_bad_pin(void)   { return g_lock_bad; }
 bool compositor_lock_pin_dirty(void) { bool v = g_lock_pin_dirty; g_lock_pin_dirty = false; return v; }
 
 bool gaming_mode_active(void)        { return g_gaming_mode; }
@@ -371,15 +371,12 @@ static void *render_thread_fn(void *arg)
         bool do_flush = false;
 
         if (!g_blanked) {
-            struct timespec t0, t1, t2, t3;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
             gui_on_tick();
             /* When a Wayland window (browser) is showing, repaint the desktop
              * beneath it every frame so its transparent CSD shadow margin blends
              * over the wallpaper instead of stale black. */
             { extern bool wayland_any_mapped(void); extern void full_redraw(void);
               if (wayland_any_mapped()) full_redraw(); }
-            clock_gettime(CLOCK_MONOTONIC, &t1);
             ipc_blit_all();
             wayland_blit_surfaces();
             /* Lift a focused IPC window (e.g. the App Store) above Wayland/XWayland
@@ -399,7 +396,7 @@ static void *render_thread_fn(void *arg)
             mouse_get_state(&cx, &cy, &lb, &rb);
             bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
             if (cursor_moved && s_last_cy >= 0) {
-                uint32_t ey0 = (uint32_t)(s_last_cy < 0 ? 0 : s_last_cy);
+                uint32_t ey0 = (uint32_t)s_last_cy;
                 console_mark_dirty_rows(ey0, ey0 + CUR_H);
             }
 
@@ -424,20 +421,10 @@ static void *render_thread_fn(void *arg)
                     console_mark_dirty_rows(0, (uint32_t)g_lmfb.height);
                 s_wl_prev = wl_now;
             }
-            clock_gettime(CLOCK_MONOTONIC, &t2);
             bool flipped = console_flip_if_dirty();
-            clock_gettime(CLOCK_MONOTONIC, &t3);
             if (flipped || cursor_moved) {
                 mouse_cursor_update();
                 s_last_cx = cx; s_last_cy = cy;
-            }
-
-            /* Log slow frames and frame components for cursor lag diagnosis */
-            {
-                long tick_ms  = (t1.tv_sec - t0.tv_sec)*1000 + (t1.tv_nsec - t0.tv_nsec)/1000000;
-                long flip_ms  = (t3.tv_sec - t2.tv_sec)*1000 + (t3.tv_nsec - t2.tv_nsec)/1000000;
-                long total_ms = (t3.tv_sec - t0.tv_sec)*1000 + (t3.tv_nsec - t0.tv_nsec)/1000000;
-                (void)flip_ms; (void)total_ms; (void)tick_ms;
             }
 
             do_flush = (flipped || cursor_moved) && g_using_drm;
@@ -622,7 +609,7 @@ int main(void) {
         ipc_poll();
         wayland_poll();
         /* Lazily connect the X window manager once XWayland is up (started on
-         * demand by fifi-run); retried at ~250ms cadence while not connected. */
+         * demand by fifi-run); retried at ~40ms cadence while not connected. */
         if (xwm_active()) {
             xwm_poll();
         } else if (++s_xwm_probe >= 10) {   /* ~40ms: attach before the app maps */
@@ -669,6 +656,20 @@ int main(void) {
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
+            /* Cross-layer z-order: the Wayland browser participates in the same
+             * raise_z ordering as built-in and IPC windows, so clicking chooses the
+             * genuinely-topmost layer at the cursor.
+             * gui_z/ipc_z/wl_top are static because the file-drag goto below jumps
+             * over their assignments while the tail after mouse_done still reads
+             * them — statics keep the last non-drag frame's values (reading autos
+             * there was undefined behaviour). */
+            extern bool wayland_covers(int32_t, int32_t);
+            extern uint32_t gui_wl_z(void);
+            extern void gui_wl_raise(void);
+            extern bool wayland_any_mapped(void);
+            static uint32_t gui_z, ipc_z;
+            static bool wl_top;
+
             if (ipc_file_drag_active()) {
                 ipc_file_drag_update(mcx, mcy);
                 if (!mlb) ipc_file_drag_drop(mcx, mcy);
@@ -678,18 +679,11 @@ int main(void) {
             bool resizing = ipc_resize_update(mcx, mcy, mlb);
             bool dragging = !resizing && ipc_drag_update(mcx, mcy, mlb);
 
-            /* Cross-layer z-order: the Wayland browser participates in the same
-             * raise_z ordering as built-in and IPC windows, so clicking chooses the
-             * genuinely-topmost layer at the cursor. */
-            extern bool wayland_covers(int32_t, int32_t);
-            extern uint32_t gui_wl_z(void);
-            extern void gui_wl_raise(void);
-            extern bool wayland_any_mapped(void);
-            uint32_t gui_z = gui_topmost_z_at(mcx, mcy);
-            uint32_t ipc_z = ipc_topmost_z_at(mcx, mcy);
+            gui_z = gui_topmost_z_at(mcx, mcy);
+            ipc_z = ipc_topmost_z_at(mcx, mcy);
             bool wl_cover  = wayland_any_mapped() && wayland_covers(mcx, mcy);
             uint32_t wl_z  = wl_cover ? gui_wl_z() : 0;
-            bool wl_top    = wl_cover && wl_z >= gui_z && wl_z >= ipc_z;
+            wl_top = wl_cover && wl_z >= gui_z && wl_z >= ipc_z;
 
             if (mlb && !pb_l && !dragging && !resizing) {
                 if (wl_top) {
@@ -879,17 +873,14 @@ int main(void) {
         /* ── Wayland key forwarding (raw evdev codes to focused surface) ── */
         {
             extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
-        }
-        if (wayland_has_focus()) {
-            extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
             uint16_t raw_code; uint8_t raw_state;
-            while (keyboard_try_get_raw(&raw_code, &raw_state))
-                wayland_send_key(raw_code, raw_state);
-        } else {
-            /* Drain queue even when no Wayland focus to prevent buildup */
-            extern int keyboard_try_get_raw(uint16_t *code, uint8_t *state);
-            uint16_t raw_code; uint8_t raw_state;
-            while (keyboard_try_get_raw(&raw_code, &raw_state)) {}
+            if (wayland_has_focus()) {
+                while (keyboard_try_get_raw(&raw_code, &raw_state))
+                    wayland_send_key(raw_code, raw_state);
+            } else {
+                /* Drain queue even when no Wayland focus to prevent buildup */
+                while (keyboard_try_get_raw(&raw_code, &raw_state)) {}
+            }
         }
 
         /* ── Screen blank / auto-lock check ────────────────────────────── */
