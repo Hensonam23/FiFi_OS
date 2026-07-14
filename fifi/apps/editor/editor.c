@@ -19,6 +19,8 @@
 #include <sys/un.h>
 #include <time.h>
 
+#include "../fifi_u8.h"
+
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #define FIFI_SOCK       "/tmp/fifi-compositor.sock"
 #define IPC_APP_CONNECT 0x01u
@@ -44,22 +46,23 @@
 #define LNUM_W   48   /* line number gutter width */
 #define PAD_X     4
 
-/* ── Colour palette ──────────────────────────────────────────────────────── */
-#define C_BG        0x00101820u
-#define C_HDR_BG    0x00182030u
-#define C_FOOT_BG   0x00182030u
-#define C_SEL       0x00204870u
-#define C_LNUM_BG   0x00141e2cu
-#define C_LNUM_FG   0x00506070u
-#define C_CUR_LINE  0x001a2838u
-#define C_TEXT      0x00d8e8f8u
-#define C_MODIFIED  0x00e0a030u
-#define C_SAVED     0x0040cc80u
-#define C_BORDER    0x00243448u
-#define C_FIND_HL   0x00806020u
-#define C_WHITE     0x00f0f0f0u
-#define C_GREY      0x00506070u
-#define C_WARN      0x00e04040u
+/* ── Colour palette (shared FiFi design language) ────────────────────────── */
+#define C_BG        0x000E1620u   /* editing surface */
+#define C_HDR_BG    0x001A2740u   /* header / toolbar bar */
+#define C_FOOT_BG   0x001A2740u   /* status bar */
+#define C_SEL       0x002F6BBFu   /* selection (accent-dim) */
+#define C_LNUM_BG   0x0016202Eu   /* line-number gutter (card) */
+#define C_LNUM_FG   0x006A8098u   /* gutter numerals (muted) */
+#define C_CUR_LINE  0x00131D2Bu   /* current line highlight */
+#define C_TEXT      0x00D8E8F8u   /* primary text */
+#define C_ACCENT    0x00409CFFu   /* accent (cursor, active line #) */
+#define C_MODIFIED  0x00E0A030u   /* modified indicator (amber) */
+#define C_SAVED     0x0040CC80u   /* saved (green) */
+#define C_BORDER    0x00243448u   /* subtle divider */
+#define C_FIND_HL   0x00335F94u   /* find match highlight */
+#define C_WHITE     0x00FFFFFFu   /* bright text */
+#define C_GREY      0x006A8098u   /* muted / secondary */
+#define C_WARN      0x00E05050u
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -107,9 +110,18 @@ static void fb_glyph(uint32_t *fb, int px, int py, unsigned char ch, uint32_t fg
     }
 }
 
+/* UTF-8 aware string draw for chrome (filename header, footer, status, line
+ * numbers): decode each codepoint and fold it to a byte the font can show, one
+ * cell per codepoint. Used only for non-editable text, so column math is free
+ * to advance per codepoint here. */
 static void fb_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg, uint32_t bg) {
-    for (; *s && x + 8 <= WIN_W; s++, x += 9)
-        fb_glyph(fb, x, y, (unsigned char)*s, fg, bg);
+    for (size_t i = 0; s[i] && x + 8 <= WIN_W; ) {
+        uint32_t cp = fifi_u8_next(s, &i);
+        int c = fifi_fold_ascii(cp);
+        if (c == 0) continue;                 /* zero-width: skip */
+        fb_glyph(fb, x, y, (unsigned char)c, fg, bg);
+        x += 9;
+    }
 }
 
 
@@ -126,6 +138,8 @@ static int    g_col_scroll = 0;  /* first visible col */
 static bool   g_modified = false;
 static char   g_filepath[512] = {0};
 static bool   g_readonly = false;
+
+static char *line_dup(const char *s);   /* full-capacity line allocator (below) */
 
 /* ── Undo (single level) ─────────────────────────────────────────────────── */
 static char  *g_undo_lines[MAX_LINES];
@@ -145,7 +159,7 @@ static void undo_restore(void) {
     if (!g_undo_valid) return;
     for (int i = 0; i < g_nlines; i++) { free(g_lines[i]); g_lines[i] = NULL; }
     g_nlines = g_undo_nlines;
-    for (int i = 0; i < g_nlines; i++) g_lines[i] = strdup(g_undo_lines[i] ? g_undo_lines[i] : "");
+    for (int i = 0; i < g_nlines; i++) g_lines[i] = line_dup(g_undo_lines[i] ? g_undo_lines[i] : "");
     g_cx = g_undo_cx; g_cy = g_undo_cy;
     g_modified = true;
 }
@@ -168,9 +182,23 @@ static void set_status(const char *msg, uint32_t col) {
     g_status_until = time(NULL) + 3;
 }
 
+/* Allocate a line buffer at full LINE_CAP capacity (NOT the string's exact
+ * length) and copy s into it. insert_char/split/join may grow a line up to
+ * LINE_CAP, so every editable line must own that much space — strdup'd
+ * exact-length buffers overflowed the heap on the first inserted character. */
+static char *line_dup(const char *s) {
+    char *p = malloc(LINE_CAP);
+    if (!p) return NULL;
+    size_t n = s ? strlen(s) : 0;
+    if (n >= LINE_CAP) n = LINE_CAP - 1;
+    if (n) memcpy(p, s, n);
+    p[n] = '\0';
+    return p;
+}
+
 /* ── File I/O ────────────────────────────────────────────────────────────── */
 static void line_ensure(int idx) {
-    if (!g_lines[idx]) g_lines[idx] = strdup("");
+    if (!g_lines[idx]) g_lines[idx] = line_dup("");
 }
 
 static bool file_load(const char *path) {
@@ -178,15 +206,18 @@ static bool file_load(const char *path) {
     if (!f) return false;
     for (int i = 0; i < g_nlines; i++) { free(g_lines[i]); g_lines[i] = NULL; }
     g_nlines = 0;
-    char buf[LINE_CAP + 2];
+    /* buf must not exceed LINE_CAP: line_dup keeps at most LINE_CAP-1 chars,
+     * and fgets reads at most sizeof(buf)-1 — anything longer would be
+     * silently dropped between the two. Overlong lines wrap to the next row. */
+    char buf[LINE_CAP];
     while (fgets(buf, sizeof(buf), f) && g_nlines < MAX_LINES) {
         int len = (int)strlen(buf);
         if (len > 0 && buf[len-1] == '\n') buf[--len] = '\0';
         if (len > 0 && buf[len-1] == '\r') buf[--len] = '\0';
-        g_lines[g_nlines++] = strdup(buf);
+        g_lines[g_nlines++] = line_dup(buf);
     }
     fclose(f);
-    if (g_nlines == 0) { g_lines[0] = strdup(""); g_nlines = 1; }
+    if (g_nlines == 0) { g_lines[0] = line_dup(""); g_nlines = 1; }
     return true;
 }
 
@@ -251,7 +282,7 @@ static void render(uint32_t *fb) {
             char lnum[16];
             snprintf(lnum, sizeof(lnum), "%4d", (line_idx + 1) % 10000);
             fb_str(fb, lnum, 4, py + (cell_h - g_glyph_h) / 2,
-                   is_cur ? C_WHITE : C_LNUM_FG, C_LNUM_BG);
+                   is_cur ? C_ACCENT : C_LNUM_FG, C_LNUM_BG);
         }
         fb_fill(fb, LNUM_W - 1, py, 1, cell_h, C_BORDER);
 
@@ -265,22 +296,46 @@ static void render(uint32_t *fb) {
         if (draw_n > vc) draw_n = vc;
         if (draw_n < 0) draw_n = 0;
 
+        /* Precompute find-match highlight mask for the visible span */
+        static bool find_mask[LINE_CAP];
+        bool find_active = (g_find_len > 0 && !g_find_mode && draw_n > 0);
+        if (find_active) {
+            memset(find_mask, 0, (size_t)draw_n);
+            const char *scan = line;
+            while ((scan = strstr(scan, g_find_buf)) != NULL) {
+                int mstart = (int)(scan - line) - draw_from;
+                if (mstart >= draw_n) break;      /* past the visible span */
+                int mend = mstart + g_find_len;
+                if (mstart < 0) mstart = 0;
+                if (mend > draw_n) mend = draw_n;
+                for (int mi = mstart; mi < mend; mi++) find_mask[mi] = true;
+                scan++;
+            }
+        }
+
+        /* Fold each source byte to a display glyph WITHOUT changing the
+         * byte↔cell mapping the cursor/scroll/find/click logic relies on:
+         * a multi-byte codepoint shows its folded ASCII glyph in the lead
+         * byte's cell and blank cells for its continuation bytes. This kills
+         * garbage boxes while keeping editing perfectly byte-aligned. */
+        static unsigned char disp[LINE_CAP];
+        {
+            size_t bi = 0;
+            while (line[bi] && bi < LINE_CAP) {
+                size_t start = bi;
+                uint32_t cp = fifi_u8_next(line, &bi);
+                if (bi > LINE_CAP) bi = LINE_CAP;
+                int fold = fifi_fold_ascii(cp);
+                disp[start] = (fold > 0) ? (unsigned char)fold : ' ';
+                for (size_t k = start + 1; k < bi; k++) disp[k] = ' ';
+            }
+        }
+
         int tx = LNUM_W + PAD_X;
         for (int ci = 0; ci < draw_n; ci++) {
-            unsigned char ch = (unsigned char)line[draw_from + ci];
-            bool in_find = false;
-            if (g_find_len > 0 && !g_find_mode) {
-                /* highlight all occurrences: check if this char is within a match */
-                const char *scan = line;
-                while ((scan = strstr(scan, g_find_buf)) != NULL) {
-                    int mstart = (int)(scan - line) - draw_from;
-                    int mend   = mstart + g_find_len;
-                    if (ci >= mstart && ci < mend) { in_find = true; break; }
-                    scan++;
-                }
-            }
+            unsigned char ch = disp[draw_from + ci];
             uint32_t bg = is_cur ? C_CUR_LINE : C_BG;
-            if (in_find) bg = C_FIND_HL;
+            if (find_active && find_mask[ci]) bg = C_FIND_HL;
             fb_glyph(fb, tx + ci * 9, py + (cell_h - g_glyph_h) / 2, ch, C_TEXT, bg);
         }
 
@@ -289,7 +344,7 @@ static void render(uint32_t *fb) {
             int cur_col = g_cx - g_col_scroll;
             if (cur_col >= 0 && cur_col <= vc) {
                 int cpx = tx + cur_col * 9;
-                fb_fill(fb, cpx, py + cell_h - 2, 9, 2, C_TEXT);
+                fb_fill(fb, cpx, py + cell_h - 2, 9, 2, C_ACCENT);
             }
         }
     }
@@ -405,7 +460,7 @@ static void join_with_next(int row) {
     line_ensure(row); line_ensure(row + 1);
     int lena = line_len(row), lenb = line_len(row + 1);
     if (lena + lenb >= LINE_CAP) return;
-    char *joined = malloc((size_t)(lena + lenb + 1));
+    char *joined = malloc(LINE_CAP);
     if (!joined) return;
     memcpy(joined, g_lines[row], (size_t)lena);
     memcpy(joined + lena, g_lines[row + 1], (size_t)(lenb + 1));
@@ -422,7 +477,7 @@ static void join_with_next(int row) {
 static void split_line(int row, int col) {
     if (g_nlines >= MAX_LINES) return;
     line_ensure(row);
-    char *rest = strdup(g_lines[row] + col);
+    char *rest = line_dup(g_lines[row] + col);
     g_lines[row][col] = '\0';
     memmove(&g_lines[row + 2], &g_lines[row + 1],
             (size_t)(g_nlines - row - 1) * sizeof(char *));
@@ -535,7 +590,7 @@ static bool handle_key(uint8_t key, int sock, uint32_t *fb) {
         else if (g_cy < g_nlines - 1) { g_cy++; g_cx = 0; }
         clamp_scroll(); return true;
     }
-    if (key == 0x82 || key == 0x48) { /* Up */
+    if (key == 0x82) { /* Up */
         if (g_cy > 0) {
             g_cy--;
             int len = line_len(g_cy);
@@ -543,7 +598,7 @@ static bool handle_key(uint8_t key, int sock, uint32_t *fb) {
         }
         clamp_scroll(); return true;
     }
-    if (key == 0x83 || key == 0x50) { /* Down */
+    if (key == 0x83) { /* Down */
         if (g_cy < g_nlines - 1) {
             g_cy++;
             int len = line_len(g_cy);
@@ -630,8 +685,8 @@ static bool handle_key(uint8_t key, int sock, uint32_t *fb) {
 int main(int argc, char **argv) {
     font_load("/fifi-data/fonts/ter16b.psf");
 
-    /* Init with empty document */
-    g_lines[0] = strdup(""); g_nlines = 1;
+    /* Init with empty document (must be full-capacity: insert_char grows in place) */
+    g_lines[0] = line_dup(""); g_nlines = 1;
 
     /* Load file if given on command line */
     if (argc >= 2) {
@@ -699,7 +754,12 @@ int main(int argc, char **argv) {
                         memcpy(&in_type,  in_hdr,     4);
                         memcpy(&in_plen,  in_hdr + 4, 4);
                         if (in_plen > 131072) { in_got = 0; break; }
-                        if (in_plen > 0) { in_pld = malloc(in_plen); in_pgot = 0; }
+                        if (in_plen > 0) { free(in_pld); in_pld = malloc(in_plen); in_pgot = 0; }
+                        else {
+                            /* zero-payload message: dispatch immediately */
+                            if (in_type == IPC_INVALIDATE) dirty = true;
+                            in_got = 0;
+                        }
                     }
                 } else if (in_plen > 0 && in_pgot < in_plen) {
                     uint32_t need = in_plen - in_pgot;
@@ -712,7 +772,7 @@ int main(int argc, char **argv) {
                             uint8_t key = in_pld ? in_pld[0] : 0;
                             running = handle_key(key, sock, fb);
                             dirty = true;
-                        } else if (in_type == IPC_OPEN_FILE && in_plen < (uint32_t)sizeof(g_filepath)) {
+                        } else if (in_type == IPC_OPEN_FILE && in_pld && in_plen < (uint32_t)sizeof(g_filepath)) {
                             /* Compositor routing another file to us */
                             memcpy(g_filepath, in_pld, in_plen);
                             g_filepath[in_plen] = '\0';

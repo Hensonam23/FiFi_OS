@@ -22,6 +22,8 @@
 #include <errno.h>
 #include <time.h>
 
+#include "../fifi_u8.h"
+
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #define FIFI_SOCK         "/tmp/fifi-compositor.sock"
 #define IPC_APP_CONNECT   0x01u
@@ -50,17 +52,18 @@
 #define ITEM_H   20   /* height per entry row */
 #define PAD_X    12
 
-/* ── Colours (ARGB / 0x00RRGGBB) ────────────────────────────────────────── */
-#define C_BG        0x00121820u
-#define C_HDR_BG    0x001a2432u
-#define C_FOOT_BG   0x001a2432u
-#define C_SEL       0x00204060u
-#define C_DIR       0x006090d8u
-#define C_FILE      0x00b0c8e0u
-#define C_GREY      0x00506070u
-#define C_BORDER    0x00243448u
-#define C_WHITE     0x00f0f0f0u
-#define C_WARN      0x00e04040u
+/* ── Colours (0x00RRGGBB — shared FiFi design language) ──────────────────── */
+#define C_BG        0x000E1620u   /* window background */
+#define C_HDR_BG    0x001A2740u   /* path/toolbar bar */
+#define C_FOOT_BG   0x0016202Eu   /* status bar (card tone) */
+#define C_SEL       0x00409CFFu   /* selection — accent */
+#define C_FIELD     0x00203450u   /* inline rename field */
+#define C_DIR       0x00409CFFu   /* directories — accent */
+#define C_FILE      0x00D8E8F8u   /* files — primary text */
+#define C_GREY      0x006A8098u   /* muted / secondary */
+#define C_BORDER    0x00243448u   /* subtle divider */
+#define C_WHITE     0x00FFFFFFu   /* on-accent / bright */
+#define C_WARN      0x00E05050u
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -107,19 +110,32 @@ static void font_draw_char(uint32_t *fb, int fw, int c,
     }
 }
 
+/* UTF-8 aware: decode each codepoint and fold it to a byte the bitmap font can
+ * show (dashes/curly quotes/accents → ASCII), drawing one cell per codepoint so
+ * filenames with non-ASCII characters render sensibly instead of garbage. */
 static void font_draw_str(uint32_t *fb, const char *s,
                           int x, int y, uint32_t fg) {
-    for (; *s; s++, x += 9)
-        font_draw_char(fb, WIN_W, (unsigned char)*s, x, y, fg);
+    for (size_t i = 0; s[i]; ) {
+        uint32_t cp = fifi_u8_next(s, &i);
+        int c = fifi_fold_ascii(cp);
+        if (c == 0) continue;                 /* zero-width: skip */
+        font_draw_char(fb, WIN_W, c, x, y, fg);
+        x += 9;
+    }
 }
 
+/* Same, bounded to the first n bytes of s (used for truncated filenames and the
+ * inline rename field). n is a byte budget; each codepoint still draws one cell. */
 static void font_draw_strn(uint32_t *fb, const char *s, int n,
                            int x, int y, uint32_t fg) {
-    for (int i = 0; i < n && s[i]; i++, x += 9)
-        font_draw_char(fb, WIN_W, (unsigned char)s[i], x, y, fg);
+    for (size_t i = 0; (int)i < n && s[i]; ) {
+        uint32_t cp = fifi_u8_next(s, &i);
+        int c = fifi_fold_ascii(cp);
+        if (c == 0) continue;                 /* zero-width: skip */
+        font_draw_char(fb, WIN_W, c, x, y, fg);
+        x += 9;
+    }
 }
-
-static int font_strw(const char *s) { return (int)strlen(s) * 9; }
 
 /* ── Rect fill ───────────────────────────────────────────────────────────── */
 static void fill_rect(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
@@ -137,9 +153,21 @@ static void draw_hline(uint32_t *fb, int y, uint32_t col) {
     for (int x = 0; x < WIN_W; x++) fb[y * WIN_W + x] = col;
 }
 
+/* Filled rect with softened (notched) corners — reads as a rounded highlight. */
+static void fill_round(uint32_t *fb, int x, int y, int w, int h,
+                       uint32_t col, uint32_t bg) {
+    fill_rect(fb, x, y, w, h, col);
+    const int r = 3;
+    for (int i = 0; i < r; i++)
+        for (int j = 0; j < r; j++)
+            if (i + j < r) {
+                if (x + i         >= 0 && x + i         < WIN_W) { if (y+j>=0&&y+j<WIN_H) fb[(y+j)*WIN_W+x+i]=bg; if (y+h-1-j>=0&&y+h-1-j<WIN_H) fb[(y+h-1-j)*WIN_W+x+i]=bg; }
+                if (x + w - 1 - i >= 0 && x + w - 1 - i < WIN_W) { if (y+j>=0&&y+j<WIN_H) fb[(y+j)*WIN_W+x+w-1-i]=bg; if (y+h-1-j>=0&&y+h-1-j<WIN_H) fb[(y+h-1-j)*WIN_W+x+w-1-i]=bg; }
+            }
+}
+
 /* ── Directory listing ───────────────────────────────────────────────────── */
 #define MAX_ENTRIES 512
-#define NAME_MAX_DISP 56
 
 typedef struct {
     char  name[256];
@@ -203,17 +231,17 @@ static void render(uint32_t *fb) {
     int hdr_y = TITLE_H;
     fill_rect(fb, 0, hdr_y, WIN_W, HDR_H, C_HDR_BG);
     draw_hline(fb, hdr_y + HDR_H - 1, C_BORDER);
-    const char *label = "  ";
-    int lx = PAD_X;
-    font_draw_str(fb, label, lx, hdr_y + (HDR_H - g_glyph_h) / 2, C_GREY);
-    lx += font_strw(label);
+    int htext_y = hdr_y + (HDR_H - g_glyph_h) / 2;
+    /* Accent location marker */
+    fill_round(fb, PAD_X, htext_y + 1, 6, g_glyph_h - 2, C_DIR, C_HDR_BG);
+    int lx = PAD_X + 14;
     int path_chars = (WIN_W - lx - PAD_X) / 9;
     const char *p = g_path;
     int plen = (int)strlen(p);
     if (plen > path_chars) p += (plen - path_chars);
-    font_draw_str(fb, p, lx, hdr_y + (HDR_H - g_glyph_h) / 2, C_WHITE);
+    font_draw_str(fb, p, lx, htext_y, C_WHITE);
 
-    /* Entry list */
+    /* Entry list (origin must match mouse hit-test: TITLE_H + HDR_H) */
     int list_top = TITLE_H + HDR_H;
     int list_bot = WIN_H - FOOT_H;
     int visible  = (list_bot - list_top) / ITEM_H;
@@ -224,12 +252,14 @@ static void render(uint32_t *fb) {
         int ry = list_top + i * ITEM_H;
         bool sel = (idx == g_selected);
 
-        if (sel) fill_rect(fb, 0, ry, WIN_W, ITEM_H, C_SEL);
+        /* Rounded selection highlight, inset from the edges */
+        if (sel && !g_renaming)
+            fill_round(fb, 6, ry + 1, WIN_W - 12, ITEM_H - 2, C_SEL, C_BG);
 
         /* When renaming this row, show inline input field */
         if (sel && g_renaming) {
-            fill_rect(fb, PAD_X + 14, ry + 1, WIN_W - PAD_X - 14 - PAD_X, ITEM_H - 2,
-                      0x00283850u);
+            fill_round(fb, PAD_X + 14, ry + 1, WIN_W - PAD_X - 14 - PAD_X, ITEM_H - 2,
+                       C_FIELD, C_BG);
             int max_ch = (WIN_W - PAD_X - 14 - PAD_X - 4) / 9;
             int draw_from = g_rename_len > max_ch ? g_rename_len - max_ch : 0;
             int draw_n    = g_rename_len - draw_from;
@@ -237,22 +267,21 @@ static void render(uint32_t *fb) {
                            PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, C_WHITE);
             /* Cursor bar */
             int cx = PAD_X + 16 + draw_n * 9;
-            fill_rect(fb, cx, ry + 3, 2, ITEM_H - 6, C_WHITE);
+            fill_rect(fb, cx, ry + 3, 2, ITEM_H - 6, C_DIR);
         } else {
+            /* Selected rows draw on the accent bar → use on-accent white */
             const char *icon = g_entries[idx].is_dir ? ">" : " ";
-            font_draw_str(fb, icon, PAD_X, ry + (ITEM_H - g_glyph_h) / 2,
-                          g_entries[idx].is_dir ? C_DIR : C_GREY);
+            uint32_t icon_fg = sel ? C_WHITE : (g_entries[idx].is_dir ? C_DIR : C_GREY);
+            font_draw_str(fb, icon, PAD_X + 4, ry + (ITEM_H - g_glyph_h) / 2, icon_fg);
 
             const char *name = g_entries[idx].name;
             int namelen = (int)strlen(name);
-            uint32_t fg = g_entries[idx].is_dir ? C_DIR : C_FILE;
-            int max_chars = (WIN_W - PAD_X - 16 - PAD_X) / 9;
+            uint32_t fg = sel ? C_WHITE : (g_entries[idx].is_dir ? C_DIR : C_FILE);
+            int max_chars = (WIN_W - PAD_X - 20 - PAD_X) / 9;
             int draw_chars = namelen < max_chars ? namelen : max_chars;
             font_draw_strn(fb, name, draw_chars,
-                           PAD_X + 16, ry + (ITEM_H - g_glyph_h) / 2, fg);
+                           PAD_X + 20, ry + (ITEM_H - g_glyph_h) / 2, fg);
         }
-
-        draw_hline(fb, ry + ITEM_H - 1, C_BORDER);
     }
 
     /* Footer */
@@ -299,7 +328,6 @@ static void send_frame(int fd, uint32_t *pixels) {
 #define KEY_ENTER 0x0D
 #define KEY_ESC   0x1B
 #define KEY_BS    0x08
-#define KEY_DEL   0x84   /* FIFI_KEY_DELETE */
 #define KEY_F5    0x8Eu  /* FIFI_KEY_F5 — rename */
 #define KEY_q     'q'
 
@@ -567,7 +595,7 @@ int main(void) {
                             }
                             if (redraw) { dirty = true; }
                             msg_done:;
-                        } else if (type == IPC_INPUT_MOUSE && in_plen >= 9) {
+                        } else if (type == IPC_INPUT_MOUSE && in_plen >= 9 && in_pld) {
                             int32_t mx, my; uint8_t btns;
                             int8_t scroll = 0;
                             memcpy(&mx, in_pld,     4);
@@ -590,6 +618,12 @@ int main(void) {
                                     int row = (my - list_top) / ITEM_H;
                                     int idx = g_scroll + row;
                                     if (idx < g_nentries) {
+                                        /* Prepare drag BEFORE nav_enter — it may
+                                         * reload g_entries and stale idx */
+                                        snprintf(g_drag_path, sizeof(g_drag_path),
+                                                 "%s/%s", g_path, g_entries[idx].name);
+                                        g_drag_pending = true;
+                                        g_drag_smx = mx; g_drag_smy = my;
                                         if (idx == g_selected) {
                                             nav_enter(sock, fb);
                                         } else {
@@ -597,11 +631,6 @@ int main(void) {
                                             clamp_scroll();
                                             dirty = true;
                                         }
-                                        /* Prepare drag */
-                                        snprintf(g_drag_path, sizeof(g_drag_path),
-                                                 "%s/%s", g_path, g_entries[idx].name);
-                                        g_drag_pending = true;
-                                        g_drag_smx = mx; g_drag_smy = my;
                                     }
                                 }
                             } else if (lbtn && g_drag_pending) {
@@ -618,7 +647,7 @@ int main(void) {
                             prev_lbtn = lbtn;
                         } else if (type == IPC_WIN_RESIZE) {
                             dirty = true;
-                        } else if (type == IPC_CLIP_DATA && in_plen > 0 && g_renaming) {
+                        } else if (type == IPC_CLIP_DATA && in_plen > 0 && in_pld && g_renaming) {
                             for (uint32_t ci = 0; ci < in_plen &&
                                  g_rename_len < (int)sizeof(g_rename_buf) - 1; ci++) {
                                 uint8_t ch = in_pld[ci];
@@ -627,7 +656,7 @@ int main(void) {
                             }
                             g_rename_buf[g_rename_len] = '\0';
                             dirty = true;
-                        } else if (type == IPC_DROP_FILE && in_plen > 0 && in_plen < 1024) {
+                        } else if (type == IPC_DROP_FILE && in_plen > 0 && in_plen < 1024 && in_pld) {
                             /* File dropped onto us — navigate to its directory */
                             char dropped[1024];
                             memcpy(dropped, in_pld, in_plen); dropped[in_plen] = '\0';
