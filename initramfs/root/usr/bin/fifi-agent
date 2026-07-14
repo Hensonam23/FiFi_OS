@@ -15,7 +15,6 @@
 
 AI_DIR=/fifi-data/ai
 CONF="$AI_DIR/model.conf"
-WORK="$AI_DIR/agent.work"     # scratch transcript
 MAX_STEPS=12                  # stop runaway loops
 
 CLI=llama-cli
@@ -86,19 +85,21 @@ classify() {
 run_cmd() {
     cmd=$1
     kind=$(classify "$cmd")
+    # run_cmd is invoked inside $(...): stdout is captured for the transcript,
+    # so all user-facing prompt text MUST go to stderr to reach the terminal.
     if [ "$kind" = danger ]; then
-        echo
-        echo "  !! DANGEROUS command proposed by the AI:"
-        echo "     $cmd"
-        printf "     This could damage the system or data. Type EXACTLY 'yes do it' to run: "
+        echo >&2
+        echo "  !! DANGEROUS command proposed by the AI:" >&2
+        echo "     $cmd" >&2
+        printf "     This could damage the system or data. Type EXACTLY 'yes do it' to run: " >&2
         read ans
-        [ "$ans" = "yes do it" ] || { echo "  (skipped)"; echo "OUTPUT: [refused by user - command not run]"; return; }
+        [ "$ans" = "yes do it" ] || { echo "  (skipped)" >&2; echo "OUTPUT: [refused by user - command not run]"; return; }
     elif [ "$kind" = mut ] || { [ "$kind" = ro ] && [ "$MODE" = ask ]; }; then
-        echo
-        echo "  AI wants to run: $cmd"
-        printf "  Run it? [y/N]: "
+        echo >&2
+        echo "  AI wants to run: $cmd" >&2
+        printf "  Run it? [y/N]: " >&2
         read ans
-        case "$ans" in y|Y|yes|YES) ;; *) echo "  (skipped)"; echo "OUTPUT: [declined by user - command not run]"; return;; esac
+        case "$ans" in y|Y|yes|YES) ;; *) echo "  (skipped)" >&2; echo "OUTPUT: [declined by user - command not run]"; return;; esac
     fi
     # execute (read-only in auto mode runs with no prompt)
     out=$(sh -c "$cmd" 2>&1)
@@ -110,12 +111,42 @@ run_cmd() {
 # extract the first RUN:/DONE: directive from a model reply
 extract() { printf '%s' "$1" | grep -m1 -E '^(RUN|DONE):' ; }
 
+# Prefer the resident llama-server (model stays warm -> fast turns); fall back to
+# spawning llama-cli per turn if the server is unavailable.
+SERVER=$(fifi-ai-serve 2>/dev/null | grep '^http' | head -1)
+
+# JSON-encode stdin into a quoted string (escapes \, ", and control chars).
+json_encode() { awk 'BEGIN{RS="\1";ORS="";printf "\""} {gsub(/\\/,"\\\\");gsub(/"/,"\\\"");gsub(/\t/,"\\t");gsub(/\r/,"");gsub(/\n/,"\\n");print} END{printf "\""}'; }
+
+server_turn() {
+    # $1 = prompt. POST to llama-server /completion, print the model reply.
+    prompt=$(printf '%s' "$1" | json_encode)
+    body="{\"prompt\":$prompt,\"n_predict\":200,\"temperature\":0.3,\"cache_prompt\":true,\"stop\":[\"\\nUser:\",\"\\nOUTPUT:\"]}"
+    resp=$(curl -s -m 180 "$SERVER/completion" -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
+    # Pull the "content" field and unescape it (awk state machine, no jq needed).
+    printf '%s' "$resp" | awk '
+      { s=s $0 }
+      END{
+        i=index(s,"\"content\":\""); if(!i){exit}
+        r=substr(s,i+11); out=""; n=length(r)
+        for(j=1;j<=n;j++){c=substr(r,j,1)
+          if(c=="\\"){d=substr(r,j+1,1);j++
+            if(d=="n")out=out"\n"; else if(d=="t")out=out"\t"; else if(d=="\"")out=out"\""; else if(d=="\\")out=out"\\"; else out=out d}
+          else if(c=="\""){break}
+          else out=out c}
+        printf "%s", out
+      }'
+}
+
 agent_turn() {
     # $1 = full transcript text; prints the model's cleaned reply.
-    # -st = single conversation turn then exit (exits cleanly, unlike -no-cnv which
-    # hung; applies the model's chat template so instruction-following is good).
-    # Strip llama-cli's UI chrome (banner, ASCII logo, prompt marker, perf line) so
-    # only the model's actual reply remains. Directive extraction tolerates the rest.
+    if [ -n "$SERVER" ]; then
+        server_turn "$SYS
+$1"
+        return
+    fi
+    # Fallback: spawn llama-cli for one turn (-st) then exit. Strip its UI chrome
+    # (banner, ASCII logo, prompt marker, perf line) so only the reply remains.
     "$CLI" -m "$MODEL" -st --simple-io --no-display-prompt --no-warmup \
         -t "$THREADS" -c 4096 -n 200 -sys "$SYS" -p "$1" </dev/null 2>/dev/null \
     | grep -avE 'Loading model|available commands|^  /(exit|regen|clear|read|glob)|^modalities|^> $|^\[ Prompt:|^Exiting|^build:|^main:' \

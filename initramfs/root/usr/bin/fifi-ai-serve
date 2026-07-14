@@ -1,0 +1,50 @@
+#!/bin/sh
+# fifi-ai-serve — ensure the resident local AI server (llama-server) is running
+# for the installed model, bound to loopback only (127.0.0.1, fully private, no
+# network exposure). Idempotent: a no-op if it is already up. Other tools
+# (fifi-agent, the GUI chat app) call this first, then POST to the HTTP API, so
+# the model stays warm across turns instead of reloading every request.
+#
+# Prints the base URL on success (http://127.0.0.1:PORT); non-zero on failure.
+
+AI_DIR=/fifi-data/ai
+HOST=127.0.0.1
+PORT=8080
+BASE="http://$HOST:$PORT"
+
+# Already serving?
+if curl -s -m 1 "$BASE/health" 2>/dev/null | grep -qi 'ok\|status'; then
+    echo "$BASE"; exit 0
+fi
+
+CONF="$AI_DIR/model.conf"
+[ -f "$CONF" ] || { echo "no model installed (run fifi-ai-install)" >&2; exit 1; }
+MFILE=$(sed -n 's/^file=//p' "$CONF")
+MODEL="$AI_DIR/$MFILE"
+[ -f "$MODEL" ] || { echo "model file missing: $MODEL" >&2; exit 1; }
+
+SRV=llama-server
+command -v "$SRV" >/dev/null 2>&1 || SRV=/usr/bin/llama-server
+[ -x "$SRV" ] || command -v llama-server >/dev/null 2>&1 || { echo "llama-server not in this build" >&2; exit 1; }
+
+THREADS=$(nproc 2>/dev/null || echo 4); [ "$THREADS" -gt 16 ] && THREADS=16
+
+# Optional vision projector (multimodal) — enables image input for the GUI app
+# when the installed model ships one. model.conf line: mmproj=models/<id>.mmproj
+MMPROJ=""
+MMF=$(sed -n 's/^mmproj=//p' "$CONF")
+[ -n "$MMF" ] && [ -f "$AI_DIR/$MMF" ] && MMPROJ="--mmproj $AI_DIR/$MMF"
+
+mkdir -p "$AI_DIR" 2>/dev/null || true
+# Detached so it outlives the caller; loopback bind keeps it private.
+setsid "$SRV" -m "$MODEL" $MMPROJ --host "$HOST" --port "$PORT" \
+    -t "$THREADS" -c 4096 --no-warmup >"$AI_DIR/server.log" 2>&1 &
+
+# Wait for readiness (model load can take a while on CPU).
+i=0
+while [ "$i" -lt 120 ]; do
+    curl -s -m 1 "$BASE/health" 2>/dev/null | grep -qi 'ok\|status' && { echo "$BASE"; exit 0; }
+    sleep 0.5; i=$((i+1))
+done
+echo "llama-server failed to become ready (see $AI_DIR/server.log)" >&2
+exit 1
