@@ -28,6 +28,10 @@ void     console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint
 void     console_render_glyph(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg, uint32_t bg);
 void     console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg);
 void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch, uint64_t scale, uint32_t fg, uint32_t bg);
+/* Codepoint-aware variants: take a decoded Unicode codepoint (UTF-8 text). */
+void     console_render_glyph_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg, uint32_t bg);
+void     console_render_glyph_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg);
+void     console_render_glyph_scaled_cp(uint64_t px, uint64_t py, uint32_t cp, uint64_t scale, uint32_t fg, uint32_t bg);
 uint64_t           console_fb_width(void);
 uint64_t           console_fb_height(void);
 uint64_t           console_cols(void);   /* visible character columns */

@@ -144,11 +144,38 @@ typedef struct {
     uint8_t  panel_align;   /* panel_align_t: how the item run is aligned */
     bool     panel_autohide;/* reveal-on-edge-hover instead of always visible */
     uint8_t  panel_size;    /* additive thickness over the base, 0..64 px */
+    bool     dock_float;    /* panel renders as a detached, rounded, floating dock
+                             * over the wallpaper (next-gen look) vs an edge-to-edge bar */
     /* ── Visual effects ── */
     bool     fx_glass;      /* translucent (frosted) panels + menus */
     bool     fx_shadows;    /* window drop shadows */
     uint8_t  corner_radius; /* window corner rounding radius, 0..12 px */
 } gui_theme_t;
+
+/* ── Colour helpers ──────────────────────────────────────────────────────
+ * Small inline utilities for deriving cohesive chrome tints from a base
+ * colour (typically g_theme.accent), so the accent threads consistently
+ * through titlebars, the taskbar and the launcher regardless of which preset
+ * the user picked. All operate on 0x00RRGGBB. */
+static inline uint32_t col_scale(uint32_t c, uint32_t num, uint32_t den) {
+    if (den == 0u) den = 1u;
+    uint32_t r = ((c >> 16) & 0xffu) * num / den;
+    uint32_t g = ((c >>  8) & 0xffu) * num / den;
+    uint32_t b = ( c        & 0xffu) * num / den;
+    if (r > 255u) r = 255u;
+    if (g > 255u) g = 255u;
+    if (b > 255u) b = 255u;
+    return (r << 16) | (g << 8) | b;
+}
+/* Linear blend a→b by t/255 (t=0 → a, t=255 → b). */
+static inline uint32_t col_mix(uint32_t a, uint32_t b, uint32_t t) {
+    if (t > 255u) t = 255u;
+    uint32_t it = 255u - t;
+    uint32_t r = (((a >> 16) & 0xffu) * it + ((b >> 16) & 0xffu) * t) / 255u;
+    uint32_t g = (((a >>  8) & 0xffu) * it + ((b >>  8) & 0xffu) * t) / 255u;
+    uint32_t bl = (( a       & 0xffu) * it + ( b        & 0xffu) * t) / 255u;
+    return (r << 16) | (g << 8) | bl;
+}
 
 #define DESK_ICON_MAX   12
 #define DESK_ICON_W     72
@@ -617,6 +644,8 @@ bool     gui_fav_add(const char *path, const char *label);  /* false if dup/full
 void     gui_fav_remove_at(int idx);
 uint64_t fav_btn_w(void);
 uint64_t favbar_start_x(void);
+uint64_t favbar_run_w(void);
+uint64_t logo_x(void);      /* launcher left X (moves with a centered dock) */
 uint64_t favbar_w(void);        /* total strip width (0 when no favorites) */
 void     favbar_draw(void);
 int      favbar_hit(int32_t mx, int32_t my);  /* unified favbar index or -1 */
@@ -639,6 +668,7 @@ __attribute__((weak)) bool platform_load_image(const char *path __attribute__((u
 
 /* ── Forward declarations: gui_text_util.c ───────────────────────────── */
 size_t   gui_strlen(const char *s);
+size_t   gui_utf8_cols(const char *s);   /* codepoint (display cell) count */
 bool     gui_streq(const char *a, const char *b);
 uint64_t desk_top(void);
 uint64_t desk_bot(void);

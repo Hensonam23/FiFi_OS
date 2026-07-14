@@ -67,6 +67,34 @@ size_t gui_strlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
 }
 
+/* Decode one UTF-8 sequence starting at s[*i]; return its codepoint and advance
+ * *i past every byte consumed. Malformed sequences yield U+FFFD and step one
+ * byte so a bad stream can't stall. ASCII is the fast path. */
+static uint32_t utf8_next(const char *s, size_t *i) {
+    unsigned char c = (unsigned char)s[*i];
+    if (c < 0x80u) { (*i)++; return c; }
+    uint32_t cp; int extra;
+    if      ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu; extra = 1; }
+    else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu; extra = 2; }
+    else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u; extra = 3; }
+    else { (*i)++; return 0xFFFDu; }                  /* stray continuation/lead */
+    (*i)++;
+    for (int k = 0; k < extra; k++) {
+        unsigned char cc = (unsigned char)s[*i];
+        if ((cc & 0xC0u) != 0x80u) return 0xFFFDu;    /* truncated — don't over-consume */
+        cp = (cp << 6) | (cc & 0x3Fu);
+        (*i)++;
+    }
+    return cp;
+}
+
+/* Column count = number of Unicode codepoints (monospace cells), not bytes. */
+size_t gui_utf8_cols(const char *s) {
+    size_t cols = 0;
+    for (size_t i = 0; s[i]; ) { utf8_next(s, &i); cols++; }
+    return cols;
+}
+
 bool gui_streq(const char *a, const char *b) {
     while (*a && *b) if (*a++ != *b++) return false;
     return *a == *b;
@@ -75,30 +103,33 @@ bool gui_streq(const char *a, const char *b) {
 void gui_draw_str(uint64_t px, uint64_t py, const char *s,
                          uint32_t fg, uint32_t bg) {
     uint64_t fw = console_font_width();
-    for (size_t i = 0; s[i]; i++)
-        console_render_glyph(px + (uint64_t)i * fw, py,
-                             (unsigned char)s[i], fg, bg);
+    uint64_t col = 0;
+    for (size_t i = 0; s[i]; col++)
+        console_render_glyph_cp(px + col * fw, py, utf8_next(s, &i), fg, bg);
 }
 
 /* Transparent-background string (only letter pixels drawn). For title-bar text so the
  * glyph cell background never paints beyond the title bar. */
 void gui_draw_str_fg(uint64_t px, uint64_t py, const char *s, uint32_t fg) {
     uint64_t fw = console_font_width();
-    for (size_t i = 0; s[i]; i++)
-        console_render_glyph_fg(px + (uint64_t)i * fw, py, (unsigned char)s[i], fg);
+    uint64_t col = 0;
+    for (size_t i = 0; s[i]; col++)
+        console_render_glyph_fg_cp(px + col * fw, py, utf8_next(s, &i), fg);
 }
 
 void gui_draw_str_clip_fg(uint64_t px, uint64_t py, const char *s,
                                  uint32_t fg, uint64_t max_chars) {
     uint64_t fw = console_font_width();
-    size_t len = gui_strlen(s);
-    if (len <= max_chars) {
+    if (gui_utf8_cols(s) <= max_chars) {
         gui_draw_str_fg(px, py, s, fg);
     } else if (max_chars >= 3) {
-        for (size_t i = 0; i < max_chars - 3; i++)
-            console_render_glyph_fg(px + (uint64_t)i * fw, py, (unsigned char)s[i], fg);
-        for (size_t i = 0; i < 3; i++)
-            console_render_glyph_fg(px + (uint64_t)(max_chars-3+i) * fw, py, '.', COL_FB_MUTED);
+        uint64_t col = 0; size_t i = 0;
+        while (s[i] && col < max_chars - 3) {
+            console_render_glyph_fg_cp(px + col * fw, py, utf8_next(s, &i), fg);
+            col++;
+        }
+        for (uint64_t k = 0; k < 3; k++)
+            console_render_glyph_fg(px + (col + k) * fw, py, '.', COL_FB_MUTED);
     }
 }
 
@@ -106,24 +137,27 @@ void gui_draw_str_clip_fg(uint64_t px, uint64_t py, const char *s,
 void gui_draw_str_scaled(uint64_t px, uint64_t py, const char *s,
                                  uint64_t scale, uint32_t fg, uint32_t bg) {
     uint64_t fw = console_font_width();
-    for (size_t i = 0; s[i]; i++)
-        console_render_glyph_scaled(px + (uint64_t)i * fw * scale, py,
-                                    (unsigned char)s[i], scale, fg, bg);
+    uint64_t col = 0;
+    for (size_t i = 0; s[i]; col++)
+        console_render_glyph_scaled_cp(px + col * fw * scale, py,
+                                       utf8_next(s, &i), scale, fg, bg);
 }
 
 /* Draw str clipped to max_chars wide */
 void gui_draw_str_clip(uint64_t px, uint64_t py, const char *s,
                                uint32_t fg, uint32_t bg, uint64_t max_chars) {
     uint64_t fw = console_font_width();
-    size_t len = gui_strlen(s);
-    if (len <= max_chars) {
+    if (gui_utf8_cols(s) <= max_chars) {
         gui_draw_str(px, py, s, fg, bg);
     } else if (max_chars >= 3) {
         /* truncate with "..." */
-        for (size_t i = 0; i < max_chars - 3; i++)
-            console_render_glyph(px + (uint64_t)i * fw, py, (unsigned char)s[i], fg, bg);
-        for (size_t i = 0; i < 3; i++)
-            console_render_glyph(px + (uint64_t)(max_chars-3+i) * fw, py, '.', COL_FB_MUTED, bg);
+        uint64_t col = 0; size_t i = 0;
+        while (s[i] && col < max_chars - 3) {
+            console_render_glyph_cp(px + col * fw, py, utf8_next(s, &i), fg, bg);
+            col++;
+        }
+        for (uint64_t k = 0; k < 3; k++)
+            console_render_glyph(px + (col + k) * fw, py, '.', COL_FB_MUTED, bg);
     }
 }
 
@@ -148,8 +182,8 @@ void gui_ip4_str(uint32_t ip, char *buf, int bufsz) {
         char nb[4]; int ni = 0;
         if (octet == 0) { nb[ni++] = '0'; }
         else { uint32_t v = octet; while (v > 0) { nb[ni++] = '0' + (int)(v % 10); v /= 10; } }
-        for (int k = ni - 1; k >= 0 && ti < 14; k--) tmp[ti++] = nb[k];
-        if (byte > 0 && ti < 14) tmp[ti++] = '.';
+        for (int k = ni - 1; k >= 0 && ti < 15; k--) tmp[ti++] = nb[k];
+        if (byte > 0 && ti < 15) tmp[ti++] = '.';
     }
     tmp[ti] = '\0';
     int i = 0; while (tmp[i] && i < bufsz - 1) { buf[i] = tmp[i]; i++; } buf[i] = '\0';

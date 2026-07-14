@@ -463,8 +463,11 @@ static void ansi_process_csi(void) {
             if (con.cols > con.cx)
                 fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
                           (con.cols - con.cx) * g_fw, g_fh, con.bg);
-            for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
-                cell_buf[con.cy][c] = ' ';
+            /* con.cy can run past the grid while draw is suppressed (terminal
+             * scrollback) — guard every cell_buf row write against OOB. */
+            if (con.cy < CELL_MAX_ROWS)
+                for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
+                    cell_buf[con.cy][c] = ' ';
             if (con.cy + 1 < con.rows) {
                 fill_rect(con.x_off, con.y_offset + (con.cy + 1u) * g_fh,
                           con.cols * g_fw, (con.rows - con.cy - 1u) * g_fh, con.bg);
@@ -480,8 +483,9 @@ static void ansi_process_csi(void) {
                         cell_buf[r][c] = ' ';
             }
             fill_rect(con.x_off, con.y_offset + con.cy * g_fh, (con.cx + 1u) * g_fw, g_fh, con.bg);
-            for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
-                cell_buf[con.cy][c] = ' ';
+            if (con.cy < CELL_MAX_ROWS)
+                for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
+                    cell_buf[con.cy][c] = ' ';
         }
     } else if (final_ch == 'K') {          /* EL — erase line */
         uint16_t mode = params[0];
@@ -489,22 +493,25 @@ static void ansi_process_csi(void) {
             if (con.cols > con.cx)
                 fill_rect(con.x_off + con.cx * g_fw, con.y_offset + con.cy * g_fh,
                           (con.cols - con.cx) * g_fw, g_fh, con.bg);
-            for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
-                cell_buf[con.cy][c] = ' ';
+            if (con.cy < CELL_MAX_ROWS)
+                for (uint64_t c = con.cx; c < con.cols && c < CELL_MAX_COLS; c++)
+                    cell_buf[con.cy][c] = ' ';
         } else if (mode == 1u) {
             fill_rect(con.x_off, con.y_offset + con.cy * g_fh, (con.cx + 1u) * g_fw, g_fh, con.bg);
-            for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
-                cell_buf[con.cy][c] = ' ';
+            if (con.cy < CELL_MAX_ROWS)
+                for (uint64_t c = 0; c <= con.cx && c < CELL_MAX_COLS; c++)
+                    cell_buf[con.cy][c] = ' ';
         } else if (mode == 2u) {
             fill_rect(con.x_off, con.y_offset + con.cy * g_fh, con.cols * g_fw, g_fh, con.bg);
-            for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
-                cell_buf[con.cy][c] = ' ';
+            if (con.cy < CELL_MAX_ROWS)
+                for (uint64_t c = 0; c < con.cols && c < CELL_MAX_COLS; c++)
+                    cell_buf[con.cy][c] = ' ';
         }
     } else if (final_ch == 'X') {              /* ECH — erase character */
         uint16_t n = (params[0] > 0u) ? params[0] : 1u;
         for (uint64_t i = con.cx; i < con.cx + n && i < con.cols && i < CELL_MAX_COLS; i++) {
             fill_rect(con.x_off + i * g_fw, con.y_offset + con.cy * g_fh, g_fw, g_fh, con.bg);
-            cell_buf[con.cy][i] = ' ';
+            if (con.cy < CELL_MAX_ROWS) cell_buf[con.cy][i] = ' ';
         }
     } else if (final_ch == 'L') {              /* IL — insert line */
         uint16_t n = (params[0] > 0u) ? params[0] : 1u;
@@ -587,13 +594,12 @@ int console_tsb_get_line(int line_from_end, char *buf, int maxlen) {
  * fill_bg paints the cell background first (opaque text); otherwise only lit
  * pixels are blended over existing content (transparent-bg path). scale>=1
  * upsamples the cached coverage for large text. */
-static void draw_glyph_ttf(uint64_t px, uint64_t py, unsigned char uc,
-                           uint32_t fg, uint32_t bg, bool fill_bg, uint32_t scale) {
+static void draw_glyph_ttf_cp(uint64_t px, uint64_t py, uint32_t cp,
+                              uint32_t fg, uint32_t bg, bool fill_bg, uint32_t scale) {
     if (scale == 0) scale = 1;
     uint64_t cw = (uint64_t)g_fw * scale;
     uint64_t ch = (uint64_t)g_fh * scale;
     if (fill_bg) fill_rect(px, py, cw, ch, bg);        /* marks dirty */
-    uint32_t cp = g_cp437_uni[uc];
     if (cp == 0) return;                                /* NUL / blank cell */
     int w, h, xo, yt, adv;
     const uint8_t *cov = ttf_glyph(cp, &w, &h, &xo, &yt, &adv);
@@ -633,6 +639,12 @@ static void draw_glyph_ttf(uint64_t px, uint64_t py, unsigned char uc,
             }
         }
     }
+}
+
+/* Byte-glyph wrapper: maps a single console byte through CP437 to its codepoint. */
+static void draw_glyph_ttf(uint64_t px, uint64_t py, unsigned char uc,
+                           uint32_t fg, uint32_t bg, bool fill_bg, uint32_t scale) {
+    draw_glyph_ttf_cp(px, py, g_cp437_uni[uc], fg, bg, fill_bg, scale);
 }
 #endif
 
@@ -935,7 +947,7 @@ void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_
     uint32_t gi = (ch < g_fglyphs) ? ch : ('?' < g_fglyphs ? '?' : 0u);
     const uint8_t *glyph = g_fdata + (uint64_t)gi * g_fbpg;
     uint32_t bpr = (g_fw + 7u) / 8u;
-    uint32_t *dst_base = g_back ? g_back : NULL;
+    uint32_t *dst_base = g_back;
     if (dst_base) {
         g_dirty = true;
         if ((uint32_t)py < g_dirty_y0) g_dirty_y0 = (uint32_t)py;
@@ -959,6 +971,39 @@ void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_
             }
         }
     }
+}
+
+/* ── Codepoint-aware glyph rendering (UTF-8 text) ──────────────────────────
+ * The byte-based variants above map one byte through CP437, so multi-byte
+ * UTF-8 (em-dash, quotes, accents…) renders as garbage. These take a decoded
+ * Unicode codepoint and draw it directly through the TTF font (which carries
+ * the full glyph set). The bitmap fallback can only show Latin-1, so anything
+ * higher degrades to '?'. */
+void console_render_glyph_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg, uint32_t bg) {
+    if (!con.initialized) return;
+    if (px + g_fw > con.w || py + g_fh > con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf_cp(px, py, cp, fg, bg, true, 1); return; }
+#endif
+    console_render_glyph(px, py, cp < 0x100u ? (unsigned char)cp : '?', fg, bg);
+}
+
+void console_render_glyph_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg) {
+    if (!con.initialized) return;
+    if (px + g_fw > con.w || py + g_fh > con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf_cp(px, py, cp, fg, 0, false, 1); return; }
+#endif
+    console_render_glyph_fg(px, py, cp < 0x100u ? (unsigned char)cp : '?', fg);
+}
+
+void console_render_glyph_scaled_cp(uint64_t px, uint64_t py, uint32_t cp,
+                                    uint64_t scale, uint32_t fg, uint32_t bg) {
+    if (!con.initialized || scale == 0) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf_cp(px, py, cp, fg, bg, true, (uint32_t)scale); return; }
+#endif
+    console_render_glyph_scaled(px, py, cp < 0x100u ? (unsigned char)cp : '?', scale, fg, bg);
 }
 
 uint64_t console_fb_width(void)           { return con.w; }
@@ -1298,6 +1343,33 @@ uint32_t    console_font_width(void)  { return g_fw; }
 uint32_t    console_font_height(void) { return g_fh; }
 const char *console_font_name(void)   { return g_fname; }
 
+/* Parse + validate a PSF1/PSF2 header; fills the geometry on success.
+ * Rejects any font whose glyph data would read out of bounds: glyph rows are
+ * read at ((fw+7)/8)*fh stride, so a smaller declared bytes-per-glyph (or a
+ * data region past raw_size) would read OOB on a malformed file. */
+static bool psf_parse_header(const uint8_t *d, uint64_t raw_size,
+                             uint32_t *fw, uint32_t *fh, uint32_t *fbpg,
+                             uint32_t *nglyphs, uint32_t *data_off) {
+    if (raw_size < 4u) return false;
+    if (d[0] == 0x36u && d[1] == 0x04u) {
+        /* PSF1: 4-byte header, always 8px wide */
+        *fw = 8u; *fh = d[3]; *fbpg = d[3];
+        *nglyphs = (d[2] & 0x01u) ? 512u : 256u;
+        *data_off = 4u;
+    } else if (d[0] == 0x72u && d[1] == 0xb5u && d[2] == 0x4au && d[3] == 0x86u) {
+        /* PSF2: 32-byte header, little-endian uint32 fields */
+        if (raw_size < 32u) return false;
+        #define LE32(o) ((uint32_t)d[o]|((uint32_t)d[(o)+1]<<8)|((uint32_t)d[(o)+2]<<16)|((uint32_t)d[(o)+3]<<24))
+        *data_off = LE32(8); *nglyphs = LE32(16); *fbpg = LE32(20); *fh = LE32(24); *fw = LE32(28);
+        #undef LE32
+    } else return false;
+    if (*fw == 0u || *fw > 64u || *fh == 0u || *fh > 64u ||
+        *nglyphs == 0u || *nglyphs > 512u) return false;
+    if (*fbpg < ((*fw + 7u) / 8u) * *fh) return false;   /* stride sanity */
+    if ((uint64_t)*data_off + (uint64_t)*nglyphs * *fbpg > raw_size) return false;
+    return true;
+}
+
 /* Render `s` using the glyphs of the PSF at `path`, WITHOUT touching the active
  * console font — used for the font-preview labels in Settings so each font name
  * appears in its own typeface. The font's native height is scaled (nearest
@@ -1308,21 +1380,10 @@ uint64_t console_render_psf_string(const char *path, const char *s,
                                     uint32_t target_h, uint32_t fg) {
     if (!con.initialized || target_h == 0 || !s) return 0;
     const void *raw = NULL; uint64_t raw_size = 0;
-    if (vfs_read(path, &raw, &raw_size) != 0 || !raw || raw_size < 4) return 0;
+    if (vfs_read(path, &raw, &raw_size) != 0 || !raw) return 0;
     const uint8_t *d = (const uint8_t *)raw;
     uint32_t fw, fh, fbpg, nglyphs, data_off;
-    if (d[0] == 0x36u && d[1] == 0x04u) {
-        fw = 8u; fh = d[3]; fbpg = d[3];
-        nglyphs = (d[2] & 0x01u) ? 512u : 256u; data_off = 4u;
-    } else if (d[0] == 0x72u && d[1] == 0xb5u && d[2] == 0x4au && d[3] == 0x86u) {
-        if (raw_size < 32u) return 0;
-        #define LE32(o) ((uint32_t)d[o]|((uint32_t)d[(o)+1]<<8)|((uint32_t)d[(o)+2]<<16)|((uint32_t)d[(o)+3]<<24))
-        data_off = LE32(8); nglyphs = LE32(16); fbpg = LE32(20); fh = LE32(24); fw = LE32(28);
-        #undef LE32
-    } else return 0;
-    if (fw == 0u || fw > 64u || fh == 0u || fh > 64u || nglyphs == 0u || nglyphs > 512u) return 0;
-    if (fbpg < ((fw + 7u) / 8u) * fh) return 0;   /* stride sanity — avoid OOB read */
-    if ((uint64_t)data_off + (uint64_t)nglyphs * fbpg > raw_size) return 0;
+    if (!psf_parse_header(d, raw_size, &fw, &fh, &fbpg, &nglyphs, &data_off)) return 0;
     const uint8_t *data = d + data_off;
     uint32_t bpr = (fw + 7u) / 8u;
 
@@ -1365,45 +1426,14 @@ uint64_t console_render_psf_string(const char *path, const char *s,
 bool console_load_psf(const char *path) {
     const void *raw = NULL;
     uint64_t raw_size = 0;
-    if (vfs_read(path, &raw, &raw_size) != 0 || !raw || raw_size < 4)
+    if (vfs_read(path, &raw, &raw_size) != 0 || !raw)
         return false;
 
     const uint8_t *d = (const uint8_t *)raw;
     uint32_t new_fw, new_fh, new_fbpg, new_nglyphs, data_off;
-
-    if (d[0] == 0x36u && d[1] == 0x04u) {
-        /* PSF1: 4-byte header, always 8px wide */
-        if (raw_size < 4u) return false;
-        new_fw      = 8u;
-        new_fh      = d[3];                       /* charsize = height */
-        new_fbpg    = d[3];
-        new_nglyphs = (d[2] & 0x01u) ? 512u : 256u;
-        data_off    = 4u;
-    } else if (d[0] == 0x72u && d[1] == 0xb5u && d[2] == 0x4au && d[3] == 0x86u) {
-        /* PSF2: 32-byte header */
-        if (raw_size < 32u) return false;
-        /* fields are little-endian uint32 */
-        #define LE32(off) ((uint32_t)d[off] | ((uint32_t)d[(off)+1]<<8) | \
-                           ((uint32_t)d[(off)+2]<<16) | ((uint32_t)d[(off)+3]<<24))
-        data_off    = LE32(8);
-        new_nglyphs = LE32(16);
-        new_fbpg    = LE32(20);
-        new_fh      = LE32(24);
-        new_fw      = LE32(28);
-        #undef LE32
-    } else {
+    if (!psf_parse_header(d, raw_size, &new_fw, &new_fh, &new_fbpg, &new_nglyphs, &data_off))
         return false;
-    }
-
-    if (new_fw == 0u || new_fw > 64u) return false;
-    if (new_fh == 0u || new_fh > 64u) return false;
-    if (new_nglyphs == 0u || new_nglyphs > 512u) return false;
-    /* Reject fonts whose declared bytes-per-glyph is smaller than the geometry
-     * requires — glyph rows are read at fh*bpr stride, so fbpg < fh*bpr would
-     * read past the validated glyph region (OOB on a malformed PSF2). */
-    if (new_fbpg < ((new_fw + 7u) / 8u) * new_fh) return false;
     uint64_t glyph_bytes = (uint64_t)new_nglyphs * new_fbpg;
-    if ((uint64_t)data_off + glyph_bytes > raw_size) return false;
     if (glyph_bytes > FONT_BUF_SIZE) return false;
 
     const uint8_t *src = d + data_off;
@@ -1462,7 +1492,9 @@ bool console_load_font(const char *path, int px_size) {
     if (!path) return false;
     int is_ttf = cons_ends_with_ci(path, ".ttf") || cons_ends_with_ci(path, ".otf")
               || cons_ends_with_ci(path, ".ttc");
-    if (!is_ttf) { ttf_clear(); return console_load_psf(path); }
+    /* console_load_psf drops the active TTF itself, but only AFTER the file
+     * validates — so a bad PSF path really does fall through to the old font. */
+    if (!is_ttf) return console_load_psf(path);
 
     if (!ttf_load(path, px_size)) return false;
     g_fw = ttf_cell_w();
