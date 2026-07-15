@@ -508,7 +508,21 @@ void gui_settings_poll_reload(void) {
     struct stat st;
     if (stat(FIFI_SETTINGS_PATH, &st) != 0) return;
     if ((long)st.st_mtime == g_settings_mtime) return;
+    char old_font[sizeof g_font_saved_path];
+    int  old_px = g_font_px;
+    snprintf(old_font, sizeof old_font, "%s", g_font_saved_path);
     gui_settings_load();          /* re-reads keys into g_theme + updates g_settings_mtime */
+#ifdef __linux__
+    /* Font changed in the Settings app: resolve the saved path against the
+     * catalog and swap the live console font, exactly like the picker did. */
+    if (strcmp(old_font, g_font_saved_path) != 0 || old_px != g_font_px) {
+        if (g_font_saved_path[0]) {
+            for (int i = 0; i < g_font_count; i++)
+                if (strcmp(g_fonts[i].path, g_font_saved_path) == 0) { g_font_family = i; break; }
+        }
+        gui_font_apply();
+    }
+#endif
     extern void full_redraw(void);
     full_redraw();
 }

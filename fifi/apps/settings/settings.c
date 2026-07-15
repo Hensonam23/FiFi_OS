@@ -43,6 +43,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <sound/asound.h>
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 #define FIFI_SOCK        "/tmp/fifi-compositor.sock"
@@ -249,6 +251,7 @@ static int g_tab = TAB_PERS;
 
 /* ── Clickable hot-regions (used by the Personalize pane) ────────────────── */
 enum { ACT_ACCENT = 1, ACT_WALL, ACT_PANEL, ACT_GLASS, ACT_SHADOW, ACT_RADIUS, ACT_DOCK, ACT_STATUS,
+       ACT_FONT_FAM, ACT_FONT_SZ,
        ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR };
 typedef struct { int x, y, w, h, act, arg; } Hot;
 #define MAX_HOTS 64
@@ -319,6 +322,137 @@ static void cfg_save(void) {
     fclose(f);
     snprintf(g_pers_note, sizeof g_pers_note, "Saved \xe2\x80\x94 applied live.");
 }
+
+/* ── System font catalog (UI font of the whole desktop) ──────────────────────
+ * The compositor scans the same directory (its VFS "/fonts" = /fifi-data/fonts)
+ * and persists the choice as font_file=/fonts/<name> + font_px= in the shared
+ * conf; it live-applies on save like every other Personalize key. We list the
+ * real directory here and present prev/next + size stepper. */
+#define FONT_DIR   "/fifi-data/fonts"
+#define FONT_MAX   200
+static char g_font_files[FONT_MAX][64];
+static int  g_font_n = 0;
+
+static int font_suffix_ok(const char *n) {
+    const char *dot = strrchr(n, '.');
+    if (!dot) return 0;
+    return !strcasecmp(dot, ".ttf") || !strcasecmp(dot, ".otf") || !strcasecmp(dot, ".ttc");
+}
+static void font_list_scan(void) {
+    g_font_n = 0;
+    DIR *d = opendir(FONT_DIR);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && g_font_n < FONT_MAX) {
+        if (e->d_name[0] == '.' || !font_suffix_ok(e->d_name)) continue;
+        if (strlen(e->d_name) >= sizeof(g_font_files[0])) continue;
+        snprintf(g_font_files[g_font_n++], sizeof(g_font_files[0]), "%s", e->d_name);
+    }
+    closedir(d);
+    for (int i = 1; i < g_font_n; i++) {          /* insertion sort, case-insensitive */
+        char t[64]; snprintf(t, sizeof t, "%s", g_font_files[i]);
+        int j = i - 1;
+        while (j >= 0 && strcasecmp(g_font_files[j], t) > 0) {
+            snprintf(g_font_files[j + 1], sizeof(g_font_files[0]), "%s", g_font_files[j]);
+            j--;
+        }
+        snprintf(g_font_files[j + 1], sizeof(g_font_files[0]), "%s", t);
+    }
+}
+/* Index of the conf's font_file in the list, or -1 (unset / not found). */
+static int font_cur_index(void) {
+    int ci = cfg_find("font_file");
+    if (ci < 0) return -1;
+    const char *base = strrchr(g_cfg_val[ci], '/');
+    base = base ? base + 1 : g_cfg_val[ci];
+    for (int i = 0; i < g_font_n; i++)
+        if (strcmp(g_font_files[i], base) == 0) return i;
+    return -1;
+}
+
+/* ── TTF preview rendering (stb_truetype) ─────────────────────────────────────
+ * Renders each font's name in its OWN typeface, like the old compositor picker.
+ * Font files are cached (read+parsed once) so scrolling the list is cheap. */
+#define TTF_CACHE_MAX 24
+static struct { char path[96]; unsigned char *buf; stbtt_fontinfo info; int ok; } g_ttf[TTF_CACHE_MAX];
+static int g_ttf_n = 0;
+static stbtt_fontinfo *ttf_get(const char *path) {
+    for (int i = 0; i < g_ttf_n; i++)
+        if (!strcmp(g_ttf[i].path, path)) return g_ttf[i].ok ? &g_ttf[i].info : NULL;
+    if (g_ttf_n >= TTF_CACHE_MAX) {           /* evict oldest */
+        free(g_ttf[0].buf);
+        memmove(&g_ttf[0], &g_ttf[1], sizeof(g_ttf[0]) * (TTF_CACHE_MAX - 1));
+        g_ttf_n--;
+    }
+    int i = g_ttf_n++;
+    snprintf(g_ttf[i].path, sizeof g_ttf[i].path, "%s", path);
+    g_ttf[i].buf = NULL; g_ttf[i].ok = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 40 * 1024 * 1024) { fclose(f); return NULL; }
+    unsigned char *b = malloc(sz);
+    if (!b) { fclose(f); return NULL; }
+    if (fread(b, 1, sz, f) != (size_t)sz) { fclose(f); free(b); return NULL; }
+    fclose(f);
+    int off = stbtt_GetFontOffsetForIndex(b, 0);
+    if (off < 0 || !stbtt_InitFont(&g_ttf[i].info, b, off)) { free(b); return NULL; }
+    g_ttf[i].buf = b; g_ttf[i].ok = 1;
+    return &g_ttf[i].info;
+}
+/* Draw ASCII text in the given TTF face at pixel height px, top-left (x,y), clipped to maxw.
+ * Falls back to the PSF font if the TTF can't load. */
+static void ttf_draw(uint32_t *fb, const char *path, const char *text,
+                     int x, int y, int px, uint32_t fg, int maxw) {
+    stbtt_fontinfo *fi = ttf_get(path);
+    if (!fi) { draw_str_clip(fb, text, x, y, fg, maxw / 9); return; }
+    float scale = stbtt_ScaleForPixelHeight(fi, (float)px);
+    int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
+    int baseline = y + (int)(asc * scale);
+    int penx = x;
+    int fr = (fg >> 16) & 0xff, fgc = (fg >> 8) & 0xff, fbc = fg & 0xff;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        int c = *p;
+        if (penx - x >= maxw) break;
+        int aw, lsb; stbtt_GetCodepointHMetrics(fi, c, &aw, &lsb);
+        int x0, y0, x1, y1;
+        stbtt_GetCodepointBitmapBox(fi, c, scale, scale, &x0, &y0, &x1, &y1);
+        int gw = x1 - x0, gh = y1 - y0;
+        if (gw > 0 && gh > 0 && gw < 512 && gh < 512) {
+            unsigned char *bmp = malloc((size_t)gw * gh);
+            if (bmp) {
+                stbtt_MakeCodepointBitmap(fi, bmp, gw, gh, gw, scale, scale, c);
+                int gx0 = penx + (int)(lsb * scale) + x0, gy0 = baseline + y0;
+                for (int gy = 0; gy < gh; gy++) {
+                    int fyv = gy0 + gy; if (fyv < 0 || fyv >= g_win_h) continue;
+                    for (int gx = 0; gx < gw; gx++) {
+                        int fxv = gx0 + gx;
+                        if (fxv < x || fxv >= x + maxw || fxv < 0 || fxv >= g_win_w) continue;
+                        unsigned char a = bmp[gy * gw + gx];
+                        if (!a) continue;
+                        uint32_t *dp = &fb[(size_t)fyv * g_win_w + fxv], d = *dp;
+                        int dr = (d >> 16) & 0xff, dg = (d >> 8) & 0xff, db = d & 0xff;
+                        *dp = 0xff000000u
+                            | (((fr * a + dr * (255 - a)) / 255) << 16)
+                            | (((fgc * a + dg * (255 - a)) / 255) << 8)
+                            |  ((fbc * a + db * (255 - a)) / 255);
+                    }
+                }
+                free(bmp);
+            }
+        }
+        penx += (int)(aw * scale);
+    }
+}
+
+/* Font size ladder + dropdown state (family=1, size=2). Geometry captured at
+ * render time for the click/wheel math in pers_click. */
+static const int g_font_sizes[] = { 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48 };
+#define N_FONT_SIZES ((int)(sizeof(g_font_sizes) / sizeof(g_font_sizes[0])))
+static int g_font_dd = 0, g_font_dd_scroll = 0;
+static int g_ff_bx, g_ff_by, g_ff_bw, g_ff_bh;   /* family combo box */
+static int g_fs_bx, g_fs_by, g_fs_bw, g_fs_bh;   /* size combo box */
+static int g_dd_x, g_dd_y, g_dd_w, g_dd_rowh, g_dd_vis;  /* open list */
 
 /* Accent presets mirror the compositor's g_accent_presets[] (gui.c). */
 #define N_ACCENT 16
@@ -848,9 +982,87 @@ static void render_personalize(uint32_t *fb) {
       y += bh + 16;
     }
 
+    /* System font — dropdown pickers: family (each name shown in its OWN face)
+     * + size. The open list is drawn as an overlay at the END of this function
+     * so it sits on top. The compositor persists font_file/font_px + live-applies. */
+    y = section_hdr(fb, "System Font", x, y);
+    { int bh = 32;
+      int cur = font_cur_index();
+      int fpx = cfg_get_int("font_px", 20);
+      /* Family combo */
+      int fw = 300;
+      g_ff_bx = x; g_ff_by = y; g_ff_bw = fw; g_ff_bh = bh;
+      fill(fb, x, y, fw, bh, C_BTN_BG);
+      rect_border(fb, x, y, fw, bh, g_font_dd == 1 ? C_WHITE : C_BORDER);
+      if (cur >= 0) {
+          char path[128], nm[64];
+          snprintf(path, sizeof path, "%s/%s", FONT_DIR, g_font_files[cur]);
+          snprintf(nm, sizeof nm, "%s", g_font_files[cur]);
+          char *dot = strrchr(nm, '.'); if (dot) *dot = '\0';
+          ttf_draw(fb, path, nm, x + 8, y + 5, bh - 12, C_VAL, fw - 30);
+      } else {
+          draw_str_clip(fb, "(default)", x + 8, y + (bh - g_glyph_h)/2, C_VAL, (fw - 30)/9);
+      }
+      draw_str(fb, "v", x + fw - 15, y + (bh - g_glyph_h)/2, C_KEY);
+      add_hot(x, y, fw, bh, ACT_FONT_FAM, 0);
+      /* Size combo */
+      int sx = x + fw + 16, sw = 96;
+      g_fs_bx = sx; g_fs_by = y; g_fs_bw = sw; g_fs_bh = bh;
+      fill(fb, sx, y, sw, bh, C_BTN_BG);
+      rect_border(fb, sx, y, sw, bh, g_font_dd == 2 ? C_WHITE : C_BORDER);
+      char sv[16]; snprintf(sv, sizeof sv, "%d px", fpx);
+      draw_str(fb, sv, sx + 8, y + (bh - g_glyph_h)/2, C_VAL);
+      draw_str(fb, "v", sx + sw - 15, y + (bh - g_glyph_h)/2, C_KEY);
+      add_hot(sx, y, sw, bh, ACT_FONT_SZ, 0);
+      y += bh + 14;
+    }
+
     /* Note */
     fill(fb, x, y, g_win_w - x - CPAD, ROW_H, C_ROW_A);
     draw_str_clip(fb, g_pers_note, x + 8, y + (ROW_H - g_glyph_h)/2, C_YELLOW, g_win_w - x - CPAD - 16);
+
+    /* ── Font dropdown overlay (drawn last = on top of everything) ────────── */
+    if (g_font_dd == 1 && g_font_n > 0) {
+        int rowh = 28, vis = 11;
+        if (vis > g_font_n) vis = g_font_n;
+        int dw = g_ff_bw, dx = g_ff_bx, dy = g_ff_by + g_ff_bh;
+        g_dd_x = dx; g_dd_y = dy; g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
+        if (g_font_dd_scroll > g_font_n - vis) g_font_dd_scroll = g_font_n - vis;
+        if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
+        fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
+        rect_border(fb, dx, dy, dw, rowh * vis, C_WHITE);
+        int cur = font_cur_index();
+        for (int r = 0; r < vis; r++) {
+            int idx = g_font_dd_scroll + r;
+            if (idx >= g_font_n) break;
+            int ry = dy + r * rowh;
+            if (idx == cur) fill(fb, dx + 1, ry, dw - 2, rowh, g_accent);
+            char path[128], nm[64];
+            snprintf(path, sizeof path, "%s/%s", FONT_DIR, g_font_files[idx]);
+            snprintf(nm, sizeof nm, "%s", g_font_files[idx]);
+            char *dot = strrchr(nm, '.'); if (dot) *dot = '\0';
+            ttf_draw(fb, path, nm, dx + 8, ry + 4, rowh - 10, C_WHITE, dw - 20);
+        }
+        if (g_font_n > vis) {                       /* scrollbar */
+            int trk = rowh * vis, th = trk * vis / g_font_n; if (th < 14) th = 14;
+            int ty = dy + (trk - th) * g_font_dd_scroll / (g_font_n - vis);
+            fill(fb, dx + dw - 5, dy, 4, trk, 0x00243448u);
+            fill(fb, dx + dw - 5, ty, 4, th, C_KEY);
+        }
+    } else if (g_font_dd == 2) {
+        int rowh = 28, vis = N_FONT_SIZES;
+        int dw = g_fs_bw, dx = g_fs_bx, dy = g_fs_by + g_fs_bh;
+        g_dd_x = dx; g_dd_y = dy; g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
+        fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
+        rect_border(fb, dx, dy, dw, rowh * vis, C_WHITE);
+        int fpx = cfg_get_int("font_px", 20);
+        for (int r = 0; r < vis; r++) {
+            int ry = dy + r * rowh;
+            if (g_font_sizes[r] == fpx) fill(fb, dx + 1, ry, dw - 2, rowh, g_accent);
+            char sv[16]; snprintf(sv, sizeof sv, "%d px", g_font_sizes[r]);
+            draw_str(fb, sv, dx + 8, ry + (rowh - g_glyph_h)/2, C_WHITE);
+        }
+    }
 }
 
 static void render_system(uint32_t *fb) {
@@ -1137,6 +1349,7 @@ static void msg_reset(MsgState *m) { free(m->pld); m->pld = NULL; m->hgot = 0; m
 static void switch_tab(int t) {
     if (t < 0 || t >= N_TABS) return;
     g_tab = t;
+    g_font_dd = 0;               /* close any open font dropdown */
     g_pw_mode = false; g_pw_len = 0;
     if (t == TAB_WIFI && !g_wifi_scanned) { g_wifi_scanned = true; wifi_scan_start(); }
     if (t == TAB_NET)  net_update();
@@ -1145,6 +1358,27 @@ static void switch_tab(int t) {
 
 /* ── Personalize click handling ──────────────────────────────────────────── */
 static void pers_click(int mx, int my) {
+    /* A font dropdown is open: a click either picks a list item or closes it. */
+    if (g_font_dd == 1) {
+        if (mx >= g_dd_x && mx < g_dd_x + g_dd_w &&
+            my >= g_dd_y && my < g_dd_y + g_dd_rowh * g_dd_vis) {
+            int idx = g_font_dd_scroll + (my - g_dd_y) / g_dd_rowh;
+            if (idx >= 0 && idx < g_font_n) {
+                char pathbuf[96];
+                snprintf(pathbuf, sizeof pathbuf, "/fonts/%s", g_font_files[idx]);
+                cfg_set_str("font_file", pathbuf); cfg_save();
+            }
+        }
+        g_font_dd = 0; return;
+    }
+    if (g_font_dd == 2) {
+        if (mx >= g_dd_x && mx < g_dd_x + g_dd_w &&
+            my >= g_dd_y && my < g_dd_y + g_dd_rowh * g_dd_vis) {
+            int r = (my - g_dd_y) / g_dd_rowh;
+            if (r >= 0 && r < N_FONT_SIZES) { cfg_set_int("font_px", g_font_sizes[r]); cfg_save(); }
+        }
+        g_font_dd = 0; return;
+    }
     for (int i = 0; i < g_nhots; i++) {
         Hot *h = &g_hots[i];
         if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
@@ -1161,6 +1395,16 @@ static void pers_click(int mx, int my) {
                                if (r < 0) r = 0;
                                if (r > 12) r = 12;
                                cfg_set_int("corner_radius", r); } break;
+            case ACT_FONT_FAM: {              /* open family dropdown */
+                if (g_font_n == 0) return;
+                g_font_dd = 1;
+                int cur = font_cur_index();
+                g_font_dd_scroll = (cur > 5) ? cur - 5 : 0;
+                return;                        /* no cfg_save — just opening */
+            }
+            case ACT_FONT_SZ:                  /* open size dropdown */
+                g_font_dd = 2;
+                return;
         }
         cfg_save();
         return;
@@ -1207,6 +1451,7 @@ int main(int argc, char **argv) {
     if (!g_glyph) { g_glyph = calloc(256*16, 1); g_glyph_h = 16; }
     alsa_init();
     cfg_load();
+    font_list_scan();
     g_accent = cfg_get_uint("accent", 0x003060c0u);
     net_update();
     sec_update();
@@ -1322,7 +1567,10 @@ int main(int argc, char **argv) {
                             if (t >= 0 && t < N_TABS) { switch_tab(t); dirty = true; }
                         } else if (mx >= SIDEBAR_W) {
                             /* Content-area input, per active tab */
-                            if (g_tab == TAB_PERS && lb && !prev_lb) { pers_click(mx, my); dirty = true; }
+                            if (g_tab == TAB_PERS) {
+                                if (wheel != 0 && g_font_dd == 1) { g_font_dd_scroll -= wheel; dirty = true; }
+                                if (lb && !prev_lb) { pers_click(mx, my); dirty = true; }
+                            }
                             else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }
                             else if (g_tab == TAB_SYS && lb &&
                                      my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&

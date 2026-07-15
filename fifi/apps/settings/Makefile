@@ -4,7 +4,7 @@ OUT := fifi-settings
 all: $(OUT)
 
 $(OUT): settings.c
-	$(CC) -O2 -static -o $@ $<
+	$(CC) -O2 -static -I../../platform/linux/vendor -o $@ $< -lm
 	@echo "[settings] built: $@"
 
 clean:
