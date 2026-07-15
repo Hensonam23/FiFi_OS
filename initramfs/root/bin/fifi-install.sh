@@ -400,7 +400,7 @@ search --no-floppy --fs-uuid --set=root $DATA_UUID
 
 menuentry "FiFi OS" {
     search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID apparmor=1 security=apparmor
+    linux /boot/bzImage console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
     initrd /boot/initramfs.cpio.gz
 }
 

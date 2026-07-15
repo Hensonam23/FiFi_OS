@@ -53,6 +53,17 @@ mkdir -p /dev/pts /dev/shm
 mount -t devpts   none /dev/pts
 mount -t tmpfs    none /dev/shm
 
+# Standard /dev fd symlinks. devtmpfs doesn't create these, but bash process
+# substitution `<(...)` and many programs need /dev/fd → /proc/self/fd (and the
+# std streams). Their absence broke the Steam runtime's logger (which uses
+# process substitution) and stalled the Steam webhelper's init; it's a general
+# POSIX expectation, so create them system-wide.
+ln -sf /proc/self/fd  /dev/fd
+ln -sf /proc/self/fd/0 /dev/stdin
+ln -sf /proc/self/fd/1 /dev/stdout
+ln -sf /proc/self/fd/2 /dev/stderr
+ln -sf /proc/kcore    /dev/core 2>/dev/null || true
+
 # ── Kernel messages: quiet after boot ────────────────────────────────────────
 echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
 
@@ -537,6 +548,13 @@ export PATH="/usr/local/bin:$PATH"
 # Prevent glibc IFUNC from selecting AVX-512 paths — fifi kernel may not
 # fully initialise ZMM XSAVE state, causing SIGILL on zmm instructions.
 export GLIBC_TUNABLES="glibc.cpu.hwcaps=-AVX512F,-AVX512VL,-AVX512BW,-AVX512CD,-AVX512DQ,-AVX512IFMA,-AVX512VBMI"
+# Dev override: a compositor dropped at /fifi-data/fifi-compositor wins over
+# the image binary, so compositor iteration is scp + reboot instead of a full
+# image rebuild. Safe mode (fifi_noswitch on cmdline) skips the override in
+# case a bad override binary would otherwise wedge every boot.
+if [ -x /fifi-data/fifi-compositor ] && ! grep -q fifi_noswitch /proc/cmdline; then
+    exec /fifi-data/fifi-compositor 2>/fifi-data/compositor.log
+fi
 if [ -x /bin/fifi-compositor ]; then
     exec /bin/fifi-compositor 2>/fifi-data/compositor.log
 fi

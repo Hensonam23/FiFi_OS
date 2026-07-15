@@ -233,13 +233,67 @@ launch_dir() {
         export HOME=/home/fifi USER=fifi LOGNAME=fifi
         exec busybox unshare -U -- "$dir/AppRun" "$@"
     fi
-    # RunImage / sharun bundles (e.g. Steam) ship their own rootfs and do their
-    # own bubblewrap containerization. Wrapping them in our unshare --mount breaks
-    # bwrap's pivot_root ("Invalid argument"), so run their AppRun DIRECTLY (no
-    # sandbox_exec) and give it a persistent, writable home. RIM_ALLOW_ROOT=1 (set
-    # above) lets it accept root.
+    # Steam (ivan-hc RunImage) ships a full Arch rootfs with a native
+    # /usr/bin/steam. Running its AppRun does bwrap DOUBLE-nesting (RunImage
+    # bwrap → Steam's own pressure-vessel "sniper" bwrap); in that nested
+    # container the steamwebhelper never finished init and the UI stayed a black
+    # "not responding" window. Instead run the native steam DIRECTLY via chroot
+    # into the rootfs, so Steam's sniper is the ONLY container (single nesting) —
+    # this reaches the login screen. Requirements that had to be met:
+    #   - a private mount namespace + the rootfs made a real mount point, so
+    #     pressure-vessel's bwrap can "make / slave" (bwrap refuses in a bare
+    #     chroot: "Failed to make / slave: Invalid argument");
+    #   - a session D-Bus (steam-runtime-launcher-service needs one);
+    #   - /dev/fd (the steam runtime logger uses bash process substitution;
+    #     /init now creates /dev/fd -> /proc/self/fd system-wide);
+    #   - libibus (ivan-hc's rootfs omits it, CEF needs it);
+    #   - -no-cef-sandbox + -cef-disable-gpu-sandbox (CEF refuses root+sandbox,
+    #     and the GPU process's own sandbox couldn't init);
+    #   - SDL_VIDEODRIVER=x11 + no WAYLAND_DISPLAY (SDL3 wayland backend fails on
+    #     our compositor and won't fall back; the X11/XWayland path works).
+    if [ -d "$dir/rootfs" ] && [ -x "$dir/rootfs/usr/bin/steam" ]; then
+        ensure_xwayland
+        printf 'Steam' > /tmp/fifi-x11-title 2>/dev/null || true
+        mkdir -p /fifi-data/home 2>/dev/null || true
+        for _need in libibus-1.0.so.5; do
+            if [ ! -e "$dir/rootfs/usr/lib/$_need" ]; then
+                _src=$(ls /usr/lib/"$_need"* 2>/dev/null | head -1)
+                [ -n "$_src" ] && cp "$_src" "$dir/rootfs/usr/lib/$_need" 2>/dev/null || true
+            fi
+        done
+        cp /etc/resolv.conf "$dir/rootfs/etc/resolv.conf" 2>/dev/null || true
+        # Inner launch script (kept in the rootfs; avoids deep nested quoting):
+        # bring up a per-session dbus, then exec native steam with the flags.
+        cat > "$dir/rootfs/fifi-steam-launch.sh" <<'STEOF'
+#!/bin/sh
+rm -f /tmp/steam-session-bus 2>/dev/null
+dbus-daemon --session --address=unix:path=/tmp/steam-session-bus --nofork --nopidfile &
+sleep 1
+exec /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox
+STEOF
+        chmod +x "$dir/rootfs/fifi-steam-launch.sh"
+        exec busybox unshare -m -- busybox sh -c '
+            R="$1"
+            busybox mount --make-rprivate /
+            busybox mount --bind "$R" "$R"
+            busybox mount --make-rprivate "$R"
+            for d in dev proc sys tmp run; do busybox mkdir -p "$R/$d"; busybox mount --bind "/$d" "$R/$d"; done
+            busybox mkdir -p /fifi-data/home "$R/root"
+            busybox mount --bind /fifi-data/home "$R/root"
+            exec chroot "$R" /usr/bin/env -i \
+                HOME=/root USER=root LOGNAME=root \
+                DISPLAY=:0 XDG_RUNTIME_DIR=/tmp SDL_VIDEODRIVER=x11 \
+                PATH=/usr/bin:/usr/local/bin:/bin TERM=xterm \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/steam-session-bus \
+                /bin/sh /fifi-steam-launch.sh
+        ' _ "$dir/rootfs"
+    fi
+    # Other RunImage/sharun bundles (non-Steam): run their AppRun directly.
     if [ -d "$dir/rootfs" ] && [ -x "$dir/AppRun" ]; then
         chmod 0666 "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" 2>/dev/null || true
+        ensure_xwayland
+        export DISPLAY=:0
+        printf '%s' "${APP_NAME:-App}" > /tmp/fifi-x11-title 2>/dev/null || true
         mkdir -p /fifi-data/home 2>/dev/null || true
         export HOME=/fifi-data/home
         export APPDIR="$dir"; cd "$dir"
