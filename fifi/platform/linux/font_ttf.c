@@ -17,9 +17,51 @@ static unsigned char *g_buf   = NULL;   /* font file bytes (kept mapped) */
 static stbtt_fontinfo g_info;
 static bool  g_active   = false;
 static float g_scale    = 0.0f;
+static int   g_px_size  = 16;           /* requested pixel height (for fallback scale) */
 static int   g_cell_w   = 8;
 static int   g_cell_h   = 16;
 static int   g_baseline = 12;
+
+/* ── Fallback fonts: rendered for codepoints the active font lacks, so the
+ * whole system can display any script/emoji regardless of the chosen UI font.
+ * The chain is broad-Latin → CJK → emoji/symbols; the first that HAS the
+ * codepoint (nonzero glyph index) supplies the glyph, rendered at the active
+ * pixel size so it shares the baseline. Loaded once, kept mapped. Emoji/CJK
+ * must be OUTLINE fonts (stb_truetype can't rasterize COLR/CBDT bitmaps), so
+ * we ship monochrome Noto Emoji, not Noto Color Emoji. */
+#define NFB 6
+static struct { unsigned char *buf; stbtt_fontinfo info; bool ok; } g_fb[NFB];
+static int  g_nfb = 0;
+static bool g_fb_loaded = false;
+static unsigned char *read_file(const char *path, long *out_sz);  /* defined below */
+
+static void fb_free(void) {
+    for (int i = 0; i < g_nfb; i++)
+        if (g_fb[i].buf) { free(g_fb[i].buf); g_fb[i].buf = NULL; g_fb[i].ok = false; }
+    g_nfb = 0;
+    g_fb_loaded = false;
+}
+static void fb_load_all(void) {
+    if (g_fb_loaded) return;
+    g_fb_loaded = true;
+    /* Order matters: broadest coverage first, emoji last. Whichever files are
+     * present get loaded; absent ones are skipped silently. */
+    static const char *paths[] = {
+        "/fonts/NotoSans-Regular.ttf",
+        "/fonts/NotoSansSymbols2-Regular.ttf",
+        "/fonts/NotoSansCJK-Regular.ttc",
+        "/fonts/NotoSansCJKsc-Regular.otf",
+        "/fonts/NotoEmoji-Regular.ttf",
+    };
+    for (unsigned p = 0; p < sizeof(paths)/sizeof(paths[0]) && g_nfb < NFB; p++) {
+        long sz = 0;
+        unsigned char *buf = read_file(paths[p], &sz);
+        if (!buf) continue;
+        int off = stbtt_GetFontOffsetForIndex(buf, 0);
+        if (off < 0 || !stbtt_InitFont(&g_fb[g_nfb].info, buf, off)) { free(buf); continue; }
+        g_fb[g_nfb].buf = buf; g_fb[g_nfb].ok = true; g_nfb++;
+    }
+}
 
 /* ── Glyph cache: open-addressed by codepoint ────────────────────────── */
 #define CN 2048
@@ -69,9 +111,11 @@ bool ttf_load(const char *path, int px_size) {
     /* success — swap in and rebuild metrics + cache */
     cache_free();
     if (g_buf) free(g_buf);
-    g_buf   = buf;
-    g_info  = info;
-    g_scale = stbtt_ScaleForPixelHeight(&g_info, (float)px_size);
+    g_buf     = buf;
+    g_info    = info;
+    g_px_size = px_size;
+    g_scale   = stbtt_ScaleForPixelHeight(&g_info, (float)px_size);
+    fb_load_all();          /* coverage fonts for glyphs g_info lacks */
 
     int asc = 0, desc = 0, gap = 0;
     stbtt_GetFontVMetrics(&g_info, &asc, &desc, &gap);
@@ -111,6 +155,7 @@ int  ttf_baseline(void)  { return g_baseline; }
 
 void ttf_clear(void) {
     cache_free();
+    fb_free();
     if (g_buf) { free(g_buf); g_buf = NULL; }
     g_active = false;
 }
@@ -135,14 +180,29 @@ const uint8_t *ttf_glyph(uint32_t cp, int *w, int *h, int *xoff, int *ytop, int 
         if (slot->cov) { stbtt_FreeBitmap(slot->cov, NULL); slot->cov = NULL; }
     }
 
+    /* Pick the source font: the active one if it has this codepoint, else the
+     * first fallback that does (so any script/emoji renders). Fallbacks render
+     * at the active pixel size (their own scale) to share the baseline. */
+    stbtt_fontinfo *src = &g_info;
+    float scale = g_scale;
+    if (cp != 0 && stbtt_FindGlyphIndex(&g_info, (int)cp) == 0) {
+        for (int i = 0; i < g_nfb; i++) {
+            if (g_fb[i].ok && stbtt_FindGlyphIndex(&g_fb[i].info, (int)cp) != 0) {
+                src   = &g_fb[i].info;
+                scale = stbtt_ScaleForPixelHeight(src, (float)g_px_size);
+                break;
+            }
+        }
+    }
+
     int bw = 0, bh = 0, xo = 0, yo = 0;
-    unsigned char *bmp = stbtt_GetCodepointBitmap(&g_info, 0, g_scale, (int)cp, &bw, &bh, &xo, &yo);
+    unsigned char *bmp = stbtt_GetCodepointBitmap(src, 0, scale, (int)cp, &bw, &bh, &xo, &yo);
     int a = 0, lsb = 0;
-    stbtt_GetCodepointHMetrics(&g_info, (int)cp, &a, &lsb);
+    stbtt_GetCodepointHMetrics(src, (int)cp, &a, &lsb);
 
     slot->cp = cp; slot->valid = true;
     slot->cov = bmp; slot->w = bw; slot->h = bh; slot->xoff = xo; slot->ytop = yo;
-    slot->adv = (int)(a * g_scale + 0.5f);
+    slot->adv = (int)(a * scale + 0.5f);
     *w = bw; *h = bh; *xoff = xo; *ytop = yo; *adv = slot->adv;
     return bmp;                                      /* may be NULL for blank glyphs */
 }
