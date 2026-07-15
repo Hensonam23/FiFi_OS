@@ -259,7 +259,7 @@ fi
 # each library's ldd closure) into the image so a clean install works out of box.
 echo "[initramfs] bundling app-support libraries (NSS/NSPR)..."
 for lib in libnss3 libnssutil3 libsmime3 libssl3 libnspr4 libplc4 libplds4 \
-           libnssckbi libsoftokn3 libfreebl3 libsqlite3; do
+           libnssckbi libsoftokn3 libfreebl3 libsqlite3 libibus-1.0; do
     for f in /usr/lib/$lib.so*; do
         [ -e "$f" ] || continue
         cp -a "$f" "$STAGE/usr/lib/" 2>/dev/null || true
@@ -425,28 +425,44 @@ else
 fi
 
 # Scalable TTF/OTF fonts for the Settings font picker. gui_font_scan() reads
-# /fonts (-> /fifi-data/fonts); we bake a curated set into /usr/share/fifi/fonts
-# and /init seeds them onto the data partition on first boot. Curated (not the
-# whole Noto tree) to keep the initramfs from ballooning.
+# /fonts (-> /fifi-data/fonts); we bake a broad set into /usr/share/fifi/fonts
+# and /init seeds them onto the data partition on first boot. The set spans the
+# platform "looks" (Windows via Liberation/Carlito/Caladea metric-compat,
+# Android via Roboto, macOS/iOS via Inter, Linux via DejaVu/Ubuntu/Cantarell)
+# plus the Noto CHARACTER-COVERAGE fonts the compositor's fallback chain uses
+# (font_ttf.c fb_load_all): NotoSans / NotoSansSymbols2 / NotoSansCJK so any
+# script/CJK renders even when the chosen UI font lacks the glyph.
 FIFI_FONT_DST="$STAGE/usr/share/fifi/fonts"
 mkdir -p "$FIFI_FONT_DST"
 for fdir in /usr/share/fonts/TTF \
             /usr/share/fonts/liberation \
-            /usr/share/fonts/carlito /usr/share/fonts/caladea; do
+            /usr/share/fonts/carlito /usr/share/fonts/caladea \
+            /usr/share/fonts/roboto /usr/share/fonts/ubuntu \
+            /usr/share/fonts/inter /usr/share/fonts/cantarell; do
     [ -d "$fdir" ] || continue
     for f in "$fdir"/*.ttf "$fdir"/*.otf "$fdir"/*.ttc; do
         [ -f "$f" ] || continue
         cp -n "$f" "$FIFI_FONT_DST/" 2>/dev/null || true
     done
 done
-# A few core Noto families (Regular weights only) without the full CJK/emoji set.
+# Core Noto families + the fallback coverage set. NotoSansCJK-Regular.ttc is
+# ~20MB but is what makes CJK visible system-wide; keep it. The fallback loader
+# looks for these exact names under /fonts, so preserve them.
 for nf in /usr/share/fonts/noto/NotoSans-Regular.ttf \
           /usr/share/fonts/noto/NotoSerif-Regular.ttf \
-          /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+          /usr/share/fonts/noto/NotoSansMono-Regular.ttf \
+          /usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf \
+          /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc; do
     [ -f "$nf" ] && cp -n "$nf" "$FIFI_FONT_DST/" 2>/dev/null || true
 done
+# Monochrome emoji (outline glyphs stb_truetype can rasterize) if present —
+# Noto COLOR Emoji is CBDT/bitmap and won't render, so only take a mono build.
+for ef in /usr/share/fonts/noto/NotoEmoji-Regular.ttf \
+          /usr/share/fonts/TTF/NotoEmoji-Regular.ttf; do
+    [ -f "$ef" ] && cp -n "$ef" "$FIFI_FONT_DST/" 2>/dev/null || true
+done
 _nfonts=$(ls "$FIFI_FONT_DST" 2>/dev/null | wc -l)
-echo "[initramfs] bundled $_nfonts scalable fonts ($(du -sh "$FIFI_FONT_DST" 2>/dev/null | cut -f1)) for the font picker"
+echo "[initramfs] bundled $_nfonts scalable fonts ($(du -sh "$FIFI_FONT_DST" 2>/dev/null | cut -f1)) for the font picker + coverage fallback"
 
 # Populate initial fifi-data content for the file browser
 mkdir -p "$STAGE/fifi-data/docs" "$STAGE/fifi-data/config" "$STAGE/fifi-data/images"
@@ -906,6 +922,94 @@ for regdb in /usr/lib/firmware/regulatory.db /lib/firmware/regulatory.db; do
         break
     fi
 done
+
+# ── GPU: i915 firmware (GuC/HuC/DMC) + Mesa OpenGL/Vulkan userspace ──────────
+# Without GuC firmware the kernel declares modern Intel iGPUs WEDGED at boot:
+# the display still works (modeset needs no firmware) but every render engine
+# is dead, so glamor/GLX/Vulkan all fail. Bundle the whole i915 firmware
+# family so FiFi lights up any Intel iGPU, decompressed (the FiFi kernel has
+# no CONFIG_FW_LOADER_COMPRESS, same as the WiFi firmware above).
+echo "[initramfs] bundling GPU stack (i915 firmware + Mesa GL/Vulkan)..."
+if [ -d /usr/lib/firmware/i915 ]; then
+    mkdir -p "$STAGE/lib/firmware/i915"
+    for fw in /usr/lib/firmware/i915/*; do
+        bn=$(basename "$fw")
+        case "$bn" in
+            *.zst) [ -f "$STAGE/lib/firmware/i915/${bn%.zst}" ] || \
+                       zstd -d -q "$fw" -o "$STAGE/lib/firmware/i915/${bn%.zst}" 2>/dev/null || true ;;
+            *)     [ -f "$STAGE/lib/firmware/i915/$bn" ] || cp "$fw" "$STAGE/lib/firmware/i915/$bn" ;;
+        esac
+    done
+    echo "[initramfs] i915 firmware bundled ($(du -sh "$STAGE/lib/firmware/i915" | cut -f1))"
+else
+    echo "[initramfs] NOTE: i915 firmware not found -- install linux-firmware-intel"
+fi
+
+# Mesa: GLX/EGL vendor libs behind glvnd, the DRI shim + gallium driver (iris
+# for Intel hardware, swrast/zink fallbacks), GBM, and the Vulkan loader +
+# Intel anv driver, each with its full ldd closure (libLLVM and friends).
+# Everything goes to the loader/Mesa default search paths: /usr/lib,
+# /usr/lib/dri, /usr/share/vulkan/icd.d, /usr/share/glvnd/egl_vendor.d.
+mkdir -p "$STAGE/usr/lib/dri" "$STAGE/usr/share/vulkan/icd.d" "$STAGE/usr/share/glvnd/egl_vendor.d"
+MESA_SEEDS="/usr/lib/libGLX_mesa.so.0 /usr/lib/libEGL_mesa.so.0 /usr/lib/libgbm.so.1 \
+    /usr/lib/libvulkan.so.1 /usr/lib/libvulkan_intel.so"
+for d in /usr/lib/dri/*_dri.so /usr/lib/dri/libdril_dri.so /usr/lib/libgallium*.so; do
+    [ -e "$d" ] && MESA_SEEDS="$MESA_SEEDS $d"
+done
+for seed in $MESA_SEEDS; do
+    [ -e "$seed" ] || continue
+    real=$(realpath "$seed" 2>/dev/null) || continue
+    [ -f "$real" ] || continue
+    case "$real" in
+        */dri/*) dest_dir="$STAGE/usr/lib/dri" ;;
+        *)       dest_dir="$STAGE/usr/lib" ;;
+    esac
+    [ -f "$dest_dir/$(basename "$real")" ] || cp "$real" "$dest_dir/"
+    case "$seed" in
+        */dri/*) link_dir="$STAGE/usr/lib/dri" ;;
+        *)       link_dir="$STAGE/usr/lib" ;;
+    esac
+    [ -e "$link_dir/$(basename "$seed")" ] || \
+        ln -sf "$(basename "$real")" "$link_dir/$(basename "$seed")"
+    # ldd prints the full transitive closure, one level is enough
+    for lib in $(ldd "$real" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/"); do
+        lreal=$(realpath "$lib" 2>/dev/null) || continue
+        [ -f "$lreal" ] || continue
+        [ -f "$STAGE/usr/lib/$(basename "$lreal")" ] || cp "$lreal" "$STAGE/usr/lib/"
+        [ -e "$STAGE/usr/lib/$(basename "$lib")" ] || \
+            ln -sf "$(basename "$lreal")" "$STAGE/usr/lib/$(basename "$lib")"
+    done
+done
+# Mesa 26 GBM backend: libgbm dlopens /usr/lib/gbm/dri_gbm.so — without it
+# "couldn't create gbm device" and XWayland glamor falls back to llvmpipe.
+if [ -f /usr/lib/gbm/dri_gbm.so ]; then
+    mkdir -p "$STAGE/usr/lib/gbm"
+    cp /usr/lib/gbm/dri_gbm.so "$STAGE/usr/lib/gbm/"
+    for lib in $(ldd /usr/lib/gbm/dri_gbm.so 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/"); do
+        lreal=$(realpath "$lib" 2>/dev/null) || continue
+        [ -f "$lreal" ] || continue
+        [ -f "$STAGE/usr/lib/$(basename "$lreal")" ] || cp "$lreal" "$STAGE/usr/lib/"
+        [ -e "$STAGE/usr/lib/$(basename "$lib")" ] || \
+            ln -sf "$(basename "$lreal")" "$STAGE/usr/lib/$(basename "$lib")"
+    done
+fi
+# Vulkan ICD + glvnd EGL vendor manifests (hasvk = ancient Gen7/8, skip it)
+cp /usr/share/vulkan/icd.d/intel_icd*.json "$STAGE/usr/share/vulkan/icd.d/" 2>/dev/null || true
+rm -f "$STAGE/usr/share/vulkan/icd.d/"intel_hasvk* 2>/dev/null
+cp /usr/share/glvnd/egl_vendor.d/50_mesa.json "$STAGE/usr/share/glvnd/egl_vendor.d/" 2>/dev/null || true
+# GPU diagnostics (vulkaninfo/glxinfo/eglinfo) — small, invaluable on-box
+for tool in vulkaninfo glxinfo eglinfo; do
+    [ -x "/usr/bin/$tool" ] || continue
+    cp "/usr/bin/$tool" "$STAGE/usr/bin/$tool"
+    for lib in $(ldd "/usr/bin/$tool" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/"); do
+        lreal=$(realpath "$lib" 2>/dev/null) || continue
+        [ -f "$lreal" ] || continue
+        [ -f "$STAGE/usr/lib/$(basename "$lreal")" ] || cp "$lreal" "$STAGE/usr/lib/"
+        [ -e "$STAGE/usr/lib/$(basename "$lib")" ] || \
+            ln -sf "$(basename "$lreal")" "$STAGE/usr/lib/$(basename "$lib")"
+    done
+done
+echo "[initramfs] Mesa GL/Vulkan bundled ($(du -sh "$STAGE/usr/lib" | cut -f1) total usr/lib)"
 
 # ── Bluetooth: BlueZ (bluetoothd + bluetoothctl) over a root-mode system D-Bus;
 #    A2DP audio via PipeWire's bluez5 plugin. Kernel BT is enabled in fifi.config.
