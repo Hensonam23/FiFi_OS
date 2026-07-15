@@ -10,6 +10,10 @@
  *   wl_output      v4   — display geometry
  *   xdg_wm_base    v3   — XDG Shell toplevel windows
  *   wl_data_device_manager v3 — clipboard / drag-and-drop
+ *   zwp_linux_dmabuf_v1 v3 — GPU (dmabuf) buffers, LINEAR modifier only, so
+ *                            the software compositor mmaps them directly
+ *   wl_drm         v2   — legacy Mesa global; render-device discovery for
+ *                         XWayland glamor (no dmabuf v4 feedback here)
  *
  * Each connected client gets a wl_client; surfaces are rendered by
  * calling ipc_blit_wayland() so they appear on top of the FiFi GUI.
@@ -29,6 +33,8 @@
 #include <sys/stat.h>
 #include <poll.h>
 #include <time.h>
+#include <sys/ioctl.h>
+#include <linux/dma-buf.h>   /* DMA_BUF_IOCTL_SYNC around dmabuf CPU reads */
 
 #include "xwm.h"   /* rootless-XWayland window manager (X11-side; see xwm.c) */
 
@@ -208,6 +214,38 @@
  * two. */
 #define XWL_SHELL_DESTROY               0   /* request */
 #define XWL_SHELL_GET_XWAYLAND_SURFACE  1   /* request: new_id, wl_surface */
+
+/* zwp_linux_dmabuf_v1 opcodes (we advertise v3: format/modifier at bind, no
+ * v4 feedback). GPU clients (XWayland glamor, EGL/Vulkan WSI) import their
+ * rendered buffers as dmabufs instead of shm copies. */
+#define ZWP_DMABUF_DESTROY              0   /* request */
+#define ZWP_DMABUF_CREATE_PARAMS        1   /* request: new_id params */
+#define ZWP_DMABUF_EV_FORMAT            0   /* event (v1, deprecated) */
+#define ZWP_DMABUF_EV_MODIFIER          1   /* event (v3): format, mod_hi, mod_lo */
+/* zwp_linux_buffer_params_v1 */
+#define ZWP_DMABUF_PARAMS_DESTROY       0   /* request */
+#define ZWP_DMABUF_PARAMS_ADD           1   /* request: fd(cmsg), plane, offset, stride, mod_hi, mod_lo */
+#define ZWP_DMABUF_PARAMS_CREATE        2   /* request: w, h, format, flags */
+#define ZWP_DMABUF_PARAMS_CREATE_IMMED  3   /* request (v2): new_id, w, h, format, flags */
+#define ZWP_DMABUF_PARAMS_EV_CREATED    0   /* event: new wl_buffer (server id) */
+#define ZWP_DMABUF_PARAMS_EV_FAILED     1   /* event */
+
+/* wl_drm (legacy Mesa protocol) — XWayland's glamor/gbm backend uses it to
+ * discover the render device when the compositor has no dmabuf v4 feedback. */
+#define WL_DRM_AUTHENTICATE             0   /* request: magic */
+#define WL_DRM_CREATE_BUFFER            1   /* request (GEM flink — unsupported) */
+#define WL_DRM_CREATE_PLANAR_BUFFER     2   /* request (unsupported) */
+#define WL_DRM_CREATE_PRIME_BUFFER      3   /* request (v2): new_id, fd(cmsg), w, h, format, 3x(offset,stride) */
+#define WL_DRM_EV_DEVICE                0   /* event: string path */
+#define WL_DRM_EV_FORMAT                1   /* event: u32 fourcc */
+#define WL_DRM_EV_AUTHENTICATED         2   /* event */
+#define WL_DRM_EV_CAPABILITIES          3   /* event: u32 (1 = prime) */
+
+/* DRM fourccs / modifiers (from drm_fourcc.h, defined here to avoid the dep) */
+#define FIFI_DRM_FORMAT_ARGB8888   0x34325241u   /* 'AR24' */
+#define FIFI_DRM_FORMAT_XRGB8888   0x34325258u   /* 'XR24' */
+#define FIFI_DRM_MOD_LINEAR        0u            /* DRM_FORMAT_MOD_LINEAR (u64 0) */
+#define FIFI_RENDER_NODE           "/dev/dri/renderD128"
 #define XWL_SURFACE_SET_SERIAL          0   /* request: uint lo, uint hi */
 #define XWL_SURFACE_DESTROY             1   /* request */
 
@@ -257,6 +295,9 @@ typedef enum {
     OBJ_KDE_DECO,       /* org_kde_kwin_server_decoration; data ALIASES a wl_surface_t */
     OBJ_XWL_SHELL,      /* xwayland_shell_v1 (rootless XWayland correlation) */
     OBJ_XWL_SURFACE,    /* xwayland_surface_v1; data ALIASES a wl_surface_t */
+    OBJ_DMABUF,         /* zwp_linux_dmabuf_v1 global instance */
+    OBJ_DMABUF_PARAMS,  /* zwp_linux_buffer_params_v1; data = dmabuf_params_t */
+    OBJ_WL_DRM,         /* wl_drm global instance (legacy Mesa device discovery) */
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -272,13 +313,24 @@ typedef struct {
 
 /* ── Shared-memory buffer ─────────────────────────────────────────────────── */
 typedef struct {
-    void    *data;      /* mmap'd shm area */
+    void    *data;      /* mmap'd shm area (or mmap'd LINEAR dmabuf) */
     size_t   size;
     int32_t  width, height, stride;
     uint32_t format;
     int      fd;
     bool     released;  /* compositor has released it */
+    bool     is_dmabuf; /* dmabuf-backed: bracket CPU reads with DMA_BUF_IOCTL_SYNC */
 } wl_shm_buf_t;
+
+/* ── zwp_linux_buffer_params_v1 pending state ─────────────────────────────── */
+/* We advertise ONLY the LINEAR modifier, so clients allocate single-plane
+ * linear buffers the software compositor can mmap directly — no GL import. */
+typedef struct {
+    int      fd;        /* plane 0 dmabuf fd, -1 until add() */
+    uint32_t offset, stride;
+    uint64_t modifier;
+    bool     used;      /* create/create_immed already consumed this params */
+} dmabuf_params_t;
 
 /* ── Positioner ───────────────────────────────────────────────────────────── */
 typedef struct {
@@ -286,6 +338,16 @@ typedef struct {
     int32_t  ar_x, ar_y, ar_w, ar_h;
     int32_t  off_x, off_y;
 } xdg_positioner_t;
+
+/* ── wl_region ────────────────────────────────────────────────────────────────
+ * We don't do true multi-rect region math; we accumulate the union bounding box
+ * of the added rectangles (subtract is ignored, which only ever keeps MORE area
+ * opaque — safe, since over-declaring opacity just skips a blend). This is what
+ * an opaque-region hint needs to fix transparent toolkit dialogs. */
+typedef struct {
+    bool     has;
+    int32_t  x0, y0, x1, y1;   /* inclusive-exclusive union bbox */
+} wl_region_t;
 
 /* ── Surface ──────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -330,6 +392,14 @@ typedef struct {
     bool         maximized, fullscreen, minimized;
     bool         half_snapped;   /* Super+Left/Right half-screen snap */
     bool         force_opaque;   /* X11/XWayland surface: alpha is meaningless, blit opaque */
+    /* Opaque region (wl_surface.set_opaque_region): pixels the client declares
+     * fully opaque, so the compositor must treat them as opaque regardless of the
+     * alpha byte. GTK/Firefox dialogs render their body with a low/zero alpha and
+     * rely on this hint; without honoring it the dialog blends into the wallpaper
+     * and looks transparent. We track the union bounding box (enough for the
+     * rounded-rect-body-minus-shadow that toolkits actually declare). */
+    bool         has_opaque;
+    int32_t      op_x, op_y, op_w, op_h;   /* opaque bbox in surface-local coords */
     uint32_t     z;              /* stacking order among Wayland toplevels (higher = front) */
     bool         ssd;               /* server-side decorations granted (FiFi chrome) */
     uint32_t     deco_id;           /* zxdg_toplevel_decoration object, 0 = none */
@@ -580,6 +650,11 @@ static void free_obj_data(wl_obj_t *o) {
         /* A subsurface / decoration / xwayland_surface is only a ROLE handle
          * aliasing a wl_surface_t owned by that surface's OBJ_SURFACE slot. It
          * does NOT own the pointer — freeing here double-frees. Drop the alias. */
+    } else if (o->type == OBJ_DMABUF_PARAMS) {
+        dmabuf_params_t *p = o->data;
+        /* fd ownership moves to the created wl_buffer; only close if unused */
+        if (!p->used && p->fd >= 0) close(p->fd);
+        free(p);
     } else if (o->data) {
         free(o->data);
     }
@@ -606,12 +681,68 @@ static void surface_copy_buffer(wl_surface_t *s, wl_shm_buf_t *b) {
         s->own_pix = p;
         s->own_cap = need;
     }
+    /* dmabuf: the GPU may still be writing — SYNC makes the CPU view coherent
+     * (flushes device caches / waits for implicit fences on i915). */
+    if (b->is_dmabuf && b->fd >= 0) {
+        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
+        ioctl(b->fd, DMA_BUF_IOCTL_SYNC, &sync);
+    }
     const uint32_t *src = (const uint32_t *)b->data;
     for (int64_t row = 0; row < h; row++)
         memcpy(s->own_pix + row * w, src + row * stride_px, (size_t)(w * 4));
+    if (b->is_dmabuf && b->fd >= 0) {
+        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
+        ioctl(b->fd, DMA_BUF_IOCTL_SYNC, &sync);
+    }
     s->own_w = (int32_t)w;
     s->own_h = (int32_t)h;
     s->mapped = true;
+}
+
+/* Server-allocated object ids (zwp_linux_buffer_params.created gives the client
+ * a wl_buffer the SERVER names). libwayland reserves ids >= 0xff000000 for this. */
+static uint32_t g_next_server_obj_id = 0xff000000u;
+
+static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *data);
+
+/* Import a LINEAR dmabuf as a regular OBJ_BUFFER. The buffer is mmap'd once
+ * here and then flows through the exact same commit-copy/release/free path as
+ * shm buffers (free_obj_data munmaps data and closes fd). Returns NULL when
+ * the buffer can't be a plain CPU mapping (non-linear modifier, offset != 0,
+ * bogus geometry, mmap refusal) — the client then falls back to shm. */
+static wl_shm_buf_t *dmabuf_import(wl_client_t *c, uint32_t buf_id,
+                                   dmabuf_params_t *p,
+                                   int32_t w, int32_t h, uint32_t format) {
+    if (!p || p->fd < 0 || w <= 0 || h <= 0 || w > 16384 || h > 16384) return NULL;
+    if (p->modifier != (uint64_t)FIFI_DRM_MOD_LINEAR) return NULL;
+    if (p->offset != 0) return NULL;   /* mmap needs page alignment; linear planes use 0 */
+    int64_t stride = p->stride ? (int64_t)p->stride : (int64_t)w * 4;
+    if (stride < (int64_t)w * 4 || stride % 4) return NULL;
+    int64_t need = stride * h;
+    if (need <= 0 || need > (int64_t)1 << 31) return NULL;
+    void *m = mmap(NULL, (size_t)need, PROT_READ, MAP_SHARED, p->fd, 0);
+    if (m == MAP_FAILED) {
+        fprintf(stderr, "[wayland] dmabuf mmap failed (%dx%d stride %lld): %s\n",
+                w, h, (long long)stride, strerror(errno));
+        return NULL;
+    }
+    wl_shm_buf_t *b = calloc(1, sizeof(*b));
+    if (!b) { munmap(m, (size_t)need); return NULL; }
+    track_buf(b);
+    b->data      = m;
+    b->size      = (size_t)need;
+    b->width     = w;
+    b->height    = h;
+    b->stride    = (int32_t)stride;
+    b->format    = format;            /* fourcc; XR24/AR24 both read as 32bpp */
+    b->fd        = p->fd;             /* ownership moves to the buffer */
+    b->is_dmabuf = true;
+    if (!wl_new_obj(c, buf_id, OBJ_BUFFER, b)) {
+        /* object table full — undo (untrack_buf so free is exact-once) */
+        if (untrack_buf(b)) { munmap(m, (size_t)need); free(b); }
+        return NULL;
+    }
+    return b;
 }
 
 static wl_obj_t *wl_new_obj(wl_client_t *c, uint32_t id, obj_type_t type, void *data) {
@@ -704,6 +835,12 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
     send_registry_global(c, reg_id,  8, "zxdg_decoration_manager_v1", 1);
     send_registry_global(c, reg_id,  9, "org_kde_kwin_server_decoration_manager", 1);
     send_registry_global(c, reg_id, 10, "xwayland_shell_v1",      1);
+    /* GPU buffer sharing. Only advertised when the render node exists — on a
+     * GPU-less box (or wedged GPU) clients must take the shm path instead. */
+    if (access(FIFI_RENDER_NODE, R_OK | W_OK) == 0) {
+        send_registry_global(c, reg_id, 11, "zwp_linux_dmabuf_v1", 3);
+        send_registry_global(c, reg_id, 12, "wl_drm",              2);
+    }
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -1189,6 +1326,40 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 wl_client_flush(c);
             } else if (name == 10 && strncmp(iface, "xwayland_shell_v1", iface_len) == 0) {
                 wl_new_obj(c, new_id, OBJ_XWL_SHELL, NULL);
+            } else if (name == 11 && strncmp(iface, "zwp_linux_dmabuf_v1", iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_DMABUF, NULL);
+                /* v3: advertise formats+modifiers at bind. LINEAR only, so every
+                 * client buffer stays CPU-mappable for the software compositor. */
+                static const uint32_t fmts[] = { FIFI_DRM_FORMAT_XRGB8888,
+                                                 FIFI_DRM_FORMAT_ARGB8888 };
+                for (size_t fi = 0; fi < sizeof(fmts)/sizeof(fmts[0]); fi++) {
+                    int fh = wl_begin_msg(c, new_id, ZWP_DMABUF_EV_FORMAT);
+                    wl_push_u32(c, fmts[fi]);
+                    wl_end_msg(c, fh);
+                    fh = wl_begin_msg(c, new_id, ZWP_DMABUF_EV_MODIFIER);
+                    wl_push_u32(c, fmts[fi]);
+                    wl_push_u32(c, (uint32_t)(((uint64_t)FIFI_DRM_MOD_LINEAR) >> 32));
+                    wl_push_u32(c, (uint32_t)(FIFI_DRM_MOD_LINEAR & 0xffffffffu));
+                    wl_end_msg(c, fh);
+                }
+                wl_client_flush(c);
+            } else if (name == 12 && strncmp(iface, "wl_drm", iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_WL_DRM, NULL);
+                /* Mesa/glamor discover the render device from this legacy global
+                 * (we have no dmabuf v4 feedback). Order matters: device first. */
+                int dh = wl_begin_msg(c, new_id, WL_DRM_EV_DEVICE);
+                wl_push_str(c, FIFI_RENDER_NODE);
+                wl_end_msg(c, dh);
+                dh = wl_begin_msg(c, new_id, WL_DRM_EV_FORMAT);
+                wl_push_u32(c, FIFI_DRM_FORMAT_XRGB8888);
+                wl_end_msg(c, dh);
+                dh = wl_begin_msg(c, new_id, WL_DRM_EV_FORMAT);
+                wl_push_u32(c, FIFI_DRM_FORMAT_ARGB8888);
+                wl_end_msg(c, dh);
+                dh = wl_begin_msg(c, new_id, WL_DRM_EV_CAPABILITIES);
+                wl_push_u32(c, 1 /* prime */);
+                wl_end_msg(c, dh);
+                wl_client_flush(c);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -1205,7 +1376,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             wl_new_obj(c, sid, OBJ_SURFACE, s);
         } else if (opcode == WL_COMPOSITOR_CREATE_REGION && args_len >= 4) {
             uint32_t rid; memcpy(&rid, args, 4);
-            wl_new_obj(c, rid, OBJ_REGION, NULL);
+            wl_region_t *rg = calloc(1, sizeof(wl_region_t));
+            wl_new_obj(c, rid, OBJ_REGION, rg);
         }
         break;
 
@@ -1217,6 +1389,23 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&s->buffer_id, args, 4);
             s->has_new_buffer = true;  /* consume + release exactly once on next commit */
             /* dx, dy at args+4 and args+8 — ignore for now */
+        } else if (opcode == WL_SURFACE_SET_OPAQUE_RGN && args_len >= 4) {
+            /* arg = wl_region id, or 0 to clear. Copy the region's union bbox so
+             * the blit can treat those pixels as opaque (see has_opaque). */
+            uint32_t rid; memcpy(&rid, args, 4);
+            if (rid == 0) {
+                s->has_opaque = false;
+            } else {
+                wl_obj_t *ro = wl_find_obj(c, rid);
+                wl_region_t *rg = (ro && ro->type == OBJ_REGION) ? ro->data : NULL;
+                if (rg && rg->has) {
+                    s->op_x = rg->x0; s->op_y = rg->y0;
+                    s->op_w = rg->x1 - rg->x0; s->op_h = rg->y1 - rg->y0;
+                    s->has_opaque = true;
+                } else {
+                    s->has_opaque = false;
+                }
+            }
         } else if (opcode == WL_SURFACE_COMMIT) {
             /* Tab-close fix: DESTROY set pending_destroy; clean up on commit. */
             if (s->pending_destroy) {
@@ -1244,6 +1433,21 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                     if (!src) src = orphan_find(s->buffer_id);
                     if (src && src->data) {
                         surface_copy_buffer(s, src);  /* sets own_pix/own_w/own_h, mapped */
+                        /* Honor the opaque region: force full alpha on the pixels
+                         * the client declared opaque, so the blend renders the
+                         * dialog/window body solid instead of see-through. Done
+                         * once per commit on our own copy (idempotent, cheap). */
+                        if (s->has_opaque && s->own_pix && !s->force_opaque) {
+                            int32_t ox0 = s->op_x < 0 ? 0 : s->op_x;
+                            int32_t oy0 = s->op_y < 0 ? 0 : s->op_y;
+                            int32_t ox1 = s->op_x + s->op_w; if (ox1 > s->own_w) ox1 = s->own_w;
+                            int32_t oy1 = s->op_y + s->op_h; if (oy1 > s->own_h) oy1 = s->own_h;
+                            for (int32_t ry = oy0; ry < oy1; ry++) {
+                                uint32_t *row = s->own_pix + (int64_t)ry * s->own_w;
+                                for (int32_t rx = ox0; rx < ox1; rx++)
+                                    row[rx] |= 0xFF000000u;
+                            }
+                        }
                         /* SSD windows: keep the FiFi titlebar on-screen and the
                          * window within the desktop area whatever size the client
                          * actually committed. */
@@ -1399,6 +1603,107 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
          * pointer to the client buffer between commits. */
         if (opcode == WL_BUFFER_DESTROY)
             wl_delete_obj(c, obj_id);
+        break;
+
+    /* ── zwp_linux_dmabuf_v1 ─────────────────────────────────────────── */
+    case OBJ_DMABUF:
+        if (opcode == ZWP_DMABUF_CREATE_PARAMS && args_len >= 4) {
+            uint32_t pid; memcpy(&pid, args, 4);
+            dmabuf_params_t *p = calloc(1, sizeof(*p));
+            if (!p) break;
+            p->fd = -1;
+            wl_new_obj(c, pid, OBJ_DMABUF_PARAMS, p);
+        } else if (opcode == ZWP_DMABUF_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+
+    /* ── zwp_linux_buffer_params_v1 ──────────────────────────────────── */
+    case OBJ_DMABUF_PARAMS: {
+        dmabuf_params_t *p = obj ? obj->data : NULL;
+        if (!p) break;
+        if (opcode == ZWP_DMABUF_PARAMS_ADD && args_len >= 20) {
+            /* add(fd[cmsg], plane_idx, offset, stride, modifier_hi, modifier_lo) */
+            uint32_t plane, off, stride, mh, ml;
+            memcpy(&plane,  args,      4);
+            memcpy(&off,    args + 4,  4);
+            memcpy(&stride, args + 8,  4);
+            memcpy(&mh,     args + 12, 4);
+            memcpy(&ml,     args + 16, 4);
+            int fd = pending_fd_pop();
+            if (plane == 0 && p->fd < 0) {
+                p->fd       = fd;
+                p->offset   = off;
+                p->stride   = stride;
+                p->modifier = ((uint64_t)mh << 32) | ml;
+            } else if (fd >= 0) {
+                close(fd);   /* multi-plane unsupported (we advertise LINEAR only) */
+            }
+        } else if (opcode == ZWP_DMABUF_PARAMS_CREATE && args_len >= 16) {
+            int32_t w, h; uint32_t fmt;
+            memcpy(&w,   args,     4);
+            memcpy(&h,   args + 4, 4);
+            memcpy(&fmt, args + 8, 4);
+            uint32_t bid = g_next_server_obj_id++;
+            if (!p->used && dmabuf_import(c, bid, p, w, h, fmt)) {
+                p->used = true;
+                int eh = wl_begin_msg(c, obj_id, ZWP_DMABUF_PARAMS_EV_CREATED);
+                wl_push_u32(c, bid);
+                wl_end_msg(c, eh);
+            } else {
+                int eh = wl_begin_msg(c, obj_id, ZWP_DMABUF_PARAMS_EV_FAILED);
+                wl_end_msg(c, eh);
+            }
+            wl_client_flush(c);
+        } else if (opcode == ZWP_DMABUF_PARAMS_CREATE_IMMED && args_len >= 20) {
+            uint32_t bid; int32_t w, h; uint32_t fmt;
+            memcpy(&bid, args,      4);
+            memcpy(&w,   args + 4,  4);
+            memcpy(&h,   args + 8,  4);
+            memcpy(&fmt, args + 12, 4);
+            if (!p->used && dmabuf_import(c, bid, p, w, h, fmt)) {
+                p->used = true;
+            } else {
+                /* Spec says we may kill the client here; register an inert
+                 * empty buffer instead so a later attach/commit just no-ops. */
+                wl_shm_buf_t *dead = calloc(1, sizeof(*dead));
+                if (dead) { track_buf(dead); dead->fd = -1; wl_new_obj(c, bid, OBJ_BUFFER, dead); }
+                fprintf(stderr, "[wayland] dmabuf create_immed failed (%dx%d)\n", w, h);
+            }
+        } else if (opcode == ZWP_DMABUF_PARAMS_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        }
+        break;
+    }
+
+    /* ── wl_drm (legacy Mesa; device discovery + prime buffer import) ─── */
+    case OBJ_WL_DRM:
+        if (opcode == WL_DRM_AUTHENTICATE && args_len >= 4) {
+            /* Render nodes need no auth — acknowledge unconditionally. */
+            int ah = wl_begin_msg(c, obj_id, WL_DRM_EV_AUTHENTICATED);
+            wl_end_msg(c, ah);
+            wl_client_flush(c);
+        } else if (opcode == WL_DRM_CREATE_PRIME_BUFFER && args_len >= 40) {
+            /* create_prime_buffer(new_id, fd[cmsg], w, h, format,
+             *                     off0, str0, off1, str1, off2, str2) */
+            uint32_t bid, fmt; int32_t w, h, off0, str0;
+            memcpy(&bid,  args,      4);
+            memcpy(&w,    args + 4,  4);
+            memcpy(&h,    args + 8,  4);
+            memcpy(&fmt,  args + 12, 4);
+            memcpy(&off0, args + 16, 4);
+            memcpy(&str0, args + 20, 4);
+            int fd = pending_fd_pop();
+            dmabuf_params_t prm = { .fd = fd, .offset = (uint32_t)off0,
+                                    .stride = (uint32_t)str0,
+                                    .modifier = FIFI_DRM_MOD_LINEAR };
+            if (!dmabuf_import(c, bid, &prm, w, h, fmt)) {
+                if (fd >= 0) close(fd);
+                wl_shm_buf_t *dead = calloc(1, sizeof(*dead));
+                if (dead) { track_buf(dead); dead->fd = -1; wl_new_obj(c, bid, OBJ_BUFFER, dead); }
+                fprintf(stderr, "[wayland] wl_drm prime import failed (%dx%d)\n", w, h);
+            }
+        }
         break;
 
     /* ── wl_seat ─────────────────────────────────────────────────────── */
@@ -1602,27 +1907,39 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                              * the titlebar is on-screen and it can be moved. */
                             if (!strncmp(s->title, "Xwayland", 8)) {
                                 extern uint32_t console_font_height(void);
-                                s->ssd = true;
                                 s->is_xwl_root = true;   /* hidden while no X app runs */
                                 /* X11 buffers carry no meaningful alpha (X is
                                  * XRGB); blend would render the whole X screen
                                  * transparent. Blit it opaque instead. */
                                 s->force_opaque = true;
-                                if (s->x == 0 && s->y == 0) {
-                                    s->x = 120;
-                                    s->y = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
-                                }
-                                /* relabel to the app fifi-run launched (XWayland
-                                 * only ever reports "Xwayland on :N") */
-                                FILE *tf = fopen("/tmp/xwayland-title", "r");
+                                /* Relabel to the app fifi-run launched (XWayland
+                                 * only ever reports "Xwayland on :N"). fifi-run
+                                 * writes the name to /tmp/fifi-x11-title. */
+                                char appnm[64] = "";
+                                FILE *tf = fopen("/tmp/fifi-x11-title", "r");
                                 if (tf) {
-                                    char nm[64];
-                                    if (fgets(nm, sizeof nm, tf)) {
-                                        nm[strcspn(nm, "\n")] = '\0';
-                                        if (nm[0]) { strncpy(s->title, nm, sizeof s->title - 1);
-                                                     s->title[sizeof s->title - 1] = '\0'; }
+                                    if (fgets(appnm, sizeof appnm, tf)) {
+                                        appnm[strcspn(appnm, "\n")] = '\0';
+                                        if (appnm[0]) { strncpy(s->title, appnm, sizeof s->title - 1);
+                                                        s->title[sizeof s->title - 1] = '\0'; }
                                     }
                                     fclose(tf);
+                                }
+                                /* Apps that draw their OWN window chrome (Steam's
+                                 * CEF UI has a titlebar + min/max/close) look wrong
+                                 * wrapped in a second FiFi frame. Present those
+                                 * borderless at the top-left so only the app's own
+                                 * window shows. Others (LibreOffice, whose gen VCL
+                                 * draws no titlebar) keep FiFi chrome + an offset. */
+                                if (!strncmp(appnm, "Steam", 5)) {
+                                    s->ssd = false;
+                                    s->x = 0; s->y = 0;
+                                } else {
+                                    s->ssd = true;
+                                    if (s->x == 0 && s->y == 0) {
+                                        s->x = 0;
+                                        s->y = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
+                                    }
                                 }
                             }
                             break;
@@ -1903,11 +2220,28 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     }
 
     /* ── wl_region ───────────────────────────────────────────────────── */
-    case OBJ_REGION:
-        /* op=0: destroy, op=1: add, op=2: subtract — we don't clip, just track */
-        if (opcode == 0) wl_delete_obj(c, obj_id);
-        /* add/subtract silently accepted */
+    case OBJ_REGION: {
+        /* op=0: destroy, op=1: add(x,y,w,h), op=2: subtract(x,y,w,h). We track the
+         * union bbox of add()s; subtract is ignored (keeps more area opaque, safe). */
+        wl_region_t *rg = obj ? obj->data : NULL;
+        if (opcode == 0) { wl_delete_obj(c, obj_id); break; }
+        if (opcode == 1 && rg && args_len >= 16) {
+            int32_t x, y, w, h;
+            memcpy(&x, args, 4); memcpy(&y, args+4, 4);
+            memcpy(&w, args+8, 4); memcpy(&h, args+12, 4);
+            if (w > 0 && h > 0) {
+                int32_t x1 = x + w, y1 = y + h;
+                if (!rg->has) { rg->x0 = x; rg->y0 = y; rg->x1 = x1; rg->y1 = y1; rg->has = true; }
+                else {
+                    if (x  < rg->x0) rg->x0 = x;
+                    if (y  < rg->y0) rg->y0 = y;
+                    if (x1 > rg->x1) rg->x1 = x1;
+                    if (y1 > rg->y1) rg->y1 = y1;
+                }
+            }
+        }
         break;
+    }
 
     /* ── wl_pointer ─────────────────────────────────────────────────── */
     case OBJ_POINTER:

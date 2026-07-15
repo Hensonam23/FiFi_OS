@@ -316,12 +316,13 @@ extern uint32_t console_fb_height(void);
  * rootless) — that is what makes it tag each window's wl_surface via
  * xwayland_shell_v1 so we can correlate + present it. Returns the WM-side fd. */
 static int xwl_spawn(void) {
-    /* Size the rootful X screen to (nearly) the display; a maximized app then
-     * fills it, leaving no black X-root border. Leave margins for the FiFi
-     * titlebar + taskbar so the whole window stays on the work area. */
+    /* Size the rootful X screen to the display width and the height minus the
+     * bottom taskbar. A maximized app then fills the work area with no black
+     * X-root border: borderless apps (Steam) sit flush at (0,0); FiFi-decorated
+     * apps (LibreOffice) are placed at x=0 just below their titlebar. */
     uint32_t fw = console_fb_width(), fh = console_fb_height();
-    s_screen_w = (int)fw > 200 ? (int)fw - 160 : (int)fw;
-    s_screen_h = (int)fh > 220 ? (int)fh - 200 : (int)fh;
+    s_screen_w = (int)fw;
+    s_screen_h = (int)fh > 120 ? (int)fh - 48 : (int)fh;   /* leave the taskbar */
     if (s_screen_w < 640) s_screen_w = 640;
     if (s_screen_h < 480) s_screen_h = 480;
     unlink("/tmp/.X11-unix/X0");            /* clear any stale display */
