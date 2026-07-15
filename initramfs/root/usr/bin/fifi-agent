@@ -54,10 +54,27 @@ DONE: <short answer/summary for the user>
 
 Rules:
 - Exactly ONE RUN: or DONE: per reply, on its own line. No extra prose around it.
+- You MUST run the commands YOURSELF with RUN:. NEVER tell the user to run a
+  command themselves, and never say you cannot access the system - you CAN, via
+  RUN:. Telling the user what to type is wrong; emit RUN: instead.
 - Inspect with safe read-only commands before changing anything.
 - NEVER invent command output; if you have not run a command you do not know its result.
 - This is FiFi OS, a custom minimal Linux. There is NO pacman/apt/dnf; never use a package manager.
-- Do not attempt to update, downgrade, or reinstall the kernel or bootloader.'
+- Do not attempt to update, downgrade, or reinstall the kernel or bootloader.
+
+Example of the REQUIRED format:
+User: what CPU does this machine have?
+Assistant: RUN: lscpu | grep "Model name"
+OUTPUT: Model name: Intel(R) Core(TM) i9-14900HX
+Assistant: DONE: This machine has an Intel Core i9-14900HX.
+
+Another example:
+User: scan my system for all hardware
+Assistant: RUN: lspci
+OUTPUT: (a list of PCI devices)
+Assistant: RUN: lscpu
+OUTPUT: (cpu details)
+Assistant: DONE: Here is your hardware: <summary of what the commands showed>.'
 
 # ── classify a command: prints "ro" (read-only), "mut" (mutating), or "danger"
 classify() {
@@ -72,7 +89,9 @@ classify() {
     first=$(printf '%s' "$c" | sed 's/^ *//' | cut -d' ' -f1)
     case "$first" in
         ls|cat|head|tail|df|du|free|ps|uname|uptime|ip|ifconfig|grep|egrep|fgrep|\
-        stat|echo|pwd|whoami|id|date|lsblk|lsusb|lspci|wc|sort|uniq|readlink|realpath|\
+        stat|echo|pwd|whoami|id|date|lsblk|lsusb|lspci|lscpu|lshw|lsmod|lsof|\
+        sensors|vulkaninfo|glxinfo|eglinfo|dmidecode|getconf|\
+        wc|sort|uniq|readlink|realpath|\
         sha1sum|md5sum|ss|netstat|env|printenv|which|type|file|hostname|nproc|\
         dmesg|journalctl|top|vmstat|cut|awk|sed|find|test|xxd|od|strings|ldd)
             # sed/find can still mutate; flag those specific forms as mutating.
@@ -94,22 +113,35 @@ run_cmd() {
         printf "     This could damage the system or data. Type EXACTLY 'yes do it' to run: " >&2
         read ans
         [ "$ans" = "yes do it" ] || { echo "  (skipped)" >&2; echo "OUTPUT: [refused by user - command not run]"; return; }
-    elif [ "$kind" = mut ] || { [ "$kind" = ro ] && [ "$MODE" = ask ]; }; then
+    elif [ "$kind" = mut ] && [ "$MODE" = ask ]; then
+        # Only state-changing commands need confirmation. Read-only inspection
+        # commands (the allowlist above) always run without a prompt, so a task
+        # like "scan my hardware" completes on its own.
         echo >&2
         echo "  AI wants to run: $cmd" >&2
         printf "  Run it? [y/N]: " >&2
         read ans
         case "$ans" in y|Y|yes|YES) ;; *) echo "  (skipped)" >&2; echo "OUTPUT: [declined by user - command not run]"; return;; esac
+    else
+        echo "  running: $cmd" >&2
     fi
-    # execute (read-only in auto mode runs with no prompt)
+    # execute (read-only always; mutating after the confirm above)
     out=$(sh -c "$cmd" 2>&1)
     # truncate to keep the model's context small
     printf 'OUTPUT: %s' "$(printf '%s' "$out" | head -c 1500)"
     echo
 }
 
-# extract the first RUN:/DONE: directive from a model reply
-extract() { printf '%s' "$1" | grep -m1 -E '^(RUN|DONE):' ; }
+# Extract the first RUN:/DONE: directive from a model reply. Tolerant of the
+# 14B model's common deviations: leading spaces, a "> " prefix, markdown bold
+# (**RUN:**), or the directive wrapped in backticks. Normalizes to a bare
+# "RUN: ..." / "DONE: ..." line so the loop below matches it.
+extract() {
+    printf '%s' "$1" \
+    | sed -E 's/^[[:space:]>*`]*//; s/\*\*//g' \
+    | grep -m1 -E '^(RUN|DONE):' \
+    | sed -E 's/`+[[:space:]]*$//'
+}
 
 # Prefer the resident llama-server (model stays warm -> fast turns); fall back to
 # spawning llama-cli per turn if the server is unavailable.
