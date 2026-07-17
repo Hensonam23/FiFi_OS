@@ -124,35 +124,140 @@ fifi version     # show the installed OS version
 
 **Near-term priority:** Linux **Desktop v1.0 is the sole goal.** Everything past it (ARM64, tablet, phone, bare-metal ARM) waits until Desktop v1.0 ships. Note also that the on-device AI ("Machine Spirit") stays a desktop/laptop feature and is designed as a cleanly-removable module, so mobile builds omit the local model entirely (a battery cannot run llama.cpp locally).
 
-### Built so far
+### The Linux plan
 
-Phases 1 through 6 are complete: the Linux foundation and custom initramfs, the hand-rolled compositor and desktop, the PTY shell and terminal, DRM/KMS display and gaming, the security and privacy suite, and the full-system layer (installer, browser, LibreOffice, offline AI, unified settings). See **What works today** above. The project is at **Beta 1.0**.
+What was built at each stage, and what still has to happen for v1.0 and beyond. Timelines are active-effort ranges (steady part-time work with AI help). Hardware-gated items are marked with an hourglass.
 
-### Where it is going
+#### Phase 1: Linux Foundation (done)
 
-Timelines are active-effort ranges (steady part-time work with AI help). Hardware-gated items are marked with an hourglass.
+- [x] Minimal linux-zen kernel config (x86-64, DRM, evdev, virtio)
+- [x] Custom initramfs: busybox userland, FiFi init script as PID 1
+- [x] FiFi banner at boot
+- [x] QEMU test target: `make linux-run`
 
-- **Phase 0 - Harden and make it testable (blocks everything).** Strip the dev SSH key from release images, add a non-root user and re-enable per-app sandboxing, verify signatures/hashes on every download (apps, AI models, OS updates), run the compositor under a supervisor with auto-reboot, move OS update to A/B (never overwrite the only bootable copy), and build a screenshot-diff test harness plus a bare-metal QEMU self-test wired into CI.
-- **Phase 1 - Consolidate the shared platform.** Extract the genuinely shared code (GUI toolkit, IPC protocol, config/theme formats, app framework) into one versioned library with a frozen, documented API consumed by both tracks, and stop the two branches from drifting.
-- **Phase 2 - Desktop/Laptop 1.0 (Linux).** Finish the desktop UX and settings parity, ship an app framework/SDK and a verifying package manager, and do the gaming presentation rework: the compositor is CPU-only software compositing today, so it needs GPU-accelerated scanout/page-flip with vsync plus pointer-constraints and relative-pointer before FPS mouselook is possible. Then ship Desktop/Laptop 1.0, the first real release.
-- **Phase 3 - ARM64 + Raspberry Pi CM5 bring-up (Linux).** Hourglass, gated by CM5 stock. Cross-compile the compositor and apps for aarch64, swap Intel/Mesa for the CM5's VideoCore VII (Mesa V3D), move the boot chain to u-boot/UEFI + device tree, and get FiFi Desktop running on the CM5 driving an external display.
-- **Phase 4 - Touch and mobile foundations = FiFi Tablet.** Add a platform-neutral touch/gesture model, a DPI-aware touch-sized responsive toolkit, an on-screen keyboard, real power management and suspend/resume, rotation, notifications, and non-root per-app isolation. Milestone: a CM5 + touchscreen + battery handheld.
-- **Phase 5 - FiFi Phone.** Hourglass, mostly hardware. Validate the software on a repairable phone (PinePhone Pro / Fairphone) first, then add cellular modem integration, a phone/SMS framework, audio routing, and the sensor stack. No built-in AI on the phone.
-- **Phase 6 - Bare-metal catch-up (the end goal).** Continuous and multi-year. Behind the frozen APIs, port matured subsystems into the from-scratch kernel: fix the x86-64 ring0 holes, add the windowing syscalls, reach GUI/WM/IPC parity, add SMP, then the ARM64 port, then the irreducibly hard parts with no Linux head start (GPU driver, filesystem, TLS, power management).
+#### Phase 2: FiFi Compositor (done)
 
-### Hardware plan (the CM5 handheld/phone)
+- [x] `/dev/fb0` framebuffer backend
+- [x] Port `gui.c` to compile as Linux userspace (platform stub headers)
+- [x] Input via evdev: keyboard, mouse (relative + buttons)
+- [x] Software cursor with save/restore
+- [x] Double-buffered rendering (backbuffer to dirty-row flip at 250 Hz)
+- [x] Full FiFi desktop: taskbar, window manager, launcher, theme system
+- [x] VFS mapped to `/fifi-data/` on real POSIX filesystem
+- [x] RTC via `localtime()`, uptime via `CLOCK_MONOTONIC`
+- [x] Static binary with no library dependencies in initramfs
 
-Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (Phase 4) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
+#### Phase 3: Shell and Terminal (done)
 
-### What accelerates with AI vs what does not
+- [x] PTY-based terminal: real shell (busybox sh) running in a FiFi window
+- [x] Keyboard routed to PTY when terminal is focused, to GUI otherwise
+- [x] F-key shortcuts always reach the GUI regardless of terminal focus
+- [x] PTY window size calculated from font metrics and terminal geometry
+- [x] SDL2 native runner: smooth VSync-locked display for development (no QEMU needed)
+- [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
+- [x] App protocol: connect, register window, push pixel frames, receive input events
+- [x] File browser as standalone IPC process (PSF font, dir nav, mouse and keyboard)
+- [x] Settings panel as standalone IPC process (system info, ALSA volume slider)
 
-- **Fast (weeks):** compositor/UI/toolkit work, touch/gesture/on-screen keyboard, settings, app framework, the ARM64 software port, security hardening, tests/CI, the shared-library refactor.
-- **Hardware-gated (months):** CM5 availability, panel sourcing and driving, battery/thermal, modem/RF, and every "debug it on the physical board" loop.
-- **Irreducibly long (years):** the bare-metal kernel's from-scratch GPU/FS/TLS/power management and the ARM64 kernel port.
+#### Phase 4: Display and Gaming (done)
 
-A full technical assessment (maturity scoring, technical debt, architectural risks, and the longer five/ten-year plans) lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
+- [x] DRM/KMS upgrade: compositor talks to GPU directly via `/dev/dri/card0`
+- [x] virtio-gpu-pci: explicit per-frame flush instead of poll timer (QEMU smooth display)
+- [x] Dirty-row tracking: only copies changed rows to GPU
+- [x] ALSA volume control: volume slider in FiFi taskbar controls real system audio
+- [x] ALSA test tone: test button plays a real sine wave at current volume via PCM ioctls
+- [x] Gamepad input: evdev HID events detected, normalized, routed to focused IPC app
+- [x] Gaming mode toggle: Settings panel button switches CPU governor and uncaps frame rate
+- [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
+- [x] Gamepad visualizer app: shows live button/axis state
+- [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar
+- [x] IPC window drag: grab any IPC app window by its title bar to move it
+- [x] CPU frequency in Settings: reads from sysfs, shown in System Information panel
+- [x] Gamepad status in Settings: shows Connected/None in Gaming section
+- [x] IPC window close button: red X in top-right of each app window
+- [x] IPC window z-ordering: click-to-front with repaint, topmost window wins hit-test
+- [x] IPC taskbar buttons: each open IPC app gets a taskbar button
+- [x] IPC window minimize: hide window, restore via taskbar button click
+- [x] F-key pass-through: F1-F4 always reach GUI even when IPC app has keyboard focus
+- [x] Screen blanking: display goes black after 5 minutes idle, any input wakes it
+- [x] PipeWire audio: game audio routing, multi-app mixing (PulseAudio-compatible)
+- [x] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
+- [x] Steam installed in image, launches in a FiFi window
+- [x] Proton configured and tested (fifi-proton panel shows versions, Vulkan detected)
 
-### v1.0 release checklist
+#### Phase 5: Security and Privacy (done)
+
+- [x] Keyboard shortcuts: Alt+Tab, Ctrl+W, F11/F12 volume, Win+L lock, Win+D show desktop, window snap
+- [x] Numpad keys: all numpad digits and operators work in terminal and apps
+- [x] Screen lock: Win+L locks the screen, password required to unlock
+- [x] Firewall toggle: nftables on/off switch in Settings
+- [x] Security Center app: firewall status, privacy mode (73 telemetry domains blocked), port scanner, active connections
+- [x] Context menus: right-click desktop and file browser, scale with font size
+- [x] Toast notifications: volume, lock, snap, show desktop, and other system actions
+- [x] Window layering: overlapping windows stack cleanly, no bleed from windows behind
+- [x] Terminal in the stack: terminal is a normal window, comes to front when clicked
+- [x] Multiple terminals: open extra terminal windows from the start menu, each independent
+- [x] Window resize: drag any edge or corner, terminal resizes cleanly with no artifacts
+- [x] Mouse wheel: routes to whichever window is on top at the cursor
+- [x] DNS over HTTPS: system-wide encrypted DNS via dnscrypt-proxy, toggle in Security Center
+- [x] VPN integration: WireGuard built in, connect/disconnect from Settings and Security Center
+- [x] Tor mode: toggle in Security Center, SOCKS5 on port 9050, bootstrap status shown
+- [x] Network scanner: detect live hosts on local subnet (nmap -sn)
+- [x] Port scanner: nmap service/version scan on any target
+- [x] Packet capture: tcpdump-based capture in Security Center
+- [x] Password strength tester: masked input, color-coded score
+- [x] Intrusion detection: log monitor, process integrity check, unexpected listener detection
+- [x] AppArmor: kernel built with MAC support, compositor and security center run in complain mode
+- [x] Encrypted storage: cryptsetup/LUKS2 bundled, status shown in Security Center
+- [x] Secure Boot status: EFI variable read and shown in Security Center
+- [x] Automatic updates: version shown in Security Center with update link
+- [x] WiFi Manager: scan, select, and connect to networks from a start-menu app
+- [x] Secure Boot USB signing: EFI binaries signed on flash, cert exported to USB root for BIOS enrollment
+
+#### Phase 6: Full System (done)
+
+- [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
+- [x] OS update command: `update` copies new kernel+initramfs from USB without reinstalling
+- [x] Online OS update: `fifi update` / `fifi upgrade` pull app and OS updates from GitHub Releases
+- [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
+- [x] Bluetooth: dbus + bluetoothd autostart at boot, pairing via `bt`/bluetoothctl, A2DP audio via PipeWire bluez5
+- [x] Browser: LibreWolf in a FiFi window (chrome-text rendering and typing fixed)
+- [x] LibreOffice: installed by default during installation
+- [x] Desktop shortcuts, image viewer, draggable desktop icons
+- [x] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
+- [x] Desktop themes: optional theme system with selectable styles
+- [x] Built-in AI assistant: local model (llama.cpp), no internet required, completely offline; `ai`/`fifi-ai` chat, `fifi-agent` agentic mode, resident llama-server via `fifi-ai-serve`
+- [x] AI chat app: windowed "FiFi AI" GUI client for the offline model, in the launcher
+- [x] Unified Settings: single tabbed hub (Personalize, Wi-Fi, Network, System, Security, About) with a theme/wallpaper personalization tab; `fifi-settings <tab>` deep-links
+- [x] Modernized desktop: accent-themed titlebars/dock/launcher/menus, rounded corners, glass, centered dock
+- [x] Live trial: "Try FiFi OS (Live)" boot entry; LibreWolf + LibreOffice auto-provision on first boot
+- [x] Full-codebase audit + optimization pass: correctness bugs fixed (integer-overflow heap writes, use-after-free, resource leaks), dead code and redundant comments removed, across the compositor and every app
+
+Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what remain.
+
+#### Phase 7: Harden and make it testable (next; blocks v1.0)
+
+- [ ] Strip the dev SSH key from release images
+- [ ] Non-root user; re-enable per-app sandboxing
+- [ ] Verify signatures/hashes on every download (apps, AI models, OS updates)
+- [ ] Run the compositor under a supervisor with auto-reboot on crash
+- [ ] A/B OS updates: never overwrite the only bootable copy
+- [ ] Screenshot-diff test harness + QEMU boot self-test wired into CI
+
+#### Phase 8: Consolidate the shared platform
+
+- [ ] Extract the genuinely shared code (GUI toolkit, IPC protocol, config/theme formats, app framework) into one versioned library
+- [ ] Freeze and document that API; both tracks (Linux and bare-metal) consume it so the branches stop drifting
+
+#### Phase 9: Desktop/Laptop v1.0
+
+- [ ] Desktop UX polish and settings parity
+- [ ] App framework/SDK and a verifying package manager
+- [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
+- [ ] Pointer-constraints and relative-pointer protocols (required for FPS mouselook)
+- [ ] Ship Desktop/Laptop v1.0, the first real release (checklist below)
+
+#### v1.0 release checklist
 
 - [ ] Boots on any x86-64 machine without configuration
 - [ ] Full desktop: browser, terminal, file manager, text editor, settings, system monitor
@@ -160,6 +265,21 @@ A full technical assessment (maturity scoring, technical debt, architectural ris
 - [ ] USB installer: one click to install to disk
 - [ ] Default encrypted, default private, default hardened
 - [ ] Public release at GitHub Releases
+
+#### Beyond v1.0
+
+Goals in the order they unlock, each defined by the milestone that proves it. Mobile work happens on its own branch when it starts, so the desktop track stays stable.
+
+- [ ] **ARM64.** Goal: FiFi Desktop running on a Raspberry Pi CM5 driving an external display. Cross-compile the compositor and apps for aarch64, swap Intel/Mesa for the CM5's VideoCore VII (Mesa V3D), move the boot chain to u-boot/UEFI + device tree. Hourglass, gated by CM5 stock.
+- [ ] **FiFi Tablet.** Goal: a CM5 + touchscreen + battery handheld running FiFi. Needs a platform-neutral touch/gesture model, a DPI-aware touch-sized responsive toolkit, an on-screen keyboard, real power management and suspend/resume, rotation, notifications, and non-root per-app isolation.
+- [ ] **FiFi Phone.** Goal: FiFi making calls and sending texts on real hardware, proven on a repairable phone (PinePhone Pro / Fairphone) first, then the custom CM5 carrier from the hardware plan below. Needs cellular modem integration, a phone/SMS framework, call audio routing, and the sensor stack. No built-in AI on the phone; mobile builds omit the local model.
+- [ ] **Bare-metal catch-up (the end goal).** Goal: the from-scratch kernel reaches parity and becomes the production kernel. Continuous and multi-year. Behind the frozen APIs, port matured subsystems in: fix the x86-64 ring0 holes, add the windowing syscalls, reach GUI/WM/IPC parity, add SMP, then the ARM64 port, then the irreducibly hard parts with no Linux head start (GPU driver, filesystem, TLS, power management).
+
+### Hardware plan (the CM5 handheld/phone)
+
+Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (the tablet goal above) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
+
+A full technical assessment (maturity scoring, technical debt, architectural risks, and the longer five/ten-year plans) lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
 
 ---
 
