@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FiFi OS — Desktop Shell (reference implementation)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#06080d}
+a{color:#FF9A6B;text-decoration:none}
+a:hover{color:#ffb891}
+.grain{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+.intent{display:flex;align-items:center;gap:7px;padding:5px 13px;border-radius:99px;cursor:pointer;font-size:12.5px;font-weight:600;letter-spacing:0.02em;transition:all .15s;color:rgba(233,237,243,0.62);background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.07)}
+.intent .d{width:5px;height:5px;border-radius:50%;background:rgba(233,237,243,0.35)}
+.intent.active{color:#0a0d12;background:var(--ac);border-color:transparent}
+.intent.active .d{background:#0a0d12}
+.plus{width:26px;height:26px;border-radius:99px;display:grid;place-items:center;color:rgba(233,237,243,0.4);border:1px dashed rgba(255,255,255,0.14);font-size:13px;cursor:pointer}
+.plus:hover{color:rgba(233,237,243,0.8);border-color:rgba(255,255,255,0.3)}
+.notif{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.07);cursor:pointer}
+.notif:hover{background:rgba(255,255,255,0.1)}
+.seam{cursor:col-resize}
+.seam:hover{background:color-mix(in oklab, var(--ac) 50%, transparent)!important}
+.hvrow:hover{background:rgba(255,255,255,0.05)}
+.tile:hover{background:rgba(255,255,255,0.06)!important}
+.chip:hover{background:rgba(255,255,255,0.07)!important}
+.ctl{opacity:0.65;cursor:pointer}
+.ctl:hover{opacity:1}
+.play{cursor:pointer;transition:transform .15s}
+.play:hover{transform:scale(1.06)}
+.dki{position:relative;width:48px;height:48px;border-radius:14px;display:grid;place-items:center;cursor:pointer;transition:all .15s}
+.dki:hover{background:rgba(255,255,255,0.08);transform:translateY(-3px)}
+.orb{transition:all .15s;cursor:pointer}
+.orb:hover{transform:translateY(-3px) scale(1.04);box-shadow:0 0 36px color-mix(in oklab, var(--ac) 50%, transparent)!important}
+.navbtn{width:22px;text-align:center;cursor:pointer}
+.navbtn:hover{color:#e9edf3}
+</style>
+</head>
+<body>
+<div id="desktop" data-screen-label="FiFi Desktop" style="width:1920px;height:1080px;position:relative;overflow:hidden;background:#06080d;font-family:'Manrope',sans-serif;color:#e9edf3;--ac:#FF9A6B;">
+  <!-- wallpaper -->
+  <div style="position:absolute;inset:0;background:radial-gradient(1200px 720px at 72% -8%, oklch(0.55 0.11 210 / 0.30), transparent 62%),radial-gradient(1000px 700px at 10% 112%, oklch(0.45 0.13 290 / 0.28), transparent 62%),radial-gradient(760px 520px at 42% 46%, oklch(0.35 0.06 230 / 0.22), transparent 65%),linear-gradient(180deg,#070a10,#05070c);"></div>
+  <div class="grain" style="position:absolute;inset:0;opacity:0.05;mix-blend-mode:overlay;"></div>
+  <div style="position:absolute;inset:0;background:radial-gradient(1600px 1000px at 50% 42%, transparent 55%, rgba(2,3,6,0.55));"></div>
+
+  <!-- horizon bar -->
+  <div style="position:absolute;top:16px;left:16px;right:16px;height:44px;z-index:50;display:flex;align-items:center;gap:14px;padding:0 14px;border-radius:14px;background:rgba(12,16,23,0.55);backdrop-filter:blur(28px) saturate(1.5);border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 40px -12px rgba(0,0,0,0.5);">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <div style="width:16px;height:16px;background:var(--ac);clip-path:polygon(50% 0%, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0% 50%, 39% 39%);filter:drop-shadow(0 0 8px color-mix(in oklab, var(--ac) 60%, transparent));"></div>
+      <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;letter-spacing:0.01em;">FiFi</div>
+    </div>
+    <div style="width:1px;height:18px;background:rgba(255,255,255,0.1);"></div>
+    <div id="intents" style="display:flex;align-items:center;gap:6px;">
+      <div class="intent active"><div class="d"></div>Build</div>
+      <div class="intent"><div class="d"></div>Research</div>
+      <div class="intent"><div class="d"></div>Play</div>
+      <div class="plus">+</div>
+    </div>
+    <div style="flex:1;"></div>
+    <div style="display:flex;align-items:flex-end;gap:2.5px;height:12px;" title="wifi">
+      <div style="width:3px;height:5px;border-radius:2px;background:rgba(233,237,243,0.85);"></div>
+      <div style="width:3px;height:8px;border-radius:2px;background:rgba(233,237,243,0.85);"></div>
+      <div style="width:3px;height:12px;border-radius:2px;background:rgba(233,237,243,0.85);"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:5px;">
+      <div style="width:22px;height:11px;border-radius:3.5px;border:1px solid rgba(233,237,243,0.4);padding:1.5px;display:flex;">
+        <div style="width:70%;height:100%;border-radius:1.5px;background:rgba(233,237,243,0.8);"></div>
+      </div>
+      <div style="width:2px;height:5px;border-radius:0 2px 2px 0;background:rgba(233,237,243,0.4);margin-left:-3px;"></div>
+      <div style="font-size:12px;color:rgba(233,237,243,0.6);font-family:'JetBrains Mono',monospace;">82%</div>
+    </div>
+    <div style="width:1px;height:18px;background:rgba(255,255,255,0.1);"></div>
+    <div class="notif">
+      <div style="width:5px;height:5px;border-radius:50%;background:var(--ac);box-shadow:0 0 6px var(--ac);"></div>
+      <div style="font-size:11.5px;font-weight:600;color:rgba(233,237,243,0.7);">2</div>
+    </div>
+    <div style="width:1px;height:18px;background:rgba(255,255,255,0.1);"></div>
+    <div id="date" style="font-size:12.5px;color:rgba(233,237,243,0.55);">Wed, Jul 15</div>
+    <div id="clock" style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14.5px;letter-spacing:0.02em;">18:05</div>
+  </div>
+
+  <!-- tiled pair: terminal -->
+  <div style="position:absolute;left:96px;top:132px;width:784px;height:648px;border-radius:16px;background:rgba(9,12,17,0.82);backdrop-filter:blur(28px) saturate(1.4);border:1px solid rgba(255,255,255,0.09);box-shadow:0 32px 90px -20px rgba(0,0,0,0.65);overflow:hidden;">
+    <div style="height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);position:relative;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ac);">&#10095;_</div>
+      <div style="font-size:12.5px;font-weight:600;color:rgba(233,237,243,0.75);">term — ~/projects/fifi-shell</div>
+      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:26px;height:3px;border-radius:2px;background:rgba(255,255,255,0.12);"></div>
+      <div style="flex:1;"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:oklch(0.72 0.13 35);"></div>
+    </div>
+    <div style="padding:20px 24px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.75;">
+      <div style="display:flex;gap:20px;align-items:flex-start;">
+        <div style="width:38px;height:38px;margin-top:6px;background:var(--ac);clip-path:polygon(50% 0%, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0% 50%, 39% 39%);opacity:0.9;"></div>
+        <div>
+          <div><span style="color:var(--ac);font-weight:600;">ray</span><span style="color:rgba(233,237,243,0.4);">@</span><span style="color:#8F7BFF;font-weight:600;">aurora</span></div>
+          <div style="color:rgba(233,237,243,0.25);">─────────────</div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">os</span>FiFi OS 0.4 <span style="color:rgba(233,237,243,0.45);">(aurora)</span></div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">kernel</span>6.15.3-fifi</div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">shell</span>fish 4.0</div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">wm</span>fifi-shell · wayland</div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">uptime</span>3h 12m</div>
+          <div><span style="color:rgba(233,237,243,0.45);display:inline-block;width:76px;">memory</span>6.2 GiB <span style="color:rgba(233,237,243,0.45);">/ 32 GiB</span></div>
+        </div>
+      </div>
+      <div style="height:16px;"></div>
+      <div><span style="color:var(--ac);">&#10095;</span> paru -Syu</div>
+      <div style="color:rgba(233,237,243,0.55);"><span style="color:#8F7BFF;">::</span> Synchronizing package databases...</div>
+      <div style="color:rgba(233,237,243,0.55);"> core is up to date</div>
+      <div style="color:rgba(233,237,243,0.55);"> extra&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;8.4 MiB&nbsp;&nbsp;12.1 MiB/s</div>
+      <div style="color:rgba(233,237,243,0.55);"><span style="color:#8F7BFF;">::</span> 4 packages to upgrade</div>
+      <div style="color:rgba(233,237,243,0.55);"> mesa <span style="color:rgba(233,237,243,0.35);">25.1.4</span> → <span style="color:#e9edf3;">25.1.5</span>&nbsp;&nbsp;linux-fifi <span style="color:rgba(233,237,243,0.35);">6.15.3</span> → <span style="color:#e9edf3;">6.15.4</span></div>
+      <div><span style="color:var(--ac);">██████████████</span><span style="color:rgba(233,237,243,0.15);">██████</span> <span style="color:rgba(233,237,243,0.55);">82%</span></div>
+      <div style="height:16px;"></div>
+      <div><span style="color:var(--ac);">&#10095;</span> <span style="display:inline-block;width:8px;height:15px;background:rgba(233,237,243,0.8);vertical-align:text-bottom;"></span></div>
+    </div>
+  </div>
+
+  <!-- seam handle -->
+  <div class="seam" style="position:absolute;left:881px;top:428px;width:8px;height:56px;border-radius:4px;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(8px);z-index:5;"></div>
+
+  <!-- tiled pair: files -->
+  <div style="position:absolute;left:890px;top:132px;width:530px;height:648px;border-radius:16px;background:rgba(13,17,24,0.72);backdrop-filter:blur(28px) saturate(1.4);border:1px solid rgba(255,255,255,0.09);box-shadow:0 32px 90px -20px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column;">
+    <div style="height:38px;flex:none;display:flex;align-items:center;gap:10px;padding:0 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);position:relative;">
+      <div style="width:14px;height:10px;border-radius:2.5px;background:rgba(233,237,243,0.4);position:relative;">
+        <div style="position:absolute;top:-3px;left:0;width:7px;height:3px;border-radius:2px 2px 0 0;background:rgba(233,237,243,0.4);"></div>
+      </div>
+      <div style="font-size:12.5px;font-weight:600;color:rgba(233,237,243,0.75);">files</div>
+      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:26px;height:3px;border-radius:2px;background:rgba(255,255,255,0.12);"></div>
+      <div style="flex:1;"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:oklch(0.72 0.13 35);"></div>
+    </div>
+    <div style="height:46px;flex:none;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid rgba(255,255,255,0.05);">
+      <div style="display:flex;gap:2px;color:rgba(233,237,243,0.45);font-size:16px;"><div class="navbtn">‹</div><div style="width:22px;text-align:center;color:rgba(233,237,243,0.2);">›</div></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(233,237,243,0.45);">home <span style="color:rgba(233,237,243,0.25);">/</span> ray <span style="color:rgba(233,237,243,0.25);">/</span> <span style="color:#e9edf3;font-weight:600;">projects</span></div>
+      <div style="flex:1;"></div>
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:99px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.07);">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ac);">/</span>
+        <span style="font-size:11.5px;color:rgba(233,237,243,0.4);">search</span>
+      </div>
+    </div>
+    <div style="flex:1;display:flex;min-height:0;">
+      <div style="width:148px;flex:none;padding:14px 10px;border-right:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:2px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;color:rgba(233,237,243,0.35);padding:0 8px 6px;">PLACES</div>
+        <div class="hvrow" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);cursor:pointer;"><div style="width:5px;height:5px;border-radius:50%;background:rgba(233,237,243,0.3);"></div>Home</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;font-weight:600;color:#e9edf3;background:color-mix(in oklab, var(--ac) 13%, transparent);"><div style="width:5px;height:5px;border-radius:50%;background:var(--ac);"></div>Projects</div>
+        <div class="hvrow" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);cursor:pointer;"><div style="width:5px;height:5px;border-radius:50%;background:rgba(233,237,243,0.3);"></div>Downloads</div>
+        <div class="hvrow" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);cursor:pointer;"><div style="width:5px;height:5px;border-radius:50%;background:rgba(233,237,243,0.3);"></div>Music</div>
+        <div class="hvrow" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);cursor:pointer;"><div style="width:5px;height:5px;border-radius:50%;background:rgba(233,237,243,0.3);"></div>Trash</div>
+        <div style="height:14px;"></div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;color:rgba(233,237,243,0.35);padding:0 8px 6px;">TAGS</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);"><div style="width:5px;height:5px;border-radius:50%;background:var(--ac);"></div>shell</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:rgba(233,237,243,0.6);"><div style="width:5px;height:5px;border-radius:50%;background:#8F7BFF;"></div>design</div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;">
+        <div style="padding:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+          <div style="padding:14px 10px 12px;border-radius:12px;background:color-mix(in oklab, var(--ac) 10%, transparent);border:1px solid color-mix(in oklab, var(--ac) 45%, transparent);display:flex;flex-direction:column;align-items:center;gap:8px;">
+            <div style="width:36px;height:26px;border-radius:5px;background:color-mix(in oklab, var(--ac) 55%, rgba(233,237,243,0.2));position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;">fifi-shell</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">42 items</div>
+          </div>
+          <div style="padding:14px 10px 12px;border-radius:12px;background:color-mix(in oklab, var(--ac) 10%, transparent);border:1px solid color-mix(in oklab, var(--ac) 45%, transparent);display:flex;flex-direction:column;align-items:center;gap:8px;">
+            <div style="width:36px;height:26px;border-radius:5px;background:color-mix(in oklab, var(--ac) 55%, rgba(233,237,243,0.2));position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;">compositor</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">18 items</div>
+          </div>
+          <div class="tile" style="padding:14px 10px 12px;border-radius:12px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+            <div style="width:36px;height:26px;border-radius:5px;background:rgba(233,237,243,0.18);position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;color:rgba(233,237,243,0.85);">icons</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">156 items</div>
+          </div>
+          <div class="tile" style="padding:14px 10px 12px;border-radius:12px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+            <div style="width:36px;height:26px;border-radius:5px;background:rgba(233,237,243,0.18);position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;color:rgba(233,237,243,0.85);">mockups</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">7 items</div>
+          </div>
+          <div class="tile" style="padding:14px 10px 12px;border-radius:12px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+            <div style="width:36px;height:26px;border-radius:5px;background:rgba(233,237,243,0.18);position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;color:rgba(233,237,243,0.85);">sounds</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">23 items</div>
+          </div>
+          <div class="tile" style="padding:14px 10px 12px;border-radius:12px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+            <div style="width:36px;height:26px;border-radius:5px;background:rgba(233,237,243,0.18);position:relative;"><div style="position:absolute;top:-4px;left:0;width:16px;height:4px;border-radius:2.5px 2.5px 0 0;background:inherit;"></div></div>
+            <div style="font-size:12px;font-weight:600;color:rgba(233,237,243,0.85);">dotfiles</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:-4px;">31 items</div>
+          </div>
+        </div>
+        <div style="padding:2px 14px 10px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;color:rgba(233,237,243,0.35);padding:8px 2px;">RECENT</div>
+          <div style="display:flex;flex-direction:column;gap:2px;">
+            <div class="hvrow" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:9px;cursor:pointer;">
+              <div style="width:12px;height:15px;border-radius:2.5px;background:rgba(233,237,243,0.18);border-top:3px solid rgba(233,237,243,0.35);"></div>
+              <div style="font-size:12.5px;color:rgba(233,237,243,0.85);">gestures.spec.md</div>
+              <div style="flex:1;"></div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(233,237,243,0.35);">14:02</div>
+            </div>
+            <div class="hvrow" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:9px;cursor:pointer;">
+              <div style="width:12px;height:15px;border-radius:2.5px;background:rgba(233,237,243,0.18);border-top:3px solid rgba(233,237,243,0.35);"></div>
+              <div style="font-size:12.5px;color:rgba(233,237,243,0.85);">panel.blend</div>
+              <div style="flex:1;"></div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(233,237,243,0.35);">11:47</div>
+            </div>
+            <div class="hvrow" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:9px;cursor:pointer;">
+              <div style="width:12px;height:15px;border-radius:2.5px;background:rgba(233,237,243,0.18);border-top:3px solid rgba(233,237,243,0.35);"></div>
+              <div style="font-size:12.5px;color:rgba(233,237,243,0.85);">spark-prompts.toml</div>
+              <div style="flex:1;"></div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(233,237,243,0.35);">yesterday</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:34px;flex:none;display:flex;align-items:center;padding:0 16px;border-top:1px solid rgba(255,255,255,0.05);font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(233,237,243,0.4);">
+      <div>6 folders · <span style="color:var(--ac);">2 selected</span></div>
+      <div style="flex:1;"></div>
+      <div>512 GB · 84 free</div>
+    </div>
+  </div>
+
+  <!-- Spark ambient card -->
+  <div style="position:absolute;left:1556px;top:132px;width:324px;border-radius:18px;background:rgba(12,16,23,0.6);backdrop-filter:blur(28px) saturate(1.5);border:1px solid rgba(255,255,255,0.08);box-shadow:0 24px 70px -18px rgba(0,0,0,0.6);padding:18px;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <div style="width:14px;height:14px;background:linear-gradient(135deg,var(--ac),#8F7BFF);clip-path:polygon(50% 0%, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0% 50%, 39% 39%);"></div>
+      <div style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:13.5px;">Spark</div>
+      <div style="flex:1;"></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.1em;color:rgba(233,237,243,0.35);">AMBIENT</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;margin-top:16px;">
+      <div style="position:relative;width:52px;height:52px;flex:none;">
+        <div style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ac) 252deg, rgba(255,255,255,0.09) 0);-webkit-mask:radial-gradient(circle, transparent 57%, #000 58%);mask:radial-gradient(circle, transparent 57%, #000 58%);"></div>
+        <div style="position:absolute;inset:0;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;">2:14</div>
+      </div>
+      <div>
+        <div style="font-size:14px;font-weight:700;">Focus · Build</div>
+        <div style="font-size:11.5px;color:rgba(233,237,243,0.5);margin-top:3px;">since 12:18 · notifications muted</div>
+      </div>
+    </div>
+    <div style="height:1px;background:rgba(255,255,255,0.07);margin:16px 0 12px;"></div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;color:rgba(233,237,243,0.35);margin-bottom:8px;">SPARK SUGGESTS</div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div class="chip" style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);cursor:pointer;display:flex;align-items:center;gap:10px;">
+        <div>
+          <div style="font-size:12.5px;font-weight:600;">Resume PR #142 · gestures</div>
+          <div style="font-size:11px;color:rgba(233,237,243,0.45);margin-top:2px;">one failing test left yesterday</div>
+        </div>
+        <div style="flex:1;"></div>
+        <div style="color:var(--ac);font-size:14px;">→</div>
+      </div>
+      <div class="chip" style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);cursor:pointer;display:flex;align-items:center;gap:10px;">
+        <div>
+          <div style="font-size:12.5px;font-weight:600;">Standup in 25 min</div>
+          <div style="font-size:11px;color:rgba(233,237,243,0.45);margin-top:2px;">wraps your Build session</div>
+        </div>
+        <div style="flex:1;"></div>
+        <div style="color:var(--ac);font-size:14px;">→</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:7px;margin-top:14px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);color:rgba(233,237,243,0.6);">super</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);color:rgba(233,237,243,0.6);">space</div>
+      <div style="font-size:11px;color:rgba(233,237,243,0.4);">ask anything</div>
+    </div>
+  </div>
+
+  <!-- floating music window -->
+  <div style="position:absolute;left:1180px;top:660px;width:410px;border-radius:16px;background:rgba(13,17,24,0.78);backdrop-filter:blur(30px) saturate(1.5);border:1px solid rgba(255,255,255,0.1);box-shadow:0 40px 110px -18px rgba(0,0,0,0.75);overflow:hidden;z-index:10;">
+    <div style="height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);position:relative;">
+      <div style="display:flex;align-items:flex-end;gap:2px;height:12px;">
+        <div style="width:3px;height:7px;border-radius:2px;background:var(--ac);"></div>
+        <div style="width:3px;height:12px;border-radius:2px;background:var(--ac);"></div>
+        <div style="width:3px;height:9px;border-radius:2px;background:var(--ac);"></div>
+      </div>
+      <div style="font-size:12.5px;font-weight:600;color:rgba(233,237,243,0.75);">waves</div>
+      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:26px;height:3px;border-radius:2px;background:rgba(255,255,255,0.12);"></div>
+      <div style="flex:1;"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:rgba(233,237,243,0.22);"></div>
+      <div style="width:7px;height:7px;border-radius:50%;background:oklch(0.72 0.13 35);"></div>
+    </div>
+    <div style="display:flex;gap:16px;padding:16px;">
+      <div style="width:132px;height:132px;flex:none;border-radius:12px;background:repeating-linear-gradient(45deg, rgba(233,237,243,0.06) 0 10px, rgba(233,237,243,0.02) 10px 20px);border:1px solid rgba(255,255,255,0.08);display:grid;place-items:center;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);">cover art</div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;min-width:0;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;color:var(--ac);">NOW PLAYING</div>
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:600;margin-top:6px;">Midnight Drive</div>
+        <div style="font-size:12.5px;color:rgba(233,237,243,0.5);margin-top:2px;">Solar Fields · Movements</div>
+        <div style="margin-top:12px;position:relative;height:4px;border-radius:99px;background:rgba(255,255,255,0.1);">
+          <div style="position:absolute;left:0;top:0;bottom:0;width:44%;border-radius:99px;background:var(--ac);"></div>
+          <div style="position:absolute;left:44%;top:50%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;background:#e9edf3;box-shadow:0 1px 6px rgba(0,0,0,0.5);"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(233,237,243,0.4);margin-top:6px;"><span>2:41</span><span>6:05</span></div>
+        <div style="display:flex;align-items:center;gap:18px;margin-top:10px;">
+          <div class="ctl" style="display:flex;gap:1px;">
+            <div style="width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;border-right:9px solid #e9edf3;"></div>
+            <div style="width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;border-right:9px solid #e9edf3;"></div>
+          </div>
+          <div class="play" style="width:38px;height:38px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;gap:4px;box-shadow:0 0 20px color-mix(in oklab, var(--ac) 45%, transparent);">
+            <div style="width:4px;height:14px;border-radius:1.5px;background:#0a0d12;"></div>
+            <div style="width:4px;height:14px;border-radius:1.5px;background:#0a0d12;"></div>
+          </div>
+          <div class="ctl" style="display:flex;gap:1px;">
+            <div style="width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;border-left:9px solid #e9edf3;"></div>
+            <div style="width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;border-left:9px solid #e9edf3;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- dock -->
+  <div style="position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:50;display:flex;align-items:center;gap:7px;padding:9px;border-radius:22px;background:rgba(12,16,23,0.55);backdrop-filter:blur(30px) saturate(1.5);border:1px solid rgba(255,255,255,0.09);box-shadow:0 20px 60px -12px rgba(0,0,0,0.6);">
+    <div class="dki">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:#dfe6ee;">&#10095;_</div>
+      <div style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--ac);"></div>
+    </div>
+    <div class="dki">
+      <div style="width:20px;height:14px;border-radius:3px;background:rgba(223,230,238,0.85);position:relative;"><div style="position:absolute;top:-4px;left:0;width:9px;height:4px;border-radius:2px 2px 0 0;background:rgba(223,230,238,0.85);"></div></div>
+      <div style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--ac);"></div>
+    </div>
+    <div class="dki">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:#dfe6ee;">{&nbsp;}</div>
+    </div>
+    <div class="dki">
+      <div style="width:20px;height:20px;border-radius:50%;border:1.5px solid rgba(223,230,238,0.85);position:relative;">
+        <div style="position:absolute;left:-1px;right:-1px;top:50%;height:1.5px;background:rgba(223,230,238,0.85);"></div>
+        <div style="position:absolute;left:50%;top:-1px;bottom:-1px;width:9px;transform:translateX(-50%);border-radius:50%;border:1.5px solid rgba(223,230,238,0.85);border-top:none;border-bottom:none;"></div>
+      </div>
+    </div>
+    <div style="width:1px;height:30px;background:rgba(255,255,255,0.1);margin:0 3px;"></div>
+    <div class="orb" style="position:relative;width:54px;height:54px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(135deg, color-mix(in oklab, var(--ac) 30%, transparent), color-mix(in oklab, #8F7BFF 30%, transparent));border:1px solid color-mix(in oklab, var(--ac) 40%, transparent);box-shadow:0 0 26px color-mix(in oklab, var(--ac) 30%, transparent);">
+      <div style="width:22px;height:22px;background:linear-gradient(135deg,#fff,#cfe9ec);clip-path:polygon(50% 0%, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0% 50%, 39% 39%);"></div>
+    </div>
+    <div style="width:1px;height:30px;background:rgba(255,255,255,0.1);margin:0 3px;"></div>
+    <div class="dki">
+      <div style="display:flex;align-items:flex-end;gap:2.5px;height:16px;">
+        <div style="width:3.5px;height:9px;border-radius:2px;background:rgba(223,230,238,0.85);"></div>
+        <div style="width:3.5px;height:16px;border-radius:2px;background:rgba(223,230,238,0.85);"></div>
+        <div style="width:3.5px;height:12px;border-radius:2px;background:rgba(223,230,238,0.85);"></div>
+      </div>
+      <div style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--ac);"></div>
+    </div>
+    <div class="dki">
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        <div style="width:18px;height:2px;border-radius:2px;background:rgba(223,230,238,0.85);position:relative;"><div style="position:absolute;left:3px;top:-2px;width:6px;height:6px;border-radius:50%;background:#dfe6ee;"></div></div>
+        <div style="width:18px;height:2px;border-radius:2px;background:rgba(223,230,238,0.85);position:relative;"><div style="position:absolute;right:2px;top:-2px;width:6px;height:6px;border-radius:50%;background:#dfe6ee;"></div></div>
+        <div style="width:18px;height:2px;border-radius:2px;background:rgba(223,230,238,0.85);position:relative;"><div style="position:absolute;left:7px;top:-2px;width:6px;height:6px;border-radius:50%;background:#dfe6ee;"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+function tick(){
+  var n=new Date();
+  document.getElementById('clock').textContent=n.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false});
+  document.getElementById('date').textContent=n.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+}
+tick();setInterval(tick,30000);
+document.querySelectorAll('#intents .intent').forEach(function(p){
+  p.addEventListener('click',function(){
+    document.querySelectorAll('#intents .intent').forEach(function(q){q.classList.remove('active');});
+    p.classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
