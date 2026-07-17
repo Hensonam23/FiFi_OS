@@ -21,21 +21,21 @@ FiFi OS lets Linux handle the hard, invisible parts (graphics cards, USB devices
 ## Architecture
 
 ```
-+-----------------------------------------------------+
-|                    FiFi Desktop                      |
++------------------------------------------------------+
+|                     FiFi Desktop                     |
 |  Taskbar / Windows / File Browser / Terminal / Apps  |
-+-----------------------------------------------------+
-|              FiFi Compositor                         |
-|   Renders GUI via DRM/KMS (direct GPU framebuffer)   |
-|   Handles input via evdev (/dev/input/event*)        |
-|   PTY-based terminal with real shell                 |
-+-----------------------------------------------------+
++------------------------------------------------------+
+|              FiFi Compositor (Wayland)               |
+|   Hand-rolled Wayland server, software-composited    |
+|     XWayland for X11 apps, own X window manager      |
+|   Input via evdev, PTY terminal with a real shell    |
++------------------------------------------------------+
 |                  Linux Kernel (zen)                  |
 |   GPU drivers / Audio / USB / Networking / Storage   |
-+-----------------------------------------------------+
++------------------------------------------------------+
 ```
 
-The FiFi compositor is a native C program that takes exclusive control of the display. No X11, no GNOME, no desktop environment underneath. It talks to the GPU directly via DRM/KMS and handles all input.
+The FiFi compositor is a native, static C program that takes exclusive control of the display. No GNOME, no KDE, no desktop environment underneath. It is its own Wayland compositor and its own X window manager (for XWayland apps), drawing every pixel of the desktop itself and handling all input.
 
 ---
 
@@ -48,18 +48,21 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 | Taskbar favorites: built-in + pinned apps as icons, drag-to-reorder, persist, running indicators | **Working** |
 | App Store: install / launch / update / uninstall / search, Installed tab, live catalog | **Working** |
 | App runtime: downloaded AppImages/apps launch via one unified launcher; real logos everywhere | **Working** |
-| Desktop icons: drag to reposition (persisted), right-click menu (Open / Properties / Remove), Properties dialog | **Working** |
-| X11 apps via XWayland: built-in X11 window manager presents apps (LibreOffice) as decorated, titled, borderless FiFi windows | **Working** |
+| Desktop icons: drag to reposition (persisted), right-click menu, Properties, double-click to open | **Working** |
+| Window controls for apps: LibreOffice gets a FiFi titlebar with close/minimize; LibreWolf draws its own minimize/maximize/close; Steam keeps its own chrome | **Working** |
+| X11 apps via XWayland: built-in X window manager presents apps as titled FiFi windows, no black X-root border | **Working** |
+| Update commands: `fifi update` / `fifi upgrade` check and apply app + OS updates from the terminal | **Working** |
+| Wallpapers: smooth aurora plus 6 presets (Northern, Nebula, Dusk, Ocean, Spring, Ember), and 2K/4K image backgrounds with Fill/Fit/Stretch/Center | **Working** |
 | System tray: battery (laptop-only, charge + charging bolt), volume, network, clock | **Working** |
 | Tray hover tooltips: battery time-remaining, network IP, volume, memory, full date | **Working** |
 | Clock calendar popup: month nav arrows + month/year picker, today highlighted | **Working** |
-| Theme system: 16 accent presets, wallpaper patterns, full-screen gradient | **Working** |
-| File browser: list/grid view, sidebar, search, operations | **Working** |
+| Theme system: 16 accent presets, wallpapers, full-screen gradient | **Working** |
+| File browser: list/grid view, sidebar, search, operations, crisp resize | **Working** |
 | Text viewer/editor: syntax highlight, edit mode, undo | **Working** |
 | Settings panel: theme, clock, audio, gaming, network, VPN | **Working** |
-| PTY terminal: real shell in a FiFi window, multiple instances | **Working** |
+| PTY terminal: real shell in a FiFi window, multiple instances, full UTF-8 | **Working** |
 | DRM/KMS display: direct GPU, no polling lag | **Working** |
-| Audio: ALSA volume control (slider works in UI) | **Working** |
+| Audio: ALSA + PipeWire volume and routing | **Working** |
 | Gamepad: evdev HID input routed to focused IPC app | **Working** |
 | Gaming mode: CPU governor switch, uncapped frame rate | **Working** |
 | WiFi: auto-connect, Intel AX-series firmware bundled | **Working** |
@@ -71,148 +74,90 @@ The FiFi compositor is a native C program that takes exclusive control of the di
 | Intrusion detection: log monitor, process integrity, listener scan | **Working** |
 | AppArmor: compositor and security apps run with MAC profiles | **Working** |
 | Encrypted storage: LUKS2 support, status shown in Security Center | **Working** |
+| Built-in offline AI: local llama.cpp model, terminal chat + agent, no internet | **Working** |
 | Keyboard shortcuts: Alt+Tab, Ctrl+W, Win+L, Win+D, window snap | **Working** |
-| Context menus: right-click desktop and file browser | **Working** |
-| Toast notifications: volume, lock, snap, and system actions | **Working** |
 | Secure Boot: USB flashing signs EFI binaries, cert exported for enrollment | **Working** |
 | In-OS installer: disk wizard, whole-disk and partition modes, GRUB dual-boot | **Working** |
-| OS update: type `update` with USB plugged in to update without reinstalling | **Working** |
+| OS update: `update` (USB) or `fifi upgrade` (online, GitHub Releases) | **Working** |
 
 ---
 
-## Current State
+## Current state
 
-**Beta 1.0 — Phases 5 and 6 (Full System) complete, followed by a full-codebase audit + optimization pass.**
+**Beta 1.0.** The build phases (Linux foundation, compositor, shell/terminal, display/gaming, security/privacy, full system) are all complete, followed by a full-codebase audit and optimization pass. The desktop runs on real hardware with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 apps (Steam, LibreOffice, browsers), WiFi via wpa_supplicant + iwd, and a full security suite.
 
-FiFi desktop runs on Linux with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 app support (Steam, browsers), WiFi via wpa_supplicant + iwd, and a full security suite in the Security Center.
+Recent work:
 
-Phase 6 brings the in-OS installer, browser integration, and a full developer workflow. The installer is a 7-screen wizard that handles disk selection, formatting, GRUB install, and Windows dual-boot alongside existing installs. Type `setup` after booting to clone the source. Type `update` with the USB plugged in to update the OS in place without reinstalling or losing any downloaded tools.
+- **App window controls.** LibreOffice (rootful XWayland) now gets a real FiFi titlebar with working close and minimize buttons above its menu bar, and the top bar auto-hides while it is maximized. LibreWolf draws its own titlebar with minimize/maximize/close. Steam stays borderless with its own chrome. Window buttons are large and easy to hit.
+- **Update from the terminal.** `fifi update` checks for both app and OS updates; `fifi upgrade` applies them. Apps come from the App Store; the OS comes from GitHub Releases. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
+- **Desktop visuals.** A smooth, seam-free aurora wallpaper plus six more presets, and 2K/4K image backgrounds with fit modes. Desktop icons open on double-click. The Files window re-renders crisply when resized.
+- **Audit + optimization.** Correctness fixes (integer-overflow heap writes, use-after-free, resource leaks) and cleanup across the compositor and every app.
 
-The desktop now has a full app ecosystem. A searchable kickoff launcher lists every built-in and installed app with its real icon; the App Store installs, launches, updates, and uninstalls apps and tracks running services; downloaded AppImages run through one unified launcher so everything opens the same way. Desktop shortcuts can be dragged anywhere and stay put, right-clicked for an Open / Properties / Remove menu, and double-clicked to launch the app. X11-only apps run through a built-in X11 window manager over rootless-style XWayland: the compositor launches and manages XWayland itself, so an app like LibreOffice appears as an ordinary decorated FiFi window titled with the app's name, with no black X-root border. The launcher also handles bootstrap/downloader packages (Discord fetches its real client on first run) and RunImage bundles, pulling in the shared libraries downloaded apps expect. The taskbar is a single icon strip — the built-in apps (Terminal, Files, Settings, Viewer) sit alongside pinned favorites, each showing a running indicator when open, and favorites can be dragged to reorder and are remembered across reboots. The tray adds a laptop-only battery indicator (charge level, a charging bolt when plugged in, and hover-for-time-remaining) plus hover tooltips across every tray item, and clicking the clock opens a month calendar with a month/year picker.
+Earlier milestones include the full app ecosystem (searchable launcher, App Store, unified launcher, draggable desktop shortcuts), the UTF-8 terminal rewrite, the security feature set (DoH, WireGuard, Tor, scanners, IDS, AppArmor, LUKS2), the window-manager overhaul (clean stacking, multi-window, edge/corner resize), the offline AI assistant, the in-OS installer, and Secure Boot USB signing.
 
-The terminal received a full UTF-8 rewrite. Multi-byte sequences are now decoded correctly so modern terminal tools render cleanly. OSC sequences (window title), alternate screen, and cursor hide/show are all handled properly. The PTY grid tracks the terminal window: text wraps at the window border and re-flows live when the window is resized.
+---
 
-Phase 5 added a security-focused feature set: DNS over HTTPS via dnscrypt-proxy, WireGuard VPN with a settings panel, Tor mode with bootstrap status, a network scanner, nmap port scanner, packet capture, password strength tester, vulnerability scanner, and intrusion detection. AppArmor profiles run the compositor and security apps in MAC mode. LUKS2 encrypted storage status and EFI Secure Boot status are shown in Security Center.
+## Updating
 
-The window manager was overhauled. Overlapping app windows stack cleanly with no title bar or outline showing through from the window behind. The terminal behaves like any other window: it comes to the front when you click it and apps cover it when raised. You can open multiple terminals from the start menu, and every window can be resized by dragging its edges or corners. Mouse wheel scrolls the topmost window under the cursor.
+FiFi separates app updates from OS updates and gives you one command for both.
 
-USB flashing signs the EFI binaries with your Secure Boot key and exports the certificate to the USB root so it can be enrolled in another machine's BIOS.
+```sh
+fifi update      # check for app AND OS updates (changes nothing)
+fifi upgrade     # apply everything (asks first); add -y to skip prompts
+fifi version     # show the installed OS version
+```
+
+- **Apps** update from the App Store online.
+- **The OS** (kernel + initramfs) updates from GitHub Releases on this repo: `fifi upgrade` compares the latest release to what is installed, downloads the `bzImage` + `initramfs.cpio.gz` assets into `/fifi-data/boot` (keeping `.prev` backups), and reboots into the new system.
+- Offline alternative: `update` applies a new OS from a plugged-in FiFi USB. `app-update` updates apps only.
 
 ---
 
 ## Roadmap
 
-### Phase 1: Linux Foundation (done)
+**Scope:** Desktop, Laptop, Tablet, Phone. "Server" is not a separate build; it is the headless/CLI profile of the same platform. Embedded and automotive are out of scope.
 
-- [x] Minimal linux-zen kernel config (x86-64, DRM, evdev, virtio)
-- [x] Custom initramfs: busybox userland, FiFi init script as PID 1
-- [x] FiFi banner at boot
-- [x] QEMU test target: `make linux-run`
+**Two tracks, kept in parallel:**
 
-### Phase 2: FiFi Compositor (done)
+- **Linux track** (this repo) is both the proving ground and a first-class product. It always ships and stays up to date. This is the daily driver for years.
+- **Bare-metal track** is the end goal: a kernel written from scratch with no Linux underneath. It catches up subsystem by subsystem behind frozen shared APIs and eventually becomes the production kernel. Linux is never discarded; it is the co-development platform until bare metal is genuinely better.
 
-- [x] `/dev/fb0` framebuffer backend
-- [x] Port `gui.c` to compile as Linux userspace (platform stub headers)
-- [x] Input via evdev: keyboard, mouse (relative + buttons)
-- [x] Software cursor with save/restore
-- [x] Double-buffered rendering (backbuffer to dirty-row flip at 250 Hz)
-- [x] Full FiFi desktop: taskbar, window manager, launcher, theme system
-- [x] VFS mapped to `/fifi-data/` on real POSIX filesystem
-- [x] RTC via `localtime()`, uptime via `CLOCK_MONOTONIC`
-- [x] Static binary with no library dependencies in initramfs
+**Near-term priority:** Linux **Desktop v1.0 is the sole goal.** Everything past it (ARM64, tablet, phone, bare-metal ARM) waits until Desktop v1.0 ships. Note also that the on-device AI ("Machine Spirit") stays a desktop/laptop feature and is designed as a cleanly-removable module, so mobile builds omit the local model entirely (a battery cannot run llama.cpp locally).
 
-### Phase 3: Shell and Terminal (done)
+### Built so far
 
-- [x] PTY-based terminal: real shell (busybox sh) running in a FiFi window
-- [x] Keyboard routed to PTY when terminal is focused, to GUI otherwise
-- [x] F-key shortcuts always reach the GUI regardless of terminal focus
-- [x] PTY window size calculated from font metrics and terminal geometry
-- [x] SDL2 native runner: smooth VSync-locked display for development (no QEMU needed)
-- [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
-- [x] App protocol: connect, register window, push pixel frames, receive input events
-- [x] File browser as standalone IPC process (PSF font, dir nav, mouse and keyboard)
-- [x] Settings panel as standalone IPC process (system info, ALSA volume slider)
+Phases 1 through 6 are complete: the Linux foundation and custom initramfs, the hand-rolled compositor and desktop, the PTY shell and terminal, DRM/KMS display and gaming, the security and privacy suite, and the full-system layer (installer, browser, LibreOffice, offline AI, unified settings). See **What works today** above. The project is at **Beta 1.0**.
 
-### Phase 4: Display and Gaming (done)
+### Where it is going
 
-- [x] DRM/KMS upgrade: compositor talks to GPU directly via `/dev/dri/card0`
-- [x] virtio-gpu-pci: explicit per-frame flush instead of poll timer (QEMU smooth display)
-- [x] Dirty-row tracking: only copies changed rows to GPU
-- [x] ALSA volume control: volume slider in FiFi taskbar controls real system audio
-- [x] ALSA test tone: test button plays a real sine wave at current volume via PCM ioctls
-- [x] Gamepad input: evdev HID events detected, normalized, routed to focused IPC app
-- [x] Gaming mode toggle: Settings panel button switches CPU governor and uncaps frame rate
-- [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
-- [x] Gamepad visualizer app: shows live button/axis state
-- [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar
-- [x] IPC window drag: grab any IPC app window by its title bar to move it
-- [x] CPU frequency in Settings: reads from sysfs, shown in System Information panel
-- [x] Gamepad status in Settings: shows Connected/None in Gaming section
-- [x] IPC window close button: red X in top-right of each app window
-- [x] IPC window z-ordering: click-to-front with repaint, topmost window wins hit-test
-- [x] IPC taskbar buttons: each open IPC app gets a taskbar button
-- [x] IPC window minimize: hide window, restore via taskbar button click
-- [x] F-key pass-through: F1-F4 always reach GUI even when IPC app has keyboard focus
-- [x] Screen blanking: display goes black after 5 minutes idle, any input wakes it
-- [x] PipeWire audio: game audio routing, multi-app mixing (PulseAudio-compatible)
-- [x] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
-- [x] Steam installed in image, launches in a FiFi window
-- [x] Proton configured and tested (fifi-proton panel shows versions, Vulkan detected)
+Timelines are active-effort ranges (steady part-time work with AI help). Hardware-gated items are marked with an hourglass.
 
-### Phase 5: Security and Privacy (done)
+- **Phase 0 - Harden and make it testable (blocks everything).** Strip the dev SSH key from release images, add a non-root user and re-enable per-app sandboxing, verify signatures/hashes on every download (apps, AI models, OS updates), run the compositor under a supervisor with auto-reboot, move OS update to A/B (never overwrite the only bootable copy), and build a screenshot-diff test harness plus a bare-metal QEMU self-test wired into CI.
+- **Phase 1 - Consolidate the shared platform.** Extract the genuinely shared code (GUI toolkit, IPC protocol, config/theme formats, app framework) into one versioned library with a frozen, documented API consumed by both tracks, and stop the two branches from drifting.
+- **Phase 2 - Desktop/Laptop 1.0 (Linux).** Finish the desktop UX and settings parity, ship an app framework/SDK and a verifying package manager, and do the gaming presentation rework: the compositor is CPU-only software compositing today, so it needs GPU-accelerated scanout/page-flip with vsync plus pointer-constraints and relative-pointer before FPS mouselook is possible. Then ship Desktop/Laptop 1.0, the first real release.
+- **Phase 3 - ARM64 + Raspberry Pi CM5 bring-up (Linux).** Hourglass, gated by CM5 stock. Cross-compile the compositor and apps for aarch64, swap Intel/Mesa for the CM5's VideoCore VII (Mesa V3D), move the boot chain to u-boot/UEFI + device tree, and get FiFi Desktop running on the CM5 driving an external display.
+- **Phase 4 - Touch and mobile foundations = FiFi Tablet.** Add a platform-neutral touch/gesture model, a DPI-aware touch-sized responsive toolkit, an on-screen keyboard, real power management and suspend/resume, rotation, notifications, and non-root per-app isolation. Milestone: a CM5 + touchscreen + battery handheld.
+- **Phase 5 - FiFi Phone.** Hourglass, mostly hardware. Validate the software on a repairable phone (PinePhone Pro / Fairphone) first, then add cellular modem integration, a phone/SMS framework, audio routing, and the sensor stack. No built-in AI on the phone.
+- **Phase 6 - Bare-metal catch-up (the end goal).** Continuous and multi-year. Behind the frozen APIs, port matured subsystems into the from-scratch kernel: fix the x86-64 ring0 holes, add the windowing syscalls, reach GUI/WM/IPC parity, add SMP, then the ARM64 port, then the irreducibly hard parts with no Linux head start (GPU driver, filesystem, TLS, power management).
 
-- [x] Keyboard shortcuts: Alt+Tab, Ctrl+W, F11/F12 volume, Win+L lock, Win+D show desktop, window snap
-- [x] Numpad keys: all numpad digits and operators work in terminal and apps
-- [x] Screen lock: Win+L locks the screen, password required to unlock
-- [x] Firewall toggle: nftables on/off switch in Settings
-- [x] Security Center app: firewall status, privacy mode (73 telemetry domains blocked), port scanner, active connections
-- [x] Context menus: right-click desktop and file browser, scale with font size
-- [x] Toast notifications: volume, lock, snap, show desktop, and other system actions
-- [x] Window layering: overlapping windows stack cleanly, no bleed from windows behind
-- [x] Terminal in the stack: terminal is a normal window, comes to front when clicked
-- [x] Multiple terminals: open extra terminal windows from the start menu, each independent
-- [x] Window resize: drag any edge or corner, terminal resizes cleanly with no artifacts
-- [x] Mouse wheel: routes to whichever window is on top at the cursor
-- [x] DNS over HTTPS: system-wide encrypted DNS via dnscrypt-proxy, toggle in Security Center
-- [x] VPN integration: WireGuard built in, connect/disconnect from Settings and Security Center
-- [x] Tor mode: toggle in Security Center, SOCKS5 on port 9050, bootstrap status shown
-- [x] Network scanner: detect live hosts on local subnet (nmap -sn)
-- [x] Port scanner: nmap service/version scan on any target
-- [x] Packet capture: tcpdump-based capture in Security Center
-- [x] Password strength tester: masked input, color-coded score
-- [x] Intrusion detection: log monitor, process integrity check, unexpected listener detection
-- [x] AppArmor: kernel built with MAC support, compositor and security center run in complain mode
-- [x] Encrypted storage: cryptsetup/LUKS2 bundled, status shown in Security Center
-- [x] Secure Boot status: EFI variable read and shown in Security Center
-- [x] Automatic updates: version shown in Security Center with update link
-- [x] WiFi Manager: scan, select, and connect to networks from a start-menu app
-- [x] Secure Boot USB signing: EFI binaries signed on flash, cert exported to USB root for BIOS enrollment
+### Hardware plan (the CM5 handheld/phone)
 
-### Phase 6: Full System
+Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (Phase 4) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
 
-- [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
-- [x] OS update command: `update` copies new kernel+initramfs from USB without reinstalling
-- [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
-- [x] Bluetooth: dbus + bluetoothd autostart at boot, pairing via `bt`/bluetoothctl, A2DP audio via PipeWire bluez5
-- [x] Browser: LibreWolf in a FiFi window (chrome-text rendering and typing fixed)
-- [x] LibreOffice: installed by default during installation
-- [x] Desktop shortcuts, image viewer
-- [x] Font system: Settings gets a dropdown where each font name renders in its own font as a preview
-- [x] Desktop themes: optional theme system with selectable styles
-- [x] Built-in AI assistant: local model (llama.cpp), no internet required, completely offline — `ai`/`fifi-ai` chat, `fifi-agent` agentic mode, resident llama-server via `fifi-ai-serve`
-- [x] AI chat app: windowed "FiFi AI" GUI client for the offline model, in the launcher
-- [x] Unified Settings: single tabbed hub (Personalize, Wi-Fi, Network, System, Security, About) with a theme/wallpaper personalization tab; `fifi-settings <tab>` deep-links
-- [x] Modernized desktop: accent-themed titlebars/dock/launcher/menus, rounded corners, glass, centered dock
-- [x] Live trial: "Try FiFi OS (Live)" boot entry; LibreWolf + LibreOffice auto-provision on first boot
-- [x] Full-codebase audit + optimization pass: correctness bugs fixed (integer-overflow heap writes, use-after-free, resource leaks), dead code and redundant comments removed, across the compositor and every app
+### What accelerates with AI vs what does not
 
-### v1.0
+- **Fast (weeks):** compositor/UI/toolkit work, touch/gesture/on-screen keyboard, settings, app framework, the ARM64 software port, security hardening, tests/CI, the shared-library refactor.
+- **Hardware-gated (months):** CM5 availability, panel sourcing and driving, battery/thermal, modem/RF, and every "debug it on the physical board" loop.
+- **Irreducibly long (years):** the bare-metal kernel's from-scratch GPU/FS/TLS/power management and the ARM64 kernel port.
+
+A full technical assessment (maturity scoring, technical debt, architectural risks, and the longer five/ten-year plans) lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
+
+### v1.0 release checklist
 
 - [ ] Boots on any x86-64 machine without configuration
 - [ ] Full desktop: browser, terminal, file manager, text editor, settings, system monitor
 - [ ] Steam and Proton gaming on NVIDIA and AMD hardware
 - [ ] USB installer: one click to install to disk
-- [ ] Dual installer: choose the everyday Linux version or the from-scratch version at install time
 - [ ] Default encrypted, default private, default hardened
 - [ ] Public release at GitHub Releases
 
@@ -242,25 +187,17 @@ make sdl-run
 
 # Flash to USB (single EFI partition, Secure Boot signed, verified write)
 sudo bash scripts/flash-linux-usb.sh /dev/sdX
-
-# Update an installed FiFi OS without reinstalling (plug in USB, then run from terminal)
-update
 ```
 
-### First boot after install
+### On the machine
 
 ```sh
-# Clone the FiFi OS source into persistent storage
-setup
+setup           # first boot: clone the FiFi OS source into persistent storage
+fifi upgrade    # check for and apply app + OS updates
+update          # offline: apply a new OS from a plugged-in FiFi USB
 ```
 
-### Updating after that
-
-```sh
-# From the FiFi OS terminal with USB plugged in:
-update
-# Then reboot. Anything installed in /fifi-data and the source repo are untouched.
-```
+Anything installed in `/fifi-data` and the source repo are untouched by updates.
 
 ---
 
@@ -275,13 +212,13 @@ FiFi OS is built with three equal priorities: gaming performance, security, and 
 - No crash reports, no analytics, no usage data collected anywhere.
 
 **Security:**
-- Full disk encryption on by default. Your data is locked without your key.
-- Each app runs in a sandbox. A compromised browser cannot touch your files.
-- Automatic security updates with rollback. Stay patched without having to manage it yourself.
+- Full disk encryption available. Your data is locked without your key.
+- App sandboxing (per-app isolation is being hardened toward v1.0).
+- OS updates from a signed source, with A/B rollback on the roadmap.
 - Signed boot chain. Nobody can swap your kernel without you knowing.
 
 **Offensive and defensive tools (legal use only):**
-- Network scanner, port scanner, packet capture: useful for testing your own network or learning how things work.
+- Network scanner, port scanner, packet capture: for testing your own network or learning how things work.
 - Password strength tester, vulnerability scanner: find problems before someone else does.
 - Log monitor, intrusion detection, process integrity checker: know when something is wrong.
 - These tools are included for legitimate security work and education, not for attacking systems you do not own.
@@ -290,13 +227,13 @@ FiFi OS is built with three equal priorities: gaming performance, security, and 
 
 ## Built-in AI
 
-A local AI assistant with no cloud, no account, and no data leaving the machine. It runs a small language model (via llama.cpp) entirely on your hardware. Useful for help with the terminal, writing, and security analysis. Completely optional and completely offline. Chat from the terminal with `ai` or `fifi-ai`, run the agentic mode with `fifi-agent`, or keep a resident model loaded with `fifi-ai-serve`.
+A local AI assistant with no cloud, no account, and no data leaving the machine. It runs a small language model (via llama.cpp) entirely on your hardware, useful for help with the terminal, writing, and security analysis. Completely optional and completely offline. Chat from the terminal with `ai` or `fifi-ai`, run the agentic mode with `fifi-agent`, or keep a resident model loaded with `fifi-ai-serve`. It is a desktop/laptop feature by design and is omitted from future mobile builds.
 
 ---
 
-## The other version
+## The two versions
 
-There is a second version of FiFi OS that runs on its own kernel written entirely from scratch, with no Linux underneath. It is a separate, longer-term project for research and learning. The version described here is the one built for everyday use and gaming, and it is where the active work happens.
+There are two FiFi OS kernels developed together. The version described here runs on the Linux kernel and is the daily driver for everyday use and gaming, where the active work happens. The second runs on its own kernel written entirely from scratch with no Linux underneath: a longer-term, multi-year effort that catches up to the Linux version subsystem by subsystem behind shared APIs, and eventually becomes the production kernel. Linux always ships; bare metal always wins in the end.
 
 ---
 
