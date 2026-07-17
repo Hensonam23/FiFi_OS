@@ -7,9 +7,9 @@
 /* ── Taskbar ─────────────────────────────────────────────────────────── */
 
 uint64_t logo_eff_w(void) {
-    uint64_t fw = console_font_width();
-    uint64_t w  = (uint64_t)gui_strlen("FiFi OS") * fw + 16u;
-    return (w > LOGO_W) ? w : LOGO_W;
+    /* The launcher is the FiFi "Spark" orb — a square button (dock height). */
+    uint64_t s = TASKBAR_H > 6u ? TASKBAR_H - 6u : TASKBAR_H;
+    return s;
 }
 
 /* ── Taskbar favorites: built-in app launchers + user-pinned apps ─────────
@@ -41,6 +41,17 @@ uint64_t favbar_w(void) {
  * panel_align on a horizontal panel: START = left after the logo (Windows),
  * CENTER = the favorites+pills run centered on screen (macOS dock), END =
  * right-justified before the tray. Everything (draw + hit) derives from this. */
+/* Combined-dock state: the system tray (battery/volume/network/clock) can render
+ * either right-anchored on a full-width bar (dock_float off = Windows style) or
+ * folded INTO the floating dock card after the app pills (dock_float on). The
+ * centering math (logo_x/favbar_start_x) runs before the tray draws, so its width
+ * is cached each frame. */
+uint64_t g_tray_total_w = 0;      /* cached tray-group width (set by taskbar_draw_tray) */
+uint64_t g_dock_tray_left = 0;    /* nonzero => draw the tray inline at this x (floating dock) */
+/* When the horizon (top) bar is on it owns the status cluster, so the dock
+ * carries no tray → zero width, keeping the dock centered on apps only. */
+static uint64_t tray_width(void) { return g_theme.statusbar ? 0u : (g_tray_total_w ? g_tray_total_w : 200u); }
+
 /* Width of the app-dock run: favorites + open-window pills (no logo/tray). */
 uint64_t favbar_run_w(void) {
     int npill = 0;
@@ -62,8 +73,19 @@ uint64_t logo_x(void) {
     uint64_t fb_w  = console_fb_width();
     uint64_t fw    = console_font_width();
     uint64_t group = logo_eff_w() + 8u + favbar_run_w();   /* logo + gap + dock run */
-    uint64_t avail_right = g_tray_left_x > LOGO_X ? g_tray_left_x - 8u
-                         : (fb_w > 30u * fw ? fb_w - 30u * fw : LOGO_X);
+    uint64_t avail_right;
+    if (g_theme.dock_float && !g_theme.statusbar) {
+        /* Combined floating dock (horizon bar off): the tray is folded into the
+         * card after the pills, so center [logo + favorites + pills + gap + tray]
+         * as one unit across the full width. */
+        group += 12u + tray_width();
+        avail_right = fb_w > 8u ? fb_w - 8u : fb_w;
+    } else {
+        /* Full-width bar: the tray is right-anchored; center favs+pills in the
+         * space left of it. */
+        avail_right = g_tray_left_x > LOGO_X ? g_tray_left_x - 8u
+                    : (fb_w > 30u * fw ? fb_w - 30u * fw : LOGO_X);
+    }
     if (avail_right <= LOGO_X) return LOGO_X;
     uint64_t region = avail_right - LOGO_X;
     if (group >= region) return LOGO_X;              /* doesn't fit → left-align */
@@ -73,6 +95,10 @@ uint64_t logo_x(void) {
 uint64_t favbar_start_x(void) {
     uint64_t base = LOGO_X + logo_eff_w() + 8u;
     if (g_theme.panel_align == PALIGN_START || panel_is_vertical()) return base;
+    /* Combined floating dock centers the whole group (incl. tray) via logo_x(),
+     * so favorites sit just right of the centered launcher. */
+    if (g_theme.dock_float && g_theme.panel_align == PALIGN_CENTER)
+        return logo_x() + logo_eff_w() + 8u;
     uint64_t run  = favbar_run_w();   /* favorites + open window pills */
     uint64_t fb_w = console_fb_width();
     /* Right boundary = actual tray left edge (clock/vol/net/battery), captured
@@ -203,18 +229,26 @@ void taskbar_draw_tray(void) {
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
 
-    /* ── Clock ── */
+    /* ── System tray as ONE grouped cluster ──────────────────────────────
+     * battery · volume · network · clock (+ gamepad/fps when active) render
+     * inside a single rounded panel on the right, so they read as one unit
+     * instead of scattered cells. Content + widths are gathered first, then a
+     * group background is drawn, then each item is placed left→right on it. */
+    /* The horizon (top) bar owns the status cluster — draw no dock tray then. */
+    if (g_theme.statusbar) {
+        g_tray_total_w = 0; g_batt_present = false;
+        g_clk_x = 0; g_clk_w = 0; g_vol_tray_x = 0; g_vol_tray_w = 0;
+        g_net_tray_x = 0; g_net_tray_w = 0; g_batt_x = 0; g_batt_w = 0;
+        g_tray_left_x = fb_w > 8u ? fb_w - 8u : 0u;
+        return;
+    }
+    uint64_t cy = ty + (TASKBAR_H - fh) / 2u;
+
+    /* Clock string (12h/24h, UTC-adjusted) */
     uint8_t rh = 0, rm = 0, rs = 0;
     rtc_get_time(&rh, &rm, &rs);
-    {
-        int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset;
-        adj = ((adj % 24) + 24) % 24;
-        rh = (uint8_t)adj;
-    }
-
-    /* Build clock string: HH:MM:SS (24h) or H:MM:SS AM/PM (12h) */
-    char clk[14]; /* max "12:59:59 PM\0" = 12 chars */
-    int clk_chars;
+    { int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset; adj = ((adj % 24) + 24) % 24; rh = (uint8_t)adj; }
+    char clk[14]; int clk_chars;
     if (g_theme.clock_12h) {
         const char *ampm = (rh < 12u) ? "AM" : "PM";
         uint8_t h12 = rh % 12u; if (h12 == 0u) h12 = 12u;
@@ -229,140 +263,134 @@ void taskbar_draw_tray(void) {
         gui_itoa_pad2(rs, clk + 6); clk[8] = '\0';
         clk_chars = 8;
     }
+    uint64_t clk_w = (uint64_t)clk_chars * fw;
 
-    uint64_t clk_w  = (uint64_t)clk_chars * fw;
-    uint64_t clk_x  = fb_w > clk_w + 8u ? fb_w - clk_w - 8u : 0u;
-    uint64_t clk_y  = ty + (TASKBAR_H - fh) / 2u;
-    /* repaint the clock cell with the panel gradient (keeps digits crisp) */
-    uint32_t clk_top = g_cal_popup_open ? 0x001b2740u : 0x00101624u;
-    uint32_t clk_bot = g_cal_popup_open ? 0x00121a2eu : 0x00080b14u;
-    console_fill_vgrad(clk_x > 4u ? clk_x - 4u : 0u, ty + 1u, clk_w + 8u, TASKBAR_H - 1u,
-                       clk_top, clk_bot);
-    gui_draw_str_fg(clk_x, clk_y, clk, 0x00b8d8f4u);
-    /* expose the clock hit region so a click opens the calendar */
-    g_clk_x = clk_x > 4u ? clk_x - 4u : 0u;
-    g_clk_w = clk_w + 8u;
+    /* Volume */
+    int vol = hda_is_ready() ? hda_get_volume() : -1;
+    char vtxt[6]; int vi = 0;
+    if (vol < 0) { vtxt[vi++]='-'; vtxt[vi++]='-'; vtxt[vi++]='%'; }
+    else if (vol >= 100) { vtxt[vi++]='1'; vtxt[vi++]='0'; vtxt[vi++]='0'; vtxt[vi++]='%'; }
+    else { if (vol >= 10) vtxt[vi++]=(char)('0'+vol/10); vtxt[vi++]=(char)('0'+vol%10); vtxt[vi++]='%'; }
+    vtxt[vi] = '\0';
+    uint64_t vol_w = (uint64_t)vi * fw;
 
-    /* (Memory usage bar removed per user request — it read as a separator bar.) */
+    /* Network */
+    bool has_nic = net_nic_present();
+    bool has_ip  = (net_ip != 0);
+    const char *net_lbl = has_ip ? "LAN" : (has_nic ? "NIC" : "---");
+    uint32_t net_fg = has_ip ? 0x0050e880u : (has_nic ? 0x00e07050u : COL_TASKBAR);
+    uint64_t net_w = 3u * fw;
 
-    /* ── Gamepad indicator (shown when gamepad connected) ── */
-    uint64_t tray_right = clk_x > 8u ? clk_x - 8u : 0u;
-    {
-        extern bool input_gamepad_connected(void);
-        if (input_gamepad_connected()) {
-            static const char *gp_lbl = "GP";
-            uint64_t gpl = 2u;
-            uint64_t gpw = gpl * fw + 8u;
-            uint64_t gpx = tray_right > gpw ? tray_right - gpw : 0u;
-            console_fill_rect(gpx, ty + 3u, gpw, TASKBAR_H - 6u, 0x00102820u);
-            gui_draw_str(gpx + 4u, ty + (TASKBAR_H - fh) / 2u, gp_lbl, 0x0050e880u, 0x00102820u);
-            tray_right = gpx > 4u ? gpx - 4u : 0u;
+    /* Battery (laptops only) — a 24px glyph */
+    bool has_batt = (battery_present && battery_present());
+    int  bpct = 0; bool bchg = false;
+    if (has_batt) { bpct = battery_percent ? battery_percent() : 0; if (bpct < 0) bpct = 0; if (bpct > 100) bpct = 100;
+                    bchg = battery_charging && battery_charging(); }
+    uint64_t batt_w = has_batt ? 26u : 0u;
+
+    /* Gamepad + FPS (only when active) sit at the group's left */
+    extern bool input_gamepad_connected(void);
+    extern bool gaming_mode_active(void);
+    extern uint32_t compositor_fps(void);
+    bool has_gp = input_gamepad_connected();
+    uint64_t gp_w = has_gp ? 2u * fw : 0u;
+    bool has_fps = gaming_mode_active();
+    char ftxt[8]; int flen = 0; uint32_t fps_col = 0x0050e880u;
+    if (has_fps) {
+        uint32_t fps = compositor_fps(); uint32_t fc = fps;
+        if (fps >= 1000) { ftxt[flen++]='9'; ftxt[flen++]='9'; ftxt[flen++]='9'; }
+        else if (fps >= 100) { ftxt[flen++]=(char)('0'+fps/100); fps%=100; ftxt[flen++]=(char)('0'+fps/10); ftxt[flen++]=(char)('0'+fps%10); }
+        else if (fps >= 10)  { ftxt[flen++]=(char)('0'+fps/10); ftxt[flen++]=(char)('0'+fps%10); }
+        else                 { ftxt[flen++]=(char)('0'+fps); }
+        ftxt[flen++]='f'; ftxt[flen++]='p'; ftxt[flen++]='s'; ftxt[flen]='\0';
+        fps_col = fc >= 60u ? 0x0050e880u : fc >= 30u ? 0x00e8c040u : 0x00e86040u;
+    }
+    uint64_t fps_w = has_fps ? (uint64_t)flen * fw : 0u;
+
+    /* Layout: order left→right = [fps][gp][battery][volume][network][clock]. */
+    enum { K_FPS, K_GP, K_BATT, K_VOL, K_NET, K_CLK };
+    uint64_t iw[6]; int kind[6]; int n = 0;
+    if (has_fps)  { iw[n] = fps_w;  kind[n] = K_FPS;  n++; }
+    if (has_gp)   { iw[n] = gp_w;   kind[n] = K_GP;   n++; }
+    if (has_batt) { iw[n] = batt_w; kind[n] = K_BATT; n++; }
+    iw[n] = vol_w; kind[n] = K_VOL; n++;
+    iw[n] = net_w; kind[n] = K_NET; n++;
+    iw[n] = clk_w; kind[n] = K_CLK; n++;
+
+    const uint64_t GAP = 12u, TPAD = 10u;
+    uint64_t sum = 0; for (int i = 0; i < n; i++) sum += iw[i];
+    uint64_t total = TPAD * 2u + sum + GAP * (uint64_t)(n - 1);
+    g_tray_total_w = total;   /* cache for the dock centering math (runs earlier) */
+    /* Anchor: folded into the floating dock card right after the app pills
+     * (g_dock_tray_left, set by taskbar_draw), else right-anchored on the bar. */
+    bool combined = (g_dock_tray_left != 0u);
+    uint64_t gleft, gright;
+    if (combined) { gleft = g_dock_tray_left; gright = gleft + total; }
+    else { gright = fb_w > 6u ? fb_w - 6u : fb_w; gleft = gright > total ? gright - total : 0u; }
+    uint64_t gy = ty + 3u, gh = TASKBAR_H > 6u ? TASKBAR_H - 6u : TASKBAR_H;
+
+    /* Group background: only when standalone (right-anchored). When folded into
+     * the floating dock the card already provides the panel, so draw items only. */
+    if (!combined) {
+        console_fill_vgrad(gleft, gy, total, gh, 0x00182634u, 0x000d151fu);
+        uint32_t bd = 0x00243646u;
+        console_fill_rect(gleft, gy, total, 1u, bd);
+        console_fill_rect(gleft, gy + gh - 1u, total, 1u, bd);
+        console_fill_rect(gleft, gy, 1u, gh, bd);
+        console_fill_rect(gleft + total - 1u, gy, 1u, gh, bd);
+    }
+
+    /* Reset tray hit regions (unused ones stay zero). */
+    g_batt_present = has_batt; g_batt_x = 0; g_batt_w = 0;
+    g_vol_tray_x = 0; g_vol_tray_w = 0; g_net_tray_x = 0; g_net_tray_w = 0;
+    g_clk_x = 0; g_clk_w = 0; g_cpu_tray_x = 0; g_cpu_tray_w = 0; g_mem_tray_x = 0; g_mem_tray_w = 0;
+
+    uint64_t x = gleft + TPAD;
+    for (int i = 0; i < n; i++) {
+        switch (kind[i]) {
+        case K_FPS:
+            gui_draw_str_fg(x, cy, ftxt, fps_col);
+            break;
+        case K_GP:
+            gui_draw_str_fg(x, cy, "GP", 0x0050e880u);
+            break;
+        case K_BATT: {
+            uint64_t bodyw = 24u, bodyh = 12u, nub = 2u;
+            uint64_t bxx = x, byy = ty + (TASKBAR_H - bodyh) / 2u;
+            uint32_t oc = 0x00b8c8dcu;
+            console_fill_rect(bxx, byy, bodyw, 1u, oc);
+            console_fill_rect(bxx, byy + bodyh - 1u, bodyw, 1u, oc);
+            console_fill_rect(bxx, byy, 1u, bodyh, oc);
+            console_fill_rect(bxx + bodyw - 1u, byy, 1u, bodyh, oc);
+            console_fill_rect(bxx + bodyw, byy + (bodyh - 6u) / 2u, nub, 6u, oc);
+            uint32_t fc = bchg ? 0x0050d090u : (bpct <= 15 ? 0x00e05050u : bpct <= 35 ? 0x00e8c040u : 0x0060c860u);
+            uint64_t fillw = (uint64_t)bpct * (bodyw - 4u) / 100u;
+            if (fillw > 0u) console_fill_rect(bxx + 2u, byy + 2u, fillw, bodyh - 4u, fc);
+            if (bchg) { uint64_t cxb = bxx + bodyw / 2u, cyb = byy + 2u; uint32_t blt = 0x00ffffffu;
+                        console_fill_rect(cxb + 1u, cyb, 2u, 3u, blt);
+                        console_fill_rect(cxb - 2u, cyb + 3u, 5u, 1u, blt);
+                        console_fill_rect(cxb - 2u, cyb + 4u, 2u, 3u, blt); }
+            g_batt_x = bxx > 4u ? bxx - 4u : bxx; g_batt_w = bodyw + nub + 8u;
+            break; }
+        case K_VOL:
+            if (g_vol_popup_open) console_fill_rect(x > 4u ? x - 4u : 0u, gy, iw[i] + 8u, gh, g_theme.accent);
+            gui_draw_str_fg(x, cy, vtxt, g_vol_popup_open ? 0x00ffffffu : 0x0090b8d8u);
+            g_vol_tray_x = x > 4u ? x - 4u : x; g_vol_tray_w = iw[i] + 8u;
+            break;
+        case K_NET:
+            gui_draw_str_fg(x, cy, net_lbl, net_fg);
+            g_net_tray_x = x > 4u ? x - 4u : x; g_net_tray_w = iw[i] + 8u;
+            break;
+        case K_CLK:
+            if (g_cal_popup_open) console_fill_rect(x > 4u ? x - 4u : 0u, gy, iw[i] + 8u, gh, g_theme.accent);
+            gui_draw_str_fg(x, cy, clk, g_cal_popup_open ? 0x00ffffffu : 0x00b8d8f4u);
+            g_clk_x = x > 4u ? x - 4u : x; g_clk_w = iw[i] + 8u;
+            break;
         }
+        x += iw[i] + GAP;
     }
-
-    /* ── Network indicator ── */
-    {
-        bool has_nic = net_nic_present();
-        bool has_ip  = (net_ip != 0);
-        const char *net_lbl = has_ip ? "LAN" : (has_nic ? "NIC" : "---");
-        uint32_t net_bg  = has_ip  ? 0x00102820u : (has_nic ? 0x00201010u : 0x00141414u);
-        uint32_t net_fg  = has_ip  ? 0x0050e880u : (has_nic ? 0x00e07050u : COL_TASKBAR);
-        uint64_t nw      = 3u * fw + 8u;
-        uint64_t nx      = tray_right > nw ? tray_right - nw : 0u;
-        console_fill_rect(nx, ty + 3u, nw, TASKBAR_H - 6u, net_bg);
-        if (has_nic || has_ip)
-            gui_draw_str(nx + 4u, ty + (TASKBAR_H - fh) / 2u, net_lbl, net_fg, net_bg);
-        g_net_tray_x = nx; g_net_tray_w = nw;
-        tray_right = nx > 4u ? nx - 4u : 0u;
-    }
-
-    /* ── FPS counter (shown in gaming mode, left of network indicator) ── */
-    uint64_t fps_right_edge = tray_right;
-    {
-        extern uint32_t compositor_fps(void);
-        extern bool gaming_mode_active(void);
-        if (gaming_mode_active()) {
-            uint32_t fps = compositor_fps();
-            uint32_t fps_for_color = fps;
-            char ftxt[8]; int fi = 0;
-            if (fps >= 1000) { ftxt[fi++]='9'; ftxt[fi++]='9'; ftxt[fi++]='9'; }
-            else if (fps >= 100) { ftxt[fi++]=(char)('0'+fps/100); fps%=100; ftxt[fi++]=(char)('0'+fps/10); ftxt[fi++]=(char)('0'+fps%10); }
-            else if (fps >= 10)  { ftxt[fi++]=(char)('0'+fps/10);  ftxt[fi++]=(char)('0'+fps%10); }
-            else                 { ftxt[fi++]=(char)('0'+fps); }
-            ftxt[fi++]='f'; ftxt[fi++]='p'; ftxt[fi++]='s'; ftxt[fi]='\0';
-            uint64_t fw2 = (uint64_t)fi * fw + 8u;
-            uint64_t fx  = fps_right_edge > fw2 ? fps_right_edge - fw2 : 0u;
-            uint32_t fbg = 0x00101828u;
-            uint32_t ffg = fps_for_color >= 60u ? 0x0050e880u : fps_for_color >= 30u ? 0x00e8c040u : 0x00e86040u;
-            console_fill_rect(fx, ty + 3u, fw2, TASKBAR_H - 6u, fbg);
-            gui_draw_str(fx + 4u, ty + (TASKBAR_H - fh) / 2u, ftxt, ffg, fbg);
-            fps_right_edge = fx > 4u ? fx - 4u : 0u;
-        }
-    }
-
-    /* ── Volume tray icon (left of memory bar / FPS counter) ── */
-    {
-        int vol = hda_is_ready() ? hda_get_volume() : -1;
-        char vtxt[6]; int vi = 0;
-        if (vol < 0) {
-            vtxt[vi++] = '-'; vtxt[vi++] = '-'; vtxt[vi++] = '%';
-        } else if (vol >= 100) {
-            vtxt[vi++] = '1'; vtxt[vi++] = '0'; vtxt[vi++] = '0'; vtxt[vi++] = '%';
-        } else {
-            if (vol >= 10) vtxt[vi++] = (char)('0' + vol / 10);
-            vtxt[vi++] = (char)('0' + vol % 10);
-            vtxt[vi++] = '%';
-        }
-        vtxt[vi] = '\0';
-        uint64_t vw  = (uint64_t)vi * fw + 8u;
-        uint64_t vx  = fps_right_edge > vw + 4u ? fps_right_edge - vw - 4u : 0u;
-        uint64_t vy  = ty + (TASKBAR_H - fh) / 2u;
-        uint32_t vbg = g_vol_popup_open ? g_theme.accent : 0x00141e2au;
-        console_fill_rect(vx, ty + 3u, vw, TASKBAR_H - 6u, vbg);
-        uint32_t vfg = g_vol_popup_open ? 0x00ffffffu : 0x0090b8d8u;
-        gui_draw_str(vx + 4u, vy, vtxt, vfg, vbg);
-        g_vol_tray_x = vx;
-        g_vol_tray_w = vw;
-    }
-
-    /* (CPU usage bar removed per user request — it read as a separator bar.) */
-    uint64_t left_edge = g_vol_tray_x > 6u ? g_vol_tray_x - 6u : 0u;
-    g_cpu_tray_x = 0; g_cpu_tray_w = 0;
-
-    /* ── Battery (laptops only) — glyph fill + charging bolt ── */
-    g_batt_present = false; g_batt_x = 0; g_batt_w = 0;
-    if (battery_present && battery_present()) {
-        g_batt_present = true;
-        int pct = battery_percent ? battery_percent() : -1;
-        bool chg = battery_charging && battery_charging();
-        if (pct < 0) pct = 0; if (pct > 100) pct = 100;
-        uint64_t bodyw = 24u, bodyh = 12u, nub = 2u;
-        uint64_t total = bodyw + nub;
-        uint64_t bxx = left_edge > total ? left_edge - total : 0u;
-        uint64_t byy = ty + (TASKBAR_H - bodyh) / 2u;
-        uint32_t oc = 0x00b8c8dcu;
-        console_fill_rect(bxx, byy, bodyw, 1u, oc);
-        console_fill_rect(bxx, byy + bodyh - 1u, bodyw, 1u, oc);
-        console_fill_rect(bxx, byy, 1u, bodyh, oc);
-        console_fill_rect(bxx + bodyw - 1u, byy, 1u, bodyh, oc);
-        console_fill_rect(bxx + bodyw, byy + (bodyh - 6u) / 2u, nub, 6u, oc);
-        uint32_t fc = chg ? 0x0050d090u : (pct <= 15 ? 0x00e05050u : pct <= 35 ? 0x00e8c040u : 0x0060c860u);
-        uint64_t innerw = bodyw - 4u;
-        uint64_t fillw = (uint64_t)pct * innerw / 100u;
-        if (fillw > 0u) console_fill_rect(bxx + 2u, byy + 2u, fillw, bodyh - 4u, fc);
-        if (chg) {   /* white lightning bolt centered on the battery */
-            uint64_t cxb = bxx + bodyw / 2u, cyb = byy + 2u;
-            uint32_t blt = 0x00ffffffu;
-            console_fill_rect(cxb + 1u, cyb,      2u, 3u, blt);
-            console_fill_rect(cxb - 2u, cyb + 3u, 5u, 1u, blt);
-            console_fill_rect(cxb - 2u, cyb + 4u, 2u, 3u, blt);
-        }
-        g_batt_x = bxx; g_batt_w = bodyw + nub;
-        left_edge = bxx > 8u ? bxx - 8u : 0u;
-    }
-    /* Leftmost pixel of the system tray — right/center-aligned favorites must
-     * stop here so they never overlap the clock/volume/network/battery. */
-    g_tray_left_x = left_edge;
+    /* Leftmost pixel of the tray group — right/center favorites stop here. */
+    g_tray_left_x = gleft > 8u ? gleft - 8u : 0u;
 }
 
 /* ── System tray indicators state + hover tooltips ───────────────────── */
@@ -374,6 +402,9 @@ uint64_t g_cpu_tray_x = 0, g_cpu_tray_w = 0;
 uint64_t g_net_tray_x = 0, g_net_tray_w = 0;
 uint64_t g_mem_tray_x = 0, g_mem_tray_w = 0;
 int      g_tray_hover = TRAY_NONE;
+int      g_active_intent = 0;
+uint64_t g_intent_x[3] = {0,0,0}, g_intent_w[3] = {0,0,0}, g_intent_y = 0, g_intent_h = 0;
+uint64_t g_bar_search_x = 0, g_bar_search_w = 0, g_bar_search_y = 0, g_bar_search_h = 0;
 
 static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
     switch (id) {
@@ -731,6 +762,7 @@ void taskbar_draw(void) {
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
+    g_dock_tray_left = 0u;   /* default: tray right-anchored; floating dock sets it below */
 
     /* Panel fill. Frosted glass (fx_glass): repaint the wallpaper behind the
      * strip, then blend a translucent dark panel so the desktop tone shows
@@ -743,22 +775,25 @@ void taskbar_draw(void) {
          * taskbar. Content x/y positions are UNCHANGED, so hit-testing is intact. */
         for (uint64_t r = 0; r < TASKBAR_H; r++)
             console_fill_rect(0, ty + r, fb_w, 1u, desktop_bg_at(ty + r));
-        /* Compact dock: the card hugs the launcher + app run (centered by the
-         * default align), leaving wallpaper gaps on both sides and the tray
-         * floating separately on the right — a real dock, not an edge-to-edge
-         * Windows-style bar. Content x positions are unchanged (hit-test intact). */
+        /* Combined dock: one rounded card holding launcher + favorites + open-app
+         * pills + the system tray, folded in after the pills, centered as a unit
+         * (logo_x/favbar_start_x include the tray width for dock_float). The tray
+         * draws inline (no separate panel) at g_dock_tray_left. */
         uint64_t pad   = 12u;
         uint64_t rstart = favbar_start_x();
         uint64_t lgx    = logo_x();
         uint64_t left   = (lgx < rstart ? lgx : rstart);         /* include launcher */
-        uint64_t right  = rstart + favbar_run_w();
+        uint64_t pills_end = rstart + favbar_run_w();
+        /* Fold the tray into the dock only when the horizon bar is OFF. */
+        g_dock_tray_left = g_theme.statusbar ? 0u : (pills_end + 12u);
+        uint64_t right  = g_theme.statusbar ? pills_end : (g_dock_tray_left + tray_width());
         uint64_t cardx  = left > pad ? left - pad : 0u;
         uint64_t cardw  = (right + pad > cardx) ? (right + pad - cardx) : 0u;
         if (cardx + cardw > fb_w) cardw = fb_w - cardx;          /* clamp to screen */
         uint64_t cardy = ty + 2u, cardh = TASKBAR_H - 6u;   /* 2px top / 4px bottom gap */
-        console_blend_rect(cardx, cardy, cardw, cardh, 0x0016202eu, 214u);
-        console_blend_rect(cardx, cardy, cardw, 1u, 0x00ffffffu, 26u);   /* top sheen */
-        int R = 7;
+        console_blend_rect(cardx, cardy, cardw, cardh, 0x000c1017u, 158u);   /* glass rgba(12,16,23,~.6) */
+        console_blend_rect(cardx, cardy, cardw, 1u, 0x00ffffffu, 24u);   /* top sheen */
+        int R = 12;
         for (int r = 0; r < R; r++) {
             int dy = R - r, rr = R * R - dy * dy; if (rr < 0) rr = 0;
             int s = 0; while ((s + 1) * (s + 1) <= rr) s++;
@@ -770,6 +805,11 @@ void taskbar_draw(void) {
             console_fill_rect(cardx,                       cardy + cardh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
             console_fill_rect(cardx + cardw - (uint64_t)n, cardy + cardh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
         }
+        /* hairline border (rgba(255,255,255,0.09)) on the straight edges */
+        console_blend_rect(cardx + (uint64_t)R, cardy, cardw - 2u*(uint64_t)R, 1u, 0x00ffffffu, 23u);
+        console_blend_rect(cardx + (uint64_t)R, cardy + cardh - 1u, cardw - 2u*(uint64_t)R, 1u, 0x00ffffffu, 18u);
+        console_blend_rect(cardx, cardy + (uint64_t)R, 1u, cardh - 2u*(uint64_t)R, 0x00ffffffu, 18u);
+        console_blend_rect(cardx + cardw - 1u, cardy + (uint64_t)R, 1u, cardh - 2u*(uint64_t)R, 0x00ffffffu, 18u);
     } else if (g_theme.fx_glass) {
         for (uint64_t r = 0; r < TASKBAR_H; r++)
             console_fill_rect(0, ty + r, fb_w, 1u, desktop_bg_at(ty + r));
@@ -785,31 +825,34 @@ void taskbar_draw(void) {
         console_fill_rect(0, hair_y, fb_w, 1u, 0x00223350u);
     }
 
-    /* Launcher button: accent gradient pill */
+    /* Launcher = the FiFi "Spark" orb: coral→violet gradient square with a coral
+     * border, a soft accent glow halo, and a white 4-point star. Opens the app
+     * launcher / command palette (hit region = logo_x()..+logo_eff_w()). */
     uint64_t lw = logo_eff_w();
-    uint32_t lg_top = g_launcher_open ? col_scale(g_theme.accent, 230u, 255u)
-                                      : col_scale(g_theme.accent, 160u, 255u);
-    uint32_t lg_bot = g_launcher_open ? col_scale(g_theme.accent, 170u, 255u)
-                                      : col_scale(g_theme.accent, 110u, 255u);
     uint64_t lx = logo_x();
-    console_fill_vgrad(lx, ty + 3u, lw, TASKBAR_H - 6u, lg_top, lg_bot);
-    {   /* pill corner softening */
-        uint32_t base = 0x000b0f1au;
-        uint64_t ph = TASKBAR_H - 6u;
-        console_fill_rect(lx,           ty + 3u,      2u, 1u, base);
-        console_fill_rect(lx,           ty + 4u,      1u, 1u, base);
-        console_fill_rect(lx + lw - 2u, ty + 3u,      2u, 1u, base);
-        console_fill_rect(lx + lw - 1u, ty + 4u,      1u, 1u, base);
-        console_fill_rect(lx,           ty + 2u + ph, 2u, 1u, base);
-        console_fill_rect(lx,           ty + 1u + ph, 1u, 1u, base);
-        console_fill_rect(lx + lw - 2u, ty + 2u + ph, 2u, 1u, base);
-        console_fill_rect(lx + lw - 1u, ty + 1u + ph, 1u, 1u, base);
+    uint64_t oy = ty + 3u, ph = TASKBAR_H > 6u ? TASKBAR_H - 6u : TASKBAR_H;
+    /* glow halo (coral, fading outward) */
+    for (int g = 3; g >= 0; g--) {
+        uint64_t gp = 2u + (uint64_t)g * 3u;
+        uint64_t gx = lx > gp ? lx - gp : 0u, gy = oy > gp ? oy - gp : 0u;
+        console_blend_rect(gx, gy, lw + 2u*gp, ph + 2u*gp, g_theme.accent, (uint8_t)(g_launcher_open ? 40 - g*8 : 26 - g*6));
     }
-    const char *logo = "FiFi OS";
-    uint64_t llen = (uint64_t)gui_strlen(logo);
-    uint64_t lpx  = lx + (lw - llen * fw) / 2u;
-    uint64_t lpy  = ty + (TASKBAR_H > fh ? (TASKBAR_H - fh) / 2u : 0u);
-    gui_draw_str_fg(lpx, lpy, logo, 0x00f2f7ffu);
+    /* orb fill: accent (coral) → violet */
+    console_fill_vgrad(lx, oy, lw, ph, col_scale(g_theme.accent, g_launcher_open ? 240u : 200u, 255u), 0x008F7BFFu);
+    /* coral border */
+    console_fill_rect(lx, oy, lw, 1u, g_theme.accent);
+    console_fill_rect(lx, oy + ph - 1u, lw, 1u, g_theme.accent);
+    console_fill_rect(lx, oy, 1u, ph, g_theme.accent);
+    console_fill_rect(lx + lw - 1u, oy, 1u, ph, g_theme.accent);
+    /* white 4-point star, centered */
+    {
+        int64_t cx = (int64_t)(lx + lw/2u), cyy = (int64_t)(oy + ph/2u), r = (int64_t)(ph/4u);
+        for (int64_t dy = -r; dy <= r; dy++) { int64_t w = r - (dy<0?-dy:dy);
+            if (w > 0) console_fill_rect((uint64_t)(cx-w), (uint64_t)(cyy+dy), (uint64_t)(2*w+1), 1u, 0x00ffffffu); }
+        for (int64_t dx = -r; dx <= r; dx++) { int64_t h = r - (dx<0?-dx:dx);
+            if (h > 0) console_fill_rect((uint64_t)(cx+dx), (uint64_t)(cyy-h), 1u, (uint64_t)(2*h+1), 0x00ffffffu); }
+    }
+    (void)fh;
 
     /* The favorites strip now holds the built-in launchers (Terminal/Files/
      * Settings/Viewer) plus user-pinned apps, each with a running indicator. */

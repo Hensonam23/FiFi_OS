@@ -251,7 +251,8 @@ static int g_tab = TAB_PERS;
 
 /* ── Clickable hot-regions (used by the Personalize pane) ────────────────── */
 enum { ACT_ACCENT = 1, ACT_WALL, ACT_PANEL, ACT_GLASS, ACT_SHADOW, ACT_RADIUS, ACT_DOCK, ACT_STATUS,
-       ACT_FONT_FAM, ACT_FONT_SZ,
+       ACT_FONT_FAM, ACT_FONT_SZ, ACT_DESKINFO, ACT_ALIGN, ACT_AUTOHIDE,
+       ACT_TBSIZE, ACT_CLOCK, ACT_WALLFIT,
        ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR };
 typedef struct { int x, y, w, h, act, arg; } Hot;
 #define MAX_HOTS 64
@@ -460,9 +461,13 @@ static const uint32_t g_accent_presets[N_ACCENT] = {
     0x003060c0u, 0x00307830u, 0x00802060u, 0x00b04010u,
     0x00408080u, 0x00606020u, 0x00204060u, 0x00803030u,
     0x00906010u, 0x00208060u, 0x00601880u, 0x00107888u,
-    0x008040a0u, 0x00505050u, 0x00285870u, 0x006a1a1au,
+    0x008040a0u, 0x005BD9E3u, 0x008F7BFFu, 0x00FF9A6Bu,
 };
-static const char *g_wall_names[6]  = { "Gradient", "Solid", "Stars", "Grid", "Waves", "Image" };
+#define WALL_N 13
+static const char *g_wall_names[WALL_N] = {
+    "Gradient", "Solid", "Stars", "Grid", "Waves", "Image",
+    "Aurora", "Northern", "Nebula", "Dusk", "Ocean", "Spring", "Ember"
+};
 static const char *g_panel_names[4] = { "Bottom", "Top", "Left", "Right" };
 
 /* ── System info (sysmon-style, reused from the original settings app) ───── */
@@ -933,13 +938,26 @@ static void render_personalize(uint32_t *fb) {
 
     /* Wallpaper */
     y = section_hdr(fb, "Wallpaper", x, y);
-    { int bw = 84, bh = 30, gap = 6;
-      for (int i = 0; i < 6; i++) {
-          int bx = x + i*(bw+gap);
-          draw_btn(fb, bx, y, bw, bh, g_wall_names[i], i == cur_wall);
-          add_hot(bx, y, bw, bh, ACT_WALL, i);
+    { int bw = 78, bh = 30, gap = 6, per_row = 6;
+      for (int i = 0; i < WALL_N; i++) {
+          int bx = x + (i % per_row)*(bw+gap);
+          int by = y + (i / per_row)*(bh+gap);
+          draw_btn(fb, bx, by, bw, bh, g_wall_names[i], i == cur_wall);
+          add_hot(bx, by, bw, bh, ACT_WALL, i);
       }
-      y += bh + 14;
+      y += ((WALL_N + per_row - 1)/per_row)*(bh+gap) + 14 - gap;
+    }
+    /* Image fit modes — only relevant for the Image wallpaper (id 5). */
+    if (cur_wall == 5) {
+        static const char *fit_names[4] = { "Fill", "Fit", "Stretch", "Center" };
+        int cur_fit = cfg_get_int("wall_fit", 0);
+        int bw = 92, bh = 28, gap = 6;
+        for (int i = 0; i < 4; i++) {
+            int bx = x + i*(bw+gap);
+            draw_btn(fb, bx, y, bw, bh, fit_names[i], i == cur_fit);
+            add_hot(bx, y, bw, bh, ACT_WALLFIT, i);
+        }
+        y += bh + 14;
     }
 
     /* Panel position */
@@ -972,6 +990,47 @@ static void render_personalize(uint32_t *fb) {
       draw_btn(fb, x+bw+60+gap, y, bw, bh, tb, topbar);        add_hot(x+bw+60+gap, y, bw, bh, ACT_STATUS, 0);
       y += bh + 12;
 
+      /* Desk info overlay + taskbar auto-hide toggles. When the top bar is off,
+       * the clock/battery/network indicators fold into the taskbar. */
+      int deskinfo = cfg_get_int("desktop_info", 1);
+      int autohide = cfg_get_int("panel_autohide", 0);
+      char di[32], ah[40];
+      snprintf(di, sizeof di, "Desk info: %s",   deskinfo ? "On" : "Off");
+      snprintf(ah, sizeof ah, "Auto-hide bar: %s", autohide ? "On" : "Off");
+      draw_btn(fb, x, y, bw, bh, di, deskinfo);               add_hot(x, y, bw, bh, ACT_DESKINFO, 0);
+      draw_btn(fb, x+bw+gap, y, bw + 40, bh, ah, autohide);   add_hot(x+bw+gap, y, bw + 40, bh, ACT_AUTOHIDE, 0);
+      y += bh + 12;
+
+      /* Clock format + taskbar thickness. */
+      int clock12  = cfg_get_int("clock_12h", 1);
+      int tbsize   = cfg_get_int("panel_size", 0);
+      char ck[32];
+      snprintf(ck, sizeof ck, "Clock: %s", clock12 ? "12h" : "24h");
+      draw_btn(fb, x, y, bw, bh, ck, clock12);                add_hot(x, y, bw, bh, ACT_CLOCK, 0);
+      draw_str(fb, "Taskbar size:", x+bw+gap, y + 6, C_KEY);
+      int tsx = x + bw + gap + 14*CW;
+      draw_btn(fb, tsx, y, 30, bh, "-", false);               add_hot(tsx, y, 30, bh, ACT_TBSIZE, -8);
+      char tsv[16]; snprintf(tsv, sizeof tsv, "+%d px", tbsize);
+      draw_str(fb, tsv, tsx + 42, y + 6, C_VAL);
+      draw_btn(fb, tsx + 100, y, 30, bh, "+", false);         add_hot(tsx + 100, y, 30, bh, ACT_TBSIZE, +8);
+      y += bh + 12;
+    }
+
+    /* Taskbar alignment: where the app buttons sit along the bar. */
+    y = section_hdr(fb, "Taskbar Alignment", x, y);
+    { int bw = 100, bh = 30, gap = 8;
+      static const char *align_names[3] = { "Left", "Center", "Right" };
+      int cur_align = cfg_get_int("panel_align", 1);
+      for (int i = 0; i < 3; i++) {
+          int bx = x + i*(bw+gap);
+          draw_btn(fb, bx, y, bw, bh, align_names[i], i == cur_align);
+          add_hot(bx, y, bw, bh, ACT_ALIGN, i);
+      }
+      y += bh + 14;
+    }
+
+    { int bw = 150, bh = 30;
+      (void)bw; (void)bh;
       /* Corner radius stepper */
       draw_str(fb, "Corner radius:", x, y + 6, C_KEY);
       int rx = x + 15*CW;
@@ -1386,11 +1445,19 @@ static void pers_click(int mx, int my) {
             case ACT_ACCENT: cfg_set_uint("accent", g_accent_presets[h->arg]);
                              g_accent = g_accent_presets[h->arg]; break;
             case ACT_WALL:   cfg_set_int("wallpaper", h->arg); break;
+            case ACT_WALLFIT: cfg_set_int("wall_fit", h->arg); break;
             case ACT_PANEL:  cfg_set_int("panel_edge", h->arg); break;
             case ACT_GLASS:  cfg_set_int("fx_glass", cfg_get_int("fx_glass", 1) ? 0 : 1); break;
             case ACT_SHADOW: cfg_set_int("fx_shadows", cfg_get_int("fx_shadows", 1) ? 0 : 1); break;
             case ACT_DOCK:   cfg_set_int("dock_float", cfg_get_int("dock_float", 1) ? 0 : 1); break;
             case ACT_STATUS: cfg_set_int("statusbar", cfg_get_int("statusbar", 1) ? 0 : 1); break;
+            case ACT_DESKINFO: cfg_set_int("desktop_info", cfg_get_int("desktop_info", 1) ? 0 : 1); break;
+            case ACT_AUTOHIDE: cfg_set_int("panel_autohide", cfg_get_int("panel_autohide", 0) ? 0 : 1); break;
+            case ACT_ALIGN:  cfg_set_int("panel_align", h->arg); break;
+            case ACT_CLOCK:  cfg_set_int("clock_12h", cfg_get_int("clock_12h", 1) ? 0 : 1); break;
+            case ACT_TBSIZE: { int s = cfg_get_int("panel_size", 0) + h->arg;
+                               if (s < 0) s = 0; if (s > 48) s = 48;
+                               cfg_set_int("panel_size", s); } break;
             case ACT_RADIUS: { int r = cfg_get_int("corner_radius", 8) + h->arg;
                                if (r < 0) r = 0;
                                if (r > 12) r = 12;

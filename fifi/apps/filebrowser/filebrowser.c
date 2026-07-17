@@ -44,8 +44,11 @@
 #define IPC_DROP_FILE     0x1Du
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
-#define WIN_W    640
-#define WIN_H    480
+/* Current framebuffer size. Updated on IPC_WIN_RESIZE so the listing re-renders
+ * crisply at the window's real pixel size (more rows) instead of the compositor
+ * upscaling a fixed 640×480 frame. Starts at the initial window size. */
+static int g_w = 640;
+static int g_h = 480;
 #define TITLE_H  24   /* reserved for compositor title bar (drawn by compositor) */
 #define HDR_H    32   /* path bar below the title */
 #define FOOT_H   22   /* status bar */
@@ -103,8 +106,8 @@ static void font_draw_char(uint32_t *fb, int fw, int c,
         for (int col = 0; col < 8; col++) {
             if (b & (0x80u >> col)) {
                 int x = px + col, y = py + row;
-                if (x >= 0 && x < fw && y >= 0 && y < WIN_H)
-                    fb[y * WIN_W + x] = fg;
+                if (x >= 0 && x < fw && y >= 0 && y < g_h)
+                    fb[y * g_w + x] = fg;
             }
         }
     }
@@ -119,7 +122,7 @@ static void font_draw_str(uint32_t *fb, const char *s,
         uint32_t cp = fifi_u8_next(s, &i);
         int c = fifi_fold_ascii(cp);
         if (c == 0) continue;                 /* zero-width: skip */
-        font_draw_char(fb, WIN_W, c, x, y, fg);
+        font_draw_char(fb, g_w, c, x, y, fg);
         x += 9;
     }
 }
@@ -132,7 +135,7 @@ static void font_draw_strn(uint32_t *fb, const char *s, int n,
         uint32_t cp = fifi_u8_next(s, &i);
         int c = fifi_fold_ascii(cp);
         if (c == 0) continue;                 /* zero-width: skip */
-        font_draw_char(fb, WIN_W, c, x, y, fg);
+        font_draw_char(fb, g_w, c, x, y, fg);
         x += 9;
     }
 }
@@ -140,17 +143,17 @@ static void font_draw_strn(uint32_t *fb, const char *s, int n,
 /* ── Rect fill ───────────────────────────────────────────────────────────── */
 static void fill_rect(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
     for (int row = y; row < y + h; row++) {
-        if (row < 0 || row >= WIN_H) continue;
+        if (row < 0 || row >= g_h) continue;
         int x0 = x < 0 ? 0 : x;
-        int x1 = x + w > WIN_W ? WIN_W : x + w;
+        int x1 = x + w > g_w ? g_w : x + w;
         for (int col2 = x0; col2 < x1; col2++)
-            fb[row * WIN_W + col2] = col;
+            fb[row * g_w + col2] = col;
     }
 }
 
 static void draw_hline(uint32_t *fb, int y, uint32_t col) {
-    if (y < 0 || y >= WIN_H) return;
-    for (int x = 0; x < WIN_W; x++) fb[y * WIN_W + x] = col;
+    if (y < 0 || y >= g_h) return;
+    for (int x = 0; x < g_w; x++) fb[y * g_w + x] = col;
 }
 
 /* Filled rect with softened (notched) corners — reads as a rounded highlight. */
@@ -161,8 +164,8 @@ static void fill_round(uint32_t *fb, int x, int y, int w, int h,
     for (int i = 0; i < r; i++)
         for (int j = 0; j < r; j++)
             if (i + j < r) {
-                if (x + i         >= 0 && x + i         < WIN_W) { if (y+j>=0&&y+j<WIN_H) fb[(y+j)*WIN_W+x+i]=bg; if (y+h-1-j>=0&&y+h-1-j<WIN_H) fb[(y+h-1-j)*WIN_W+x+i]=bg; }
-                if (x + w - 1 - i >= 0 && x + w - 1 - i < WIN_W) { if (y+j>=0&&y+j<WIN_H) fb[(y+j)*WIN_W+x+w-1-i]=bg; if (y+h-1-j>=0&&y+h-1-j<WIN_H) fb[(y+h-1-j)*WIN_W+x+w-1-i]=bg; }
+                if (x + i         >= 0 && x + i         < g_w) { if (y+j>=0&&y+j<g_h) fb[(y+j)*g_w+x+i]=bg; if (y+h-1-j>=0&&y+h-1-j<g_h) fb[(y+h-1-j)*g_w+x+i]=bg; }
+                if (x + w - 1 - i >= 0 && x + w - 1 - i < g_w) { if (y+j>=0&&y+j<g_h) fb[(y+j)*g_w+x+w-1-i]=bg; if (y+h-1-j>=0&&y+h-1-j<g_h) fb[(y+h-1-j)*g_w+x+w-1-i]=bg; }
             }
 }
 
@@ -224,18 +227,18 @@ static void load_dir(const char *path) {
 /* ── Rendering ───────────────────────────────────────────────────────────── */
 static void render(uint32_t *fb) {
     /* Full background */
-    fill_rect(fb, 0, 0, WIN_W, WIN_H, C_BG);
+    fill_rect(fb, 0, 0, g_w, g_h, C_BG);
     /* Top TITLE_H px left dark — compositor draws the title bar there */
 
     /* Path bar */
     int hdr_y = TITLE_H;
-    fill_rect(fb, 0, hdr_y, WIN_W, HDR_H, C_HDR_BG);
+    fill_rect(fb, 0, hdr_y, g_w, HDR_H, C_HDR_BG);
     draw_hline(fb, hdr_y + HDR_H - 1, C_BORDER);
     int htext_y = hdr_y + (HDR_H - g_glyph_h) / 2;
     /* Accent location marker */
     fill_round(fb, PAD_X, htext_y + 1, 6, g_glyph_h - 2, C_DIR, C_HDR_BG);
     int lx = PAD_X + 14;
-    int path_chars = (WIN_W - lx - PAD_X) / 9;
+    int path_chars = (g_w - lx - PAD_X) / 9;
     const char *p = g_path;
     int plen = (int)strlen(p);
     if (plen > path_chars) p += (plen - path_chars);
@@ -243,7 +246,7 @@ static void render(uint32_t *fb) {
 
     /* Entry list (origin must match mouse hit-test: TITLE_H + HDR_H) */
     int list_top = TITLE_H + HDR_H;
-    int list_bot = WIN_H - FOOT_H;
+    int list_bot = g_h - FOOT_H;
     int visible  = (list_bot - list_top) / ITEM_H;
 
     for (int i = 0; i < visible; i++) {
@@ -254,13 +257,13 @@ static void render(uint32_t *fb) {
 
         /* Rounded selection highlight, inset from the edges */
         if (sel && !g_renaming)
-            fill_round(fb, 6, ry + 1, WIN_W - 12, ITEM_H - 2, C_SEL, C_BG);
+            fill_round(fb, 6, ry + 1, g_w - 12, ITEM_H - 2, C_SEL, C_BG);
 
         /* When renaming this row, show inline input field */
         if (sel && g_renaming) {
-            fill_round(fb, PAD_X + 14, ry + 1, WIN_W - PAD_X - 14 - PAD_X, ITEM_H - 2,
+            fill_round(fb, PAD_X + 14, ry + 1, g_w - PAD_X - 14 - PAD_X, ITEM_H - 2,
                        C_FIELD, C_BG);
-            int max_ch = (WIN_W - PAD_X - 14 - PAD_X - 4) / 9;
+            int max_ch = (g_w - PAD_X - 14 - PAD_X - 4) / 9;
             int draw_from = g_rename_len > max_ch ? g_rename_len - max_ch : 0;
             int draw_n    = g_rename_len - draw_from;
             font_draw_strn(fb, g_rename_buf + draw_from, draw_n,
@@ -277,7 +280,7 @@ static void render(uint32_t *fb) {
             const char *name = g_entries[idx].name;
             int namelen = (int)strlen(name);
             uint32_t fg = sel ? C_WHITE : (g_entries[idx].is_dir ? C_DIR : C_FILE);
-            int max_chars = (WIN_W - PAD_X - 20 - PAD_X) / 9;
+            int max_chars = (g_w - PAD_X - 20 - PAD_X) / 9;
             int draw_chars = namelen < max_chars ? namelen : max_chars;
             font_draw_strn(fb, name, draw_chars,
                            PAD_X + 20, ry + (ITEM_H - g_glyph_h) / 2, fg);
@@ -285,7 +288,7 @@ static void render(uint32_t *fb) {
     }
 
     /* Footer */
-    fill_rect(fb, 0, list_bot, WIN_W, FOOT_H, C_FOOT_BG);
+    fill_rect(fb, 0, list_bot, g_w, FOOT_H, C_FOOT_BG);
     draw_hline(fb, list_bot, C_BORDER);
     int foot_y = list_bot + (FOOT_H - g_glyph_h) / 2;
     if (g_renaming) {
@@ -312,12 +315,12 @@ static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) 
 }
 
 static void send_frame(int fd, uint32_t *pixels) {
-    uint32_t frm[4] = {0, 0, WIN_W, WIN_H};
-    uint32_t total  = 16 + WIN_W * WIN_H * 4;
+    uint32_t frm[4] = {0, 0, g_w, g_h};
+    uint32_t total  = 16 + g_w * g_h * 4;
     uint8_t *msg    = malloc(total);
     if (!msg) return;
     memcpy(msg,      frm,    16);
-    memcpy(msg + 16, pixels, WIN_W * WIN_H * 4);
+    memcpy(msg + 16, pixels, g_w * g_h * 4);
     ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
     free(msg);
 }
@@ -332,7 +335,7 @@ static void send_frame(int fd, uint32_t *pixels) {
 #define KEY_q     'q'
 
 static int g_visible(void) {
-    return (WIN_H - TITLE_H - HDR_H - FOOT_H) / ITEM_H;
+    return (g_h - TITLE_H - HDR_H - FOOT_H) / ITEM_H;
 }
 
 static void clamp_scroll(void) {
@@ -394,7 +397,7 @@ int main(void) {
     load_dir(g_path);
 
     /* Allocate pixel buffer */
-    uint32_t *fb = malloc(WIN_W * WIN_H * 4);
+    uint32_t *fb = malloc(g_w * g_h * 4);
     if (!fb) return 1;
 
     /* Connect to compositor */
@@ -409,7 +412,7 @@ int main(void) {
 
     /* Register window */
     uint8_t conn[68] = {0};
-    uint16_t w = WIN_W, h = WIN_H;
+    uint16_t w = g_w, h = g_h;
     memcpy(conn,     &w, 2);
     memcpy(conn + 2, &h, 2);
     snprintf((char *)(conn + 4), 64, "File Browser");
@@ -614,7 +617,7 @@ int main(void) {
                             if (lbtn && !prev_lbtn) {
                                 /* Press: select row and start potential drag */
                                 int list_top = TITLE_H + HDR_H;
-                                if (my >= list_top && my < WIN_H - FOOT_H) {
+                                if (my >= list_top && my < g_h - FOOT_H) {
                                     int row = (my - list_top) / ITEM_H;
                                     int idx = g_scroll + row;
                                     if (idx < g_nentries) {
@@ -646,6 +649,20 @@ int main(void) {
                             }
                             prev_lbtn = lbtn;
                         } else if (type == IPC_WIN_RESIZE) {
+                            /* Compositor tells us the new window pixel size (two
+                             * little-endian uint16). Re-render at that resolution so
+                             * text stays crisp and more rows fit, rather than being
+                             * upscaled from a fixed frame. */
+                            if (in_pld && in_plen >= 4) {
+                                int nw = (int)(in_pld[0] | (in_pld[1] << 8));
+                                int nh = (int)(in_pld[2] | (in_pld[3] << 8));
+                                if (nw < 240)  nw = 240;  if (nw > 8192) nw = 8192;
+                                if (nh < 180)  nh = 180;  if (nh > 8192) nh = 8192;
+                                if (nw != g_w || nh != g_h) {
+                                    uint32_t *nfb = realloc(fb, (size_t)nw * nh * 4);
+                                    if (nfb) { fb = nfb; g_w = nw; g_h = nh; }
+                                }
+                            }
                             dirty = true;
                         } else if (type == IPC_CLIP_DATA && in_plen > 0 && in_pld && g_renaming) {
                             for (uint32_t ci = 0; ci < in_plen &&

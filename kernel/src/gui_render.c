@@ -2,120 +2,143 @@
 
 /* ── Status bar (top strip, 0..STATUS_H-1) ───────────────────────────── */
 
-void draw_status_bar(void) {
-    /* No status bar when disabled — the desktop simply extends over the strip. */
-    if (!g_theme.statusbar) return;
+/* Slim 4-point FiFi star (logo mark) centered at (cx,cy), arm length r. */
+static void draw_fifi_star(int64_t cx, int64_t cy, int64_t r, uint32_t col) {
+    for (int64_t dy = -r; dy <= r; dy++) {          /* vertical diamond */
+        int64_t w = r - (dy < 0 ? -dy : dy);
+        if (w > 0) console_fill_rect((uint64_t)(cx - w), (uint64_t)(cy + dy), (uint64_t)(2*w + 1), 1u, col);
+    }
+    for (int64_t dx = -r; dx <= r; dx++) {          /* horizontal diamond */
+        int64_t h = r - (dx < 0 ? -dx : dx);
+        if (h > 0) console_fill_rect((uint64_t)(cx + dx), (uint64_t)(cy - h), 1u, (uint64_t)(2*h + 1), col);
+    }
+}
 
+/* Horizon bar: a floating glass card at the top holding the FiFi mark, intent
+ * workspace pills (Build/Research/Play), and a right status cluster
+ * (wifi · battery · clock). Matches the FiFi design language. */
+void draw_status_bar(void) {
+    if (!g_theme.statusbar) return;
+    /* Auto-hide when a window is maximized: in the normal (pre-window) pass, skip
+     * drawing so the maximized window fills all the way to the top edge. The bar is
+     * redrawn as an overlay (g_statusbar_overlay) only while the cursor rests at the
+     * very top edge. Zero the hit rects so a click on the covered area does nothing. */
+    if (!statusbar_bottom() && any_window_maximized() && !g_statusbar_overlay) {
+        g_bar_search_x = 0; g_bar_search_w = 0;
+        g_intent_w[0] = g_intent_w[1] = g_intent_w[2] = 0;
+        return;
+    }
     uint64_t fb_w = console_fb_width();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint32_t bar_bg = 0x0008101cu;
-
-    /* Status bar sits at the top, or at the bottom when the panel is on top. */
     uint64_t sby  = statusbar_y();
-    uint64_t sy   = sby + ((STATUS_H > fh) ? (STATUS_H - fh) / 2u : 0u);
 
-    console_fill_rect(0, sby, fb_w, STATUS_H, bar_bg);
-    /* separator hairline on the inner edge (facing the desktop) */
-    console_fill_rect(0, statusbar_bottom() ? sby : sby + STATUS_H - 1u, fb_w, 1, COL_TASKBAR_SEP);
+    /* Repaint the wallpaper across the reserved strip so glass never accumulates.
+     * In overlay mode the bar floats over the maximized window, so blend directly
+     * over whatever is beneath (no wallpaper repaint) — full_redraw repaints the
+     * window under it each frame, so alpha never accumulates. */
+    if (!g_statusbar_overlay)
+        for (uint64_t r = 0; r < STATUS_H; r++)
+            console_fill_rect(0, sby + r, fb_w, 1u, desktop_bg_at(sby + r));
 
-    /* Left: branding */
-    gui_draw_str(6u, sy, "FiFi OS", g_theme.accent, bar_bg);
+    /* Floating glass card. */
+    uint64_t M = 16u, H = 44u;
+    uint64_t bx = M, by = sby + M, bw = (fb_w > 2u*M) ? fb_w - 2u*M : fb_w, bh = H;
+    console_blend_rect(bx, by, bw, bh, 0x000c1017u, 150u);
+    console_blend_rect(bx, by, bw, 1u, 0x00ffffffu, 22u);
+    int R = 12;
+    for (int r = 0; r < R; r++) {
+        int dyk = R - r, rr = R*R - dyk*dyk; if (rr < 0) rr = 0;
+        int s = 0; while ((s+1)*(s+1) <= rr) s++; int n = R - s; if (n <= 0) continue;
+        uint32_t ct = desktop_bg_at(by + (uint64_t)r), cb = desktop_bg_at(by + bh - 1u - (uint64_t)r);
+        console_fill_rect(bx, by + (uint64_t)r, (uint64_t)n, 1u, ct);
+        console_fill_rect(bx + bw - (uint64_t)n, by + (uint64_t)r, (uint64_t)n, 1u, ct);
+        console_fill_rect(bx, by + bh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
+        console_fill_rect(bx + bw - (uint64_t)n, by + bh - 1u - (uint64_t)r, (uint64_t)n, 1u, cb);
+    }
+    console_blend_rect(bx + (uint64_t)R, by, bw - 2u*(uint64_t)R, 1u, 0x00ffffffu, 22u);
+    console_blend_rect(bx + (uint64_t)R, by + bh - 1u, bw - 2u*(uint64_t)R, 1u, 0x00ffffffu, 16u);
 
-    /* RTC wall clock: HH:MM (respects clock format setting) */
-    uint8_t rh = 0, rm = 0, rs_unused = 0;
-    rtc_get_time(&rh, &rm, &rs_unused);
-    char clk[10];
-    uint64_t clk_len;
+    uint64_t midy = by + bh/2u;
+    uint64_t cy   = by + (bh > fh ? (bh - fh)/2u : 0u);
+    uint64_t x    = bx + 16u;
+
+    /* Brand: coral star + "FiFi". */
+    draw_fifi_star((int64_t)(x + 7u), (int64_t)midy, 7, g_theme.accent);
+    x += 20u;
+    gui_draw_str_fg(x, cy, "FiFi", 0x00e9edf3u); x += 4u*fw + 12u;
+    console_blend_rect(x, by + (bh - 18u)/2u, 1u, 18u, 0x00ffffffu, 26u); x += 12u;
+
+    /* Intent workspace pills (clickable — switch the active intent). */
+    static const char *pills[3] = { "Build", "Research", "Play" };
+    uint64_t ph = 24u, py = by + (bh - ph)/2u;
+    g_intent_y = py; g_intent_h = ph;
+    for (int i = 0; i < 3; i++) {
+        uint64_t plen = (uint64_t)gui_strlen(pills[i]);
+        uint64_t pw = plen*fw + 26u;
+        g_intent_x[i] = x; g_intent_w[i] = pw;
+        if (i == g_active_intent) {
+            console_fill_rect(x, py, pw, ph, g_theme.accent);
+            console_fill_rect(x + 9u, midy - 2u, 5u, 5u, 0x000a0d12u);
+            gui_draw_str_fg(x + 18u, cy, pills[i], 0x000a0d12u);
+        } else {
+            console_blend_rect(x, py, pw, ph, 0x00ffffffu, 13u);
+            console_fill_rect(x + 9u, midy - 2u, 5u, 5u, 0x005a626cu);
+            gui_draw_str_fg(x + 18u, cy, pills[i], 0x009da6b0u);
+        }
+        x += pw + 6u;
+    }
+    uint64_t search_start = x + 6u;   /* empty middle begins after the pills */
+
+    /* Right cluster, laid out from the right edge inward: clock · battery · wifi. */
+    uint64_t rx = bx + bw - 16u;
+    uint8_t rh = 0, rm = 0, rsx = 0; rtc_get_time(&rh, &rm, &rsx);
+    { int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset; adj = ((adj%24)+24)%24; rh = (uint8_t)adj; }
+    char clk[10]; int clen;
     if (g_theme.clock_12h) {
-        const char *ampm = (rh < 12u) ? "AM" : "PM";
-        uint8_t h12 = rh % 12u; if (h12 == 0u) h12 = 12u;
-        clk[0] = (char)('0' + h12 / 10u); clk[1] = (char)('0' + h12 % 10u); clk[2] = ':';
-        gui_itoa_pad2(rm, clk + 3); clk[5] = ' '; clk[6] = ampm[0]; clk[7] = ampm[1]; clk[8] = '\0';
-        clk_len = 8u;
-    } else {
-        gui_itoa_pad2(rh, clk + 0); clk[2] = ':';
-        gui_itoa_pad2(rm, clk + 3); clk[5] = '\0';
-        clk_len = 5u;
+        const char *ap = (rh < 12u) ? "AM" : "PM"; uint8_t h = rh % 12u; if (!h) h = 12u;
+        clk[0]='0'+h/10u; clk[1]='0'+h%10u; clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]=' '; clk[6]=ap[0]; clk[7]=ap[1]; clk[8]='\0'; clen=8;
+    } else { gui_itoa_pad2(rh, clk); clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]='\0'; clen=5; }
+    rx -= (uint64_t)clen*fw; gui_draw_str_fg(rx, cy, clk, 0x00e9edf3u);
+    rx -= 14u;
+    if (battery_present && battery_present()) {
+        int pct = battery_percent ? battery_percent() : -1; if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+        char pb[6]; int k = 0;
+        if (pct >= 100) { pb[k++]='1'; pb[k++]='0'; pb[k++]='0'; }
+        else { if (pct >= 10) pb[k++]=(char)('0'+pct/10); pb[k++]=(char)('0'+pct%10); }
+        pb[k++]='%'; pb[k]='\0';
+        rx -= (uint64_t)k*fw; gui_draw_str_fg(rx, cy, pb, 0x00b6bcc6u); rx -= 7u;
+        uint64_t gw = 22u, gh = 11u, gyy = midy - gh/2u; rx -= (gw + 3u);
+        uint32_t oc = 0x0099a2acu;
+        console_fill_rect(rx, gyy, gw, 1u, oc); console_fill_rect(rx, gyy+gh-1u, gw, 1u, oc);
+        console_fill_rect(rx, gyy, 1u, gh, oc);  console_fill_rect(rx+gw-1u, gyy, 1u, gh, oc);
+        console_fill_rect(rx+gw, gyy+(gh-5u)/2u, 2u, 5u, oc);
+        uint64_t fwid = (uint64_t)pct*(gw-4u)/100u;
+        if (fwid) console_fill_rect(rx+2u, gyy+2u, fwid, gh-4u, pct <= 15 ? 0x00e05050u : 0x00b6bcc6u);
+        rx -= 12u;
     }
+    { uint32_t wc = (net_ip != 0) ? 0x00e9edf3u : 0x005a626cu; rx -= 13u;
+      console_fill_rect(rx,     midy+2u, 3u, 5u,  wc);
+      console_fill_rect(rx+5u,  midy-1u, 3u, 8u,  wc);
+      console_fill_rect(rx+10u, midy-5u, 3u, 12u, wc); }
 
-    /* Uptime */
-    uint64_t hz   = pit_get_hz();
-    if (!hz) hz   = 100;
-    uint64_t secs = pit_ticks() / hz;
-    uint64_t mins = secs / 60u;  secs %= 60u;
-    uint64_t hrs  = mins / 60u;  mins %= 60u;
-    char up[14];
-    {
-        int i = 0;
-        const char *p;
-        for (p = "up "; *p; ) up[i++] = *p++;
-        gui_itoa_pad2((int)hrs,  up + i); i += 2; up[i++] = ':';
-        gui_itoa_pad2((int)mins, up + i); i += 2; up[i++] = ':';
-        gui_itoa_pad2((int)secs, up + i); i += 2; up[i] = '\0';
-    }
-
-    /* Memory: used / total MB */
-    uint64_t total_p = pmm_get_total_pages();
-    uint64_t free_p  = pmm_get_free_pages();
-    uint64_t used_mb  = ((total_p - free_p) * 4096u) >> 20u;
-    uint64_t total_mb = (total_p * 4096u) >> 20u;
-
-    char membuf[32];
-    char ub[8], tb[8];
-    gui_itoa((int)used_mb,  ub, 8);
-    gui_itoa((int)total_mb, tb, 8);
-    {
-        int i = 0;
-        const char *p;
-        for (p = ub;    *p && i < 28; ) membuf[i++] = *p++;
-        for (p = "/";   *p && i < 28; ) membuf[i++] = *p++;
-        for (p = tb;    *p && i < 28; ) membuf[i++] = *p++;
-        for (p = "MB";  *p && i < 28; ) membuf[i++] = *p++;
-        membuf[i] = '\0';
-    }
-
-    /* Right side: clock | mem | uptime */
-    uint32_t info_col = 0x00506878u;
-    uint64_t mem_len  = (uint64_t)gui_strlen(membuf);
-    uint64_t up_len   = (uint64_t)gui_strlen(up);
-    uint64_t right_w  = (clk_len + 3u + mem_len + 3u + up_len) * fw + 12u;
-    uint64_t rx = fb_w > right_w ? fb_w - right_w : 0u;
-
-    gui_draw_str(rx,                                    sy, clk,    0x0090c8e8u, bar_bg);
-    gui_draw_str(rx + (clk_len + 1u) * fw,             sy, "|",    0x00303848u, bar_bg);
-    gui_draw_str(rx + (clk_len + 3u) * fw,             sy, membuf, info_col,    bar_bg);
-    gui_draw_str(rx + (clk_len + 3u + mem_len + 1u) * fw, sy, "|", 0x00303848u, bar_bg);
-    gui_draw_str(rx + (clk_len + 3u + mem_len + 3u) * fw, sy, up,  info_col,    bar_bg);
-
-    /* Center: context path for Files / Text Viewer (topmost visible) */
-    {
-        const char *ctx = NULL;
-        for (int zi = MAX_WINS - 1; zi >= 0; zi--) {
-            int si = g_z[zi];
-            window_t *cw = &g_wins[si];
-            if (!cw->active || cw->state == WIN_HIDDEN) continue;
-            if (cw->type == WIN_FILES  && cw->fb.path[0])    ctx = cw->fb.path;
-            else if (cw->type == WIN_TEXT && cw->text.path[0]) ctx = cw->text.path;
-            break;
+    /* Search field in the empty middle — click opens the app launcher/search. */
+    uint64_t search_end = rx > 14u ? rx - 14u : search_start;
+    if (search_end > search_start + 10u*fw) {
+        g_bar_search_x = search_start; g_bar_search_w = search_end - search_start;
+        g_bar_search_y = by; g_bar_search_h = bh;
+        uint64_t shh = 22u, shy = by + (bh - shh)/2u;
+        extern bool g_launcher_top; extern char g_launch_q[40]; extern int g_launch_qlen;
+        bool focused = g_launcher_open && g_launcher_top;
+        console_blend_rect(search_start, shy, g_bar_search_w, shh, 0x00ffffffu, focused ? 14u : 8u);
+        if (focused && g_launch_qlen > 0) {
+            gui_draw_str_fg(search_start + 12u, cy, g_launch_q, 0x00e9edf3u);
+            console_fill_rect(search_start + 12u + (uint64_t)g_launch_qlen*fw + 1u, cy, 2u, fh, g_theme.accent);
+        } else {
+            gui_draw_str_fg(search_start + 12u, cy, "Search", focused ? 0x009da6b0u : 0x006a707au);
+            if (focused) console_fill_rect(search_start + 12u, cy, 2u, fh, g_theme.accent);
         }
-        if (ctx) {
-            uint64_t brand_w = (7u + 3u) * fw;  /* "FiFi OS" + 3 gap chars */
-            uint64_t avail   = rx > brand_w ? rx - brand_w : 0u;
-            if (avail > 4u * fw) {
-                uint64_t max_ch  = avail / fw;
-                uint64_t ctx_len = (uint64_t)gui_strlen(ctx);
-                const char *show = ctx;
-                if (ctx_len > max_ch && max_ch > 1u) {
-                    show = ctx + (ctx_len - max_ch + 1u);
-                    while (show > ctx && *show != '/') show++;
-                }
-                uint64_t show_len = (uint64_t)gui_strlen(show);
-                uint64_t ctx_x = brand_w + (avail > show_len * fw ? (avail - show_len * fw) / 2u : 0u);
-                gui_draw_str_clip(ctx_x, sy, show, 0x00384e60u, bar_bg, max_ch);
-            }
-        }
-    }
+    } else { g_bar_search_x = 0; g_bar_search_w = 0; }
 }
 
 /* ── Resize edge highlight ───────────────────────────────────────────── */
@@ -459,6 +482,14 @@ void draw_desktop_info(void) {
 #define WALL_GRAD_TOP  0x00294a8fu
 #define WALL_GRAD_BOT  0x00070a14u
 
+/* Cache for smooth "field" wallpapers (Aurora + variants): rendered once and
+ * blitted thereafter (see draw_desktop_bg). Declared here so desktop_bg_at can
+ * sample it. Keyed on resolution + accent + which field. */
+static uint32_t *g_aurora_cache = 0;
+static uint64_t  g_aurora_cw = 0, g_aurora_ch = 0;
+static uint32_t  g_aurora_accent = 0;
+static int       g_aurora_wall = -1;
+
 /* Wallpaper colour at absolute row y — used by window corner rounding so the
  * punched-out corners reveal the true backdrop for any wallpaper/palette. For
  * non-gradient wallpapers, return a representative deep tone. */
@@ -476,14 +507,225 @@ uint32_t desktop_bg_at(uint64_t y) {
         return (r<<16)|(g<<8)|b;
     }
     if (g_theme.wallpaper == WALLPAPER_SOLID) return 0x00111118u;
+    /* Field wallpapers (Aurora + variants, ids >= WALLPAPER_AURORA): sample the
+     * rendered field cache at its horizontal centre for this row so corner-rounding
+     * + the status-bar strip repaint match the real pixels. Deep tone until built. */
+    if (g_theme.wallpaper >= WALLPAPER_AURORA) {
+        if (g_aurora_cache && g_aurora_cw > 0 && y < g_aurora_ch)
+            return g_aurora_cache[y * g_aurora_cw + g_aurora_cw / 2u];
+        return 0x00090e1au;
+    }
     return 0x000a0c14u;
 }
+
+/* Cheap parabolic sine approximation (no libm): input radians, output ~[-1,1].
+ * Uses only add/sub/mul/div, so it needs no math library (works in static build). */
+static float aurora_fsin(float x) {
+    const float PI = 3.14159265f, TAU = 6.28318531f;
+    x -= TAU * (float)((int)(x / TAU + (x < 0.0f ? -0.5f : 0.5f)));  /* wrap ~[-PI,PI] */
+    if (x < -PI) x += TAU; else if (x > PI) x -= TAU;
+    float ax = x < 0.0f ? -x : x;
+    float y = 1.27323954f * x - 0.405284735f * x * ax;              /* 4/PI, 4/PI^2 */
+    float ay = y < 0.0f ? -y : y;
+    return 0.225f * (y * ay - y) + y;                               /* precision refine */
+}
+
+/* ── Smooth per-pixel "field" wallpapers ───────────────────────────────────
+ * A dark vertical base + a few soft, gently FLOWING colour ribbons lit
+ * additively, with 4x4 Bayer dither to defeat 8-bit banding. Every field
+ * wallpaper (Aurora, Northern Lights, Nebula, Dusk, ...) is just a different
+ * field_cfg_t through this SAME renderer, so they are ALL seamless (no banded
+ * rects, no per-segment seams). Rendered once and cached (see draw_desktop_bg). */
+#define FIELD_MAX_RIB 6
+typedef struct {
+    uint32_t base_top, base_bot;   /* dark vertical base gradient */
+    int      nrib;                 /* number of ribbons (<= FIELD_MAX_RIB) */
+    int      accent_rib;           /* ribbon index using g_theme.accent, or -1 */
+    struct {
+        float    cy, hh, peak;     /* centre frac, half-height frac, additive peak */
+        uint32_t col;              /* ribbon colour (ignored if this is accent_rib) */
+        float    amp, fq, ph;      /* vertical undulation: amplitude frac, freq, phase */
+        float    im, ifq, iph;     /* horizontal intensity: depth, freq (hi=rays), phase */
+    } rib[FIELD_MAX_RIB];
+} field_cfg_t;
+
+static void smoothfield_render(uint32_t *buf, uint64_t fb_w, uint64_t fb_h,
+                               const field_cfg_t *cfg, uint32_t accent) {
+    float W = (float)fb_w, Hf = (float)fb_h;
+    int nr = cfg->nrib; if (nr > FIELD_MAX_RIB) nr = FIELD_MAX_RIB; if (nr < 1) nr = 1;
+    /* Resolve ribbon colours (accent substitution) to float r/g/b. */
+    float cr[FIELD_MAX_RIB], cg[FIELD_MAX_RIB], cb[FIELD_MAX_RIB];
+    for (int i = 0; i < nr; i++) {
+        uint32_t c = (i == cfg->accent_rib) ? accent : cfg->rib[i].col;
+        cr[i] = (float)((c >> 16) & 0xffu);
+        cg[i] = (float)((c >> 8)  & 0xffu);
+        cb[i] = (float)( c        & 0xffu);
+    }
+    float btR=(float)((cfg->base_top>>16)&0xffu), btG=(float)((cfg->base_top>>8)&0xffu), btB=(float)(cfg->base_top&0xffu);
+    float bbR=(float)((cfg->base_bot>>16)&0xffu), bbG=(float)((cfg->base_bot>>8)&0xffu), bbB=(float)(cfg->base_bot&0xffu);
+    const float TAU = 6.28318531f;
+    /* Hoist per-column sine work out of the pixel loop. */
+    float *cy = (float *)kmalloc(fb_w * (uint64_t)nr * sizeof(float));
+    float *im = (float *)kmalloc(fb_w * (uint64_t)nr * sizeof(float));
+    if (!cy || !im) { if (cy) kfree(cy); if (im) kfree(im); return; }
+    for (uint64_t x = 0; x < fb_w; x++) {
+        float u = (float)x / W;
+        for (int i = 0; i < nr; i++) {
+            cy[x*nr+i] = (cfg->rib[i].cy + cfg->rib[i].amp * aurora_fsin(u*TAU*cfg->rib[i].fq + cfg->rib[i].ph)) * Hf;
+            float m = 0.5f * (1.0f + aurora_fsin(u*TAU*cfg->rib[i].ifq + cfg->rib[i].iph));
+            im[x*nr+i] = (1.0f - cfg->rib[i].im) + cfg->rib[i].im * m;
+        }
+    }
+    static const int bay[4][4] = {{0,8,2,10},{12,4,14,6},{3,11,1,9},{15,7,13,5}};
+    for (uint64_t y = 0; y < fb_h; y++) {
+        float fy = (float)y, v = fy / Hf;
+        float baseR = btR + (bbR - btR) * v;
+        float baseG = btG + (bbG - btG) * v;
+        float baseB = btB + (bbB - btB) * v;
+        uint32_t *rowp = buf + y * fb_w;
+        const int *brow = bay[y & 3];
+        for (uint64_t x = 0; x < fb_w; x++) {
+            float R = baseR, G = baseG, B = baseB;
+            for (int i = 0; i < nr; i++) {
+                float d = (fy - cy[x*nr+i]) / (cfg->rib[i].hh * Hf);
+                float ad = d < 0.0f ? -d : d;
+                if (ad >= 1.0f) continue;
+                float t = 1.0f - ad*ad; t *= t;               /* smooth quartic bump */
+                float inten = cfg->rib[i].peak * t * im[x*nr+i];
+                R += cr[i] * inten; G += cg[i] * inten; B += cb[i] * inten;
+            }
+            int dth = (brow[x & 3] - 7) >> 1;                 /* ~-4..+4 ordered dither */
+            int Ri = (int)(R + 0.5f) + dth;
+            int Gi = (int)(G + 0.5f) + dth;
+            int Bi = (int)(B + 0.5f) + dth;
+            if (Ri < 0) Ri = 0; else if (Ri > 255) Ri = 255;
+            if (Gi < 0) Gi = 0; else if (Gi > 255) Gi = 255;
+            if (Bi < 0) Bi = 0; else if (Bi > 255) Bi = 255;
+            rowp[x] = ((uint32_t)Ri << 16) | ((uint32_t)Gi << 8) | (uint32_t)Bi;
+        }
+    }
+    kfree(cy); kfree(im);
+}
+
+/* ── Field wallpaper presets ───────────────────────────────────────────────*/
+/* "Aurora" — the accent-adaptive flagship: teal-green top, warm accent hero
+ * curtain, violet floor. (accent_rib=1 → the hero uses g_theme.accent.) */
+static const field_cfg_t FIELD_AURORA = {
+    0x00080c17u, 0x0003050au, 3, 1,
+    {{ 0.24f,0.28f,0.58f, 0x002cd6bau, 0.055f,1.4f,0.0f, 0.42f,2.3f,0.7f },
+     { 0.46f,0.26f,0.80f, 0x00000000u, 0.060f,1.1f,2.1f, 0.34f,1.7f,2.0f },
+     { 0.74f,0.32f,0.60f, 0x007c5af0u, 0.050f,1.3f,4.2f, 0.42f,2.0f,3.4f }},
+};
+
+/* "Northern Lights" — true-to-life aurora: emerald hero curtain with vertical
+ * ray striations (high ifq), a magenta upper fringe, a cyan lower glow, over a
+ * deep night-blue base. Curated palette (not accent-tinted). */
+static const field_cfg_t FIELD_NORTHERN = {
+    0x00060c1cu, 0x00020408u, 3, -1,
+    {{ 0.24f,0.20f,0.46f, 0x00c24a96u, 0.05f,1.5f,0.5f, 0.44f,6.5f,0.9f },
+     { 0.46f,0.25f,0.83f, 0x0033f593u, 0.065f,1.2f,2.2f, 0.48f,6.5f,0.7f },
+     { 0.74f,0.31f,0.50f, 0x0010b0e0u, 0.045f,0.95f,4.5f, 0.36f,1.8f,3.2f }},
+};
+
+/* "Nebula" — deep-space blooms: indigo body, violet, magenta hero, cyan wisp,
+ * deep-blue floor. Diffuse (low ifq), Hubble-field depth. */
+static const field_cfg_t FIELD_NEBULA = {
+    0x00080614u, 0x00020108u, 5, -1,
+    {{ 0.52f,0.34f,0.47f, 0x004a3ad0u, 0.05f,1.0f,0.0f, 0.35f,1.4f,0.5f },
+     { 0.30f,0.26f,0.60f, 0x008a46f2u, 0.06f,1.3f,1.6f, 0.40f,1.8f,2.1f },
+     { 0.68f,0.24f,0.72f, 0x00e0409au, 0.07f,1.15f,3.0f, 0.42f,1.6f,4.0f },
+     { 0.15f,0.19f,0.50f, 0x0033d6e0u, 0.08f,1.6f,4.7f, 0.45f,2.2f,0.9f },
+     { 0.86f,0.30f,0.42f, 0x005a30c8u, 0.04f,0.9f,5.5f, 0.38f,1.2f,3.3f }},
+};
+
+/* "Coral Dusk" — twilight: cool indigo night up top warming to a rose mid-band,
+ * coral afterglow, and an amber sun-line at the horizon. */
+static const field_cfg_t FIELD_DUSK = {
+    0x00080616u, 0x00170608u, 4, -1,
+    {{ 0.20f,0.30f,0.50f, 0x00705cf0u, 0.04f,1.1f,0.4f, 0.35f,1.6f,0.5f },
+     { 0.46f,0.26f,0.56f, 0x00e84f9cu, 0.05f,1.4f,2.1f, 0.40f,2.2f,2.0f },
+     { 0.66f,0.24f,0.62f, 0x00f06a55u, 0.06f,0.9f,3.6f, 0.42f,1.3f,3.5f },
+     { 0.86f,0.32f,0.83f, 0x00ff9a3au, 0.045f,1.0f,5.0f, 0.38f,1.8f,4.8f }},
+};
+
+/* "Abyssal Ocean" — cool depths: aqua surface caustics (high ifq), cyan hero,
+ * teal current, deep-blue abyss floor. */
+static const field_cfg_t FIELD_OCEAN = {
+    0x00061420u, 0x00010306u, 4, -1,
+    {{ 0.15f,0.24f,0.56f, 0x0038e6d0u, 0.05f,1.5f,0.4f, 0.44f,6.5f,1.1f },
+     { 0.40f,0.29f,0.74f, 0x0015c4e8u, 0.06f,1.1f,2.2f, 0.36f,1.6f,3.3f },
+     { 0.60f,0.30f,0.48f, 0x000f9c86u, 0.07f,0.9f,3.9f, 0.40f,2.3f,5.0f },
+     { 0.84f,0.33f,0.64f, 0x001a54dau, 0.045f,1.3f,5.6f, 0.34f,1.4f,0.7f }},
+};
+
+/* "Spring Dawn" — airy but dark: pale-green sky, aqua band, mint hero, pale-gold
+ * sunrise on the horizon. */
+static const field_cfg_t FIELD_SPRING = {
+    0x000a1713u, 0x00050c10u, 4, -1,
+    {{ 0.16f,0.22f,0.44f, 0x0074d69cu, 0.05f,1.0f,5.2f, 0.34f,1.4f,1.2f },
+     { 0.36f,0.24f,0.55f, 0x002fc8d6u, 0.07f,1.5f,3.6f, 0.40f,4.6f,4.0f },
+     { 0.56f,0.28f,0.66f, 0x003fe08cu, 0.06f,1.2f,1.8f, 0.44f,2.2f,0.9f },
+     { 0.84f,0.26f,0.50f, 0x00e6c06au, 0.04f,0.9f,0.4f, 0.36f,1.3f,2.1f }},
+};
+
+/* "Molten Ember" — volcanic glow rising from the floor: smoky ember, crimson
+ * body, molten-orange hero, gold hottest core (flame rays via high ifq). */
+static const field_cfg_t FIELD_EMBER = {
+    0x00080506u, 0x00160805u, 4, -1,
+    {{ 0.45f,0.30f,0.45f, 0x00b52812u, 0.07f,0.85f,5.0f, 0.38f,2.2f,1.0f },
+     { 0.72f,0.34f,0.55f, 0x00e01f2bu, 0.05f,0.9f,0.0f, 0.40f,1.6f,0.5f },
+     { 0.88f,0.28f,0.80f, 0x00ff5e14u, 0.06f,1.2f,1.6f, 0.42f,5.0f,2.1f },
+     { 0.96f,0.20f,0.52f, 0x00ffc24au, 0.04f,1.5f,3.2f, 0.45f,6.0f,4.0f }},
+};
+
+/* Maps a wallpaper id to its field config, or NULL for non-field wallpapers. */
+static const field_cfg_t *field_cfg_for(int wall) {
+    switch (wall) {
+        case WALLPAPER_AURORA:   return &FIELD_AURORA;
+        case WALLPAPER_NORTHERN: return &FIELD_NORTHERN;
+        case WALLPAPER_NEBULA:   return &FIELD_NEBULA;
+        case WALLPAPER_DUSK:     return &FIELD_DUSK;
+        case WALLPAPER_OCEAN:    return &FIELD_OCEAN;
+        case WALLPAPER_SPRING:   return &FIELD_SPRING;
+        case WALLPAPER_EMBER:    return &FIELD_EMBER;
+        default:                 return 0;
+    }
+}
+
+/* Cache for the procedural Aurora wallpaper: it depends only on resolution +
+ * accent, so render it once and blit the cache thereafter (window drags trigger
+ * full_redraw per frame — recomputing 8 soft bands each time would be wasteful). */
 
 void draw_desktop_bg(void) {
     uint64_t fb_w  = console_fb_width();
     uint64_t dt    = desk_top();
     uint64_t dav   = desk_avail();
     uint64_t dbot  = desk_bot();
+
+    /* Smooth per-pixel "field" wallpapers (Aurora + variants): render once into a
+     * cache (keyed on resolution + accent + which field), blit thereafter. Full
+     * screen (0..fb_h) so it's seamless behind the horizon bar and dock. */
+    const field_cfg_t *fcfg = field_cfg_for(g_theme.wallpaper);
+    if (fcfg) {
+        uint64_t fb_h = console_fb_height();
+        if (!g_aurora_cache || g_aurora_cw != fb_w || g_aurora_ch != fb_h ||
+            g_aurora_accent != g_theme.accent || g_aurora_wall != g_theme.wallpaper) {
+            if (g_aurora_cache && (g_aurora_cw != fb_w || g_aurora_ch != fb_h)) {
+                kfree(g_aurora_cache); g_aurora_cache = 0;
+            }
+            if (!g_aurora_cache) g_aurora_cache = kmalloc(fb_w * fb_h * 4u);
+            if (g_aurora_cache) {
+                smoothfield_render(g_aurora_cache, fb_w, fb_h, fcfg, g_theme.accent);
+                g_aurora_cw = fb_w; g_aurora_ch = fb_h;
+                g_aurora_accent = g_theme.accent; g_aurora_wall = g_theme.wallpaper;
+            }
+        }
+        if (g_aurora_cache) console_paste_rect(g_aurora_cache, 0, 0, fb_w, fb_h);
+        else console_fill_vgrad(0, 0, fb_w, fb_h, fcfg->base_top, fcfg->base_bot);
+        draw_desktop_icons();  /* same post-wallpaper overlays as the switch tail below */
+        draw_desktop_info();
+        return;
+    }
 
     switch (g_theme.wallpaper) {
 
@@ -554,10 +796,45 @@ void draw_desktop_bg(void) {
     }
 
     case WALLPAPER_IMAGE:
-        /* Scale-blit the loaded wallpaper image to fill the desktop area */
+        /* Place the loaded image into the desktop area per the chosen fit mode. */
         if (g_wall_img && g_wall_img_w > 0 && g_wall_img_h > 0) {
-            console_blit_scaled(g_wall_img, g_wall_img_w, g_wall_img_h,
-                                0, dt, fb_w, dav);
+            uint64_t iw = g_wall_img_w, ih = g_wall_img_h;
+            uint32_t *img = g_wall_img;
+            const uint32_t LB = 0x00060810u;   /* letterbox / matte tone */
+            switch (g_theme.wall_fit) {
+            case WALLFIT_STRETCH:
+                console_blit_scaled(img, iw, ih, 0, dt, fb_w, dav);
+                break;
+            case WALLFIT_FIT: {   /* contain: whole image visible, letterboxed */
+                uint64_t sw2, sh2;
+                if (fb_w * ih < dav * iw) { sw2 = fb_w;         sh2 = ih * fb_w / iw; }
+                else                      { sh2 = dav;          sw2 = iw * dav / ih; }
+                console_fill_rect(0, dt, fb_w, dav, LB);
+                console_blit_scaled(img, iw, ih, (fb_w - sw2) / 2,
+                                    dt + (dav - sh2) / 2, sw2, sh2);
+                break;
+            }
+            case WALLFIT_CENTER: {   /* 1:1, centred (crop if larger, matte if smaller) */
+                uint64_t dwn = iw < fb_w ? iw : fb_w;
+                uint64_t dhn = ih < dav  ? ih : dav;
+                int64_t  sx0 = iw > fb_w ? (int64_t)(iw - fb_w) / 2 : 0;
+                int64_t  sy0 = ih > dav  ? (int64_t)(ih - dav)  / 2 : 0;
+                console_fill_rect(0, dt, fb_w, dav, LB);
+                console_blit_scaled_src(img, iw, ih, sx0, sy0, dwn, dhn,
+                                        (fb_w - dwn) / 2, dt + (dav - dhn) / 2, dwn, dhn);
+                break;
+            }
+            default: {   /* WALLFIT_FILL — cover: fill the area, crop overflow */
+                uint64_t cw, ch; int64_t sx0, sy0;
+                if (iw * dav > fb_w * ih) {         /* image wider than desk → crop sides */
+                    cw = ih * fb_w / dav; ch = ih; sx0 = (int64_t)(iw - cw) / 2; sy0 = 0;
+                } else {                            /* taller → crop top/bottom */
+                    cw = iw; ch = iw * dav / fb_w; sx0 = 0; sy0 = (int64_t)(ih - ch) / 2;
+                }
+                console_blit_scaled_src(img, iw, ih, sx0, sy0, cw, ch, 0, dt, fb_w, dav);
+                break;
+            }
+            }
         } else {
             /* Fallback gradient if no image loaded */
             console_fill_rect(0, dt, fb_w, dav, 0x00101018u);
@@ -789,6 +1066,15 @@ void help_draw(void) {
  * Called from main.c after ipc_blit_all / ipc_draw_overlays so they are
  * never covered by IPC app framebuffers. */
 void gui_draw_popups(void) {
+    /* Reveal the auto-hidden top bar as an overlay while the cursor is at the very
+     * top edge and a window is maximized. Drawn here (after the IPC blit) so it sits
+     * above IPC/Wayland app framebuffers, not behind them. */
+    if (!statusbar_bottom() && g_theme.statusbar &&
+        any_window_maximized() && g_statusbar_reveal) {
+        g_statusbar_overlay = true;
+        draw_status_bar();
+        g_statusbar_overlay = false;
+    }
     if (g_launcher_open)  launcher_draw();
     if (g_vol_popup_open) vol_popup_draw();
     if (g_cal_popup_open) cal_popup_draw();

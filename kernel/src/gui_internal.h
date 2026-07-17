@@ -21,8 +21,13 @@
 #include "hda.h"
 
 /* ── Layout ──────────────────────────────────────────────────────────── */
-#define STATUS_H        (console_font_height() + 6u)
-#define TASKBAR_H       (console_font_height() + 10u)
+/* Reserved top strip for the floating "horizon bar" (16px margin + 44px card
+ * + 8px gap). Fixed so the bar geometry is independent of the console font. */
+#define STATUS_H        68u
+/* Base bar height + the user's additive "Taskbar size" (panel_size, 0..64px).
+ * All layout (desk_top/bot, tray centering) derives from TASKBAR_H, so the bar
+ * and work area track this each frame. */
+#define TASKBAR_H       (console_font_height() + 10u + (uint32_t)g_theme.panel_size)
 #define TITLE_H         24u
 #define BTN_W           TITLE_H
 #define BORDER          1u
@@ -125,7 +130,23 @@
 #define WALLPAPER_GRID      3
 #define WALLPAPER_WAVES     4
 #define WALLPAPER_IMAGE     5
-#define WALLPAPER_COUNT     6
+#define WALLPAPER_AURORA    6   /* smooth field: accent-adaptive northern-lights curtain */
+#define WALLPAPER_NORTHERN  7   /* smooth field: true-to-life emerald aurora */
+#define WALLPAPER_NEBULA    8   /* smooth field: deep-space nebula blooms */
+#define WALLPAPER_DUSK      9   /* smooth field: coral/amber sunset */
+#define WALLPAPER_OCEAN     10  /* smooth field: abyssal teal/cyan depths */
+#define WALLPAPER_SPRING    11  /* smooth field: mint/aqua/gold spring dawn */
+#define WALLPAPER_EMBER     12  /* smooth field: molten crimson/orange/gold */
+#define WALLPAPER_COUNT     13
+/* Field wallpapers (rendered by smoothfield_render) are the contiguous range
+ * [WALLPAPER_AURORA, WALLPAPER_COUNT); desktop_bg_at() relies on that ordering. */
+
+/* Image wallpaper fit modes (how a picture fills the desktop). */
+#define WALLFIT_FILL    0   /* cover: scale to fill, crop overflow (keeps aspect) */
+#define WALLFIT_FIT     1   /* contain: scale to fit inside, letterbox (keeps aspect) */
+#define WALLFIT_STRETCH 2   /* stretch to exact desktop size (distorts aspect) */
+#define WALLFIT_CENTER  3   /* 1:1 centred (crop if larger, letterbox if smaller) */
+#define WALLFIT_COUNT   4
 
 /* Panel edge + item-run alignment for the configurable taskbar/panel. */
 typedef enum { PANEL_BOTTOM = 0, PANEL_TOP = 1, PANEL_LEFT = 2, PANEL_RIGHT = 3 } panel_edge_t;
@@ -134,6 +155,7 @@ typedef enum { PALIGN_START = 0, PALIGN_CENTER = 1, PALIGN_END = 2 } panel_align
 typedef struct {
     uint32_t accent;        /* primary accent colour (borders, highlights) */
     int      wallpaper;     /* one of WALLPAPER_* */
+    uint8_t  wall_fit;      /* image wallpaper fit: one of WALLFIT_* */
     bool     clock_12h;     /* true = 12-hour AM/PM format */
     bool     animations;    /* true = window open/close animations */
     bool     statusbar;     /* true = show top status bar */
@@ -351,6 +373,8 @@ extern gui_theme_t  g_theme;
 extern uint32_t    *g_wall_img;
 extern uint32_t     g_wall_img_w;
 extern uint32_t     g_wall_img_h;
+extern char         g_wall_img_path[256];   /* current image-wallpaper path (persisted) */
+void gui_load_wallpaper_image(void);         /* load g_wall_img_path into g_wall_img */
 
 extern desk_icon_t  g_desk_icons[DESK_ICON_MAX];
 extern int          g_desk_icon_hover;
@@ -416,6 +440,7 @@ extern uint64_t     g_resize_ww0;
 extern uint64_t     g_resize_wh0;
 
 extern bool         g_launcher_open;
+extern bool         g_launcher_top;   /* anchored under the horizon-bar search field */
 extern bool         g_help_open;     /* Super+/ shortcuts overlay */
 void     help_draw(void);            /* gui_render.c */
 
@@ -502,6 +527,11 @@ extern uint64_t g_net_tray_x, g_net_tray_w;
 extern uint64_t g_mem_tray_x, g_mem_tray_w;
 extern int      g_tray_hover;           /* TRAY_* id under cursor, or TRAY_NONE */
 int      tray_item_at(int32_t mx, int32_t my);
+
+/* Horizon-bar interactive regions (set by draw_status_bar each frame). */
+extern int      g_active_intent;         /* 0=Build 1=Research 2=Play */
+extern uint64_t g_intent_x[3], g_intent_w[3], g_intent_y, g_intent_h;
+extern uint64_t g_bar_search_x, g_bar_search_w, g_bar_search_y, g_bar_search_h;
 void     tray_tip_draw(void);
 /* platform battery/cpu (weak — Linux-only) */
 __attribute__((weak)) bool battery_present(void);
@@ -681,6 +711,10 @@ uint64_t desk_right(void);
 uint64_t desk_availw(void);            /* usable desktop width */
 bool     statusbar_bottom(void);       /* status bar relocated to bottom (top panel) */
 uint64_t statusbar_y(void);            /* status bar top Y */
+bool     any_window_maximized(void);   /* a maximized window => top bar auto-hides */
+uint64_t desk_maxtop(void);            /* top edge a maximized window fills to (0 if top bar) */
+extern bool g_statusbar_reveal;        /* cursor at top edge: reveal the hidden bar */
+extern bool g_statusbar_overlay;       /* draw_status_bar in overlay mode (no wallpaper repaint) */
 uint64_t vpanel_logo_y(void);          /* vertical dock: logo square Y */
 uint64_t vpanel_fav_y0(void);          /* vertical dock: first favorite Y */
 void     taskbar_draw_vertical(void);

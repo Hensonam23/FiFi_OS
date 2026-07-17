@@ -1792,6 +1792,31 @@ void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
     }
 }
 
+/* Scale-blit a SOURCE SUB-RECTANGLE (sx0,sy0,scw×sch) of src into dest rect
+ * (dx,dy,dw×dh), nearest-neighbour, clipped to the framebuffer. Source samples
+ * are clamped into [0,sw)×[0,sh). This is the general primitive the wallpaper
+ * fit modes use: "cover" crops the source, "fit"/"center" inset the dest. */
+void console_blit_scaled_src(const uint32_t *src, uint64_t sw, uint64_t sh,
+                             int64_t sx0, int64_t sy0, uint64_t scw, uint64_t sch,
+                             uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh) {
+    if (!g_back || !src || !sw || !sh || !dw || !dh || !scw || !sch) return;
+    g_dirty = true;
+    if ((uint32_t)dy < g_dirty_y0) g_dirty_y0 = (uint32_t)dy;
+    uint32_t _y1 = (uint32_t)(dy + dh);
+    if (_y1 > g_dirty_y1) g_dirty_y1 = _y1;
+    for (uint64_t y = 0; y < dh && dy + y < con.h; y++) {
+        int64_t sy = sy0 + (int64_t)(y * sch / dh);
+        if (sy < 0) sy = 0; else if (sy >= (int64_t)sh) sy = (int64_t)sh - 1;
+        const uint32_t *src_row = src + (uint64_t)sy * sw;
+        uint32_t *dst_row = g_back + (dy + y) * con.pitch32 + dx;
+        for (uint64_t x = 0; x < dw && dx + x < con.w; x++) {
+            int64_t sx = sx0 + (int64_t)(x * scw / dw);
+            if (sx < 0) sx = 0; else if (sx >= (int64_t)sw) sx = (int64_t)sw - 1;
+            dst_row[x] = src_row[(uint64_t)sx];
+        }
+    }
+}
+
 /* Scale-blit ARGB source with per-pixel alpha blending over the backbuffer.
  * Nearest-neighbor. Used for app-icon logos over the wallpaper. */
 void console_blit_scaled_alpha(const uint32_t *src, uint64_t sw, uint64_t sh,

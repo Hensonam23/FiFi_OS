@@ -62,6 +62,7 @@ typedef struct {
     uint32_t *frame_buf; /* native frame pixels (frame_w × frame_h) */
     uint32_t *disp_buf;  /* NULL = use frame_buf directly; else = scaled win_w×win_h copy */
     bool     snapped;
+    bool     maximized;    /* fully maximized (zone 3) — top status bar auto-hides */
     uint32_t pre_snap_x, pre_snap_y, pre_snap_w, pre_snap_h;
     char     title[64];
     /* partial-read state */
@@ -152,8 +153,15 @@ static void ipc_apply_snap(int i, int zone) {
      * never overlaps the panel, whichever edge it's on. */
     extern uint64_t desk_left(void); extern uint64_t desk_top(void);
     extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+    extern uint64_t desk_bot(void); extern bool statusbar_bottom(void);
+    extern bool g_theme_statusbar_on(void);
     uint32_t dl = (uint32_t)desk_left(),  dt = (uint32_t)desk_top();
     uint32_t dw = (uint32_t)desk_availw(), dh = (uint32_t)desk_avail();
+    /* When a top status bar is present it auto-hides on maximize, so a maximized
+     * window fills from the very top edge (y=0) down to the dock. */
+    bool top_bar = g_theme_statusbar_on() && !statusbar_bottom();
+    uint32_t maxtop = top_bar ? 0u : dt;
+    uint32_t maxh   = (uint32_t)desk_bot() - maxtop;
 
     if (!c->snapped) {
         c->pre_snap_x = c->win_x;
@@ -161,6 +169,7 @@ static void ipc_apply_snap(int i, int zone) {
         c->pre_snap_w = c->win_w;
         c->pre_snap_h = c->win_h;
     }
+    c->maximized = false;
     switch (zone) {
     case 1:  /* left half */
         c->win_x = dl;          c->win_y = dt; c->win_w = dw / 2;      c->win_h = dh;
@@ -168,8 +177,9 @@ static void ipc_apply_snap(int i, int zone) {
     case 2:  /* right half */
         c->win_x = dl + dw / 2; c->win_y = dt; c->win_w = dw - dw / 2; c->win_h = dh;
         break;
-    case 3:  /* maximize */
-        c->win_x = dl;          c->win_y = dt; c->win_w = dw;          c->win_h = dh;
+    case 3:  /* maximize — fill to the top edge, bar auto-hides */
+        c->win_x = dl;          c->win_y = maxtop; c->win_w = dw;      c->win_h = maxh;
+        c->maximized = true;
         break;
     }
     c->snapped = true;
@@ -195,6 +205,7 @@ static void ipc_unsnap(int i) {
     c->win_w = c->pre_snap_w;
     c->win_h = c->pre_snap_h;
     c->snapped = false;
+    c->maximized = false;
     /* If restored size differs from frame, keep scaling via disp_buf */
     if (c->win_w != c->frame_w || c->win_h != c->frame_h) {
         free(c->disp_buf);
@@ -208,6 +219,15 @@ static void ipc_unsnap(int i) {
     g_ipc_needs_redraw = true;
     uint16_t rsz[2] = { (uint16_t)c->win_w, (uint16_t)c->win_h };
     ipc_send(c, IPC_WIN_RESIZE, rsz, sizeof(rsz));
+}
+
+/* True when any live, non-minimized IPC app window is maximized. Used by the
+ * kernel-side any_window_maximized() to auto-hide the top status bar. */
+bool ipc_any_maximized(void) {
+    for (int i = 0; i < IPC_MAX_APPS; i++)
+        if (g_clients[i].active && g_clients[i].maximized && !g_clients[i].minimized)
+            return true;
+    return false;
 }
 
 /* ── Send a message to an app ────────────────────────────────────────────── */

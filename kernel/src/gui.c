@@ -35,6 +35,7 @@ int      gui_theme_glass(void)  { return g_theme.fx_glass ? 1 : 0; }
 uint32_t *g_wall_img   = NULL;
 uint32_t  g_wall_img_w = 0;
 uint32_t  g_wall_img_h = 0;
+char      g_wall_img_path[256] = "";   /* persisted image-wallpaper path */
 
 desk_icon_t g_desk_icons[DESK_ICON_MAX];
 int         g_desk_icon_hover = -1;
@@ -83,9 +84,9 @@ const uint32_t g_accent_presets[ACCENT_PRESET_COUNT] = {
     0x00601880u,   /* Purple               */
     0x00107888u,   /* Cyan                 */
     0x008040a0u,   /* Mauve                */
-    0x00505050u,   /* Graphite             */
-    0x00285870u,   /* Steel Blue           */
-    0x006a1a1au,   /* Dark Red             */
+    0x005BD9E3u,   /* FiFi Cyan (design)   */
+    0x008F7BFFu,   /* FiFi Purple (design) */
+    0x00FF9A6Bu,   /* FiFi Coral (design)  */
 };
 
 const int g_anim_open_scale[ANIM_TICKS]  = { 36, 64, 84, 96, 100 };
@@ -136,7 +137,10 @@ uint64_t     g_resize_ww0 = 0;
 uint64_t     g_resize_wh0 = 0;
 
 bool g_launcher_open = false;
+bool g_launcher_top  = false;   /* launcher anchored under the horizon-bar search field */
 bool g_help_open     = false;   /* Super+/ keyboard-shortcuts overlay */
+bool g_statusbar_reveal  = false;  /* cursor at top edge: reveal the auto-hidden top bar */
+bool g_statusbar_overlay = false;  /* draw_status_bar over windows (skip wallpaper repaint) */
 
 int      g_settings_scroll    = 0;
 uint32_t g_gui_raise_z        = 2;
@@ -451,12 +455,13 @@ static long g_settings_mtime = -1;
 void gui_settings_save(void) {
     FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
     if (!f) return;
-    fprintf(f, "accent=%u\nwallpaper=%d\nclock_12h=%d\nanimations=%d\n"
+    fprintf(f, "accent=%u\nwallpaper=%d\nwall_fit=%d\nclock_12h=%d\nanimations=%d\n"
                "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
                "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
                "dock_float=%d\nfx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
                "font_file=%s\nfont_px=%d\n",
-            (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.clock_12h,
+            (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.wall_fit,
+            (int)g_theme.clock_12h,
             (int)g_theme.animations, (int)g_theme.statusbar,
             (int)g_theme.desktop_info, (int)g_theme.utc_offset,
             (int)g_theme.panel_edge, (int)g_theme.panel_align,
@@ -464,6 +469,8 @@ void gui_settings_save(void) {
             (int)g_theme.dock_float,
             (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius,
             (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px);
+    /* Image-wallpaper path last, read line-wise on load so paths with spaces work. */
+    if (g_wall_img_path[0]) fprintf(f, "wallpaper_image=%s\n", g_wall_img_path);
     fclose(f);
 }
 void gui_settings_load(void) {
@@ -475,6 +482,12 @@ void gui_settings_load(void) {
         int v; unsigned uv;
         if      (sscanf(line, "accent=%u", &uv) == 1)       g_theme.accent = uv;
         else if (sscanf(line, "wallpaper=%d", &v) == 1)     { if (v >= 0 && v < WALLPAPER_COUNT) g_theme.wallpaper = v; }
+        else if (sscanf(line, "wall_fit=%d", &v) == 1)      { if (v >= 0 && v < WALLFIT_COUNT) g_theme.wall_fit = (uint8_t)v; }
+        else if (strncmp(line, "wallpaper_image=", 16) == 0) {
+            char *val = line + 16;
+            char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
+            snprintf(g_wall_img_path, sizeof g_wall_img_path, "%s", val);
+        }
         else if (sscanf(line, "clock_12h=%d", &v) == 1)     g_theme.clock_12h = (v != 0);
         else if (sscanf(line, "animations=%d", &v) == 1)    g_theme.animations = (v != 0);
         else if (sscanf(line, "statusbar=%d", &v) == 1)     g_theme.statusbar = (v != 0);
@@ -512,6 +525,8 @@ void gui_settings_poll_reload(void) {
     int  old_px = g_font_px;
     snprintf(old_font, sizeof old_font, "%s", g_font_saved_path);
     gui_settings_load();          /* re-reads keys into g_theme + updates g_settings_mtime */
+    /* Switched to (or still on) an image wallpaper: make sure it's loaded. */
+    if (g_theme.wallpaper == WALLPAPER_IMAGE) gui_load_wallpaper_image();
 #ifdef __linux__
     /* Font changed in the Settings app: resolve the saved path against the
      * catalog and swap the live console font, exactly like the picker did. */
@@ -646,6 +661,8 @@ void gui_init(void) {
 
     /* Load persisted user settings (theme/colors/toggles) over the defaults. */
     gui_settings_load();
+    /* Restore a persisted image wallpaper (path saved in the config). */
+    if (g_theme.wallpaper == WALLPAPER_IMAGE) gui_load_wallpaper_image();
 
 #ifdef __linux__
     /* Scan the bundled scalable fonts and pick the active one. */
@@ -720,19 +737,31 @@ void gui_init(void) {
 void gui_add_desktop_icon(const char *path, const char *label);
 void gui_set_wallpaper_image(const char *path);
 
-/* Launch the app/document behind a desktop icon. Executables (no extension)
- * open on a single click; documents require a double-click (600ms window),
- * unless `force` is set (the right-click menu's "Open" opens immediately). */
+/* Launch the app/document behind a desktop icon. EVERY shortcut requires a
+ * DOUBLE-CLICK to open (two clicks on the same icon within ~1s); the first click
+ * just selects the icon and arms the timer, and a slow second click resets it.
+ * `force` (the right-click menu's "Open") opens immediately. */
 static void desk_icon_launch(int idx, bool force) {
     if (idx < 0 || idx >= DESK_ICON_MAX || !g_desk_icons[idx].active) return;
     const char *ipath = g_desk_icons[idx].path;
+
+    /* First click (or too slow since the last): select + arm, don't open. */
+    uint64_t now = pit_ticks();
+    if (!force && !(g_desk_icon_dbl == idx && now - g_desk_icon_click_t < 100u)) {
+        g_desk_icon_dbl     = idx;
+        g_desk_icon_click_t = now;
+        g_desk_icon_sel     = idx;   /* highlight the selected icon */
+        full_redraw();
+        return;
+    }
+    g_desk_icon_dbl = -1;            /* second click within the window → open */
+
     const char *_base = strrchr(ipath, '/');
     _base = _base ? _base + 1 : ipath;
     const char *_ext = strrchr(_base, '.');
     /* An APP shortcut launches the app; only real DOCUMENT files open in the
      * editor/viewer. App launchers have no extension, are .sh/.AppImage, or live
-     * in the app-store dir. This is why a Discord/Steam shortcut must run the app
-     * rather than open its launcher script in the text editor. */
+     * in the app-store dir. */
     bool _is_app = (_ext == NULL)
                  || strcasecmp(_ext, ".sh") == 0
                  || strcasecmp(_ext, ".appimage") == 0
@@ -741,27 +770,19 @@ static void desk_icon_launch(int idx, bool force) {
     __attribute__((weak)) void gui_spawn_app(const char *p);
     if (_is_app) {
         if (gui_spawn_app) gui_spawn_app(ipath);
-        g_desk_icon_dbl = -1;
         return;
     }
-    uint64_t now = pit_ticks();
-    if (force || (g_desk_icon_dbl == idx && now - g_desk_icon_click_t < 60u)) {
-        const char *ext = strrchr(ipath, '.');
-        bool is_img = false;
-        if (ext) {
-            static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
-            for (int _ii = 0; imgs[_ii]; _ii++)
-                if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
-        }
-        if (is_img && gui_spawn_app_with_arg)
-            gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
-        else if (gui_spawn_app_with_arg)
-            gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
-        g_desk_icon_dbl = -1;
-    } else {
-        g_desk_icon_dbl     = idx;
-        g_desk_icon_click_t = now;
+    const char *ext = strrchr(ipath, '.');
+    bool is_img = false;
+    if (ext) {
+        static const char *imgs[] = { ".bmp",".ppm",".pgm",".png",".jpg",".jpeg", NULL };
+        for (int _ii = 0; imgs[_ii]; _ii++)
+            if (strcasecmp(ext, imgs[_ii]) == 0) { is_img = true; break; }
     }
+    if (is_img && gui_spawn_app_with_arg)
+        gui_spawn_app_with_arg("/bin/fifi-imageviewer", ipath);
+    else if (gui_spawn_app_with_arg)
+        gui_spawn_app_with_arg("/bin/fifi-editor", ipath);
 }
 
 /* ── File browser context menu executor (shared by keyboard + mouse) ── */
@@ -854,6 +875,16 @@ void gui_on_tick(void) {
     bool btn_released = !lbtn && g_prev_lbtn;
     g_prev_lbtn = lbtn;
 
+    /* Top status-bar auto-reveal: while a window is maximized the top bar is hidden
+     * (the window fills to the top edge). Reveal it when the cursor touches the very
+     * top edge; keep it up while the cursor stays over the bar; hide once it leaves. */
+    if (g_theme.statusbar && !statusbar_bottom() && any_window_maximized()) {
+        bool want = g_statusbar_reveal ? ((uint64_t)my < STATUS_H) : (my <= 2);
+        if (want != g_statusbar_reveal) { g_statusbar_reveal = want; full_redraw(); }
+    } else if (g_statusbar_reveal) {
+        g_statusbar_reveal = false;
+    }
+
     /* Right-click: consumed from ring buffer so fast press/release isn't missed */
     int32_t rcx, rcy;
     bool rbtn_pressed = mouse_consume_rclick(&rcx, &rcy);
@@ -877,6 +908,19 @@ void gui_on_tick(void) {
          * a matching release). */
         if (btn_released || !lbtn) {
             if (g_icon_dragging) {
+                /* Snap to the nearest desktop grid cell (dedicated spots). */
+                uint64_t cw = DESK_ICON_W + 28u, ch = DESK_ICON_H + 24u + console_font_height();
+                int32_t ax = (int32_t)desk_left() + (int32_t)DESK_ICON_PAD;
+                int32_t ay = (int32_t)desk_top()  + (int32_t)DESK_ICON_PAD;
+                int32_t col = (int32_t)(((int32_t)g_desk_icons[g_icon_drag].x - ax) + (int32_t)cw/2) / (int32_t)cw;
+                int32_t row = (int32_t)(((int32_t)g_desk_icons[g_icon_drag].y - ay) + (int32_t)ch/2) / (int32_t)ch;
+                if (col < 0) col = 0; if (row < 0) row = 0;
+                int32_t sx = ax + col*(int32_t)cw, sy = ay + row*(int32_t)ch;
+                int32_t mxx = (int32_t)desk_right() - (int32_t)DESK_ICON_W;
+                int32_t myy = (int32_t)desk_bot()   - (int32_t)DESK_ICON_H;
+                if (sx > mxx) sx = mxx; if (sy > myy) sy = myy;
+                if (sx < ax) sx = ax;  if (sy < ay) sy = ay;
+                g_desk_icons[g_icon_drag].x = sx; g_desk_icons[g_icon_drag].y = sy;
                 g_desk_icons[g_icon_drag].placed = true;   /* commit + persist */
                 gui_desktop_save();
             } else {
@@ -3036,6 +3080,30 @@ void gui_on_tick(void) {
         }
     }
 
+    /* ── Horizon bar (top) clicks: intent pills + search field ── */
+    if (btn_pressed && g_theme.statusbar && !statusbar_bottom()) {
+        if ((uint64_t)my >= g_intent_y && (uint64_t)my < g_intent_y + g_intent_h) {
+            for (int i = 0; i < 3; i++) {
+                if (g_intent_w[i] > 0u && (uint64_t)mx >= g_intent_x[i] &&
+                    (uint64_t)mx < g_intent_x[i] + g_intent_w[i]) {
+                    g_active_intent = i;
+                    int32_t cx, cy; mouse_consume_click(&cx, &cy);
+                    full_redraw();
+                    return;
+                }
+            }
+        }
+        if (g_bar_search_w > 0u &&
+            (uint64_t)my >= g_bar_search_y && (uint64_t)my < g_bar_search_y + g_bar_search_h &&
+            (uint64_t)mx >= g_bar_search_x && (uint64_t)mx < g_bar_search_x + g_bar_search_w) {
+            g_cal_popup_open = false; g_vol_popup_open = false;
+            g_launcher_open = true; g_launcher_top = true; g_launcher_hover = -1;
+            launcher_open_reset(); taskbar_draw(); full_redraw(); launcher_draw();
+            int32_t cx, cy; mouse_consume_click(&cx, &cy);
+            return;
+        }
+    }
+
     /* ── Taskbar clicks ── */
     if (btn_pressed && in_panel) {
         int32_t cx, cy;
@@ -3051,6 +3119,7 @@ void gui_on_tick(void) {
             g_vol_popup_open = false;
             g_cal_popup_open = false;
             g_launcher_open = !g_launcher_open;
+            g_launcher_top = false;   /* orb opens the dock-anchored launcher */
             g_launcher_hover = -1;
             if (g_launcher_open) {
                 launcher_open_reset();
@@ -4912,8 +4981,20 @@ void gui_set_wallpaper_image(const char *path) {
     g_wall_img   = new_px;
     g_wall_img_w = nw;
     g_wall_img_h = nh;
+    snprintf(g_wall_img_path, sizeof g_wall_img_path, "%s", path);
     g_theme.wallpaper = WALLPAPER_IMAGE;
+    gui_settings_save();          /* persist the path + IMAGE selection across reboots */
     full_redraw();
+}
+
+/* Load the persisted image-wallpaper from g_wall_img_path into g_wall_img without
+ * changing the selection or re-saving (used at boot when wallpaper==IMAGE). */
+void gui_load_wallpaper_image(void) {
+    if (!g_wall_img_path[0] || g_wall_img) return;
+    uint32_t *px = NULL, w = 0, h = 0;
+    if (platform_load_image(g_wall_img_path, &px, &w, &h)) {
+        free(g_wall_img); g_wall_img = px; g_wall_img_w = w; g_wall_img_h = h;
+    }
 }
 
 /* Add a desktop icon shortcut. label may be NULL (defaults to basename of path). */

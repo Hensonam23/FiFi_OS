@@ -440,7 +440,12 @@ for fdir in /usr/share/fonts/TTF \
             /usr/share/fonts/roboto /usr/share/fonts/ubuntu \
             /usr/share/fonts/inter /usr/share/fonts/cantarell; do
     [ -d "$fdir" ] || continue
-    for f in "$fdir"/*.ttf "$fdir"/*.otf "$fdir"/*.ttc; do
+    # Match both lower- and upper-case extensions: the MS core fonts in
+    # /usr/share/fonts/TTF ship as Arial.TTF / Times.TTF / Verdana.TTF etc.
+    # (uppercase .TTF), so a lowercase-only glob silently skipped every
+    # recognizable Windows family — the font picker looked half-empty.
+    for f in "$fdir"/*.ttf "$fdir"/*.otf "$fdir"/*.ttc \
+             "$fdir"/*.TTF "$fdir"/*.OTF "$fdir"/*.TTC; do
         [ -f "$f" ] || continue
         cp -n "$f" "$FIFI_FONT_DST/" 2>/dev/null || true
     done

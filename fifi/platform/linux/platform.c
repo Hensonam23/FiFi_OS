@@ -461,10 +461,20 @@ bool net_send_eth(const uint8_t dst[6], uint16_t et,
 
 void gui_spawn_app(const char *path) {
     signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
+    /* Dev override: a newer build of an in-house app dropped at
+     * /fifi-data/<name> wins over the image's /bin/<name>, so apps can iterate
+     * with scp + relaunch instead of a full image rebuild (mirrors the
+     * /fifi-data/fifi-compositor override). Only for /bin/ paths. */
+    static char ov[256];
+    const char *use = path;
+    if (path && !strncmp(path, "/bin/", 5)) {
+        snprintf(ov, sizeof ov, "/fifi-data/%s", path + 5);
+        if (access(ov, X_OK) == 0) use = ov;
+    }
     pid_t pid = fork();
     if (pid == 0) {
-        char *argv[] = { (char *)path, NULL };
-        execv(path, argv);
+        char *argv[] = { (char *)use, NULL };
+        execv(use, argv);
         _exit(127);
     }
     if (pid > 0)
@@ -688,7 +698,15 @@ bool platform_load_image(const char *path, uint32_t **out_px,
     uint32_t *px = NULL;
     int w = 0, h = 0;
 
-    if (got >= 2 && buf[0] == 'B' && buf[1] == 'M') {
+    if (got >= 8 && buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G') {
+        /* PNG — decode via lodepng (handles all colour types/depths, e.g. 2K/4K
+         * photos exported as PNG). Returns 0xAARRGGBB; alpha is ignored on the
+         * opaque wallpaper layer. */
+        extern uint32_t *fifi_load_png(const char *, uint32_t *, uint32_t *);
+        uint32_t uw = 0, uh = 0;
+        uint32_t *pp = fifi_load_png(path, &uw, &uh);
+        if (pp) { px = pp; w = (int)uw; h = (int)uh; }
+    } else if (got >= 2 && buf[0] == 'B' && buf[1] == 'M') {
         /* BMP */
         if (got >= 54) {
             uint32_t data_off; memcpy(&data_off, buf + 10, 4);

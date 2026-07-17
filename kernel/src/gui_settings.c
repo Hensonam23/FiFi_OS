@@ -492,7 +492,8 @@ void settings_render(window_t *w) {
         /* Wallpaper selector row(s) — wraps dynamically based on available width */
         {
             static const char *wall_names[WALLPAPER_COUNT] = {
-                "Gradient", "Solid", "Stars", "Grid", "Waves", "Image"
+                "Gradient", "Solid", "Stars", "Grid", "Waves", "Image",
+                "Aurora", "Northern", "Nebula", "Dusk", "Ocean", "Spring", "Ember"
             };
             uint64_t wall_bh = (uint64_t)(fh + 6u);
             uint64_t wall_bw = wall_bw_c;

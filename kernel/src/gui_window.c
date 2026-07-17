@@ -489,8 +489,11 @@ void win_maximize_toggle(window_t *w) {
             w->saved_x = w->x; w->saved_y = w->y;
             w->saved_w = w->w; w->saved_h = w->h;
         }
-        w->x = desk_left(); w->y = desk_top();
-        w->w = desk_availw(); w->h = desk_avail();
+        /* A top status bar auto-hides while a window is maximized, so the window
+         * fills the entire screen up to the very top edge (and down to the dock). */
+        uint64_t top = desk_maxtop();
+        w->x = desk_left(); w->y = top;
+        w->w = desk_availw(); w->h = desk_bot() - top;
         w->state = WIN_MAXIMIZED;
     }
     w->half_snapped = false;

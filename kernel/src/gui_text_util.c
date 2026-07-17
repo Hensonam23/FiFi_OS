@@ -63,6 +63,33 @@ uint64_t desk_right(void) {
 uint64_t desk_avail(void)  { return desk_bot() - desk_top(); }
 uint64_t desk_availw(void) { return desk_right() - desk_left(); }
 
+/* Top edge a MAXIMIZED window fills to: 0 when a top status bar is present (it
+ * auto-hides on maximize so the window uses the whole screen), else the normal
+ * work-area top. Shared by every maximize path (built-in, IPC, Wayland, xwm). */
+uint64_t desk_maxtop(void) {
+    return (g_theme.statusbar && !statusbar_bottom()) ? 0u : desk_top();
+}
+
+/* Accessor so the platform IPC/Wayland layers can query the theme without the
+ * full g_theme struct definition. */
+bool g_theme_statusbar_on(void) { return g_theme.statusbar; }
+
+/* True when any live window is maximized — built-in, IPC app, or Wayland/X app.
+ * The top status bar auto-hides in that case so the window uses the whole screen
+ * (revealed on cursor-at-top-edge). */
+bool any_window_maximized(void) {
+    for (int i = 0; i < MAX_WINS; i++) {
+        window_t *w = &g_wins[i];
+        if (w->active && w->state == WIN_MAXIMIZED && w->anim_phase != ANIM_CLOSE)
+            return true;
+    }
+#ifdef __linux__
+    { extern bool ipc_any_maximized(void);     if (ipc_any_maximized())     return true; }
+    { extern bool wayland_any_maximized(void); if (wayland_any_maximized()) return true; }
+#endif
+    return false;
+}
+
 size_t gui_strlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
 }

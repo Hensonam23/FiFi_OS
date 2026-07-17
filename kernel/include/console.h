@@ -55,6 +55,10 @@ bool console_capture_rect(uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uin
 void console_paste_rect(const uint32_t *buf, uint64_t x, uint64_t y, uint64_t w, uint64_t h);
 void console_blit_scaled(const uint32_t *src, uint64_t sw, uint64_t sh,
                          uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);
+/* Scale-blit a source sub-rect into a dest rect (clamped), for wallpaper fit modes. */
+void console_blit_scaled_src(const uint32_t *src, uint64_t sw, uint64_t sh,
+                             int64_t sx0, int64_t sy0, uint64_t scw, uint64_t sch,
+                             uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);
 /* Same but ARGB source with per-pixel alpha blending (app-icon logos). */
 void console_blit_scaled_alpha(const uint32_t *src, uint64_t sw, uint64_t sh,
                                uint64_t dx, uint64_t dy, uint64_t dw, uint64_t dh);

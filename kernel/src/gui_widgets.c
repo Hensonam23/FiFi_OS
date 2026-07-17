@@ -203,7 +203,9 @@ void launcher_filter(void) {
 uint64_t launcher_row_h(void)  { return console_font_height() + 8u; }
 uint64_t launcher_item_h(void) { return launcher_row_h(); }  /* compat */
 static uint64_t launcher_search_h(void) { return console_font_height() + 14u; }
-static uint64_t launcher_header_h(void) { return launcher_search_h() + 16u; }
+/* Top-bar search mode has NO internal search box (the horizon-bar field is the
+ * input) — it renders as a bare results dropdown. */
+static uint64_t launcher_header_h(void) { return g_launcher_top ? 0u : (launcher_search_h() + 16u); }
 
 uint64_t launcher_panel_w(void) {
     uint64_t fw = console_font_width();
@@ -221,6 +223,10 @@ uint64_t launcher_panel_w(void) {
 uint64_t launcher_eff_w(void) { return launcher_panel_w(); }  /* compat */
 
 uint64_t launcher_rows_visible(void) {
+    if (g_launcher_top) {                 /* size the dropdown to the matches */
+        int n = g_launch_filt_n; if (n < 1) n = 1; if (n > 10) n = 10;
+        return (uint64_t)n;
+    }
     uint64_t rh  = launcher_row_h();
     uint64_t top = STATUS_H + 8u;
     uint64_t bot = console_fb_height() - TASKBAR_H;
@@ -236,6 +242,12 @@ uint64_t launcher_panel_h(void) {
 }
 /* The launcher opens adjacent to the panel's logo, toward the desktop. */
 uint64_t launcher_lx(void) {
+    if (g_launcher_top && g_bar_search_w > 0u) {    /* anchored under the search field */
+        uint64_t w = launcher_panel_w(), fbw = console_fb_width();
+        uint64_t x = g_bar_search_x;
+        if (x + w > fbw) x = fbw > w ? fbw - w - 8u : 0u;   /* keep on-screen */
+        return x;
+    }
     if (g_theme.panel_edge == PANEL_RIGHT) {
         uint64_t w = launcher_panel_w(), r = desk_right();
         return r > w ? r - w : 0u;                 /* left of the right dock */
@@ -244,6 +256,7 @@ uint64_t launcher_lx(void) {
     return desk_left() + LOGO_X;                    /* bottom/top: near the logo */
 }
 uint64_t launcher_ly(void) {
+    if (g_launcher_top) return STATUS_H + 4u;        /* just under the horizon bar */
     uint64_t h = launcher_panel_h();
     if (g_theme.panel_edge == PANEL_TOP ||
         g_theme.panel_edge == PANEL_LEFT ||
@@ -255,6 +268,7 @@ uint64_t launcher_body_y(void) { return launcher_ly() + launcher_header_h(); }
 
 /* ── Hit testing ───────────────────────────────────────────────────────── */
 bool launcher_in_search(int32_t mx, int32_t my) {
+    if (g_launcher_top) return false;   /* no internal search box in top-bar mode */
     uint64_t lx = launcher_lx(), ly = launcher_ly(), w = launcher_panel_w();
     uint64_t sy = ly + 8u, sh = launcher_search_h();
     return ((uint64_t)mx >= lx + 10u && (uint64_t)mx < lx + w - 10u &&
@@ -379,6 +393,11 @@ void launcher_draw(void) {
     uint64_t sh = launcher_search_h();
     uint64_t by = launcher_body_y();
 
+    /* Top-bar search: this is a pure results dropdown driven by the horizon-bar
+     * field. Show nothing until the user types — clicking the field must NOT pop
+     * a full app list (that read as a start menu). */
+    if (g_launcher_top && g_launch_qlen == 0) return;
+
     /* Panel + outline. Frosted glass: the launcher isn't redrawn over a fresh
      * full_redraw every frame (only on open/hover/search), so a naive blend
      * would accumulate alpha. Instead capture the CLEAN desktop behind the panel
@@ -405,7 +424,8 @@ void launcher_draw(void) {
     console_fill_rect(lx, ly, 1u, ph, 0x00223048u);
     console_fill_rect(lx + w - 1u, ly, 1u, ph, 0x00223048u);
 
-    /* Search box */
+    /* Search box (skipped in top-bar mode — the horizon-bar field is the input) */
+    if (!g_launcher_top) {
     uint64_t sx = lx + 10u, sy = ly + 8u, sw = w - 20u;
     console_fill_rect(sx, sy, sw, sh, 0x000c1220u);
     console_fill_rect(sx, sy, sw, 1u, 0x00304a70u);
@@ -428,6 +448,7 @@ void launcher_draw(void) {
         if ((g_gui_tick / 8u) % 2u == 0)
             console_fill_rect(cxp, tyy, 2u, fh, col_mix(g_theme.accent, 0x00ffffffu, 80u));
     }
+    } /* !g_launcher_top */
 
     /* Body rows */
     if (g_launch_filt_n == 0) {
