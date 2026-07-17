@@ -71,10 +71,8 @@ build-linux/
 linux/*.o
 linux/*.a
 build-sdl/
-fifi/apps/hello/hello-fifi-app
-fifi/apps/filebrowser/fifi-filebrowser
-fifi/apps/settings/fifi-settings
-fifi/apps/gamepad/fifi-gamepad
+# compiled IPC app binaries (rebuilt from .c by build-initramfs.sh)
+fifi/apps/*/fifi-*
 
 # Python bytecode cache
 __pycache__/

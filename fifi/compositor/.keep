@@ -1,3 +1,0 @@
-# Phase 2: FiFi compositor source goes here.
-# Shared between linux-desktop (DRM/KMS) and main (Limine framebuffer).
-# Platform-specific code lives in fifi/platform/{linux,bare}/.
