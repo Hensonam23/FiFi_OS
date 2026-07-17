@@ -202,7 +202,7 @@
 #define ZXDG_TL_DECO_CONFIGURE      0   /* event: uint mode */
 #define ZXDG_DECO_MODE_CLIENT       1
 #define ZXDG_DECO_MODE_SERVER       2
-#define SSD_TITLE_H                 24  /* server-side titlebar height */
+#define SSD_TITLE_H                 32  /* server-side titlebar height (tall enough for easy-to-hit buttons) */
 
 /* wl_subcompositor opcodes (requests) */
 #define WL_SUBCOMP_DESTROY        0
@@ -938,9 +938,43 @@ static void wl_client_flush(wl_client_t *c);
 /* Ask a toplevel to close: xdg_toplevel.close for Wayland clients, a polite
  * WM_DELETE_WINDOW for rootless-XWayland windows. */
 static void toplevel_request_close(wl_client_t *c, wl_surface_t *s) {
+    /* The rootful X screen (LibreOffice) has no per-window x11_window; close its
+     * primary app window via the WM instead. */
+    if (s->is_xwl_root) { xwm_close_main(); return; }
     if (s->is_x11) { xwm_close(s->x11_window); return; }
     int h = wl_begin_msg(c, s->xdg_toplevel_id, XDG_TOPLEVEL_CLOSE);
     wl_end_msg(c, h);
+    wl_client_flush(c);
+}
+
+/* Decide + apply FiFi chrome for the rootful X screen based on which app fifi-run
+ * launched (/tmp/fifi-x11-title). Apps with no window frame of their own
+ * (LibreOffice's "gen" VCL is just a menu bar) get an SSD titlebar with working
+ * close + minimize; apps that draw their own controls (Steam's CEF _ [] X) stay
+ * borderless so there is no double frame. One-shot + idempotent: it only upgrades
+ * borderless -> decorated, so repeated title changes don't churn. It must run once
+ * the app is actually up (fifi-run writes the title file just before launch), which
+ * is why it is also called from wayland_x11_root_title (the real app title arrives
+ * later) — not only from the initial "Xwayland on :0" toplevel-title event, which
+ * can fire at XWayland boot before any app, when the file is still empty. */
+static void xwl_root_apply_chrome(wl_client_t *c, wl_surface_t *s) {
+    extern uint64_t desk_maxtop(void); extern uint64_t desk_left(void);
+    extern uint64_t desk_availw(void); extern uint64_t desk_bot(void);
+    if (!s || !s->is_xwl_root || s->ssd) return;   /* n/a or already decorated */
+    char appnm[64] = "";
+    FILE *tf = fopen("/tmp/fifi-x11-title", "r");
+    if (tf) { if (fgets(appnm, sizeof appnm, tf)) appnm[strcspn(appnm, "\n")] = '\0'; fclose(tf); }
+    if (!(strstr(appnm, "LibreOffice") || strstr(appnm, "libreoffice"))) return;
+    s->ssd = true;
+    s->maximized = true;
+    s->x = (int32_t)desk_left();
+    /* Reserve SSD_TITLE_H at the top for the FiFi titlebar; the X content sits
+     * just below it and ssd_draw_chrome paints the bar in the strip above. */
+    s->y = (int32_t)desk_maxtop() + SSD_TITLE_H;
+    send_toplevel_configure(c, s,
+        (int32_t)desk_availw(),
+        (int32_t)(desk_bot() - desk_maxtop() - SSD_TITLE_H),
+        XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
     wl_client_flush(c);
 }
 
@@ -964,6 +998,21 @@ static void deco_grant_ssd(wl_client_t *c, wl_surface_t *s) {
     wl_client_flush(c);
 }
 
+/* CLIENT-side decorations: the app draws its OWN titlebar (its default look, with
+ * its own min/max/close), and the compositor draws no FiFi chrome. This is what
+ * real apps (LibreWolf/Firefox, GTK, Electron) expect and gives them working
+ * window controls the FiFi bar couldn't provide for every app. */
+static void deco_grant_csd(wl_client_t *c, wl_surface_t *s) {
+    s->ssd = false;
+    if (s->deco_id) {
+        int h = wl_begin_msg(c, s->deco_id, ZXDG_TL_DECO_CONFIGURE);
+        wl_push_u32(c, ZXDG_DECO_MODE_CLIENT);
+        wl_end_msg(c, h);
+    }
+    send_xdg_surface_configure(c, s);
+    wl_client_flush(c);
+}
+
 /* A toplevel we should draw FiFi chrome on: an SSD toplevel with a real window
  * buffer. Two transparent-center cases must be told apart:
  *   - Electron's phantom "host": a FULL-SCREEN transparent surface → must NOT be
@@ -978,6 +1027,9 @@ static bool ssd_decorated(const wl_surface_t *s) {
     if (xwl_root_empty(s)) return false;   /* empty XWayland root: not shown */
     if (!s->mapped || s->minimized || !s->own_pix || s->own_w < 8 || s->own_h < 8)
         return false;
+    /* Rootful X screen (LibreOffice): decorated only when its app opted into FiFi
+     * chrome (s->ssd set in the "Xwayland" title branch). Steam et al keep ssd=0. */
+    if (s->is_xwl_root) return s->ssd;
     /* Rootless X11 windows: override-redirect (menus/tooltips) are borderless;
      * a normal X11 toplevel is always a real, opaque window → always decorate. */
     if (s->is_x11) return !s->x11_override;
@@ -1192,12 +1244,16 @@ static void wl_toplevel_raise(wl_surface_t *s) {
  * a maximized window fills exactly the area not covered by the panel, on any
  * edge — the taskbar is never overlapped. */
 static void wl_maxarea(int32_t *mx, int32_t *my, int32_t *mw, int32_t *mh) {
-    extern uint64_t desk_left(void); extern uint64_t desk_top(void);
-    extern uint64_t desk_availw(void); extern uint64_t desk_avail(void);
+    extern uint64_t desk_left(void); extern uint64_t desk_maxtop(void);
+    extern uint64_t desk_availw(void); extern uint64_t desk_bot(void);
+    /* Fill to the top edge (the top bar auto-hides on maximize): the SSD titlebar
+     * sits in the SSD_TITLE_H strip above the content, so content starts at
+     * maxtop + SSD_TITLE_H and runs down to the dock. */
+    int32_t top = (int32_t)desk_maxtop();
     *mx = (int32_t)desk_left();
-    *my = (int32_t)desk_top() + SSD_TITLE_H;
+    *my = top + SSD_TITLE_H;
     *mw = (int32_t)desk_availw();
-    *mh = (int32_t)desk_avail() - SSD_TITLE_H;
+    *mh = (int32_t)desk_bot() - top - SSD_TITLE_H;
     if (*mw < 200) *mw = 200;
     if (*mh < 200) *mh = 200;
 }
@@ -1474,11 +1530,20 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                                     send_toplevel_configure(c, s, nw, nh, 0, 0);
                                 }
                             }
-                            if (s->x + s->own_w > g_w) s->x = g_w - s->own_w;
-                            if (s->x < 0) s->x = 0;
-                            int32_t bot3 = g_h - (fh3 + 10);
-                            if (s->y + s->own_h > bot3) s->y = bot3 - s->own_h;
-                            if (s->y < top3) s->y = top3;
+                            /* Keep FLOATING SSD windows on-screen (titlebar below the
+                             * top bar, body above the dock). A maximized/fullscreen
+                             * window is deliberately placed at the max area (its titlebar
+                             * fills the auto-hidden top-bar strip, e.g. the rootful X
+                             * screen at desk_maxtop()+SSD_TITLE_H), so this clamp must NOT
+                             * shove it down — that both hid it under a gap and moved the
+                             * titlebar hit region away from where it's drawn. */
+                            if (!s->maximized && !s->fullscreen) {
+                                if (s->x + s->own_w > g_w) s->x = g_w - s->own_w;
+                                if (s->x < 0) s->x = 0;
+                                int32_t bot3 = g_h - (fh3 + 10);
+                                if (s->y + s->own_h > bot3) s->y = bot3 - s->own_h;
+                                if (s->y < top3) s->y = top3;
+                            }
                         }
                         if (src->width > 0 && src->height > 0) {
                             s->w = src->width; s->h = src->height;
@@ -1925,22 +1990,37 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                                     }
                                     fclose(tf);
                                 }
-                                /* Apps that draw their OWN window chrome (Steam's
-                                 * CEF UI has a titlebar + min/max/close) look wrong
-                                 * wrapped in a second FiFi frame. Present those
-                                 * borderless at the top-left so only the app's own
-                                 * window shows. Others (LibreOffice, whose gen VCL
-                                 * draws no titlebar) keep FiFi chrome + an offset. */
-                                if (!strncmp(appnm, "Steam", 5)) {
-                                    s->ssd = false;
-                                    s->x = 0; s->y = 0;
-                                } else {
-                                    s->ssd = true;
-                                    if (s->x == 0 && s->y == 0) {
-                                        s->x = 0;
-                                        s->y = (int32_t)console_font_height() + 6 + SSD_TITLE_H;
-                                    }
-                                }
+                                /* Downloaded/external apps present their OWN window
+                                 * chrome (Steam's CEF titlebar with _ [] X, browsers,
+                                 * LibreOffice menus). Wrapping the rootful X screen in
+                                 * a second FiFi titlebar produced a visible double
+                                 * frame (two sets of window buttons). Policy: FiFi
+                                 * decoration is only for our in-house apps; X apps are
+                                 * borderless and fill the whole work area so only the
+                                 * app's own window shows and no strip is wasted at the
+                                 * top. xwm sizes the X screen to desk_availw() x
+                                 * desk_avail() to match. */
+                                extern uint64_t desk_maxtop(void); extern uint64_t desk_left(void);
+                                extern uint64_t desk_availw(void); extern uint64_t desk_bot(void);
+                                (void)appnm;
+                                /* Default: borderless, filling to the top edge (the top
+                                 * bar auto-hides while a maximized X app is up). The
+                                 * X-root toplevel was created at the ~78%/88% cascade
+                                 * size, so send a MAXIMIZED configure to make XWayland
+                                 * resize its rootful output to fill the work area. */
+                                s->maximized = true;
+                                s->ssd = false;
+                                s->x = (int32_t)desk_left();
+                                s->y = (int32_t)desk_maxtop();
+                                send_toplevel_configure(c, s,
+                                    (int32_t)desk_availw(),
+                                    (int32_t)(desk_bot() - desk_maxtop()),
+                                    XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                                /* Upgrade to a FiFi titlebar if the launched app has no
+                                 * frame of its own (LibreOffice). No-op here when the
+                                 * app isn't up yet (title file empty at XWayland boot);
+                                 * re-checked from wayland_x11_root_title on title arrival. */
+                                xwl_root_apply_chrome(c, s);
                             }
                             break;
                         }
@@ -1970,8 +2050,16 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             if (s && !s->maximized) {
                 if (!s->fullscreen) { s->restore_x = s->x; s->restore_y = s->y;
                                       s->restore_w = s->w; s->restore_h = s->h; }
-                s->maximized = true; s->x = 0; s->y = 0;
-                send_toplevel_configure(c, s, g_w, g_h, XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
+                /* Fill the work area to the top edge (bar auto-hides), NOT the whole
+                 * framebuffer — the dock stays uncovered. */
+                extern uint64_t desk_left(void); extern uint64_t desk_maxtop(void);
+                extern uint64_t desk_availw(void); extern uint64_t desk_bot(void);
+                int32_t mtop = (int32_t)desk_maxtop();
+                s->maximized = true;
+                s->x = (int32_t)desk_left(); s->y = mtop;
+                send_toplevel_configure(c, s, (int32_t)desk_availw(),
+                                        (int32_t)(desk_bot() - mtop),
+                                        XDG_TOPLEVEL_STATE_MAXIMIZED, 0);
             }
         } else if (opcode == XDG_TOPLEVEL_UNSET_MAXIMIZED) {
             wl_surface_t *s = find_surface_by_toplevel(obj_id, NULL);
@@ -2085,9 +2173,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             memcpy(&tl_id,   args + 4, 4);
             wl_new_obj(c, deco_id, OBJ_TL_DECO, NULL);
             /* Answer the mode immediately — clients block their first commit on it.
-             * SERVER mode: the compositor draws the FiFi titlebar (see deco_grant_ssd). */
+             * CLIENT mode: the app draws its own titlebar (its default), so real
+             * apps (LibreWolf/GTK/Electron) get working window controls. */
             int dh = wl_begin_msg(c, deco_id, ZXDG_TL_DECO_CONFIGURE);
-            wl_push_u32(c, ZXDG_DECO_MODE_SERVER);
+            wl_push_u32(c, ZXDG_DECO_MODE_CLIENT);
             wl_end_msg(c, dh);
             if (!deco_try_attach(c, deco_id, tl_id) && g_n_pending_deco < MAX_PENDING_DECO) {
                 g_pending_deco[g_n_pending_deco].deco_id = deco_id;
@@ -2104,8 +2193,8 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     case OBJ_TL_DECO: {
         wl_surface_t *ds = obj ? obj->data : NULL;
         if (opcode == ZXDG_TL_DECO_SET_MODE || opcode == ZXDG_TL_DECO_UNSET_MODE) {
-            /* whatever the client prefers, we impose server-side (uniform chrome) */
-            if (ds) deco_grant_ssd(c, ds);
+            /* Let the app decorate itself (its default titlebar + window controls). */
+            if (ds) deco_grant_csd(c, ds);
         } else if (opcode == ZXDG_TL_DECO_DESTROY) {
             if (ds) { ds->ssd = false; ds->deco_id = 0; }
             wl_delete_obj(c, obj_id);
@@ -2122,11 +2211,10 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
             wl_obj_t *so = wl_find_obj(c, surf_id);
             wl_surface_t *s = (so && so->type == OBJ_SURFACE) ? so->data : NULL;
             wl_new_obj(c, kdeco_id, OBJ_KDE_DECO, s);
-            /* Impose Server mode so the toolkit hides its own titlebar and we
-             * draw the FiFi chrome (ssd_decorated keys off s->ssd). */
-            if (s) s->ssd = true;
+            /* Client mode: the toolkit draws its own titlebar (its default). */
+            if (s) s->ssd = false;
             int mh = wl_begin_msg(c, kdeco_id, 0 /* mode */);
-            wl_push_u32(c, 2 /* Server */);
+            wl_push_u32(c, 1 /* Client */);
             wl_end_msg(c, mh);
             wl_client_flush(c);
         }
@@ -2136,9 +2224,9 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     case OBJ_KDE_DECO: {
         wl_surface_t *ks = obj ? obj->data : NULL;
         if (opcode == 1 /* request_mode(mode) */) {
-            if (ks) ks->ssd = true;   /* whatever it asks, impose Server */
+            if (ks) ks->ssd = false;   /* Client mode: app draws its own titlebar */
             int mh = wl_begin_msg(c, obj_id, 0 /* mode */);
-            wl_push_u32(c, 2 /* Server */);
+            wl_push_u32(c, 1 /* Client */);
             wl_end_msg(c, mh);
             wl_client_flush(c);
         } else if (opcode == 0 /* release */) {
@@ -2642,6 +2730,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 if (cc->objs[oi].type != OBJ_SURFACE) continue;
                 wl_surface_t *es = cc->objs[oi].data;
                 if (g_wl_minimized || !ssd_decorated(es)) continue;
+                if (es->is_xwl_root) continue;   /* rootful X screen: fixed size, no edge-resize */
                 const int32_t M = 6;
                 int32_t wx0 = es->x, wy0 = es->y - SSD_TITLE_H;
                 int32_t wx1 = es->x + es->own_w, wy1 = es->y + es->own_h;
@@ -2665,7 +2754,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                  * which stole clicks meant for the close button (only a sliver of the
                  * X was left reachable — the "exact spot" bug). Never start a resize
                  * from the button strip; let the titlebar handler below claim it. */
-                if (my >= wy0 && my < es->y && mx >= wx1 - 84) e = 0;
+                if (my >= wy0 && my < es->y && mx >= wx1 - 108) e = 0;
                 if (e) { rs = es; rs_ci = ci; rs_sid = cc->objs[oi].id; g_iop_edges = (int)e; }
             }
         }
@@ -2709,9 +2798,19 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                 extern uint32_t console_font_height(void);
                 int32_t fh2 = (int32_t)console_font_height();
                 int32_t top = fh2 + 6 + SSD_TITLE_H;
-                if (rel >= bw - 24) {                     /* close */
+                if (bar_s->is_xwl_root) {
+                    /* Rootful X screen (LibreOffice): fixed fullscreen, so only the
+                     * close + minimize buttons act — maximize/restore/drag are no-ops
+                     * (the app already fills the work area). Generous zones (32px each)
+                     * to match the spaced-out button glyphs. */
+                    if (rel >= bw - 36)                          toplevel_request_close(bc, bar_s);
+                    else if (rel >= bw - 100 && rel < bw - 68)   g_wl_minimized = true;
+                    g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns;
+                    return;
+                }
+                if (rel >= bw - 36) {                     /* close */
                     toplevel_request_close(bc, bar_s);
-                } else if (rel >= bw - 48) {              /* maximize / restore */
+                } else if (rel >= bw - 68) {              /* maximize / restore */
                     bool eff_max = bar_s->maximized ||
                         (bar_s->own_w >= g_w * 9 / 10 && bar_s->own_h >= g_h * 85 / 100);
                     if (!eff_max) {
@@ -2740,7 +2839,7 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
                         send_toplevel_configure(bc, bar_s, rw, rh, 0, 0);
                     }
                     wl_client_flush(bc);
-                } else if (rel >= bw - 72) {              /* minimize (taskbar restores) */
+                } else if (rel >= bw - 100) {             /* minimize (taskbar restores) */
                     g_wl_minimized = true;
                 } else {
                     /* Double-click on the titlebar = maximize/restore toggle
@@ -3017,6 +3116,26 @@ void wayland_send_key(uint32_t evdev_key, uint32_t state) {
  * validation, focus goes stale when the window is closed or the layer is
  * minimized (wayland_send_mouse stops being called, so it never recomputes) and
  * every keystroke gets eaten instead of reaching IPC apps like the App Store. */
+/* Whether any Wayland/XWayland toplevel is currently maximized + visible. The
+ * kernel's any_window_maximized() uses it to auto-hide the top status bar. A
+ * hidden XWayland root (flagged maximized but with no X app mapped) and a
+ * minimized Wayland session do NOT count. */
+bool wayland_any_maximized(void) {
+    if (g_wl_minimized) return false;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        if (!g_wl_clients[ci].active) continue;
+        for (int oi = 0; oi < g_wl_clients[ci].n_objs; oi++) {
+            if (g_wl_clients[ci].objs[oi].type != OBJ_SURFACE) continue;
+            wl_surface_t *s = g_wl_clients[ci].objs[oi].data;
+            if (!s || !s->maximized || s->minimized || !s->mapped ||
+                s->pending_destroy) continue;
+            if (xwl_root_empty(s)) continue;   /* no X app actually showing */
+            return true;
+        }
+    }
+    return false;
+}
+
 bool wayland_has_focus(void) {
     /* Gate for KEYBOARD input routing (all callers use it to decide whether keys
      * go to Wayland). It must track KEYBOARD focus (g_kbd_ci/g_kbd_sid) — the same
@@ -3307,6 +3426,10 @@ void wayland_x11_root_title(const char *title) {
                 !s->is_popup && !s->is_subsurface && !s->is_x11) {
                 strncpy(s->title, title, sizeof(s->title) - 1);
                 s->title[sizeof(s->title) - 1] = '\0';
+                /* The app is up now, so /tmp/fifi-x11-title is populated: upgrade
+                 * the rootful X screen to a FiFi titlebar if it needs one (one-shot;
+                 * a no-op once already decorated). */
+                xwl_root_apply_chrome(&g_wl_clients[ci], s);
                 return;
             }
         }
@@ -3599,22 +3722,25 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
     }
     /* Window buttons: conventional flat symbols (minimize / maximize / close),
      * NOT macOS traffic-light circles. Drawn from rectangles. */
+    /* Window buttons: conventional flat symbols spaced 32px apart so each has a
+     * generous, easy-to-hit target (the click zones in the pointer handler match
+     * these centres: close=w-20, maximize=w-52, minimize=w-84). */
     uint64_t cyc = ty + SSD_TITLE_H / 2u;
     uint32_t gc  = focused ? 0x00cbd6e6u : 0x00808c9cu;
-    if (w >= 88u) {
-        uint64_t mcx = x + w - 60u;                        /* minimize: bottom bar */
-        console_fill_rect(mcx - 5u, cyc + 4u, 10u, 2u, gc);
-        uint64_t xcx = x + w - 36u, sq = 9u;               /* maximize: square outline */
+    if (w >= 110u) {
+        uint64_t mcx = x + w - 84u;                        /* minimize: bottom bar */
+        console_fill_rect(mcx - 7u, cyc + 5u, 14u, 2u, gc);
+        uint64_t xcx = x + w - 52u, sq = 12u;              /* maximize: square outline */
         uint64_t x0 = xcx - sq / 2u, y0 = cyc - sq / 2u;
-        console_fill_rect(x0, y0, sq, 1u, gc);
-        console_fill_rect(x0, y0 + sq - 1u, sq, 1u, gc);
-        console_fill_rect(x0, y0, 1u, sq, gc);
-        console_fill_rect(x0 + sq - 1u, y0, 1u, sq, gc);
+        console_fill_rect(x0, y0, sq, 2u, gc);
+        console_fill_rect(x0, y0 + sq - 2u, sq, 2u, gc);
+        console_fill_rect(x0, y0, 2u, sq, gc);
+        console_fill_rect(x0 + sq - 2u, y0, 2u, sq, gc);
     }
-    uint64_t ccx = x + w - 12u;                            /* close: X */
-    for (uint64_t k = 0; k < 9u; k++) {
-        console_fill_rect(ccx - 4u + k, cyc - 4u + k, 2u, 2u, gc);
-        console_fill_rect(ccx - 4u + k, cyc + 4u - k, 2u, 2u, gc);
+    uint64_t ccx = x + w - 20u;                            /* close: X */
+    for (uint64_t k = 0; k < 11u; k++) {
+        console_fill_rect(ccx - 5u + k, cyc - 5u + k, 2u, 2u, gc);
+        console_fill_rect(ccx - 5u + k, cyc + 5u - k, 2u, 2u, gc);
     }
     /* frame + focus ring around bar+content — both derived from the accent so the
      * active window's outline matches the built-in windows and the taskbar. */

@@ -18,6 +18,10 @@ shift 2>/dev/null || true
 # --- shared runtime environment (identical for every app) ---------------------
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+# NOTE: do NOT set XDG_CURRENT_DESKTOP=GNOME to try to get Firefox's window
+# buttons — it makes LibreWolf hang waiting on GNOME/portal services that don't
+# exist here (verified: browser never appears). LibreWolf draws its own titlebar
+# via CSD; close with Ctrl+Q / its menu / Alt+F4.
 export XKB_CONFIG_ROOT="$RT/share/X11/xkb"
 export FONTCONFIG_PATH="$RT/etc/fonts"
 export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share"
@@ -44,6 +48,28 @@ export ELECTRON_DISABLE_SANDBOX=1
 # resizable FiFi window. Harmless to apps that don't read USE_X11.
 export USE_X11=false
 export APPIMAGE_EXTRACT_AND_RUN=1
+
+# Provide xdg-open: apps shell out to it to open a URL/file in the user's browser
+# or default handler, and the box ships none (LibreOffice's "Check for Updates ->
+# Download..." ran `xdg-open <url>` -> "xdg-open: not found" -> the button did
+# nothing). This shim routes http(s)/ftp URLs and .html files to LibreWolf and
+# everything else to the file browser, both through this same launcher. Recreated
+# each launch (in tmpfs) and put first on PATH so every app inherits it.
+if [ ! -x /tmp/fifi-xdg/xdg-open ]; then
+    mkdir -p /tmp/fifi-xdg 2>/dev/null || true
+    cat > /tmp/fifi-xdg/xdg-open <<'XDGEOF'
+#!/bin/sh
+t="$1"
+case "$t" in
+    http://*|https://*|ftp://*|*.htm|*.html)
+        exec /fifi-data/apps/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
+    *)
+        exec /fifi-data/apps/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
+esac
+XDGEOF
+    chmod +x /tmp/fifi-xdg/xdg-open 2>/dev/null || true
+fi
+export PATH="/tmp/fifi-xdg:${PATH:-/usr/bin:/bin}"
 
 # Start a ROOTLESS XWayland (:0) on demand for apps that only speak X11 (e.g.
 # LibreOffice's "gen" VCL). Rootless = each X11 window becomes its own FiFi
@@ -310,6 +336,16 @@ STEOF
         mkdir -p /fifi-data/home 2>/dev/null || true
         export HOME=/fifi-data/home
         export MOZ_DISABLE_CONTENT_SANDBOX=1
+        # Give Firefox's integrated (CSD) titlebar the min/max/close buttons. It
+        # reads the button set from the GtkSetting gtk-decoration-layout, which
+        # GTK loads from settings.ini regardless of desktop environment (unlike
+        # XDG_CURRENT_DESKTOP=GNOME, which hangs the browser waiting on GNOME
+        # services that don't exist here). Written each launch so it's always current.
+        mkdir -p "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0" 2>/dev/null || true
+        for _gtkdir in "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0"; do
+            printf '[Settings]\ngtk-decoration-layout=icon:minimize,maximize,close\n' \
+                > "$_gtkdir/settings.ini" 2>/dev/null || true
+        done
         # Dedicated persistent profile next to the app, created up front so the
         # first run initializes it in place (an empty -profile dir shows "Profile
         # Missing"; a non-existent one too). --no-remote so it never forwards to
@@ -321,15 +357,22 @@ STEOF
         # earlier guard on browser.tabs.inTitlebar skipped the whole block for old
         # profiles, so the chrome-font fix never applied on reboot. We isolate our
         # prefs in fifi.js and merge them into user.js each launch.
-        #  - inTitlebar: FiFi draws the titlebar (SSD); stop Firefox drawing its own.
+        #  - inTitlebar: the compositor now grants CLIENT-side decorations, so let
+        #    Firefox draw its own integrated titlebar (with tabs + the min/max/close
+        #    buttons from gtk-decoration-layout above). Was 0 back when FiFi imposed SSD.
         #  - warnOn*: the quit/close confirmation renders as a transparent, unclosable
         #    dialog on this compositor -> disable the prompts so it closes cleanly.
         #  - font.name.*: pin content generics to bundled fonts.
         #  - legacyUserProfileCustomizations.stylesheets: REQUIRED for userChrome.css.
         #  - startup.page=0: skip the "trouble getting your pages back" restore page.
         {
-          printf 'user_pref("browser.tabs.inTitlebar", 0);\n'
-          printf 'user_pref("browser.tabs.drawInTitlebar", false);\n'
+          printf 'user_pref("browser.tabs.inTitlebar", 1);\n'
+          printf 'user_pref("browser.tabs.drawInTitlebar", true);\n'
+          # Draw Firefox's OWN symbolic min/max/close glyphs instead of the GTK
+          # theme's button assets — the box has no GTK icon theme, so the native
+          # path renders the controls as blank grey circles. This gives clean
+          # -/[]/x glyphs regardless of theme.
+          printf 'user_pref("widget.gtk.non-native-titlebar-buttons.enabled", true);\n'
           printf 'user_pref("browser.warnOnQuit", false);\n'
           printf 'user_pref("browser.warnOnClose", false);\n'
           printf 'user_pref("browser.tabs.warnOnClose", false);\n'
@@ -345,7 +388,7 @@ STEOF
             # || true: grep exits 1 when it filters out EVERY line (profile had only
             # FiFi prefs); under `set -e` that non-zero would abort fifi-run before
             # the browser ever launches.
-            grep -vE 'inTitlebar|drawInTitlebar|warnOn(Quit|Close)|tabs.warnOnClose|sessionstore.warnOnQuit|font.name.(sans-serif|serif|monospace).x-western|legacyUserProfileCustomizations.stylesheets|browser.startup.page' \
+            grep -vE 'inTitlebar|drawInTitlebar|non-native-titlebar-buttons|warnOn(Quit|Close)|tabs.warnOnClose|sessionstore.warnOnQuit|font.name.(sans-serif|serif|monospace).x-western|legacyUserProfileCustomizations.stylesheets|browser.startup.page' \
                 "$prof/user.js" 2>/dev/null >> "$prof/fifi.js" || true
         fi
         mv "$prof/fifi.js" "$prof/user.js"
@@ -355,7 +398,36 @@ STEOF
         # Force family, a concrete pixel size, AND a dark colour: on this box the
         # chrome inherited a zero/unset font size (glyphs laid out but invisible),
         # so family alone was not enough — size + colour make chrome text render.
-        printf '* { font-family: "DejaVu Sans", sans-serif !important; font-size: 15px !important; color: #101010 !important; }\n' > "$prof/chrome/userChrome.css"
+        # ALSO draw the min/max/close window-button glyphs ourselves: with no GTK
+        # icon theme, Firefox renders the controls as blank grey circles, so we
+        # paint explicit -/[]/x glyphs via self-contained SVG data URIs (no theme
+        # dependency) and flatten the circular background. Written each launch.
+        cat > "$prof/chrome/userChrome.css" <<'CSSEOF'
+* { font-family: "DejaVu Sans", sans-serif !important; font-size: 15px !important; color: #101010 !important; }
+.titlebar-button {
+  -moz-appearance: none !important; appearance: none !important;
+  background: transparent !important; border-radius: 0 !important; padding: 0 10px !important;
+}
+.titlebar-button:hover { background: rgba(0,0,0,0.10) !important; }
+.titlebar-close:hover  { background: rgba(232,17,35,0.90) !important; }
+.titlebar-button > .toolbarbutton-icon {
+  -moz-appearance: none !important; appearance: none !important;
+  opacity: 1 !important; width: 16px !important; height: 16px !important;
+  -moz-context-properties: fill !important; fill: rgb(20,20,20) !important;
+}
+.titlebar-min {
+  list-style-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M3 8 h10' stroke='rgb(20,20,20)' stroke-width='1.2'/></svg>") !important;
+}
+.titlebar-max {
+  list-style-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect x='3.5' y='3.5' width='9' height='9' fill='none' stroke='rgb(20,20,20)' stroke-width='1.2'/></svg>") !important;
+}
+.titlebar-restore {
+  list-style-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect x='3.5' y='5.5' width='7' height='7' fill='none' stroke='rgb(20,20,20)' stroke-width='1.2'/><path d='M5.5 5.5 v-2 h7 v7 h-2' fill='none' stroke='rgb(20,20,20)' stroke-width='1.2'/></svg>") !important;
+}
+.titlebar-close {
+  list-style-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M4 4 L12 12 M12 4 L4 12' stroke='rgb(20,20,20)' stroke-width='1.2'/></svg>") !important;
+}
+CSSEOF
         export APPDIR="$dir"; cd "$dir"
         _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"

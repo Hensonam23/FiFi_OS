@@ -716,7 +716,11 @@ int main(void) {
              * titlebar presses (drag start / double-click maximize): consumed. */
             {
                 extern bool ipc_press_suppressed(bool lbtn_down);
-                if (ipc_keyboard_active() && !dragging && !resizing &&
+                /* Only forward when the pointer actually moved or a button changed —
+                 * previously this fired every loop iteration, flooding the focused app
+                 * with ~125 identical mouse events/sec (wasted work + a framing-desync
+                 * risk under load). */
+                if (had_input && ipc_keyboard_active() && !dragging && !resizing &&
                     !ipc_resize_active() && !ipc_press_suppressed(mlb))
                     ipc_send_focused_mouse(mcx, mcy, btns);
             }

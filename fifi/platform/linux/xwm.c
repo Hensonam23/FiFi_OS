@@ -66,6 +66,7 @@ typedef struct {
     uint64_t serial;         /* WL_SURFACE_SERIAL (0 = not read yet) */
     bool     serial_known;
     bool     adopted;        /* handed to wayland.c */
+    bool     maximized;      /* a big app main window we filled to the X screen */
     char     title[128];
 } xwin_t;
 
@@ -244,6 +245,17 @@ static void x_send_configure_notify(uint32_t window, int32_t x, int32_t y,
     x_bump_seq(); x_write(r, sizeof r);
 }
 
+/* Forceful close: terminate the X client owning `resource`. Used as the app-close
+ * fallback when a client ignores WM_DELETE_WINDOW (LibreOffice's minimal "gen" VCL
+ * does not act on the polite delete). The app is closed cleanly enough that
+ * LibreOffice offers document recovery on the next launch. */
+static void x_kill_client(uint32_t resource) {
+    uint8_t r[8];
+    r[0] = X_KillClient; r[1] = 0; put16(r + 2, 2);
+    put32(r + 4, resource);
+    x_bump_seq(); x_write(r, sizeof r);
+}
+
 /* Polite close: ClientMessage WM_PROTOCOLS/WM_DELETE_WINDOW via SendEvent. */
 static void x_send_delete(uint32_t window) {
     uint8_t r[44];
@@ -310,6 +322,9 @@ static int   s_screen_w = 0, s_screen_h = 0;   /* rootful X screen size */
  * size the rootful X screen so a maximized app fills the usable desktop. */
 extern uint32_t console_fb_width(void);
 extern uint32_t console_fb_height(void);
+extern uint32_t console_font_height(void);
+extern uint64_t desk_availw(void);   /* usable desktop width  (below/between panels) */
+extern uint64_t desk_avail(void);    /* usable desktop height (between top bar + taskbar) */
 
 /* Spawn XWayland with -wm on one end of a socketpair; the WM uses the other end
  * as its X connection. -wm tells XWayland who the window manager is (and implies
@@ -321,10 +336,34 @@ static int xwl_spawn(void) {
      * X-root border: borderless apps (Steam) sit flush at (0,0); FiFi-decorated
      * apps (LibreOffice) are placed at x=0 just below their titlebar. */
     uint32_t fw = console_fb_width(), fh = console_fb_height();
-    s_screen_w = (int)fw;
-    s_screen_h = (int)fh > 120 ? (int)fh - 48 : (int)fh;   /* leave the taskbar */
+    /* Size the X screen to the work area MINUS the FiFi titlebar, so a maximized
+     * app fills the space between the top bar and the taskbar exactly: the
+     * compositor places the X-root surface at desk_top()+SSD_TITLE_H with the
+     * titlebar in the SSD_TITLE_H strip above it. desk_availw()/desk_avail()
+     * already subtract the top status bar + bottom taskbar (+ floating-dock gap);
+     * they are valid here because xwm_init() runs after gui_init(). Fall back to
+     * font-metric reserves if the desktop layout isn't ready yet. */
+    extern uint64_t desk_bot(void);      /* work-area bottom (above the taskbar) */
+    extern uint64_t desk_maxtop(void);   /* top edge a maximized window fills to (0 if top bar) */
+    uint64_t aw = desk_availw();
+    /* A maximized X app fills from the top edge (the top status bar auto-hides on
+     * maximize) down to the dock, so size the rootful X screen to that full height,
+     * not just the between-bars work area. */
+    uint64_t ah = desk_bot() - desk_maxtop();
+    if (aw >= 320 && ah >= 240) {
+        /* Borderless X apps fill the whole screen (top edge to the taskbar). */
+        s_screen_w = (int)aw;
+        s_screen_h = (int)ah;
+    } else {
+        int top_reserve = (int)console_font_height() + 6;   /* status bar (if any) */
+        int bot_reserve = (int)console_font_height() + 10;  /* taskbar (TASKBAR_H) */
+        s_screen_w = (int)fw;
+        s_screen_h = (int)fh > 200 ? (int)fh - top_reserve - bot_reserve : (int)fh;
+    }
     if (s_screen_w < 640) s_screen_w = 640;
     if (s_screen_h < 480) s_screen_h = 480;
+    fprintf(stderr, "[xwm] xwl_spawn: fb=%ux%u desk_availw=%llu desk_avail=%llu -> s_screen=%dx%d\n",
+            fw, fh, (unsigned long long)desk_availw(), (unsigned long long)desk_avail(), s_screen_w, s_screen_h);
     unlink("/tmp/.X11-unix/X0");            /* clear any stale display */
     unlink("/tmp/.X0-lock");
     int sv[2];
@@ -514,6 +553,7 @@ static void ev_map_request(const uint8_t *e) {
     bool big = w && w->w >= s_screen_w * 2 / 5 && w->h >= s_screen_h * 2 / 5;
     if (big) {
         w->x = 0; w->y = 0; w->w = s_screen_w; w->h = s_screen_h;
+        w->maximized = true;   /* keep it filled even if it later asks to shrink */
         x_configure(window, 0, 0, s_screen_w, s_screen_h, false);
     }
     x_map_window(window);       /* honor the map (we are the redirect target) */
@@ -550,6 +590,16 @@ static void ev_map_notify(const uint8_t *e) {
     x_change_event_mask(window, EV_PROPERTY_CHANGE);
     if (X.a_wl_surface_serial) x_get_property(window, X.a_wl_surface_serial);
     xwin_try_adopt(w);
+    /* A big window arriving via MapNotify (rather than MapRequest) is an
+     * override-redirect toplevel — SDL/Unity "exclusive fullscreen" games map
+     * this way, and the WM never gets a MapRequest to focus them. Without X
+     * input focus the game receives pointer events (routed by position) but NO
+     * keyboard, so keys like Escape never reach it. Raise + focus big
+     * override-redirect windows so fullscreen games get the keyboard. */
+    if (override && w->w >= s_screen_w * 2 / 5 && w->h >= s_screen_h * 2 / 5) {
+        x_configure(window, 0, 0, 0, 0, true);   /* raise above other X windows */
+        x_set_input_focus(window);
+    }
 }
 
 static void ev_unmap(const uint8_t *e) {
@@ -580,9 +630,27 @@ static void ev_configure_request(const uint8_t *e) {
         if (mask & CFG_W) xw->w = w;
         if (mask & CFG_H) xw->h = h;
     }
-    /* Honor the requested geometry so the client is not left unconfigured. */
-    x_configure(window, xw ? xw->x : x, xw ? xw->y : y,
-                (mask & CFG_W) ? w : 0, (mask & CFG_H) ? h : 0, false);
+    /* FiFi presents X (downloaded) apps BORDERLESS, filling the whole work area.
+     * XWayland's rootful buffer tracks the mapped toplevel's size, so if the app
+     * main window shrinks, the app renders small in the top-left over the
+     * wallpaper. Steam (CEF) maps big, is maximized by ev_map_request, then
+     * requests its saved ~1170x730 here; honoring that shrank it. So a window we
+     * already maximized as an app main window (xw->maximized, set at map, never
+     * override-redirect) is kept filling the X screen: clamp the request UP and
+     * send the ICCCM synthetic ConfigureNotify (or the client waits forever for
+     * a size it will never get). Small dialogs/popups + windows we never
+     * maximized keep their natural size + position (identical to the old path). */
+    bool keep_full = xw && xw->maximized && !xw->override_redirect &&
+                     xw->w >= s_screen_w * 2 / 5 && xw->h >= s_screen_h * 2 / 5;
+    if (keep_full) {
+        xw->x = 0; xw->y = 0; xw->w = s_screen_w; xw->h = s_screen_h;
+        x_configure(window, 0, 0, s_screen_w, s_screen_h, false);
+        x_send_configure_notify(window, 0, 0, s_screen_w, s_screen_h);
+    } else {
+        /* Honor the requested geometry so the client is not left unconfigured. */
+        x_configure(window, xw ? xw->x : x, xw ? xw->y : y,
+                    (mask & CFG_W) ? w : 0, (mask & CFG_H) ? h : 0, false);
+    }
     if (xw && xw->adopted)
         wayland_x11_geometry(window, xw->x, xw->y, xw->w, xw->h);
 }
@@ -748,8 +816,8 @@ bool xwm_init(void) {
      * (else the app's window maps + sends WL_SURFACE_ID before we can see it). */
     { int rf = open("/tmp/xwm.ready", O_CREAT | O_WRONLY | O_TRUNC, 0644);
       if (rf >= 0) close(rf); }
-    fprintf(stderr, "[xwm] managing X server :0 (root=0x%x, atoms wl=%u del=%u)\n",
-            X.root, X.a_wl_surface_id, X.a_wm_delete);
+    fprintf(stderr, "[xwm] managing X server :0 (root=0x%x, proto=%u del=%u)\n",
+            X.root, X.a_wm_protocols, X.a_wm_delete);
     return true;
 }
 
@@ -823,4 +891,41 @@ void xwm_activate(uint32_t xwindow) {
     if (!X.up) return;
     x_configure(xwindow, 0, 0, 0, 0, true);     /* raise only */
     x_set_input_focus(xwindow);
+}
+
+/* The app's primary toplevel: prefer the maximized main window (the one we filled
+ * to the X screen at map), else the first mapped, non-override-redirect window.
+ * Used to route the FiFi titlebar buttons drawn over the rootful X screen. */
+uint32_t xwm_main_window(void) {
+    if (!X.up) return 0;
+    /* Prefer the maximized main window (the one we filled to the X screen at map);
+     * else the LARGEST mapped, non-override window — LibreOffice maps small helper
+     * windows too, and WM_DELETE to one of those does nothing. */
+    for (int i = 0; i < XWM_MAX_WINS; i++)
+        if (X.wins[i].window && X.wins[i].mapped &&
+            !X.wins[i].override_redirect && X.wins[i].maximized)
+            return X.wins[i].window;
+    uint32_t best = 0; long best_area = 0;
+    for (int i = 0; i < XWM_MAX_WINS; i++) {
+        xwin_t *w = &X.wins[i];
+        if (!w->window || !w->mapped || w->override_redirect) continue;
+        long a = (long)w->w * (long)w->h;
+        if (a > best_area) { best_area = a; best = w->window; }
+    }
+    return best;
+}
+
+void xwm_close_main(void) {
+    /* Ask every managed top-level to close politely first (WM_DELETE_WINDOW), so a
+     * well-behaved app can run its own "save changes?" flow. Then forcefully kill
+     * the client owning the main window, because LibreOffice's "gen" VCL ignores
+     * WM_DELETE and would otherwise stay open. Killing the client tears down all
+     * of the app's windows; LibreOffice offers document recovery next launch. */
+    uint32_t main_win = xwm_main_window();
+    for (int i = 0; i < XWM_MAX_WINS; i++) {
+        xwin_t *w = &X.wins[i];
+        if (!w->window || !w->mapped || w->override_redirect) continue;
+        x_send_delete(w->window);
+    }
+    if (main_win) x_kill_client(main_win);
 }

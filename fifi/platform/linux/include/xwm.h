@@ -45,4 +45,10 @@ void xwm_set_focus(uint32_t xwindow);   /* give X input focus to this window    
 void xwm_close(uint32_t xwindow);       /* polite close (WM_DELETE_WINDOW)        */
 void xwm_activate(uint32_t xwindow);    /* raise + focus                          */
 
+/* The app's primary (maximized) X toplevel + a polite close of it. Used to route
+ * the FiFi titlebar's close/minimize buttons drawn on the rootful X screen
+ * (LibreOffice), which has no per-window Wayland surface of its own. */
+uint32_t xwm_main_window(void);
+void     xwm_close_main(void);          /* WM_DELETE_WINDOW to the main window     */
+
 #endif /* FIFI_XWM_H */
