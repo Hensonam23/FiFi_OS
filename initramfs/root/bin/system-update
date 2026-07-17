@@ -1,0 +1,94 @@
+#!/bin/sh
+# system-update — check for and apply ALL updates: your apps AND the OS itself
+# (kernel + initramfs), the FiFi equivalent of `apt update && apt upgrade` or
+# `pacman -Syu`.
+#     system-update       check everything, ask before applying
+#     system-update -y    apply everything, no prompts
+#     system-update -c    check only (don't download anything)
+#
+# Apps come from the App Store (online). The OS comes from GitHub Releases on the
+# FiFi_OS repo: it compares the latest published release to what's installed and,
+# if newer, downloads the bzImage + initramfs.cpio.gz assets into /fifi-data/boot
+# (keeping .prev backups) so the next reboot runs the new system.
+
+REPO="Hensonam23/FiFi_OS"
+BOOT=/fifi-data/boot
+TAGFILE=/fifi-data/os-release-tag          # GitHub tag of the currently-installed OS
+API="https://api.github.com/repos/$REPO/releases/latest"
+
+MODE=ask
+case "$1" in
+    -y|--yes)   MODE=yes ;;
+    -c|--check) MODE=check ;;
+    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+esac
+
+# ── 1. Apps ──────────────────────────────────────────────────────────────────
+echo "== Apps =="
+if command -v app-update >/dev/null 2>&1; then
+    case "$MODE" in
+        check) app-update -c ;;
+        yes)   app-update -y ;;
+        *)     app-update ;;
+    esac
+else
+    echo "app-update not available; skipping app updates."
+fi
+
+# ── 2. Operating system (GitHub Releases) ────────────────────────────────────
+echo
+echo "== Operating system =="
+echo "Installed: $(cat /etc/fifi-version 2>/dev/null || echo unknown)"
+inst_tag=""; [ -f "$TAGFILE" ] && read -r inst_tag < "$TAGFILE"
+
+echo "Checking GitHub for a newer FiFi OS release..."
+json=$(curl -sL --max-time 30 "$API" 2>/dev/null)
+tag=$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"[[:space:]]*//;s/^"//;s/"$//')
+
+if [ -z "$tag" ]; then
+    echo "No published OS release found yet (nothing to update the OS to)."
+    exit 0
+fi
+echo "Latest release: $tag"
+
+if [ -n "$inst_tag" ] && [ "$tag" = "$inst_tag" ]; then
+    echo "OS is up to date."
+    exit 0
+fi
+
+# Resolve the two required asset download URLs from the release JSON.
+kurl=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*bzImage[^"]*"' | head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')
+iurl=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*initramfs[^"]*"' | head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')
+if [ -z "$kurl" ] || [ -z "$iurl" ]; then
+    echo "Release $tag has no bzImage/initramfs.cpio.gz assets — cannot auto-update the OS."
+    exit 1
+fi
+
+echo "OS update available: $tag"
+[ "$MODE" = check ] && exit 0
+
+if [ "$MODE" = ask ]; then
+    printf "Download and install OS update %s now? [y/N] " "$tag"
+    read -r ans
+    case "$ans" in [yY]*) ;; *) echo "Skipped OS update."; exit 0 ;; esac
+fi
+
+echo "Downloading kernel..."
+curl -fL --max-time 600 -o "$BOOT/bzImage.new" "$kurl" || { echo "Kernel download failed."; rm -f "$BOOT/bzImage.new"; exit 1; }
+echo "Downloading system image (this is large, please wait)..."
+curl -fL --max-time 1800 -o "$BOOT/initramfs.cpio.gz.new" "$iurl" || { echo "System image download failed."; rm -f "$BOOT/bzImage.new" "$BOOT/initramfs.cpio.gz.new"; exit 1; }
+
+# Sanity-check the downloads before touching the working boot files.
+[ -s "$BOOT/bzImage.new" ] && [ -s "$BOOT/initramfs.cpio.gz.new" ] || {
+    echo "Downloaded files are empty/corrupt — aborting, boot files untouched."
+    rm -f "$BOOT/bzImage.new" "$BOOT/initramfs.cpio.gz.new"; exit 1; }
+
+echo "Installing (keeping .prev backups so you can roll back)..."
+cp -f "$BOOT/bzImage"           "$BOOT/bzImage.prev"           2>/dev/null || true
+cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev" 2>/dev/null || true
+mv "$BOOT/bzImage.new"           "$BOOT/bzImage"
+mv "$BOOT/initramfs.cpio.gz.new" "$BOOT/initramfs.cpio.gz"
+printf '%s' "$tag" > "$TAGFILE"
+sync; sync
+
+echo "OS updated to $tag. Reboot to run it:  reboot"

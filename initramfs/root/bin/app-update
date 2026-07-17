@@ -1,0 +1,68 @@
+#!/bin/sh
+# app-update — check for and apply updates to your installed apps
+# (LibreOffice, LibreWolf, Steam, and anything else from the App Store).
+#
+# Like `apt update && apt upgrade`:
+#     app-update        check, then ask before updating
+#     app-update -y     check and update everything, no questions
+#     app-update -c     check only (list what's out of date, don't download)
+#
+# NOTE: this updates APPS. To update the OS itself (kernel + initramfs) use the
+# `update` command with a FiFi USB plugged in.
+
+APPS=/fifi-data/apps
+MODE=ask
+case "$1" in
+    -y|--yes)   MODE=yes ;;
+    -c|--check) MODE=check ;;
+    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+esac
+
+[ -f "$APPS/appstore-update-check.sh" ] || {
+    echo "app-update: App Store not available on this system." >&2; exit 1; }
+
+echo "Checking for updates..."
+sh "$APPS/appstore-update-check.sh" 2>/dev/null || true
+
+# Collect apps that have an update marker (<Name>.update) from the check above.
+updates=""
+for u in "$APPS"/*.update; do
+    [ -e "$u" ] || continue
+    n=${u##*/}; n=${n%.update}
+    updates="$updates $n"
+done
+
+if [ -z "$updates" ]; then
+    echo "Everything is up to date."
+    exit 0
+fi
+
+echo "Updates available for:$updates"
+[ "$MODE" = check ] && exit 0
+
+if [ "$MODE" = ask ]; then
+    printf "Update all now? [Y/n] "
+    read -r ans
+    case "$ans" in [nN]*) echo "Cancelled."; exit 0 ;; esac
+fi
+
+rc=0
+for n in $updates; do
+    src=""
+    [ -f "$APPS/$n.src" ] && read -r src < "$APPS/$n.src"
+    if [ -z "$src" ]; then
+        echo "  $n: no source recorded, skipping."
+        continue
+    fi
+    echo "Updating $n ..."
+    if sh "$APPS/appstore-install.sh" "$src" "$n"; then
+        rm -f "$APPS/$n.update"
+        echo "  $n updated."
+    else
+        echo "  $n update FAILED."
+        rc=1
+    fi
+done
+
+echo "Done. Restart any updated app to run the new version."
+exit $rc

@@ -1,0 +1,30 @@
+#!/bin/sh
+# fifi — FiFi OS control command.
+#
+#   fifi update            check for app + OS updates (don't change anything)
+#   fifi upgrade           apply all available updates (asks first)
+#   fifi upgrade -y        apply all updates without asking
+#   fifi version           show the installed OS version
+#   fifi help              show this help
+#
+# "update" then "upgrade" mirrors apt; a single `fifi upgrade` also re-checks
+# first, so you can just run that. Apps come from the App Store, the OS from
+# GitHub Releases (see system-update).
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    update)
+        exec system-update -c ;;
+    upgrade|up|-Syu)
+        exec system-update "$@" ;;        # pass -y through
+    version|--version|-v)
+        cat /etc/fifi-version 2>/dev/null || echo "FiFi OS (version unknown)" ;;
+    ""|help|-h|--help)
+        sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)
+        echo "fifi: unknown command '$cmd'" >&2
+        echo "try: fifi help" >&2
+        exit 1 ;;
+esac
