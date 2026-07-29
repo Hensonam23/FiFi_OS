@@ -5,8 +5,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZEN_REPO="https://github.com/zen-kernel/zen-kernel.git"
-SRC_DIR="$REPO_ROOT/linux/src"
+SRC_DIR="${FIFI_LINUX_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/fifi-os/linux-src}"
+LEGACY_SRC="$REPO_ROOT/linux/src"
 CFG_FRAGMENT="$REPO_ROOT/linux/fifi.config"
+STAGED_CFG="$SRC_DIR/fifi.config.fragment"
 
 # Detect latest zen stable branch (format: X.Y/main)
 detect_zen_branch() {
@@ -23,6 +25,20 @@ detect_zen_branch() {
         echo "$latest"
     fi
 }
+
+mkdir -p "$(dirname "$SRC_DIR")"
+
+# Linux's build system rejects source paths containing spaces. Older FiFi
+# checkouts cloned into linux/src, so migrate that ignored tree once and keep a
+# convenience symlink in the repository.
+if [ "$LEGACY_SRC" != "$SRC_DIR" ] && [ -d "$LEGACY_SRC/.git" ] &&
+   [ ! -e "$SRC_DIR" ]; then
+    echo "[setup] Moving Linux source to space-free cache: $SRC_DIR"
+    mv "$LEGACY_SRC" "$SRC_DIR"
+fi
+if [ "$LEGACY_SRC" != "$SRC_DIR" ] && [ ! -e "$LEGACY_SRC" ]; then
+    ln -s "$SRC_DIR" "$LEGACY_SRC"
+fi
 
 if [ -d "$SRC_DIR/.git" ]; then
     echo "[setup] linux-zen source already at $SRC_DIR"
@@ -42,7 +58,10 @@ cd "$SRC_DIR"
 make x86_64_defconfig
 
 # Merge our FiFi-specific overrides on top
-scripts/kconfig/merge_config.sh -m .config "$CFG_FRAGMENT"
+# merge_config.sh internally word-splits its arguments, so give it a path that
+# cannot contain spaces even when the repository path does.
+cp "$CFG_FRAGMENT" "$STAGED_CFG"
+scripts/kconfig/merge_config.sh -m .config "$STAGED_CFG"
 
 # Run olddefconfig to resolve any remaining symbols to defaults
 make olddefconfig

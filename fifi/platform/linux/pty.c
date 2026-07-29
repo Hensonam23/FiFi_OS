@@ -69,6 +69,13 @@ void pty_set_initial_winsize(uint16_t cols, uint16_t rows) {
 }
 
 void pty_init(void) {
+    /* Reap any inherited children before installing the PTY-specific SIGCHLD
+     * handler. Normally the init supervisor owns boot-time services, but this
+     * also keeps direct/development launches clean. */
+    {
+        int inherited_status;
+        while (waitpid(-1, &inherited_status, WNOHANG) > 0) {}
+    }
     signal(SIGCHLD, pty_sigchld);
     signal(SIGPIPE, SIG_IGN);
 

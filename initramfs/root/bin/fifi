@@ -4,6 +4,8 @@
 #   fifi update            check for app + OS updates (don't change anything)
 #   fifi upgrade           apply all available updates (asks first)
 #   fifi upgrade -y        apply all updates without asking
+#   fifi channel [name]    show or select stable/test updates
+#   fifi rollback          restore the previous OS boot pair
 #   fifi version           show the installed OS version
 #   fifi help              show this help
 #
@@ -19,10 +21,18 @@ case "$cmd" in
         exec system-update -c ;;
     upgrade|up|-Syu)
         exec system-update "$@" ;;        # pass -y through
+    channel)
+        case "${1:-}" in
+            stable|test) exec update "$1" ;;
+            "") exec update channel ;;
+            *) echo "usage: fifi channel [stable|test]" >&2; exit 2 ;;
+        esac ;;
+    rollback)
+        exec update rollback ;;
     version|--version|-v)
         cat /etc/fifi-version 2>/dev/null || echo "FiFi OS (version unknown)" ;;
     ""|help|-h|--help)
-        sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
         echo "fifi: unknown command '$cmd'" >&2
         echo "try: fifi help" >&2

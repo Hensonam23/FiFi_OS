@@ -1,69 +1,61 @@
 #!/bin/sh
-# update — apply a new FiFi OS kernel+initramfs from USB without reinstalling.
-# fifi-data (installed tools, source repo) is completely untouched.
-# Plug in the USB, type: update  then reboot.
+# update — FiFi OS in-place updater.
+#
+# Plain `update` first uses a plugged-in FiFi update USB, then falls back to the
+# currently selected online channel. The installed /fifi-data partition,
+# applications, settings, and user files are preserved.
+#
+#   update                 check, prompt, and install
+#   update -y              install without prompting
+#   update --check         check without changing anything
+#   update test            select the test channel and install
+#   update stable          return to the stable channel and install
+#   update channel         show the selected channel
+#   update rollback        restore the previous kernel + initramfs
+#   update usb             update from a plugged-in FiFi live USB
 
-log()  { echo "[update] $*"; }
-fail() { echo "[update] ERROR: $*"; exit 1; }
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+CHANNEL_FILE="$DATA_ROOT/update-channel"
 
-USB_MNT=/mnt/fifi-upd-src
-TGT_MNT=/mnt/fifi-upd-dst
-mkdir -p "$USB_MNT" "$TGT_MNT"
-
-cleanup() {
-    umount "$USB_MNT" 2>/dev/null || true
-    umount "$TGT_MNT" 2>/dev/null || true
-    rmdir  "$USB_MNT" "$TGT_MNT"  2>/dev/null || true
-}
-trap cleanup EXIT
-
-# All candidate FAT32 partitions across visible disks
-CANDIDATES=""
-for disk in /dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/sde \
-            /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1; do
-    [ -b "$disk" ] || continue
-    for part in "${disk}p1" "${disk}p2" "${disk}1" "${disk}2"; do
-        [ -b "$part" ] && CANDIDATES="$CANDIDATES $part"
-    done
-done
-
-# Find USB source: has .fifi-live-usb marker + boot/bzImage
-USB_DEV=""
-for dev in $CANDIDATES; do
-    mount -o ro "$dev" "$USB_MNT" 2>/dev/null || continue
-    if [ -f "$USB_MNT/.fifi-live-usb" ] && [ -f "$USB_MNT/boot/bzImage" ]; then
-        USB_DEV="$dev"
-        log "Source USB: $dev"
-        break
-    fi
-    umount "$USB_MNT" 2>/dev/null
-done
-[ -n "$USB_DEV" ] || fail "FiFi OS USB not found — make sure it is plugged in."
-
-# Find installed target: has boot/bzImage but no .fifi-live-usb marker
-TGT_DEV=""
-for dev in $CANDIDATES; do
-    [ "$dev" = "$USB_DEV" ] && continue
-    mount -o rw "$dev" "$TGT_MNT" 2>/dev/null || continue
-    if [ -f "$TGT_MNT/boot/bzImage" ] && [ ! -f "$TGT_MNT/.fifi-live-usb" ]; then
-        TGT_DEV="$dev"
-        log "Target (installed): $dev"
-        break
-    fi
-    umount "$TGT_MNT" 2>/dev/null
-done
-[ -n "$TGT_DEV" ] || fail "Installed FiFi OS not found — run the installer first."
-
-log "Updating kernel and initramfs..."
-cp "$USB_MNT/boot/bzImage"           "$TGT_MNT/boot/bzImage"           || fail "kernel copy failed"
-cp "$USB_MNT/boot/initramfs.cpio.gz" "$TGT_MNT/boot/initramfs.cpio.gz" || fail "initramfs copy failed"
-if [ -f "$USB_MNT/EFI/BOOT/BOOTX64.EFI" ]; then
-    cp "$USB_MNT/EFI/BOOT/BOOTX64.EFI" "$TGT_MNT/EFI/BOOT/BOOTX64.EFI"
-    log "  GRUB EFI updated"
-fi
-sync
-
-log "kernel updated"
-log "initramfs updated"
-log ""
-log "Done. Unplug USB and reboot."
+case "${1:-}" in
+    test|stable)
+        selected_channel="$1"
+        shift
+        mkdir -p "$DATA_ROOT" || exit 1
+        printf '%s\n' "$selected_channel" > "$CHANNEL_FILE" || exit 1
+        echo "[update] channel set to $selected_channel"
+        exec system-update --channel "$selected_channel" "$@"
+        ;;
+    channel)
+        if [ -s "$CHANNEL_FILE" ]; then
+            read -r channel < "$CHANNEL_FILE"
+        elif [ -s "${FIFI_ETC_ROOT:-/etc}/fifi-update-channel" ]; then
+            read -r channel < "${FIFI_ETC_ROOT:-/etc}/fifi-update-channel"
+        else
+            channel=stable
+        fi
+        echo "$channel"
+        ;;
+    rollback)
+        exec update-rollback
+        ;;
+    usb|--usb)
+        shift
+        exec update-usb "$@"
+        ;;
+    -h|--help|help)
+        sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        # This makes the same command work before a test build has been
+        # published: a recognized FiFi USB wins, while exit 2 means no USB was
+        # present and the normal online updater should continue.
+        if [ $# -eq 0 ] || [ "${1:-}" = "-y" ]; then
+            update-usb --if-present "$@"
+            usb_status=$?
+            [ "$usb_status" -eq 0 ] && exit 0
+            [ "$usb_status" -eq 2 ] || exit "$usb_status"
+        fi
+        exec system-update "$@"
+        ;;
+esac

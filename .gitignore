@@ -63,8 +63,8 @@ serial.log
 serial-linux.log
 qemu-stdout.log
 
-# linux-desktop: kernel source (huge, cloned separately by setup-linux.sh)
-linux/src/
+# linux-desktop: kernel source or convenience symlink (kept outside the repo)
+linux/src
 # linux-desktop: build artifacts
 build-linux/
 # linux-desktop: keep the config fragment but ignore build byproducts

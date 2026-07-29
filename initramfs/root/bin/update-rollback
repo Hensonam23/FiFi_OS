@@ -1,0 +1,33 @@
+#!/bin/sh
+# update-rollback — swap the active and previous FiFi OS boot pairs.
+set -eu
+
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+BOOT="$DATA_ROOT/boot"
+
+fail() { echo "[rollback] ERROR: $*" >&2; exit 1; }
+
+for file in bzImage initramfs.cpio.gz; do
+    [ -s "$BOOT/$file" ] || fail "missing active $file"
+    [ -s "$BOOT/$file.prev" ] || fail "no previous $file is available"
+done
+
+mv "$BOOT/bzImage" "$BOOT/bzImage.rollback-tmp"
+mv "$BOOT/bzImage.prev" "$BOOT/bzImage"
+mv "$BOOT/bzImage.rollback-tmp" "$BOOT/bzImage.prev"
+
+mv "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.rollback-tmp"
+mv "$BOOT/initramfs.cpio.gz.prev" "$BOOT/initramfs.cpio.gz"
+mv "$BOOT/initramfs.cpio.gz.rollback-tmp" "$BOOT/initramfs.cpio.gz.prev"
+
+if [ -f "$DATA_ROOT/os-build-id.prev" ]; then
+    current=""
+    [ -f "$DATA_ROOT/os-build-id" ] &&
+        read -r current < "$DATA_ROOT/os-build-id"
+    mv "$DATA_ROOT/os-build-id.prev" "$DATA_ROOT/os-build-id"
+    [ -n "$current" ] &&
+        printf '%s\n' "$current" > "$DATA_ROOT/os-build-id.prev"
+fi
+
+sync
+echo "[rollback] Previous FiFi OS restored. Reboot to use it."

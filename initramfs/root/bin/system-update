@@ -1,94 +1,270 @@
 #!/bin/sh
-# system-update — check for and apply ALL updates: your apps AND the OS itself
-# (kernel + initramfs), the FiFi equivalent of `apt update && apt upgrade` or
-# `pacman -Syu`.
-#     system-update       check everything, ask before applying
-#     system-update -y    apply everything, no prompts
-#     system-update -c    check only (don't download anything)
+# system-update — verified in-place application and OS updates.
 #
-# Apps come from the App Store (online). The OS comes from GitHub Releases on the
-# FiFi_OS repo: it compares the latest published release to what's installed and,
-# if newer, downloads the bzImage + initramfs.cpio.gz assets into /fifi-data/boot
-# (keeping .prev backups) so the next reboot runs the new system.
+# OS images are selected from a persistent stable/test channel, downloaded from
+# GitHub Releases, checked against the release manifest, staged beside the
+# active boot files, and activated only after both downloads pass validation.
 
-REPO="Hensonam23/FiFi_OS"
-BOOT=/fifi-data/boot
-TAGFILE=/fifi-data/os-release-tag          # GitHub tag of the currently-installed OS
-API="https://api.github.com/repos/$REPO/releases/latest"
+set -u
+
+REPO="${FIFI_UPDATE_REPO:-Hensonam23/FiFi_OS}"
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+ETC_ROOT="${FIFI_ETC_ROOT:-/etc}"
+BOOT="$DATA_ROOT/boot"
+CHANNEL_FILE="$DATA_ROOT/update-channel"
+DEFAULT_CHANNEL_FILE="$ETC_ROOT/fifi-update-channel"
+BUILD_FILE="$DATA_ROOT/os-build-id"
+TAG_FILE="$DATA_ROOT/os-release-tag"
 
 MODE=ask
-case "$1" in
-    -y|--yes)   MODE=yes ;;
-    -c|--check) MODE=check ;;
-    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+CHANNEL_OVERRIDE=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -y|--yes) MODE=yes ;;
+        -c|--check) MODE=check ;;
+        --channel)
+            shift
+            [ "$#" -gt 0 ] || {
+                echo "system-update: --channel requires stable or test" >&2
+                exit 2
+            }
+            CHANNEL_OVERRIDE="$1"
+            ;;
+        -h|--help)
+            sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "system-update: unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+channel="$CHANNEL_OVERRIDE"
+if [ -z "$channel" ] && [ -s "$CHANNEL_FILE" ]; then
+    read -r channel < "$CHANNEL_FILE"
+fi
+if [ -z "$channel" ] && [ -s "$DEFAULT_CHANNEL_FILE" ]; then
+    read -r channel < "$DEFAULT_CHANNEL_FILE"
+fi
+[ -n "$channel" ] || channel=stable
+
+case "$channel" in
+    stable)
+        API="https://api.github.com/repos/$REPO/releases/latest"
+        ;;
+    test)
+        API="https://api.github.com/repos/$REPO/releases/tags/linux-desktop-test"
+        ;;
+    *)
+        echo "system-update: invalid update channel '$channel'" >&2
+        echo "Use: update stable  or  update test" >&2
+        exit 2
+        ;;
 esac
 
-# ── 1. Apps ──────────────────────────────────────────────────────────────────
+mkdir -p "$BOOT" || {
+    echo "system-update: cannot create $BOOT" >&2
+    exit 1
+}
+
 echo "== Apps =="
-if command -v app-update >/dev/null 2>&1; then
+if [ "${FIFI_SKIP_APP_UPDATE:-0}" = 1 ]; then
+    echo "App update skipped by test environment."
+elif command -v app-update >/dev/null 2>&1; then
     case "$MODE" in
         check) app-update -c ;;
-        yes)   app-update -y ;;
-        *)     app-update ;;
+        yes) app-update -y ;;
+        *) app-update ;;
     esac
 else
     echo "app-update not available; skipping app updates."
 fi
 
-# ── 2. Operating system (GitHub Releases) ────────────────────────────────────
 echo
 echo "== Operating system =="
-echo "Installed: $(cat /etc/fifi-version 2>/dev/null || echo unknown)"
-inst_tag=""; [ -f "$TAGFILE" ] && read -r inst_tag < "$TAGFILE"
+echo "Channel:   $channel"
+echo "Installed: $(cat "$ETC_ROOT/fifi-version" 2>/dev/null || echo unknown)"
+echo "Checking GitHub release metadata..."
 
-echo "Checking GitHub for a newer FiFi OS release..."
-json=$(curl -sL --max-time 30 "$API" 2>/dev/null)
-tag=$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"[[:space:]]*//;s/^"//;s/"$//')
+json=$(curl -fsSL --max-time 30 "$API" 2>/dev/null) || {
+    echo "Could not retrieve the $channel update channel." >&2
+    exit 1
+}
 
-if [ -z "$tag" ]; then
-    echo "No published OS release found yet (nothing to update the OS to)."
-    exit 0
-fi
-echo "Latest release: $tag"
+tag=$(printf '%s' "$json" |
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    head -1 | sed 's/.*:[[:space:]]*"//;s/"$//')
+[ -n "$tag" ] || {
+    echo "The $channel channel has no published update." >&2
+    exit 1
+}
 
-if [ -n "$inst_tag" ] && [ "$tag" = "$inst_tag" ]; then
-    echo "OS is up to date."
-    exit 0
-fi
+asset_url() {
+    asset_name="$1"
+    printf '%s' "$json" |
+        grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+        sed 's/.*:[[:space:]]*"//;s/"$//' |
+        grep "/$asset_name$" |
+        head -1
+}
 
-# Resolve the two required asset download URLs from the release JSON.
-kurl=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*bzImage[^"]*"' | head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')
-iurl=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*initramfs[^"]*"' | head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')
-if [ -z "$kurl" ] || [ -z "$iurl" ]; then
-    echo "Release $tag has no bzImage/initramfs.cpio.gz assets — cannot auto-update the OS."
+manifest_url=$(asset_url fifi-update.manifest)
+kernel_url=$(asset_url bzImage)
+initramfs_url=$(asset_url initramfs.cpio.gz)
+
+if [ -z "$manifest_url" ] || [ -z "$kernel_url" ] ||
+   [ -z "$initramfs_url" ]; then
+    echo "Release $tag is incomplete; required update assets are missing." >&2
     exit 1
 fi
 
-echo "OS update available: $tag"
-[ "$MODE" = check ] && exit 0
+manifest_new="$BOOT/.fifi-update.manifest.new"
+curl -fsSL --max-time 60 -o "$manifest_new" "$manifest_url" || {
+    echo "Update manifest download failed." >&2
+    exit 1
+}
 
-if [ "$MODE" = ask ]; then
-    printf "Download and install OS update %s now? [y/N] " "$tag"
-    read -r ans
-    case "$ans" in [yY]*) ;; *) echo "Skipped OS update."; exit 0 ;; esac
+manifest_value() {
+    key="$1"
+    sed -n "s/^${key}=\\([A-Za-z0-9._-]*\\)$/\\1/p" "$manifest_new" |
+        head -1
+}
+
+manifest_version=$(manifest_value format)
+manifest_channel=$(manifest_value channel)
+build_id=$(manifest_value build)
+kernel_sha=$(manifest_value kernel_sha256)
+initramfs_sha=$(manifest_value initramfs_sha256)
+
+[ "$manifest_version" = 1 ] || {
+    echo "Unsupported or malformed update manifest." >&2
+    rm -f "$manifest_new"
+    exit 1
+}
+[ "$manifest_channel" = "$channel" ] || {
+    echo "Update channel mismatch; refusing the release." >&2
+    rm -f "$manifest_new"
+    exit 1
+}
+[ -n "$build_id" ] || {
+    echo "Update manifest has no build identifier." >&2
+    rm -f "$manifest_new"
+    exit 1
+}
+printf '%s\n' "$kernel_sha" | grep -Eq '^[0-9a-fA-F]{64}$' &&
+printf '%s\n' "$initramfs_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+    echo "Update manifest has invalid SHA-256 values." >&2
+    rm -f "$manifest_new"
+    exit 1
+}
+
+installed_build=""
+[ -s "$BUILD_FILE" ] && read -r installed_build < "$BUILD_FILE"
+echo "Available: $tag ($build_id)"
+
+if [ "$installed_build" = "$build_id" ]; then
+    echo "OS is already on the newest $channel build."
+    rm -f "$manifest_new"
+    exit 0
 fi
 
+echo "OS update available: $installed_build -> $build_id"
+[ "$MODE" = check ] && {
+    rm -f "$manifest_new"
+    exit 0
+}
+
+if [ "$MODE" = ask ]; then
+    printf "Download and install this OS update now? [y/N] "
+    read -r answer
+    case "$answer" in
+        y|Y|yes|YES) ;;
+        *)
+            echo "Skipped OS update."
+            rm -f "$manifest_new"
+            exit 0
+            ;;
+    esac
+fi
+
+kernel_new="$BOOT/bzImage.new"
+initramfs_new="$BOOT/initramfs.cpio.gz.new"
+rm -f "$kernel_new" "$initramfs_new"
+
 echo "Downloading kernel..."
-curl -fL --max-time 600 -o "$BOOT/bzImage.new" "$kurl" || { echo "Kernel download failed."; rm -f "$BOOT/bzImage.new"; exit 1; }
-echo "Downloading system image (this is large, please wait)..."
-curl -fL --max-time 1800 -o "$BOOT/initramfs.cpio.gz.new" "$iurl" || { echo "System image download failed."; rm -f "$BOOT/bzImage.new" "$BOOT/initramfs.cpio.gz.new"; exit 1; }
+curl -fL --max-time 600 -o "$kernel_new" "$kernel_url" || {
+    echo "Kernel download failed." >&2
+    rm -f "$manifest_new" "$kernel_new"
+    exit 1
+}
 
-# Sanity-check the downloads before touching the working boot files.
-[ -s "$BOOT/bzImage.new" ] && [ -s "$BOOT/initramfs.cpio.gz.new" ] || {
-    echo "Downloaded files are empty/corrupt — aborting, boot files untouched."
-    rm -f "$BOOT/bzImage.new" "$BOOT/initramfs.cpio.gz.new"; exit 1; }
+echo "Downloading system image..."
+curl -fL --max-time 1800 -o "$initramfs_new" "$initramfs_url" || {
+    echo "System image download failed." >&2
+    rm -f "$manifest_new" "$kernel_new" "$initramfs_new"
+    exit 1
+}
 
-echo "Installing (keeping .prev backups so you can roll back)..."
-cp -f "$BOOT/bzImage"           "$BOOT/bzImage.prev"           2>/dev/null || true
-cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev" 2>/dev/null || true
-mv "$BOOT/bzImage.new"           "$BOOT/bzImage"
-mv "$BOOT/initramfs.cpio.gz.new" "$BOOT/initramfs.cpio.gz"
-printf '%s' "$tag" > "$TAGFILE"
-sync; sync
+actual_kernel_sha=$(sha256sum "$kernel_new" | awk '{print $1}')
+actual_initramfs_sha=$(sha256sum "$initramfs_new" | awk '{print $1}')
+if [ "$actual_kernel_sha" != "$kernel_sha" ] ||
+   [ "$actual_initramfs_sha" != "$initramfs_sha" ]; then
+    echo "Downloaded image checksum mismatch; active boot files are untouched." >&2
+    rm -f "$manifest_new" "$kernel_new" "$initramfs_new"
+    exit 1
+fi
 
-echo "OS updated to $tag. Reboot to run it:  reboot"
+gzip -t "$initramfs_new" 2>/dev/null || {
+    echo "Downloaded initramfs failed gzip validation." >&2
+    rm -f "$manifest_new" "$kernel_new" "$initramfs_new"
+    exit 1
+}
+
+echo "Checksums and initramfs validation passed."
+echo "Saving the previous boot pair..."
+cp -f "$BOOT/bzImage" "$BOOT/bzImage.prev.new" 2>/dev/null || {
+    echo "Could not back up the active kernel." >&2
+    rm -f "$manifest_new" "$kernel_new" "$initramfs_new"
+    exit 1
+}
+cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev.new" 2>/dev/null || {
+    echo "Could not back up the active initramfs." >&2
+    rm -f "$manifest_new" "$kernel_new" "$initramfs_new" \
+        "$BOOT/bzImage.prev.new"
+    exit 1
+}
+mv -f "$BOOT/bzImage.prev.new" "$BOOT/bzImage.prev"
+mv -f "$BOOT/initramfs.cpio.gz.prev.new" "$BOOT/initramfs.cpio.gz.prev"
+
+previous_build=""
+[ -s "$BUILD_FILE" ] && read -r previous_build < "$BUILD_FILE"
+[ -n "$previous_build" ] &&
+    printf '%s\n' "$previous_build" > "$BUILD_FILE.prev"
+
+echo "Activating the verified boot pair..."
+mv -f "$kernel_new" "$BOOT/bzImage" || {
+    echo "Kernel activation failed." >&2
+    rm -f "$manifest_new" "$initramfs_new"
+    exit 1
+}
+if ! mv -f "$initramfs_new" "$BOOT/initramfs.cpio.gz"; then
+    cp -f "$BOOT/bzImage.prev" "$BOOT/bzImage"
+    echo "Initramfs activation failed; previous kernel restored." >&2
+    rm -f "$manifest_new"
+    exit 1
+fi
+
+mv -f "$manifest_new" "$BOOT/fifi-update.manifest"
+printf '%s\n' "$build_id" > "$BUILD_FILE"
+printf '%s\n' "$tag" > "$TAG_FILE"
+printf '%s\n' "$channel" > "$CHANNEL_FILE"
+sync
+
+echo "OS updated to $tag ($build_id)."
+echo "Reboot to use it: reboot"
+echo "After a successful boot, rollback remains available with: update rollback"
+echo "New installations also include a 'FiFi OS (previous)' GRUB entry."

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC_DIR="$REPO_ROOT/linux/src"
+SRC_DIR="${FIFI_LINUX_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/fifi-os/linux-src}"
 OUT_DIR="$REPO_ROOT/build-linux"
 
 if [ ! -f "$SRC_DIR/.config" ]; then

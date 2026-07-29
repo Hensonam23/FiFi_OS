@@ -46,6 +46,10 @@ cp "$INITRAMFS" "$STAGE/boot/initramfs.cpio.gz"
 # what was flashed.
 FIFI_USB_ID="FIFI-USB-$(date -u +%Y%m%d%H%M%S 2>/dev/null || echo build)"
 printf '%s\n' "$FIFI_USB_ID" > "$STAGE/fifi-usb-boot.id"
+# The updater present on older installed images identifies update media by this
+# marker. Keep it alongside the unique GRUB marker so a dd-flashed ISO can
+# perform the one-time in-place transition to the new online updater.
+touch "$STAGE/.fifi-live-usb"
 
 # Offline app bundle (optional): lets the guided installer set up the browser
 # and office suite with no internet. Populate with scripts/fetch-app-bundle.sh.

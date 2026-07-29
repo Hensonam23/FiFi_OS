@@ -1,0 +1,104 @@
+#!/bin/sh
+# update-usb — apply a new FiFi OS kernel+initramfs from USB without reinstalling.
+
+log()  { echo "[update-usb] $*"; }
+fail() { echo "[update-usb] ERROR: $*"; exit 1; }
+
+IF_PRESENT=0
+if [ "${1:-}" = "--if-present" ]; then
+    IF_PRESENT=1
+    shift
+fi
+
+USB_MNT=/mnt/fifi-upd-src
+TGT_MNT=/mnt/fifi-upd-dst
+mkdir -p "$USB_MNT" "$TGT_MNT"
+TGT_MOUNTED=0
+
+cleanup() {
+    umount "$USB_MNT" 2>/dev/null || true
+    [ "$TGT_MOUNTED" = 1 ] && umount "$TGT_MNT" 2>/dev/null || true
+    rmdir "$USB_MNT" 2>/dev/null || true
+    [ "$TGT_MOUNTED" = 1 ] && rmdir "$TGT_MNT" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+CANDIDATES=""
+for sys_part in /sys/class/block/*; do
+    [ -f "$sys_part/partition" ] || continue
+    part="/dev/${sys_part##*/}"
+    [ -b "$part" ] && CANDIDATES="$CANDIDATES $part"
+done
+
+USB_DEV=""
+for dev in $CANDIDATES; do
+    mount -o ro "$dev" "$USB_MNT" 2>/dev/null || continue
+    if { [ -f "$USB_MNT/.fifi-live-usb" ] ||
+         [ -f "$USB_MNT/fifi-usb-boot.id" ]; } &&
+       [ -s "$USB_MNT/boot/bzImage" ] &&
+       [ -s "$USB_MNT/boot/initramfs.cpio.gz" ]; then
+        USB_DEV="$dev"
+        log "Source USB: $dev"
+        break
+    fi
+    umount "$USB_MNT" 2>/dev/null
+done
+if [ -z "$USB_DEV" ]; then
+    [ "$IF_PRESENT" = 1 ] && exit 2
+    fail "FiFi OS USB not found — make sure it is plugged in."
+fi
+
+TGT_DEV=""
+# Installed FiFi already mounts the authoritative data partition here. Prefer
+# it over probing partition numbers; real installations may use p3, p4, or
+# later, and an EFI partition can also contain stale /boot files.
+if [ -f /fifi-data/installed ] && [ -s /fifi-data/boot/bzImage ]; then
+    TGT_MNT=/fifi-data
+    TGT_DEV="$(awk '$2 == "/fifi-data" {print $1; exit}' /proc/mounts)"
+    log "Target (installed): ${TGT_DEV:-/fifi-data}"
+else
+    for dev in $CANDIDATES; do
+        [ "$dev" = "$USB_DEV" ] && continue
+        mount -o rw "$dev" "$TGT_MNT" 2>/dev/null || continue
+        TGT_MOUNTED=1
+        if [ -f "$TGT_MNT/installed" ] &&
+           [ -s "$TGT_MNT/boot/bzImage" ] &&
+           [ ! -f "$TGT_MNT/.fifi-live-usb" ] &&
+           [ ! -f "$TGT_MNT/fifi-usb-boot.id" ]; then
+            TGT_DEV="$dev"
+            log "Target (installed): $dev"
+            break
+        fi
+        umount "$TGT_MNT" 2>/dev/null
+        TGT_MOUNTED=0
+    done
+fi
+[ -n "$TGT_DEV" ] || fail "Installed FiFi OS data partition not found."
+
+BOOT="$TGT_MNT/boot"
+log "Validating source images..."
+gzip -t "$USB_MNT/boot/initramfs.cpio.gz" ||
+    fail "source initramfs failed gzip validation"
+
+log "Saving previous boot pair..."
+cp -f "$BOOT/bzImage" "$BOOT/bzImage.prev.new" ||
+    fail "kernel backup failed"
+cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev.new" ||
+    fail "initramfs backup failed"
+mv -f "$BOOT/bzImage.prev.new" "$BOOT/bzImage.prev"
+mv -f "$BOOT/initramfs.cpio.gz.prev.new" "$BOOT/initramfs.cpio.gz.prev"
+
+log "Installing kernel and initramfs..."
+cp "$USB_MNT/boot/bzImage" "$BOOT/bzImage.new" ||
+    fail "kernel staging failed"
+cp "$USB_MNT/boot/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.new" ||
+    fail "initramfs staging failed"
+mv -f "$BOOT/bzImage.new" "$BOOT/bzImage"
+if ! mv -f "$BOOT/initramfs.cpio.gz.new" "$BOOT/initramfs.cpio.gz"; then
+    cp -f "$BOOT/bzImage.prev" "$BOOT/bzImage"
+    fail "initramfs activation failed; previous kernel restored"
+fi
+
+sync
+log "Done. User data and applications were not changed."
+log "Unplug the USB and reboot. Keep this USB until the new boot is verified."

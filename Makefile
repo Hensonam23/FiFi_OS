@@ -1,5 +1,6 @@
 OUTPUT := fifi
 BUILD  := build
+LINUX_SRC ?= $(HOME)/.cache/fifi-os/linux-src
 ISO_ROOT := $(BUILD)/iso_root
 KERNEL := $(BUILD)/$(OUTPUT)
 ISO    := $(BUILD)/$(OUTPUT).iso
@@ -199,13 +200,13 @@ clean:
 # These targets build and run the linux-desktop branch version.
 # The bare-metal targets above (run, rundbg, iso, etc.) are unchanged.
 
-.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-usb linux-flash linux-clean
+.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-usb linux-flash linux-test-update linux-test-usb linux-publish-test linux-update-test linux-clean
 
 linux-setup:
 	bash scripts/setup-linux.sh
 
 linux-menuconfig:
-	$(MAKE) -C linux/src menuconfig
+	$(MAKE) -C $(LINUX_SRC) menuconfig
 
 linux-kernel:
 	bash scripts/build-kernel.sh
@@ -229,6 +230,23 @@ linux-flash: linux-usb
 	@echo ""
 	@echo "Flash command (replace sdX with your USB drive):"
 	@echo "  sudo dd if=build-linux/fifi-linux.iso of=/dev/sdX bs=4M status=progress oflag=sync"
+
+linux-update-test:
+	bash test/update/run.sh
+
+linux-test-update: linux-kernel
+	BUILD_ID="$$(git rev-parse HEAD)"; \
+	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then BUILD_ID="$$BUILD_ID-dirty"; fi; \
+	FIFI_UPDATE_CHANNEL=test FIFI_BUILD_ID="$$BUILD_ID" bash scripts/build-initramfs.sh
+	BUILD_ID="$$(git rev-parse HEAD)"; \
+	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then BUILD_ID="$$BUILD_ID-dirty"; fi; \
+	FIFI_BUILD_ID="$$BUILD_ID" bash scripts/package-update.sh test
+
+linux-test-usb: linux-test-update
+	bash scripts/build-linux-usb.sh
+
+linux-publish-test:
+	bash scripts/publish-test-update.sh
 
 linux-clean:
 	rm -rf build-linux/
@@ -389,4 +407,3 @@ build/%.o: kernel/src/%.c build/.dir
 
 build/ctx_switch.o: kernel/arch/x86_64/ctx_switch.S
 	clang --target=x86_64-elf -c $< -o $@
-

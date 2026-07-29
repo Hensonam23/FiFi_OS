@@ -31,6 +31,22 @@ trap 'rm -rf "$STAGE"' EXIT
 
 cp -a "$ROOT_DIR/." "$STAGE/"
 
+# Identify the exact image and its update channel. Test-channel builds keep
+# following test releases after installation; stable builds follow normal
+# releases. CI may pass FIFI_BUILD_ID explicitly, otherwise use the Git commit.
+FIFI_UPDATE_CHANNEL="${FIFI_UPDATE_CHANNEL:-stable}"
+case "$FIFI_UPDATE_CHANNEL" in
+    stable|test) ;;
+    *)
+        echo "[initramfs] ERROR: FIFI_UPDATE_CHANNEL must be stable or test" >&2
+        exit 1
+        ;;
+esac
+FIFI_BUILD_ID="${FIFI_BUILD_ID:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
+printf '%s\n' "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-update-channel"
+printf '%s\n' "$FIFI_BUILD_ID" > "$STAGE/etc/fifi-build-id"
+echo "[initramfs] update channel: $FIFI_UPDATE_CHANNEL  build: $FIFI_BUILD_ID"
+
 # Embed the kernel in the initramfs so fifi-install.sh can always find it
 # without having to locate and mount the USB EFI partition
 mkdir -p "$STAGE/boot"
@@ -914,6 +930,32 @@ if [ -d "$FWDIR" ]; then
     echo "[initramfs] Intel WiFi firmware bundled ($(du -sh "$FWSTAGE" | cut -f1))"
 else
     echo "[initramfs] NOTE: Intel WiFi firmware not found -- install linux-firmware-intel"
+fi
+
+# Realtek PCIe Ethernet firmware. rtl8169 requests this raw path on the target
+# laptop; Arch stores it compressed, while this kernel expects it decompressed.
+RTL_NIC_SRC=""
+for candidate in \
+    /usr/lib/firmware/rtl_nic/rtl8168h-2.fw.zst \
+    /lib/firmware/rtl_nic/rtl8168h-2.fw.zst \
+    /usr/lib/firmware/rtl_nic/rtl8168h-2.fw \
+    /lib/firmware/rtl_nic/rtl8168h-2.fw; do
+    [ -f "$candidate" ] && RTL_NIC_SRC="$candidate" && break
+done
+if [ -n "$RTL_NIC_SRC" ]; then
+    mkdir -p "$STAGE/lib/firmware/rtl_nic"
+    case "$RTL_NIC_SRC" in
+        *.zst)
+            zstd -d -q "$RTL_NIC_SRC" \
+                -o "$STAGE/lib/firmware/rtl_nic/rtl8168h-2.fw"
+            ;;
+        *)
+            cp "$RTL_NIC_SRC" "$STAGE/lib/firmware/rtl_nic/rtl8168h-2.fw"
+            ;;
+    esac
+    echo "[initramfs] Realtek Ethernet firmware bundled"
+else
+    echo "[initramfs] NOTE: rtl8168h-2 firmware not found -- install linux-firmware-realtek"
 fi
 
 # Regulatory domain database (required for legal WiFi channel use)

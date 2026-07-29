@@ -78,7 +78,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 | Keyboard shortcuts: Alt+Tab, Ctrl+W, Win+L, Win+D, window snap | **Working** |
 | Secure Boot: USB flashing signs EFI binaries, cert exported for enrollment | **Working** |
 | In-OS installer: disk wizard, whole-disk and partition modes, GRUB dual-boot | **Working** |
-| OS update: `update` (USB) or `fifi upgrade` (online, GitHub Releases) | **Working** |
+| OS update: plain `update` from stable/test channels, verified staging, USB fallback, rollback | **Working** |
 
 ---
 
@@ -89,7 +89,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 Recent work:
 
 - **App window controls.** LibreOffice (rootful XWayland) now gets a real FiFi titlebar with working close and minimize buttons above its menu bar, and the top bar auto-hides while it is maximized. LibreWolf draws its own titlebar with minimize/maximize/close. Steam stays borderless with its own chrome. Window buttons are large and easy to hit.
-- **Update from the terminal.** `fifi update` checks for both app and OS updates; `fifi upgrade` applies them. Apps come from the App Store; the OS comes from GitHub Releases. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
+- **Update from the terminal.** Plain `update` now applies an in-place OS update from the selected stable or test channel. `fifi update` remains the check-only command and `fifi upgrade` applies app and OS updates together. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
 - **Desktop visuals.** A smooth, seam-free aurora wallpaper plus six more presets, and 2K/4K image backgrounds with fit modes. Desktop icons open on double-click. The Files window re-renders crisply when resized.
 - **Audit + optimization.** Correctness fixes (integer-overflow heap writes, use-after-free, resource leaks) and cleanup across the compositor and every app.
 
@@ -99,17 +99,68 @@ Earlier milestones include the full app ecosystem (searchable launcher, App Stor
 
 ## Updating
 
-FiFi separates app updates from OS updates and gives you one command for both.
+FiFi updates in place. It does not repartition or reinstall the machine, and
+everything under `/fifi-data` is preserved.
 
 ```sh
-fifi update      # check for app AND OS updates (changes nothing)
-fifi upgrade     # apply everything (asks first); add -y to skip prompts
-fifi version     # show the installed OS version
+update                 # download and apply from the selected channel (asks first)
+update -y              # apply without prompting
+update --check         # check without changing anything
+update test            # select the test channel and update
+update stable          # return to stable and update
+update channel         # show the selected channel
+update rollback        # swap back to the previous kernel + initramfs
+update usb             # offline update from a plugged-in FiFi USB
+
+fifi update            # check app and OS updates without changing anything
+fifi upgrade           # apply app and OS updates together
+fifi version           # show the installed OS version
 ```
 
 - **Apps** update from the App Store online.
-- **The OS** (kernel + initramfs) updates from GitHub Releases on this repo: `fifi upgrade` compares the latest release to what is installed, downloads the `bzImage` + `initramfs.cpio.gz` assets into `/fifi-data/boot` (keeping `.prev` backups), and reboots into the new system.
-- Offline alternative: `update` applies a new OS from a plugged-in FiFi USB. `app-update` updates apps only.
+- **The OS** downloads a matching kernel, initramfs, and manifest from GitHub Releases. Both files are staged and SHA-256 checked before the active boot pair changes. The previous complete pair is retained for `update rollback`.
+- `app-update` updates apps only. New installations also receive a **FiFi OS (previous)** GRUB entry.
+
+### Moving an existing laptop onto the test channel
+
+The updater installed on older FiFi images only understands USB updates. It can
+make the first online transition without an ISO or reinstall by temporarily
+running the small updater shipped with the test release:
+
+```sh
+curl -fL https://github.com/Hensonam23/FiFi_OS/releases/download/linux-desktop-test/fifi-bootstrap-update -o /tmp/fifi-bootstrap-update
+chmod +x /tmp/fifi-bootstrap-update
+FIFI_SKIP_APP_UPDATE=1 /tmp/fifi-bootstrap-update -y --channel test
+reboot
+```
+
+This downloads only the actual update payload, stages and verifies it, then
+changes the kernel and initramfs in `/fifi-data/boot`. Applications, settings,
+models, and user files are untouched. The temporary bootstrap disappears on
+reboot because the new initramfs already contains the permanent updater. Future
+updates are simply:
+
+```sh
+update
+```
+
+The test ISO remains an optional recovery and live hardware-test path, not a
+requirement for updating an existing installation.
+
+### Developer verification and publishing
+
+```sh
+make linux-update-test    # simulated install, corruption, no-op, and rollback tests
+make linux-test-update    # real kernel + test-channel initramfs + release package
+make linux-test-usb       # also produce the hardware-test ISO
+make linux-publish-test   # publish update assets (+ ISO when built); never commits/pushes
+```
+
+`linux-publish-test` refuses a dirty working tree. Verify locally first, commit
+and push the reviewed `linux-desktop` changes, rebuild with
+`make linux-test-update`, and only then publish the fixed `linux-desktop-test`
+prerelease. Running `make linux-test-usb` first also includes the optional live
+hardware-test and recovery ISO.
 
 ---
 
@@ -217,8 +268,8 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 #### Phase 6: Full System (done)
 
 - [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
-- [x] OS update command: `update` copies new kernel+initramfs from USB without reinstalling
-- [x] Online OS update: `fifi update` / `fifi upgrade` pull app and OS updates from GitHub Releases
+- [x] OS update command: plain `update` applies the selected stable/test channel in place
+- [x] Verified update staging: manifest hashes, complete-pair backup, rollback, and USB fallback
 - [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
 - [x] Bluetooth: dbus + bluetoothd autostart at boot, pairing via `bt`/bluetoothctl, A2DP audio via PipeWire bluez5
 - [x] Browser: LibreWolf in a FiFi window (chrome-text rendering and typing fixed)
@@ -313,8 +364,9 @@ sudo bash scripts/flash-linux-usb.sh /dev/sdX
 
 ```sh
 setup           # first boot: clone the FiFi OS source into persistent storage
-fifi upgrade    # check for and apply app + OS updates
-update          # offline: apply a new OS from a plugged-in FiFi USB
+update          # check for and apply an OS update from the selected channel
+fifi upgrade    # check for and apply both app and OS updates
+update usb      # offline fallback from a plugged-in FiFi USB
 ```
 
 Anything installed in `/fifi-data` and the source repo are untouched by updates.
