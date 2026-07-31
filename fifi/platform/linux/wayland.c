@@ -3945,9 +3945,9 @@ bool wayland_init(void) {
         fprintf(stderr, "[wayland] bind %s failed: %s\n", g_sock_path, strerror(errno));
         close(g_wl_fd); g_wl_fd = -1; return false;
     }
-    /* 0666: user-namespaced clients (archimage apps run with a fake non-root
-     * uid) must still be able to connect. The socket dir remains protected. */
-    chmod(g_sock_path, 0666);
+    /* Only the desktop uid (plus root, which bypasses mode checks) may connect. */
+    chown(g_sock_path, 1000, 1000);
+    chmod(g_sock_path, 0600);
 
     if (listen(g_wl_fd, 8) < 0) {
         fprintf(stderr, "[wayland] listen failed: %s\n", strerror(errno));

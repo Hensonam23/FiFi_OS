@@ -573,9 +573,10 @@ void ipc_init(void) {
         g_srv_fd = -1;
         return;
     }
-    /* Owner-only: the IPC socket accepts frame/gamepad messages, so it must not
-     * be reachable by other local users. (All FiFi apps run as the same user.) */
-    chmod(FIFI_SOCK, 0600);
+    /* The compositor remains privileged while ordinary apps run as the single
+     * desktop uid. Restrict the socket to root + the FiFi desktop group. */
+    chown(FIFI_SOCK, 0, 1000);
+    chmod(FIFI_SOCK, 0660);
 
     for (int i = 0; i < IPC_MAX_APPS; i++) {
         g_clients[i].fd     = -1;
@@ -597,9 +598,8 @@ void ipc_poll(void) {
         struct ucred cr;
         socklen_t cr_len = sizeof(cr);
         if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &cr_len) != 0 ||
-            cr.uid != getuid()) {
-            fprintf(stderr, "[ipc] rejected connection from uid %d (expected %d)\n",
-                    cr.uid, (int)getuid());
+            (cr.uid != 0 && cr.uid != 1000)) {
+            fprintf(stderr, "[ipc] rejected connection from uid %d\n", cr.uid);
             close(fd);
             continue;
         }

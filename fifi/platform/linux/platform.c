@@ -459,6 +459,22 @@ bool net_send_eth(const uint8_t dst[6], uint16_t et,
 
 /* ── App spawning — fork+exec for IPC apps ────────────────────────────────── */
 
+static bool gui_app_runs_unprivileged(const char *path) {
+    const char *name;
+    if (!path) return false;
+    name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    return strcmp(name, "fifi-terminal") == 0 ||
+           strcmp(name, "fifi-filebrowser") == 0 ||
+           strcmp(name, "fifi-editor") == 0 ||
+           strcmp(name, "fifi-calc") == 0 ||
+           strcmp(name, "fifi-imageviewer") == 0 ||
+           strcmp(name, "fifi-sysmon") == 0 ||
+           strcmp(name, "fifi-aichat") == 0 ||
+           strcmp(name, "fifi-gamepad") == 0 ||
+           strcmp(name, "fifi-proton") == 0;
+}
+
 void gui_spawn_app(const char *path) {
     signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
     /* Dev override: a newer build of an in-house app dropped at
@@ -474,6 +490,13 @@ void gui_spawn_app(const char *path) {
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { (char *)use, NULL };
+        if (gui_app_runs_unprivileged(path)) {
+            char *user_argv[] = {
+                "/bin/fifi-user-exec", (char *)use, NULL
+            };
+            execv(user_argv[0], user_argv);
+            _exit(127);
+        }
         execv(use, argv);
         _exit(127);
     }
@@ -610,6 +633,13 @@ void gui_spawn_app_with_arg(const char *path, const char *arg) {
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { (char *)path, (char *)arg, NULL };
+        if (gui_app_runs_unprivileged(path)) {
+            char *user_argv[] = {
+                "/bin/fifi-user-exec", (char *)path, (char *)arg, NULL
+            };
+            execv(user_argv[0], user_argv);
+            _exit(127);
+        }
         execv(path, argv);
         _exit(127);
     }

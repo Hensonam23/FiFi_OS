@@ -965,7 +965,7 @@ static int tab_spawn(Tab *t) {
         unsetenv("LC_NUMERIC"); unsetenv("LC_TIME");     unsetenv("LC_MONETARY");
         setenv("LANG",  "C.UTF-8", 1);
         setenv("LC_ALL","C.UTF-8", 1);
-        setenv("HOME",  "/root",          1);
+        setenv("HOME",  "/fifi-data/home", 1);
         setenv("PATH",  "/usr/local/bin:/fifi-data/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
         setenv("USER",  "fifi",           1);
         setenv("SHELL", "/bin/sh",        1);

@@ -52,6 +52,32 @@ test ! -e "$completion_root/post-update.pending"
 grep -Fxq updated "$completion_root/apps.log"
 grep -Fq '[post-update] complete' "$completion_root/update-completion.log"
 
+echo "[test-security] non-root launcher enforces the desktop identity"
+gcc -std=c11 -O2 -Wall -Wextra \
+    "$ROOT/fifi/platform/linux/fifi-user-exec.c" \
+    -o "$TMP/fifi-user-exec"
+test "$("$TMP/fifi-user-exec" id -u)" = 1000
+test "$("$TMP/fifi-user-exec" id -g)" = 1000
+grep -Fq 'chown(FIFI_SOCK, 0, 1000)' \
+    "$ROOT/fifi/platform/linux/ipc.c"
+grep -Fq '(cr.uid != 0 && cr.uid != 1000)' \
+    "$ROOT/fifi/platform/linux/ipc.c"
+grep -Fq 'chown(g_sock_path, 1000, 1000)' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'CONFIG_USER_NS=y' "$ROOT/linux/fifi.config"
+grep -Fq 'PR_SET_NO_NEW_PRIVS' \
+    "$ROOT/fifi/platform/linux/fifi-user-exec.c"
+grep -Fq 'strcmp(name, "fifi-terminal") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq '/bin/fifi-user-exec "$target" --appimage-extract' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+! grep -Fq -- '--no-sandbox' "$ROOT/fifi/apps/browser/browser.c"
+! grep -Fq -- '--no-sandbox' "$ROOT/initramfs/root/bin/fifi-download-browser.sh"
+! grep -Fq 'export MOZ_DISABLE_CONTENT_SANDBOX=1' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+! grep -Fq 'export ELECTRON_DISABLE_SANDBOX=1' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+
 echo "[test-security] ignored legacy key is removed from staged images"
 stage="$TMP/stage"
 mkdir -p "$stage/usr/share/fifi"

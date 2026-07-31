@@ -54,7 +54,7 @@ elif [ "$BROWSER" = "firefox" ]; then
     rm -f "$TMPTAR"
     [ -x "$OUTDIR/firefox" ] || { echo "ERROR: Extract failed"; exit 1; }
 
-    printf '#!/bin/sh\nDIR="%s"\nexport LD_LIBRARY_PATH="$DIR:$LD_LIBRARY_PATH"\nexec "$DIR/firefox" --no-sandbox "$@"\n' \
+    printf '#!/bin/sh\nDIR="%s"\nexport LD_LIBRARY_PATH="$DIR:$LD_LIBRARY_PATH"\nexec "$DIR/firefox" "$@"\n' \
         "$OUTDIR" > "$OUTPUT"
     chmod +x "$OUTPUT"
     echo "Firefox ready"

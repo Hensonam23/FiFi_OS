@@ -134,6 +134,14 @@ chmod +x "$STAGE/bin/sudo"
 ln -sf /bin/sudo "$STAGE/usr/bin/sudo" 2>/dev/null || true
 echo "[initramfs] sudo shim installed"
 
+# Small, auditable privilege boundary used when the root compositor launches
+# ordinary apps and terminal shells.
+gcc -std=c11 -O2 -Wall -Wextra -static \
+    "$REPO_ROOT/fifi/platform/linux/fifi-user-exec.c" \
+    -o "$STAGE/bin/fifi-user-exec"
+chmod 755 "$STAGE/bin/fifi-user-exec"
+echo "[initramfs] non-root app launcher installed"
+
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
 (cd "$REPO_ROOT/fifi/compositor" && make -s) || {
@@ -1091,6 +1099,10 @@ cp /usr/share/dbus-1/system-services/org.bluez.service "$STAGE/usr/share/dbus-1/
 mkdir -p "$STAGE/etc"
 [ -s "$STAGE/etc/passwd" ] || echo 'root:x:0:0:root:/root:/bin/sh' > "$STAGE/etc/passwd"
 [ -s "$STAGE/etc/group" ]  || echo 'root:x:0:' > "$STAGE/etc/group"
+grep -q '^fifi:' "$STAGE/etc/passwd" ||
+    echo 'fifi:x:1000:1000:FiFi Desktop:/fifi-data/home:/bin/sh' >> "$STAGE/etc/passwd"
+grep -q '^fifi:' "$STAGE/etc/group" ||
+    echo 'fifi:x:1000:' >> "$STAGE/etc/group"
 grep -q "^dbus:" "$STAGE/etc/passwd" 2>/dev/null || echo "dbus:x:81:81:System Message Bus:/:/sbin/nologin" >> "$STAGE/etc/passwd"
 grep -q "^dbus:" "$STAGE/etc/group"  2>/dev/null || echo "dbus:x:81:" >> "$STAGE/etc/group"
 # A machine-id is required by D-Bus/BlueZ; seed a static one (init regenerates if empty).

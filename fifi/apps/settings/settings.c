@@ -802,6 +802,7 @@ static void wifi_connect(const char *ssid, const char *password) {
 
     FILE *wc = fopen("/fifi-data/wpa.conf", "w");
     if (!wc) { snprintf(g_wstatus, sizeof g_wstatus, "Error: cannot write config"); return; }
+    fchmod(fileno(wc), 0600);
     fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n    ssid=");
     for (int i = 0; ssid[i]; i++) fprintf(wc, "%02x", (unsigned char)ssid[i]);
     fprintf(wc, "\n    psk=\"");
@@ -825,6 +826,7 @@ static void wifi_connect(const char *ssid, const char *password) {
 
     FILE *sc = fopen("/fifi-data/wifi.conf", "w");
     if (sc) {
+        fchmod(fileno(sc), 0600);
         char ss[128]={0}, pw[128]={0}; int si=0, pi=0;
         for (int i=0; ssid[i] && si<127; i++) if (ssid[i]!='\n'&&ssid[i]!='\r') ss[si++]=ssid[i];
         for (int i=0; password[i] && pi<127; i++) if (password[i]!='\n'&&password[i]!='\r') pw[pi++]=password[i];

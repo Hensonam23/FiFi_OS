@@ -146,12 +146,14 @@ mkdir -p /fifi-data
 FIFI_DATA_UUID=""
 FIFI_LIVE=0
 FIFI_UPDATE_BOOT=0
+FIFI_SELFTEST=0
 for arg in $(cat /proc/cmdline 2>/dev/null); do
     case "$arg" in
         fifi_data_uuid=*) FIFI_DATA_UUID="${arg#fifi_data_uuid=}" ;;
         UUID=*)           [ -z "$FIFI_DATA_UUID" ] && FIFI_DATA_UUID="${arg#UUID=}" ;;
         fifi_live)        FIFI_LIVE=1 ;;   # booted from the install USB, not a disk
         fifi_update)      FIFI_UPDATE_BOOT=1 ;;
+        fifi_selftest)    FIFI_SELFTEST=1 ;;
     esac
 done
 case "$FIFI_DATA_UUID" in *[!0-9A-Fa-f-]*|"") FIFI_DATA_UUID="" ;; esac
@@ -265,12 +267,22 @@ fi
 ip link set lo up 2>/dev/null
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null
 
-# Persistent home for apps that refuse to run as root (archimage/JuNest):
-# they run in a user namespace as user "fifi" with /home/fifi bound to the
-# data partition so settings survive reboots.
+# Persistent home for the unprivileged desktop account. Migrate ownership once;
+# all ordinary apps and terminal shells run as uid/gid 1000.
 mkdir -p /fifi-data/home /home/fifi
-chmod 0777 /fifi-data/home /home/fifi
+if [ ! -e /fifi-data/.home-owned-by-fifi ]; then
+    chown -R 1000:1000 /fifi-data/home 2>/dev/null || true
+    : > /fifi-data/.home-owned-by-fifi
+fi
+chown 1000:1000 /fifi-data/home /home/fifi
+chmod 0700 /fifi-data/home /home/fifi
 mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
+
+# Credentials written by older builds may have inherited a permissive umask.
+for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
+               /fifi-data/wg0.conf /fifi-data/torrc; do
+    [ -f "$_secret" ] && chmod 0600 "$_secret"
+done
 
 # Apps expect standard tools in /usr/bin (#!/usr/bin/env shebangs, uname, etc.):
 # link every busybox applet there unless a real binary already exists.
@@ -615,11 +627,50 @@ if [ -z "$FIFI_COMPOSITOR" ] && [ -x /bin/fifi-compositor ]; then
     FIFI_COMPOSITOR=/bin/fifi-compositor
 fi
 
+# The automated boot gate waits for both compositor sockets, verifies their
+# ownership, then launches one ordinary app through the real privilege boundary.
+# Results go to serial so the host can make a deterministic pass/fail decision.
+fifi_boot_selftest() {
+    _tries=0
+    while [ "$_tries" -lt 120 ]; do
+        if [ -S /tmp/fifi-compositor.sock ] && [ -S /tmp/wayland-0 ]; then
+            _ipc_mode="$(stat -c '%u:%g:%a' /tmp/fifi-compositor.sock 2>/dev/null)"
+            _wayland_mode="$(stat -c '%u:%g:%a' /tmp/wayland-0 2>/dev/null)"
+            if [ "$_ipc_mode" != "0:1000:660" ] ||
+               [ "$_wayland_mode" != "1000:1000:600" ]; then
+                printf 'FIFI_SELFTEST FAIL socket-permissions ipc=%s wayland=%s\n' \
+                    "$_ipc_mode" "$_wayland_mode" >/dev/ttyS0
+                return
+            fi
+
+            /bin/fifi-user-exec /bin/fifi-calc \
+                >/tmp/fifi-selftest-app.log 2>&1 &
+            _app_pid=$!
+            sleep 3
+            _app_uid="$(awk '/^Uid:/{print $2}' "/proc/$_app_pid/status" 2>/dev/null)"
+            if kill -0 "$_app_pid" 2>/dev/null && [ "$_app_uid" = 1000 ]; then
+                printf 'FIFI_SELFTEST PASS compositor-ready app-uid=1000\n' \
+                    >/dev/ttyS0
+                return
+            fi
+            printf 'FIFI_SELFTEST FAIL unprivileged-app uid=%s\n' \
+                "${_app_uid:-missing}" >/dev/ttyS0
+            return
+        fi
+        _tries=$((_tries + 1))
+        sleep 1
+    done
+    printf 'FIFI_SELFTEST FAIL compositor-timeout\n' >/dev/ttyS0
+}
+
 # Keep the init shell as PID 1. Besides restarting the desktop after a crash,
 # this makes it the permanent parent/reaper for boot-time helpers and prevents
 # exited network/service wrappers from accumulating as zombie processes.
 if [ -n "$FIFI_COMPOSITOR" ]; then
     while :; do
+        if [ "$FIFI_SELFTEST" = 1 ]; then
+            fifi_boot_selftest &
+        fi
         "$FIFI_COMPOSITOR" 2>>/fifi-data/compositor.log
         FIFI_COMPOSITOR_STATUS=$?
         printf '%s compositor exited status=%s; restarting in 2s\n' \

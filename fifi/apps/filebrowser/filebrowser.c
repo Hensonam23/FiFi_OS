@@ -181,7 +181,7 @@ static Entry   g_entries[MAX_ENTRIES];
 static int     g_nentries = 0;
 static int     g_selected = 0;
 static int     g_scroll   = 0;
-static char    g_path[1024] = "/fifi-data";
+static char    g_path[1024] = "/fifi-data/home";
 static bool    g_confirm_delete = false;
 static bool    g_renaming = false;
 static char    g_rename_buf[256];

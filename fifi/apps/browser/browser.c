@@ -656,9 +656,10 @@ static void on_click(app_t *a, int mx, int my, int sock) {
                     dup2(logfd, STDERR_FILENO);
                     close(logfd);
                 }
-                execl(BROWSER_APPIMAGE, BROWSER_APPIMAGE,
-                      "--appimage-extract-and-run", "--no-sandbox", NULL);
-                execl(BROWSER_APPIMAGE, BROWSER_APPIMAGE, "--no-sandbox", NULL);
+                execl("/bin/fifi-user-exec", "fifi-user-exec",
+                      BROWSER_APPIMAGE, "--appimage-extract-and-run", NULL);
+                execl("/bin/fifi-user-exec", "fifi-user-exec",
+                      BROWSER_APPIMAGE, NULL);
                 write(STDERR_FILENO, "exec failed\n", 12);
                 _exit(1);
             }
@@ -742,8 +743,10 @@ int main(void) {
         pid_t pid = fork();
         if (pid == 0) {
             setsid();
-            execl(BROWSER_APPIMAGE,BROWSER_APPIMAGE,"--appimage-extract-and-run","--no-sandbox",NULL);
-            execl(BROWSER_APPIMAGE,BROWSER_APPIMAGE,"--no-sandbox",NULL);
+            execl("/bin/fifi-user-exec", "fifi-user-exec",
+                  BROWSER_APPIMAGE, "--appimage-extract-and-run", NULL);
+            execl("/bin/fifi-user-exec", "fifi-user-exec",
+                  BROWSER_APPIMAGE, NULL);
             _exit(1);
         }
         return 0;

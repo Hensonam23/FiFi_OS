@@ -124,17 +124,23 @@ void pty_init(void) {
         setenv("TERM",   "xterm-256color", 1);  /* not "linux" — supports 256 colors + TERM-aware apps */
         setenv("LANG",   "C.UTF-8",    1);  /* UTF-8 locale for proper character handling */
         setenv("LC_ALL", "C.UTF-8",    1);
-        setenv("HOME",   "/root",      1);
+        setenv("HOME",   "/fifi-data/home", 1);
         setenv("PATH",   "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/fifi-data/local/bin", 1);
         setenv("USER",   "fifi",       1);
         setenv("SHELL",  "/bin/sh",    1);
         /* Familiar Linux-style prompt: fifi@FiFiOS:<cwd>$  (e.g. fifi@FiFiOS:~$). */
         setenv("PS1",    "fifi@FiFiOS:\\w$ ", 1);
 
-        /* Try ush first (FiFi shell), then busybox sh, then sh */
-        execl("/bin/ush", "-ush", NULL);
-        execl("/bin/sh",  "-sh",  NULL);
-        execl("/bin/busybox", "sh", NULL);
+        /* The compositor is privileged for DRM/input, but its shell is not. */
+        const char *shell = access("/bin/ush", X_OK) == 0 ? "/bin/ush" :
+                            access("/bin/sh", X_OK) == 0 ? "/bin/sh" :
+                            "/bin/busybox";
+        if (strcmp(shell, "/bin/busybox") == 0)
+            execl("/bin/fifi-user-exec", "fifi-user-exec",
+                  shell, "sh", NULL);
+        else
+            execl("/bin/fifi-user-exec", "fifi-user-exec",
+                  shell, NULL);
         _exit(1);
     }
 

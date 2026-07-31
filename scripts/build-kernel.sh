@@ -12,6 +12,17 @@ if [ ! -f "$SRC_DIR/.config" ]; then
     exit 1
 fi
 
+# Reapply the tracked FiFi fragment on every build so security requirements
+# added after initial setup cannot be silently missed by a stale cached config.
+CFG_FRAGMENT="$REPO_ROOT/linux/fifi.config"
+STAGED_CFG="$SRC_DIR/fifi.config.fragment"
+cp "$CFG_FRAGMENT" "$STAGED_CFG"
+(
+    cd "$SRC_DIR"
+    scripts/kconfig/merge_config.sh -m .config "$STAGED_CFG"
+    make olddefconfig
+)
+
 mkdir -p "$OUT_DIR"
 
 JOBS=$(nproc)
