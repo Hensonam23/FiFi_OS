@@ -1107,7 +1107,7 @@ static void render(uint32_t *fb) {
     /* ── System Version / Updates ─── */
     SECTION("System Version");
     {
-        char ver[64] = "FiFi OS linux-desktop alpha";
+        char ver[64] = "FiFi OS linux-desktop Beta 1.0";
         int vfd = open("/etc/fifi-version", O_RDONLY);
         if (vfd >= 0) {
             ssize_t vn = read(vfd, ver, sizeof(ver)-1); close(vfd);

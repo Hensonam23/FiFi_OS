@@ -1,7 +1,7 @@
 NAME="FiFi OS"
-VERSION="linux-desktop alpha"
+VERSION="linux-desktop Beta 1.0"
 ID=fifios
 ID_LIKE=arch
-PRETTY_NAME="FiFi OS (linux-desktop alpha)"
+PRETTY_NAME="FiFi OS (linux-desktop Beta 1.0)"
 HOME_URL="https://github.com/Hensonam23/FiFi_OS"
 BUILD_BRANCH="linux-desktop"
