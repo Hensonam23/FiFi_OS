@@ -88,6 +88,13 @@ menuentry "Install FiFi OS" {
     initrd /boot/initramfs.cpio.gz
 }
 
+# One-action update path: updates the installed boot pair, schedules migrations
+# and app updates, then powers off so the USB can be removed safely.
+menuentry "Update Installed FiFi OS" {
+    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 fifi_live fifi_update
+    initrd /boot/initramfs.cpio.gz
+}
+
 # Safe graphics fallback: forces the EFI framebuffer (nomodeset) for machines
 # whose NVIDIA/AMD KMS driver blanks the screen on the entries above.
 menuentry "Try FiFi OS (Live)  [nomodeset — safe graphics]" {

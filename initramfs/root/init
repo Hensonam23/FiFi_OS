@@ -145,11 +145,13 @@ mkdir -p /fifi-data
 # only a fast-path hint; the marker probe below is authoritative.
 FIFI_DATA_UUID=""
 FIFI_LIVE=0
+FIFI_UPDATE_BOOT=0
 for arg in $(cat /proc/cmdline 2>/dev/null); do
     case "$arg" in
         fifi_data_uuid=*) FIFI_DATA_UUID="${arg#fifi_data_uuid=}" ;;
         UUID=*)           [ -z "$FIFI_DATA_UUID" ] && FIFI_DATA_UUID="${arg#UUID=}" ;;
         fifi_live)        FIFI_LIVE=1 ;;   # booted from the install USB, not a disk
+        fifi_update)      FIFI_UPDATE_BOOT=1 ;;
     esac
 done
 case "$FIFI_DATA_UUID" in *[!0-9A-Fa-f-]*|"") FIFI_DATA_UUID="" ;; esac
@@ -206,6 +208,37 @@ else
     echo "fifi-data: no installed partition found, using tmpfs (live mode)"
 fi
 
+# A dedicated USB boot entry performs the complete installed-system update
+# without opening a terminal. The updated system finishes migrations and online
+# app updates automatically on its next normal boot.
+if [ "$FIFI_UPDATE_BOOT" = 1 ]; then
+    clear
+    cat /etc/fifi-banner
+    echo
+    echo "Updating the installed FiFi OS..."
+    if update-usb; then
+        echo
+        echo "Update installed successfully."
+        echo "This computer will power off. Remove the USB, then turn it on."
+        sync
+        sleep 5
+        poweroff -f
+        # ACPI poweroff is not implemented by every machine/firmware pair.
+        # SysRq is a second kernel-level path; the final loop guarantees PID 1
+        # remains alive even if both mechanisms return unexpectedly.
+        echo o > /proc/sysrq-trigger 2>/dev/null || true
+        while :; do sleep 3600; done
+    fi
+    echo
+    echo "The update could not be completed. No user data was changed."
+    echo "This computer will power off. Reflash or replace the USB and retry."
+    sync
+    sleep 10
+    poweroff -f
+    echo o > /proc/sysrq-trigger 2>/dev/null || true
+    while :; do sleep 3600; done
+fi
+
 # Track the running image on persistent storage. This also makes offline USB
 # updates and GRUB rollback boots visible to the online updater.
 if [ -s /etc/fifi-update-channel ] && [ ! -s /fifi-data/update-channel ]; then
@@ -219,6 +252,12 @@ if [ -s /etc/fifi-build-id ]; then
             printf '%s\n' "$_recorded_build" > /fifi-data/os-build-id.prev
         printf '%s\n' "$_running_build" > /fifi-data/os-build-id
     fi
+fi
+
+# One-time security migration for systems that booted an older image. It removes
+# only FiFi's known historical development key and preserves all owner keys.
+if [ -x /usr/share/fifi/migrate-legacy-ssh-keys.sh ]; then
+    /usr/share/fifi/migrate-legacy-ssh-keys.sh
 fi
 
 # ── Loopback interface ────────────────────────────────────────────────────────
@@ -312,12 +351,14 @@ fi
 cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
 ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
 
-# ── SSH server (Dropbear) — keys persist in /fifi-data/ssh across updates ────
-# Add your public key to /fifi-data/ssh/authorized_keys for key-based login.
-# Password auth is disabled; key auth only.
-if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
+# ── SSH server (Dropbear) — disabled until the owner installs a key ──────────
+# To opt in, place a public key in /fifi-data/ssh/authorized_keys and reboot.
+# Password auth is disabled; no authorization key is baked into the OS image.
+if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ] &&
+   [ -s /fifi-data/ssh/authorized_keys ]; then
     mkdir -p /fifi-data/ssh
     chmod 700 /fifi-data/ssh
+    chmod 600 /fifi-data/ssh/authorized_keys
 
     # Generate host keys on first boot (stored in /fifi-data/ssh — survives updates)
     [ -f /fifi-data/ssh/dropbear_ed25519_host_key ] || \
@@ -331,24 +372,11 @@ if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
     [ -f /etc/passwd ] || echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
     [ -f /etc/group ]  || echo 'root:x:0:' > /etc/group
 
-    # Authorize SSH via a REAL ~/.ssh directory. dropbear can reject a SYMLINKED
-    # ~/.ssh, so build /root/.ssh fresh each boot from two sources: the persistent
-    # per-install keys (/fifi-data/ssh/authorized_keys, survives updates) plus any
-    # baked key. TEMPORARY/TEST: /usr/share/fifi/authorized_keys holds a dev key so
-    # remote access works out of the box — REMOVE it before any public release.
-    if [ ! -s /fifi-data/ssh/authorized_keys ] &&
-       [ -s /usr/share/fifi/authorized_keys ]; then
-        cp /usr/share/fifi/authorized_keys /fifi-data/ssh/authorized_keys
-        chmod 600 /fifi-data/ssh/authorized_keys
-    fi
+    # Dropbear can reject a symlinked ~/.ssh, so copy the owner-managed,
+    # persistent key file into a real root-owned directory on every boot.
     mkdir -p /root/.ssh
     chmod 700 /root/.ssh
-    : > /root/.ssh/authorized_keys
-    [ -f /fifi-data/ssh/authorized_keys ] && cat /fifi-data/ssh/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null
-    if [ -f /usr/share/fifi/authorized_keys ] &&
-       ! cmp -s /usr/share/fifi/authorized_keys /fifi-data/ssh/authorized_keys 2>/dev/null; then
-        cat /usr/share/fifi/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null
-    fi
+    cp /fifi-data/ssh/authorized_keys /root/.ssh/authorized_keys
     chmod 600 /root/.ssh/authorized_keys
 
     # Start dropbear: key-only auth (-s), disable port forwarding (-j -k)
@@ -359,6 +387,8 @@ if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ]; then
         >>/fifi-data/sshd.log 2>&1 && \
         echo "ssh: dropbear started on port 22" >> /fifi-data/network.log || \
         echo "ssh: dropbear failed to start — check /fifi-data/sshd.log" >> /fifi-data/network.log
+else
+    echo "ssh: disabled (install /fifi-data/ssh/authorized_keys to enable)" >> /fifi-data/network.log
 fi
 
 # ── Bluetooth: root-mode system D-Bus + bluetoothd (no-op if not bundled) ─────
@@ -445,6 +475,13 @@ TORRC
     echo "no carrier after 30s" > /fifi-data/network.log
 ) &
 
+# A USB update may need the installed system's saved Wi-Fi configuration, and
+# every update should leave applications current too. Complete that work in the
+# background once networking is available; failures remain pending for retry.
+if [ -x /usr/share/fifi/complete-pending-update.sh ]; then
+    /usr/share/fifi/complete-pending-update.sh &
+fi
+
 # ── WiFi auto-connect via iwd ─────────────────────────────────────────────────
 # Runs in parallel with ethernet negotiation. Reads /fifi-data/wifi.conf:
 #   SSID=YourNetworkName
@@ -529,6 +566,11 @@ if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
     /usr/sbin/nft -f /etc/nftables.conf 2>/fifi-data/firewall.log && \
         echo "firewall: active" >> /fifi-data/firewall.log || \
         echo "firewall: failed (kernel nftables support required)" >> /fifi-data/firewall.log
+    if [ -s /fifi-data/ssh/authorized_keys ] && pidof dropbear >/dev/null 2>&1; then
+        /usr/sbin/nft add rule inet fifi_filter input tcp dport 22 accept \
+            2>>/fifi-data/firewall.log || \
+            echo "firewall: failed to allow opted-in SSH" >> /fifi-data/firewall.log
+    fi
 else
     echo "firewall: nft or rules not found" > /fifi-data/firewall.log
 fi

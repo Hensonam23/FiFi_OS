@@ -262,6 +262,7 @@ mv -f "$manifest_new" "$BOOT/fifi-update.manifest"
 printf '%s\n' "$build_id" > "$BUILD_FILE"
 printf '%s\n' "$tag" > "$TAG_FILE"
 printf '%s\n' "$channel" > "$CHANNEL_FILE"
+: > "$DATA_ROOT/post-update.pending"
 sync
 
 echo "OS updated to $tag ($build_id)."

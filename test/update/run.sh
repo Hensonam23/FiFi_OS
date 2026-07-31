@@ -111,6 +111,7 @@ grep -Fxq build-002 "$DATA/os-build-id"
 grep -Fxq build-001 "$DATA/os-build-id.prev"
 grep -Fxq test "$DATA/update-channel"
 grep -Fxq old-kernel "$DATA/boot/bzImage.prev"
+test -e "$DATA/post-update.pending"
 
 echo "[test-update] no-op when already current"
 before_sha="$(sha256sum "$DATA/boot/bzImage" | awk '{print $1}')"

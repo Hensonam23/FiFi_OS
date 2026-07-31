@@ -74,13 +74,23 @@ cat > "$MNT/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=8
 set default=0
 
-menuentry "FiFi OS linux-desktop" {
-    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 apparmor=1 security=apparmor
+menuentry "Try FiFi OS (Live)" {
+    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 fifi_live
     initrd /boot/initramfs.cpio.gz
 }
 
-menuentry "FiFi OS linux-desktop  [nomodeset]" {
-    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset apparmor=1 security=apparmor
+menuentry "Install FiFi OS" {
+    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 fifi_live
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Update Installed FiFi OS" {
+    linux /boot/bzImage console=tty0 console=ttyS0,115200 quiet loglevel=3 fifi_live fifi_update
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Try FiFi OS (Live)  [nomodeset]" {
+    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset fifi_live
     initrd /boot/initramfs.cpio.gz
 }
 GRUBCFG
@@ -121,6 +131,7 @@ else
 fi
 
 touch "$MNT/.fifi-live-usb"
+printf 'FIFI-USB-%s\n' "$(date -u +%Y%m%d%H%M%S)" > "$MNT/fifi-usb-boot.id"
 
 echo "[flash] Syncing to device..."
 sync

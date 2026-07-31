@@ -12,7 +12,11 @@ mkdir -p "$OUT_DIR"
 
 # ── Busybox: provides /bin/sh, mount, ls, etc. ────────────────────────────────
 BUSYBOX_BIN=""
-for candidate in /usr/bin/busybox /bin/busybox; do
+# The development shell may run in a container while the static BusyBox binary
+# is installed on the host. Host paths are read-only inputs and produce the same
+# self-contained initramfs.
+for candidate in /usr/bin/busybox /bin/busybox \
+                 /run/host/usr/bin/busybox /run/host/root/usr/bin/busybox; do
     if [ -x "$candidate" ]; then
         BUSYBOX_BIN="$candidate"
         break
@@ -1309,6 +1313,10 @@ PWCFG
 
 # Ensure /init is executable
 chmod +x "$STAGE/init"
+
+# Remove the legacy developer-key location and reject any other SSH credentials
+# before packing. This also catches ignored local files copied into the stage.
+bash "$REPO_ROOT/scripts/sanitize-initramfs-stage.sh" "$STAGE"
 
 # Minimal /dev nodes (devtmpfs fills the rest at runtime)
 mkdir -p "$STAGE/dev"

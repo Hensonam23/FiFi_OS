@@ -120,6 +120,9 @@ fifi version           # show the installed OS version
 - **Apps** update from the App Store online.
 - **The OS** downloads a matching kernel, initramfs, and manifest from GitHub Releases. Both files are staged and SHA-256 checked before the active boot pair changes. The previous complete pair is retained for `update rollback`.
 - `app-update` updates apps only. New installations also receive a **FiFi OS (previous)** GRUB entry.
+- A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi
+  installs the verified boot pair, powers off safely, then completes migrations
+  and application updates automatically on the next normal boot.
 
 ### Moving an existing laptop onto the test channel
 
@@ -161,6 +164,18 @@ and push the reviewed `linux-desktop` changes, rebuild with
 `make linux-test-update`, and only then publish the fixed `linux-desktop-test`
 prerelease. Running `make linux-test-usb` first also includes the optional live
 hardware-test and recovery ISO.
+
+### Remote access
+
+SSH is disabled by default and no authorization key is included in FiFi OS.
+To opt in on a specific installation, create
+`/fifi-data/ssh/authorized_keys` with your public key, set it to mode `600`,
+and reboot. Dropbear then starts with password authentication and port
+forwarding disabled. Removing that file and rebooting disables SSH again.
+When an older installation first boots a hardened image, FiFi automatically
+removes its historical development key while preserving different owner-added
+keys. The pre-migration file is retained as
+`authorized_keys.before-ssh-hardening`, but is never used for authentication.
 
 ---
 
@@ -288,10 +303,10 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 #### Phase 7: Harden and make it testable (next; blocks v1.0)
 
-- [ ] Strip the dev SSH key from release images
+- [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [ ] Non-root user; re-enable per-app sandboxing
 - [ ] Verify signatures/hashes on every download (apps, AI models, OS updates)
-- [ ] Run the compositor under a supervisor with auto-reboot on crash
+- [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
 - [ ] A/B OS updates: never overwrite the only bootable copy
 - [ ] Screenshot-diff test harness + QEMU boot self-test wired into CI
 

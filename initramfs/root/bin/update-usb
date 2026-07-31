@@ -25,7 +25,12 @@ trap cleanup EXIT
 
 CANDIDATES=""
 for sys_part in /sys/class/block/*; do
-    [ -f "$sys_part/partition" ] || continue
+    # Hybrid GRUB ISOs expose their ISO9660 filesystem on the whole removable
+    # disk, not necessarily on a mountable partition. Include partitions plus
+    # whole removable devices; otherwise a correctly flashed FiFi USB is skipped.
+    if [ ! -f "$sys_part/partition" ]; then
+        [ "$(cat "$sys_part/removable" 2>/dev/null)" = 1 ] || continue
+    fi
     part="/dev/${sys_part##*/}"
     [ -b "$part" ] && CANDIDATES="$CANDIDATES $part"
 done
@@ -99,6 +104,10 @@ if ! mv -f "$BOOT/initramfs.cpio.gz.new" "$BOOT/initramfs.cpio.gz"; then
     fail "initramfs activation failed; previous kernel restored"
 fi
 
+# The new image runs security/data migrations immediately at boot, then updates
+# installed applications as soon as the saved network connection is available.
+: > "$TGT_MNT/post-update.pending"
 sync
-log "Done. User data and applications were not changed."
+log "Done. User data was preserved."
+log "App updates and migrations will finish automatically after reboot."
 log "Unplug the USB and reboot. Keep this USB until the new boot is verified."
