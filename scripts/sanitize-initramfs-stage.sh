@@ -20,7 +20,8 @@ while IFS= read -r candidate; do
 done < <(
     find "$stage" -type f \
         \( -name authorized_keys -o -name 'id_rsa' -o -name 'id_ecdsa' \
-           -o -name 'id_ed25519' -o -name '*.pub' \) -print
+           -o -name 'id_ed25519' -o -name '*.pub' \) \
+        ! -path "$stage/etc/fifi-release-signing.pub" -print
 )
 
 if [[ -z "$credential" ]]; then

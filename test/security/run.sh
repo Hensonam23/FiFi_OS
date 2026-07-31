@@ -95,6 +95,13 @@ if bash "$ROOT/scripts/sanitize-initramfs-stage.sh" "$stage"; then
     exit 1
 fi
 
+echo "[test-security] release verification key is allowed"
+rm -rf "$stage/root/.ssh"
+mkdir -p "$stage/etc"
+cp "$ROOT/security/release-signing-public.pem" \
+    "$stage/etc/fifi-release-signing.pub"
+bash "$ROOT/scripts/sanitize-initramfs-stage.sh" "$stage"
+
 echo "[test-security] compositor crashes are supervised"
 grep -Fq '# ── Supervise FiFi compositor' "$ROOT/initramfs/root/init"
 grep -Fq '"$FIFI_COMPOSITOR" 2>>/fifi-data/compositor.log' \

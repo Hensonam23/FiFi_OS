@@ -1231,6 +1231,25 @@ else
     echo "[initramfs] WARNING: curl not found -- browser/LibreOffice downloads will fail"
 fi
 
+# OpenSSL verifies the Ed25519 signature on every OS update manifest before any
+# downloaded kernel or initramfs is trusted.
+OPENSSL_BIN="$(which openssl 2>/dev/null)"
+if [ -x "$OPENSSL_BIN" ]; then
+    cp "$OPENSSL_BIN" "$STAGE/bin/openssl"
+    ldd "$OPENSSL_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+    cp "$REPO_ROOT/security/release-signing-public.pem" \
+        "$STAGE/etc/fifi-release-signing.pub"
+    chmod 0644 "$STAGE/etc/fifi-release-signing.pub"
+    echo "[initramfs] release signature verifier bundled"
+else
+    echo "[initramfs] ERROR: openssl not found -- secure updates cannot be built" >&2
+    exit 1
+fi
+
 # ── CA certificates (required for TLS in Go binaries like dnscrypt-proxy) ────
 echo "[initramfs] bundling CA certificates..."
 if [ -f /etc/ssl/certs/ca-certificates.crt ]; then

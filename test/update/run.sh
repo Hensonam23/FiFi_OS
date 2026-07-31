@@ -10,6 +10,9 @@ ETC="$TMP/etc"
 FIXTURES="$TMP/fixtures"
 MOCK_BIN="$TMP/bin"
 mkdir -p "$DATA/boot" "$ETC" "$FIXTURES" "$MOCK_BIN"
+openssl genpkey -algorithm ED25519 -out "$FIXTURES/test-signing-key.pem"
+openssl pkey -in "$FIXTURES/test-signing-key.pem" -pubout \
+    -out "$ETC/fifi-release-signing.pub"
 
 printf 'old-kernel\n' > "$DATA/boot/bzImage"
 printf 'old-initramfs\n' | gzip -c > "$DATA/boot/initramfs.cpio.gz"
@@ -32,6 +35,10 @@ write_manifest() {
         printf 'kernel_sha256=%s\n' "$ksha"
         printf 'initramfs_sha256=%s\n' "$initramfs_sha"
     } > "$FIXTURES/fifi-update.manifest"
+    openssl pkeyutl -sign -rawin \
+        -inkey "$FIXTURES/test-signing-key.pem" \
+        -in "$FIXTURES/fifi-update.manifest" \
+        -out "$FIXTURES/fifi-update.manifest.sig"
 }
 
 write_api() {
@@ -40,6 +47,7 @@ write_api() {
   "tag_name": "linux-desktop-test",
   "assets": [
     {"browser_download_url": "https://fixtures/fifi-update.manifest"},
+    {"browser_download_url": "https://fixtures/fifi-update.manifest.sig"},
     {"browser_download_url": "https://fixtures/bzImage"},
     {"browser_download_url": "https://fixtures/initramfs.cpio.gz"}
   ]
@@ -71,6 +79,7 @@ done
 case "$url" in
     *api.github.com*) src="$FIFI_TEST_FIXTURES/api.json" ;;
     */fifi-update.manifest) src="$FIFI_TEST_FIXTURES/fifi-update.manifest" ;;
+    */fifi-update.manifest.sig) src="$FIFI_TEST_FIXTURES/fifi-update.manifest.sig" ;;
     */bzImage) src="$FIFI_TEST_FIXTURES/bzImage" ;;
     */initramfs.cpio.gz) src="$FIFI_TEST_FIXTURES/initramfs.cpio.gz" ;;
     *) echo "mock curl: unexpected URL: $url" >&2; exit 22 ;;
@@ -133,6 +142,15 @@ fi
 cmp "$FIXTURES/bzImage" "$DATA/boot/bzImage"
 grep -Fxq build-002 "$DATA/os-build-id"
 
+echo "[test-update] forged manifest is rejected"
+printf 'tampered\n' >> "$FIXTURES/fifi-update.manifest"
+if system-update -y --channel test; then
+    echo "forged manifest unexpectedly succeeded" >&2
+    exit 1
+fi
+cmp "$FIXTURES/bzImage" "$DATA/boot/bzImage"
+write_manifest build-003 "$kernel_sha"
+
 echo "[test-update] rollback swaps complete boot pairs"
 update rollback
 grep -Fxq old-kernel "$DATA/boot/bzImage"
@@ -146,6 +164,8 @@ mkdir -p "$PACKAGE_BUILD"
 cp "$FIXTURES/bzImage" "$PACKAGE_BUILD/bzImage"
 cp "$FIXTURES/initramfs.cpio.gz" "$PACKAGE_BUILD/initramfs.cpio.gz"
 FIFI_BUILD_DIR="$PACKAGE_BUILD" FIFI_BUILD_ID=build-004 \
+FIFI_RELEASE_SIGNING_KEY="$FIXTURES/test-signing-key.pem" \
+FIFI_RELEASE_PUBLIC_KEY="$ETC/fifi-release-signing.pub" \
     bash "$ROOT/scripts/package-update.sh" test
 grep -Fxq channel=test "$PACKAGE_BUILD/update-test/fifi-update.manifest"
 grep -Fxq build=build-004 "$PACKAGE_BUILD/update-test/fifi-update.manifest"
@@ -153,5 +173,9 @@ cmp "$FIXTURES/bzImage" "$PACKAGE_BUILD/update-test/bzImage"
 cmp "$ROOT/initramfs/root/bin/system-update" \
     "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"
 test -x "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"
+openssl pkeyutl -verify -pubin \
+    -inkey "$ETC/fifi-release-signing.pub" -rawin \
+    -in "$PACKAGE_BUILD/update-test/fifi-update.manifest" \
+    -sigfile "$PACKAGE_BUILD/update-test/fifi-update.manifest.sig" >/dev/null
 
 echo "[test-update] PASS"

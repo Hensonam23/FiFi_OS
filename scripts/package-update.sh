@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="${1:-test}"
 BUILD_DIR="${FIFI_BUILD_DIR:-$ROOT/build-linux}"
 OUT="${2:-$BUILD_DIR/update-$CHANNEL}"
+SIGNING_KEY="${FIFI_RELEASE_SIGNING_KEY:-$HOME/.config/fifi-os/release-signing-key.pem}"
+PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ROOT/security/release-signing-public.pem}"
 
 case "$CHANNEL" in
     stable|test) ;;
@@ -53,6 +55,20 @@ initramfs_sha="$(sha256sum "$OUT/initramfs.cpio.gz" | awk '{print $1}')"
 
 gzip -t "$OUT/initramfs.cpio.gz"
 
+[[ -f "$SIGNING_KEY" ]] || {
+    echo "[package-update] missing release signing key: $SIGNING_KEY" >&2
+    echo "Set FIFI_RELEASE_SIGNING_KEY to the protected Ed25519 private key." >&2
+    exit 1
+}
+openssl pkeyutl -sign -rawin -inkey "$SIGNING_KEY" \
+    -in "$OUT/fifi-update.manifest" \
+    -out "$OUT/fifi-update.manifest.sig"
+openssl pkeyutl -verify -pubin \
+    -inkey "$PUBLIC_KEY" -rawin \
+    -in "$OUT/fifi-update.manifest" \
+    -sigfile "$OUT/fifi-update.manifest.sig" >/dev/null
+
 echo "[package-update] ready: $OUT"
 echo "[package-update] build: $BUILD_ID"
 echo "[package-update] channel: $CHANNEL"
+echo "[package-update] manifest signature verified"

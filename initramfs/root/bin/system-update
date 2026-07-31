@@ -13,6 +13,7 @@ ETC_ROOT="${FIFI_ETC_ROOT:-/etc}"
 BOOT="$DATA_ROOT/boot"
 CHANNEL_FILE="$DATA_ROOT/update-channel"
 DEFAULT_CHANNEL_FILE="$ETC_ROOT/fifi-update-channel"
+RELEASE_PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ETC_ROOT/fifi-release-signing.pub}"
 BUILD_FILE="$DATA_ROOT/os-build-id"
 TAG_FILE="$DATA_ROOT/os-release-tag"
 
@@ -113,20 +114,40 @@ asset_url() {
 }
 
 manifest_url=$(asset_url fifi-update.manifest)
+manifest_sig_url=$(asset_url fifi-update.manifest.sig)
 kernel_url=$(asset_url bzImage)
 initramfs_url=$(asset_url initramfs.cpio.gz)
 
-if [ -z "$manifest_url" ] || [ -z "$kernel_url" ] ||
+if [ -z "$manifest_url" ] || [ -z "$manifest_sig_url" ] ||
+   [ -z "$kernel_url" ] ||
    [ -z "$initramfs_url" ]; then
     echo "Release $tag is incomplete; required update assets are missing." >&2
     exit 1
 fi
 
 manifest_new="$BOOT/.fifi-update.manifest.new"
+manifest_sig_new="$BOOT/.fifi-update.manifest.sig.new"
 curl -fsSL --max-time 60 -o "$manifest_new" "$manifest_url" || {
     echo "Update manifest download failed." >&2
     exit 1
 }
+curl -fsSL --max-time 60 -o "$manifest_sig_new" "$manifest_sig_url" || {
+    echo "Update manifest signature download failed." >&2
+    rm -f "$manifest_new"
+    exit 1
+}
+[ -s "$RELEASE_PUBLIC_KEY" ] || {
+    echo "FiFi release verification key is missing; update refused." >&2
+    rm -f "$manifest_new" "$manifest_sig_new"
+    exit 1
+}
+openssl pkeyutl -verify -pubin -inkey "$RELEASE_PUBLIC_KEY" -rawin \
+    -in "$manifest_new" -sigfile "$manifest_sig_new" >/dev/null 2>&1 || {
+    echo "Update manifest signature is invalid; update refused." >&2
+    rm -f "$manifest_new" "$manifest_sig_new"
+    exit 1
+}
+rm -f "$manifest_sig_new"
 
 manifest_value() {
     key="$1"
@@ -224,7 +245,7 @@ gzip -t "$initramfs_new" 2>/dev/null || {
     exit 1
 }
 
-echo "Checksums and initramfs validation passed."
+echo "Signature, checksums, and initramfs validation passed."
 echo "Saving the previous boot pair..."
 cp -f "$BOOT/bzImage" "$BOOT/bzImage.prev.new" 2>/dev/null || {
     echo "Could not back up the active kernel." >&2

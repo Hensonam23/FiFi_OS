@@ -118,7 +118,7 @@ fifi version           # show the installed OS version
 ```
 
 - **Apps** update from the App Store online.
-- **The OS** downloads a matching kernel, initramfs, and manifest from GitHub Releases. Both files are staged and SHA-256 checked before the active boot pair changes. The previous complete pair is retained for `update rollback`.
+- **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the active boot pair changes. The previous complete pair is retained for `update rollback`.
 - `app-update` updates apps only. New installations also receive a **FiFi OS (previous)** GRUB entry.
 - A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi
   installs the verified boot pair, powers off safely, then completes migrations
@@ -126,22 +126,11 @@ fifi version           # show the installed OS version
 
 ### Moving an existing laptop onto the test channel
 
-The updater installed on older FiFi images only understands USB updates. It can
-make the first online transition without an ISO or reinstall by temporarily
-running the small updater shipped with the test release:
-
-```sh
-curl -fL https://github.com/Hensonam23/FiFi_OS/releases/download/linux-desktop-test/fifi-bootstrap-update -o /tmp/fifi-bootstrap-update
-chmod +x /tmp/fifi-bootstrap-update
-FIFI_SKIP_APP_UPDATE=1 /tmp/fifi-bootstrap-update -y --channel test
-reboot
-```
-
-This downloads only the actual update payload, stages and verifies it, then
-changes the kernel and initramfs in `/fifi-data/boot`. Applications, settings,
-models, and user files are untouched. The temporary bootstrap disappears on
-reboot because the new initramfs already contains the permanent updater. Future
-updates are simply:
+The updater installed on older FiFi images only understands USB updates. Use
+the bootable FiFi USB's **Update Installed FiFi OS** entry once; this avoids
+downloading and executing an updater that the old image cannot authenticate.
+Applications, settings, models, and user files remain untouched. Future updates
+are simply:
 
 ```sh
 update
