@@ -166,12 +166,11 @@ static void draw_icon_ph(uint32_t *fb, const char *name, int dx, int dy, int dsz
 /* ── Catalog ─────────────────────────────────────────────────────────────── */
 #define MAX_APPS 1400
 #define ICON_DIR  "/fifi-data/apps/icons"
-#define ICON_BASE "https://appimage.github.io/database/"
 typedef struct {
     char name[48];
     char cat[24];
     char repo[80];
-    char icon[96];     /* feed icon path (under ICON_BASE), "" = none */
+    char icon[96];     /* reserved for signed, image-bundled catalog icons */
     char desc[512];
     char status[12];   /* "", installing, downloading, done, error */
     bool installing;
@@ -321,75 +320,14 @@ static void app_icon_forget(const char *name) {
         }
 }
 
-/* ── Lazy feed-icon downloads (for browse rows + detail view) ────────────── */
-static int g_icon_dl = 0;   /* curls in flight */
-
-/* Reject strings with shell-dangerous characters. The catalog is fetched over
- * the network, and a->name / a->icon get embedded in an sh -c command below; a
- * name like  x';rm -rf ~;'  would otherwise break out of the quotes and run
- * arbitrary commands. Allow only characters that legitimately appear in an app
- * name or a URL path. */
-static bool field_shell_safe(const char *s) {
-    for (; *s; s++) {
-        char c = *s;
-        if (c >= 'a' && c <= 'z') continue;
-        if (c >= 'A' && c <= 'Z') continue;
-        if (c >= '0' && c <= '9') continue;
-        if (c == ' ' || c == '.' || c == '_' || c == '-' ||
-            c == '/' || c == ':' || c == '+' || c == '(' || c == ')') continue;
-        return false;   /* anything else (quotes, ; | & $ ` < > \ newline ...) */
-    }
-    return true;
-}
-
-/* Start fetching an app's feed icon in the background (max 4 at once). */
+/* Catalog metadata and icons must come from the signed OS image or the
+ * hash-verified AppImage itself. Never fetch unsigned images from a feed. */
 static void icon_dl_start(App *a) {
-    if (a->icon_state != 0 || !a->icon[0] || g_icon_dl >= 4) return;
-    if (!field_shell_safe(a->name) || !field_shell_safe(a->icon)) { a->icon_state = 2; return; }
-    char fin[224], fail[240];
-    snprintf(fin, sizeof fin, ICON_DIR "/%s.png", a->name);
-    snprintf(fail, sizeof fail, "%s.fail", fin);
-    struct stat st;
-    if (stat(fin, &st) == 0) return;                       /* already there */
-    if (stat(fail, &st) == 0) { a->icon_state = 2; return; } /* known-bad */
-    a->icon_state = 1;
-    g_icon_dl++;
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int nul = open("/dev/null", O_RDWR);
-        if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        char cmd[640];
-        snprintf(cmd, sizeof cmd,
-            "mkdir -p " ICON_DIR "; "
-            "curl -sL --max-time 30 -o '%s.part' '" ICON_BASE "%s' "
-            "&& mv '%s.part' '%s' || { rm -f '%s.part'; : > '%s'; }",
-            fin, a->icon, fin, fin, fin, fail);
-        execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
-        _exit(127);
-    }
-    if (pid < 0) { a->icon_state = 0; g_icon_dl--; }
+    a->icon_state = 2;
 }
 
-/* Poll in-flight icon downloads; true if any finished (needs redraw). */
 static bool icon_dl_poll(void) {
-    bool changed = false;
-    for (int i = 0; i < g_napps; i++) {
-        if (g_apps[i].icon_state != 1) continue;
-        char fin[224], fail[240]; struct stat st;
-        snprintf(fin, sizeof fin, ICON_DIR "/%s.png", g_apps[i].name);
-        snprintf(fail, sizeof fail, "%s.fail", fin);
-        if (stat(fin, &st) == 0) {
-            g_apps[i].icon_state = 0;
-            if (g_icon_dl > 0) g_icon_dl--;
-            app_icon_forget(g_apps[i].name);
-            changed = true;
-        } else if (stat(fail, &st) == 0) {
-            g_apps[i].icon_state = 2;
-            if (g_icon_dl > 0) g_icon_dl--;
-        }
-    }
-    return changed;
+    return false;
 }
 
 /* Alpha-blend scale-blit an ARGB icon into the window framebuffer. */

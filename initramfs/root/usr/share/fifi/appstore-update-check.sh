@@ -8,6 +8,7 @@
 #
 # Usage: appstore-update-check.sh [AppName]   (no arg = check all installed apps)
 APPS=/fifi-data/apps
+. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 # pick best x86_64 AppImage from a newline-separated URL list
 pick() {
@@ -22,14 +23,16 @@ resolve() {
     spec="$1"
     case "$spec" in
     url:*)
-        printf '%s' "${spec#url:}" ;;
+        return 1 ;;
     gitlab:*)
-        rel=$(curl -sL --max-time 30 "https://gitlab.com/api/v4/projects/${spec#gitlab:}/releases?per_page=10")
-        pick "$(printf '%s' "$rel" | grep -oE '"url":"[^"]*\.AppImage"' | sed 's/^"url":"//;s/"$//')" ;;
+        proj="${spec#gitlab:}"
+        rel=$(curl -sL --max-time 30 "https://gitlab.com/api/v4/projects/$proj/releases?per_page=10")
+        url="$(pick "$(printf '%s' "$rel" | grep -oE '"url":"[^"]*\.AppImage"' | sed 's/^"url":"//;s/"$//')")"
+        sha="$(fifi_gitlab_package_sha256 "$proj" "$url")"
+        [ -n "$url" ] && [ -n "$sha" ] && printf '%s|%s' "$url" "$sha" ;;
     *)
         rel=$(curl -sL --max-time 30 "https://api.github.com/repos/$spec/releases?per_page=30")
-        pick "$(printf '%s' "$rel" | grep -oE '"browser_download_url": *"[^"]*\.AppImage"' \
-                | sed 's/.*"browser_download_url": *"//;s/"$//')" ;;
+        fifi_pick_x86_64_pair "$(printf '%s' "$rel" | fifi_github_appimage_pairs)" ;;
     esac
 }
 
@@ -37,12 +40,15 @@ check_one() {
     n="$1"
     [ -f "$APPS/$n.src" ] || return 0
     cur=$(cat "$APPS/$n.url" 2>/dev/null)
-    new=$(resolve "$(cat "$APPS/$n.src")")
+    cur_sha=$(cat "$APPS/$n.sha256" 2>/dev/null)
+    pair=$(resolve "$(cat "$APPS/$n.src")")
+    new="${pair%|*}"
+    new_sha="${pair##*|}"
     # Resolution failed (offline / API error): keep any existing marker rather
     # than wrongly clearing a previously detected update.
     [ -n "$new" ] || return 0
-    if [ "$new" != "$cur" ]; then
-        printf '%s' "$new" > "$APPS/$n.update"
+    if [ "$new" != "$cur" ] || [ "$new_sha" != "$cur_sha" ]; then
+        printf '%s|%s' "$new" "$new_sha" > "$APPS/$n.update"
         echo "update available: $n"
     else
         rm -f "$APPS/$n.update"

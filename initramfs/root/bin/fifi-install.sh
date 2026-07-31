@@ -24,6 +24,7 @@
 #  10. Cleanup and finish
 
 set -e
+. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 # ── 1. Helpers and setup ───────────────────────────────────────────────────────
 
@@ -491,7 +492,7 @@ esac
 prog 62
 
 if echo "$SOFTWARE" | grep -q "libreoffice"; then
-    install_app "url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage" "LibreOffice"
+    install_app "ivan-hc/LibreOffice-appimage" "LibreOffice"
 fi
 prog 88
 
@@ -536,15 +537,18 @@ if [ "$AI_MODEL" != "none" ] && [ -n "$AI_MODEL" ]; then
     else
         mkdir -p "$MNT_DATA/ai/models"
         _mfile="$MNT_DATA/ai/models/$AI_MODEL.gguf"
-        log "AI: downloading $AI_NAME (this can take a while)..."
-        if curl -fL --retry 3 --retry-delay 2 -o "$_mfile.part" "$AI_URL" >>"$DEBUGLOG" 2>&1; then
-            mv "$_mfile.part" "$_mfile"
+        AI_SHA="$(fifi_huggingface_lfs_sha256 "$AI_URL" || true)"
+        if [ -z "$AI_SHA" ]; then
+            log "WARNING: no trusted SHA-256 for $AI_NAME — download refused"
+        else
+        log "AI: downloading and verifying $AI_NAME (this can take a while)..."
+        if fifi_download_verified "$AI_URL" "$AI_SHA" "$_mfile" >>"$DEBUGLOG" 2>&1; then
             printf 'id=%s\nname=%s\nfile=models/%s.gguf\n' "$AI_MODEL" "$AI_NAME" "$AI_MODEL" \
                 > "$MNT_DATA/ai/model.conf"
             log "AI: $AI_NAME installed ($(du -sh "$_mfile" 2>/dev/null | cut -f1))"
         else
-            rm -f "$_mfile.part" 2>/dev/null || true
-            log "WARNING: $AI_NAME download failed — run fifi-ai-install later to add it"
+            log "WARNING: $AI_NAME download or verification failed — run fifi-ai-install later"
+        fi
         fi
     fi
 fi

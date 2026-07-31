@@ -11,34 +11,52 @@
 #        FIFI_BUNDLE_DRY=1 scripts/fetch-app-bundle.sh   # resolve URLs only
 set -euo pipefail
 
-OUT="${1:-"$(cd "$(dirname "$0")/.." && pwd)/build-linux/apps-bundle"}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/initramfs/root/usr/share/fifi/verified-download.sh"
+OUT="${1:-"$ROOT/build-linux/apps-bundle"}"
 DRY="${FIFI_BUNDLE_DRY:-0}"
 mkdir -p "$OUT"
 
-fetch() {  # <Name> <url>
+fetch() {  # <Name> <url> <sha256>
     echo "[bundle] $1  <-  $2"
+    [[ "$3" =~ ^[0-9a-fA-F]{64}$ ]] || {
+        echo "[bundle] ERROR: no trusted SHA-256 for $1" >&2
+        return 1
+    }
     [ "$DRY" = 1 ] && return 0
     curl -L --fail --progress-bar -o "$OUT/$1.AppImage.part" "$2"
+    fifi_verify_sha256 "$OUT/$1.AppImage.part" "$3" || {
+        echo "[bundle] ERROR: SHA-256 mismatch for $1" >&2
+        rm -f "$OUT/$1.AppImage.part"
+        return 1
+    }
     mv "$OUT/$1.AppImage.part" "$OUT/$1.AppImage"
+    printf '%s  %s.AppImage\n' "$3" "$1" > "$OUT/$1.AppImage.sha256"
     chmod +x "$OUT/$1.AppImage"
 }
 
 # LibreWolf — GitLab releases API (same source the App Store catalog uses)
-LW_URL="$(curl -sf 'https://gitlab.com/api/v4/projects/librewolf-community%2Fbrowser%2Fappimage/releases?per_page=10' \
+LW_PROJECT='librewolf-community%2Fbrowser%2Fappimage'
+LW_URL="$(curl -sf "https://gitlab.com/api/v4/projects/$LW_PROJECT/releases?per_page=10" \
     | grep -oE '"url":"[^"]*\.AppImage"' | sed 's/^"url":"//;s/"$//' \
     | grep -iE 'x86_64' | head -1 || true)"
-if [ -n "$LW_URL" ]; then fetch LibreWolf "$LW_URL"
+LW_SHA="$(fifi_gitlab_package_sha256 "$LW_PROJECT" "$LW_URL" || true)"
+if [ -n "$LW_URL" ] && [ -n "$LW_SHA" ]; then fetch LibreWolf "$LW_URL" "$LW_SHA"
 else echo "[bundle] WARNING: could not resolve LibreWolf" >&2; fi
 
 # Firefox — ivan-hc AppImage build, GitHub releases API
-FF_URL="$(curl -sf 'https://api.github.com/repos/ivan-hc/Firefox-appimage/releases?per_page=30' \
-    | grep -oE '"browser_download_url": *"[^"]*\.AppImage"' \
-    | sed 's/.*"browser_download_url": *"//;s/"$//' \
-    | grep -iE 'x86_64|amd64' | head -1 || true)"
-if [ -n "$FF_URL" ]; then fetch Firefox "$FF_URL"
+FF_PAIR="$(curl -sf 'https://api.github.com/repos/ivan-hc/Firefox-appimage/releases?per_page=30' |
+    fifi_github_appimage_pairs | grep -iE 'x86_64|amd64' | head -1 || true)"
+FF_URL="${FF_PAIR%|*}"; FF_SHA="${FF_PAIR##*|}"
+if [ -n "$FF_URL" ] && [ "$FF_URL" != "$FF_SHA" ]; then fetch Firefox "$FF_URL" "$FF_SHA"
 else echo "[bundle] WARNING: could not resolve Firefox" >&2; fi
 
-# LibreOffice — versionless "fresh" URL, always the latest release
-fetch LibreOffice "https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage"
+# LibreOffice — GitHub asset with a server-computed release digest.
+LO_PAIR="$(curl -sf 'https://api.github.com/repos/ivan-hc/LibreOffice-appimage/releases?per_page=10' |
+    fifi_github_appimage_pairs |
+    grep -iE 'fresh-standard.*x86_64|fresh.*x86_64' | head -1 || true)"
+LO_URL="${LO_PAIR%|*}"; LO_SHA="${LO_PAIR##*|}"
+if [ -n "$LO_URL" ] && [ "$LO_URL" != "$LO_SHA" ]; then fetch LibreOffice "$LO_URL" "$LO_SHA"
+else echo "[bundle] WARNING: could not resolve LibreOffice" >&2; fi
 
 [ "$DRY" = 1 ] || { echo "[bundle] done:"; du -sh "$OUT"; ls -lh "$OUT"; }

@@ -117,7 +117,11 @@ fifi upgrade           # apply app and OS updates together
 fifi version           # show the installed OS version
 ```
 
-- **Apps** update from the App Store online.
+- **Apps** come from the catalog embedded in the signed OS image. GitHub and
+  GitLab SHA-256 metadata is checked before an AppImage is installed; offline
+  USB bundles carry matching hash sidecars.
+- **AI models** are checked against their Hugging Face Git LFS SHA-256 object
+  IDs before activation.
 - **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the active boot pair changes. The previous complete pair is retained for `update rollback`.
 - `app-update` updates apps only. New installations also receive a **FiFi OS (previous)** GRUB entry.
 - A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi
@@ -295,7 +299,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
 - [ ] Privilege brokers for hardware/admin apps; remove the remaining Steam root exception
-- [ ] Verify signatures/hashes on every download (apps, AI models, OS updates)
+- [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
 - [ ] A/B OS updates: never overwrite the only bootable copy
 - [x] Screenshot-diff test harness + QEMU boot self-test wired into CI

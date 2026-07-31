@@ -5,6 +5,7 @@
 
 AI_DIR=/fifi-data/ai
 HF=https://huggingface.co/bartowski
+. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 # id | Name | size | RAM | GPU | URL
 MODELS="
@@ -43,13 +44,17 @@ url=$(echo "$sel" | cut -d'|' -f6)
 
 mkdir -p "$AI_DIR/models"
 out="$AI_DIR/models/$id.gguf"
-echo "Downloading $name ..."
-if curl -fL --retry 3 --retry-delay 2 -o "$out.part" "$url"; then
-    mv "$out.part" "$out"
+echo "Resolving the trusted model hash..."
+sha="$(fifi_huggingface_lfs_sha256 "$url" || true)"
+[ -n "$sha" ] || {
+    echo "The model SHA-256 could not be verified; download refused."
+    exit 1
+}
+echo "Downloading and verifying $name ..."
+if fifi_download_verified "$url" "$sha" "$out"; then
     printf 'id=%s\nname=%s\nfile=models/%s.gguf\n' "$id" "$name" "$id" > "$AI_DIR/model.conf"
     echo "Done. $name is ready — type 'ai' to chat."
 else
-    rm -f "$out.part" 2>/dev/null
-    echo "Download failed. Check your network and try again."
+    echo "Download or SHA-256 verification failed. Check your network and try again."
     exit 1
 fi

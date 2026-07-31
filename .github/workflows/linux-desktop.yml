@@ -34,6 +34,7 @@ jobs:
         run: |
           make linux-security-test
           make linux-update-test
+          make linux-download-test
 
       - name: Configure and build Linux
         run: |

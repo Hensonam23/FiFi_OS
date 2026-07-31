@@ -302,6 +302,17 @@ for f in fifi-run appstore-install.sh appstore-sync.sh \
         chmod +x "/fifi-data/apps/$f"
     fi
 done
+# Replace any catalog cached by older builds before the App Store can read it.
+[ -f /fifi-data/apps/appstore-sync.sh ] &&
+    sh /fifi-data/apps/appstore-sync.sh >/dev/null 2>&1 || true
+# Older installs used an unsigned versionless LibreOffice URL. Move its recorded
+# update source to the digest-bearing GitHub release channel.
+if [ -f /fifi-data/apps/LibreOffice.src ] &&
+   grep -Fxq 'url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage' \
+       /fifi-data/apps/LibreOffice.src; then
+    printf '%s' 'ivan-hc/LibreOffice-appimage' \
+        > /fifi-data/apps/LibreOffice.src
+fi
 # App Store binary ships in the image; older data partitions expect it at
 # /fifi-data/apps too (launcher fallback path), so mirror it there.
 [ -f /fifi-data/apps/fifi-appstore ] || cp /bin/fifi-appstore /fifi-data/apps/fifi-appstore 2>/dev/null || true
@@ -310,10 +321,6 @@ done
 # the App Store then shows Update buttons without a manual "Check Updates".
 # Offline-safe: the check just fails quietly and retries next boot.
 ( sleep 25
-  # Build the App Store catalog if missing, so search works on a fresh install
-  # (offline-safe: fails quietly, retries next boot).
-  [ -s /fifi-data/apps/catalog.tsv ] || \
-      { [ -f /fifi-data/apps/appstore-sync.sh ] && sh /fifi-data/apps/appstore-sync.sh >/dev/null 2>&1; }
   # Trial provisioning: on a fresh/live system the desktop has LibreWolf +
   # LibreOffice ICONS but not the AppImages (those download on demand). Fetch the
   # two flagship apps in the background so a fresh install / live trial is usable
@@ -325,7 +332,7 @@ done
       [ -f /fifi-data/apps/LibreWolf.AppImage ] || \
           sh /fifi-data/apps/appstore-install.sh 'gitlab:librewolf-community%2Fbrowser%2Fappimage' LibreWolf >/dev/null 2>&1
       [ -f /fifi-data/apps/LibreOffice.AppImage ] || \
-          sh /fifi-data/apps/appstore-install.sh 'url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage' LibreOffice >/dev/null 2>&1
+          sh /fifi-data/apps/appstore-install.sh 'ivan-hc/LibreOffice-appimage' LibreOffice >/dev/null 2>&1
   fi
   [ -f /fifi-data/apps/appstore-update-check.sh ] && \
       sh /fifi-data/apps/appstore-update-check.sh >/dev/null 2>&1 ) &

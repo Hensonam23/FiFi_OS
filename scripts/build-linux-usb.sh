@@ -58,6 +58,7 @@ if ls "$BUNDLE"/*.AppImage >/dev/null 2>&1; then
     echo "[usb] bundling offline apps: $(cd "$BUNDLE" && ls *.AppImage | tr '\n' ' ')"
     mkdir -p "$STAGE/apps-bundle"
     cp "$BUNDLE"/*.AppImage "$STAGE/apps-bundle/"
+    cp "$BUNDLE"/*.AppImage.sha256 "$STAGE/apps-bundle/"
 else
     echo "[usb] NOTE: no offline app bundle — run scripts/fetch-app-bundle.sh first"
     echo "[usb]       to include browser/office AppImages for offline installs"

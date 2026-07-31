@@ -15,6 +15,7 @@ set -e
 repo="$1"
 name="$2"
 [ -n "$repo" ] && [ -n "$name" ] || { echo "usage: appstore-install.sh <source> <AppName>" >&2; exit 2; }
+. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 APPS="${FIFI_APPS_DIR:-/fifi-data/apps}"
 DESKTOP_CONF="${FIFI_DESKTOP_CONF:-/fifi-data/fifi-desktop.conf}"
@@ -27,16 +28,22 @@ echo resolving > "$status"
 # release with no AppImage. Grab the newest x86_64 AppImage across recent releases.
 # "gitlab:<url-encoded-project-path>" entries use the GitLab releases API instead.
 srcfile=""
+expected_sha=""
+allpairs=""
+allurls=""
+proj=""
 case "$repo" in
 file:*)
-    # local AppImage (USB offline bundle) — no network at all
+    # Offline bundles carry the hash beside each AppImage.
     srcfile="${repo#file:}"
     [ -f "$srcfile" ] || { echo error > "$status"; echo "no such file: $srcfile" >&2; exit 1; }
+    expected_sha="$(awk 'NF {print $1; exit}' "$srcfile.sha256" 2>/dev/null || true)"
     allurls="file"
     ;;
 url:*)
-    # direct download URL — no release-API resolution needed
-    allurls="${repo#url:}"
+    echo error > "$status"
+    echo "direct URL has no authenticated digest; install refused" >&2
+    exit 1
     ;;
 gitlab:*)
     proj="${repo#gitlab:}"
@@ -46,16 +53,29 @@ gitlab:*)
     ;;
 *)
     rel=$(curl -sL --max-time 30 "https://api.github.com/repos/$repo/releases?per_page=30" || true)
-    allurls=$(printf '%s' "$rel" | grep -oE '"browser_download_url": *"[^"]*\.AppImage"' \
-              | sed 's/.*"browser_download_url": *"//;s/"$//')
+    allpairs="$(printf '%s' "$rel" | fifi_github_appimage_pairs || true)"
     ;;
 esac
-# Prefer x86_64/amd64/linux; else any AppImage; releases are newest-first so head -1 = newest.
-url=$(printf '%s\n' "$allurls" | grep -iE 'x86_64|amd64|linux' | head -1)
-[ -n "$url" ] || url=$(printf '%s\n' "$allurls" | grep -viE 'arm|aarch|i386|i686' | head -1)
-[ -n "$url" ] || url=$(printf '%s\n' "$allurls" | head -1)
+if [ -n "${allpairs:-}" ]; then
+    pair="$(fifi_pick_x86_64_pair "$allpairs")"
+    url="${pair%|*}"
+    expected_sha="${pair##*|}"
+else
+    # Prefer x86_64/amd64/linux; else any AppImage.
+    url=$(printf '%s\n' "${allurls:-}" | grep -iE 'x86_64|amd64|linux' | head -1)
+    [ -n "$url" ] || url=$(printf '%s\n' "${allurls:-}" | grep -viE 'arm|aarch|i386|i686' | head -1)
+    [ -n "$url" ] || url=$(printf '%s\n' "${allurls:-}" | head -1)
+fi
 
 if [ -z "$url" ]; then echo error > "$status"; echo "no .AppImage asset for $repo" >&2; exit 1; fi
+if [ -z "$expected_sha" ] && [ -n "${proj:-}" ]; then
+    expected_sha="$(fifi_gitlab_package_sha256 "$proj" "$url" || true)"
+fi
+printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+    echo error > "$status"
+    echo "no trusted SHA-256 digest for $repo; install refused" >&2
+    exit 1
+}
 
 dest="$APPS/$name.AppImage"
 was_installed=0
@@ -64,8 +84,14 @@ echo downloading > "$status"
 if [ -n "$srcfile" ]; then
     cp "$srcfile" "$dest.part" || { echo error > "$status"; exit 1; }
 else
-    curl -fsL --max-time 600 "$url" -o "$dest.part" || { echo error > "$status"; rm -f "$dest.part"; exit 1; }
+    curl -fsL --max-time 1800 "$url" -o "$dest.part" || { echo error > "$status"; rm -f "$dest.part"; exit 1; }
 fi
+fifi_verify_sha256 "$dest.part" "$expected_sha" || {
+    echo error > "$status"
+    echo "SHA-256 mismatch for $name; install refused" >&2
+    rm -f "$dest.part"
+    exit 1
+}
 mv "$dest.part" "$dest"
 chmod +x "$dest"
 
@@ -73,6 +99,7 @@ chmod +x "$dest"
 # pending-update marker (we just installed the latest we could resolve).
 printf '%s' "$repo" > "$APPS/$name.src"
 printf '%s' "$url"  > "$APPS/$name.url"
+printf '%s\n' "$expected_sha" > "$APPS/$name.sha256"
 rm -f "$APPS/$name.update"
 
 # Pre-extract now (no FUSE on FiFi OS) so first launch is instant. Re-extract
@@ -81,7 +108,14 @@ echo extracting > "$status"
 ext="$APPS/$name.d"
 rm -rf "$ext"
 mkdir -p "$ext"
-( cd "$ext" && "$dest" --appimage-extract >/dev/null 2>&1 ) || true
+chown 1000:1000 "$ext" 2>/dev/null || true
+USER_EXEC="${FIFI_USER_EXEC:-/bin/fifi-user-exec}"
+if [ -x "$USER_EXEC" ]; then
+    ( cd "$ext" &&
+      "$USER_EXEC" "$dest" --appimage-extract >/dev/null 2>&1 ) || true
+else
+    echo "privilege-drop launcher missing; AppImage extraction skipped" >&2
+fi
 
 # App icon: AppImages carry their logo as squashfs-root/.DirIcon, but some ship
 # a tiny placeholder there (LibreOffice's is 1.3KB), so also scan the top level

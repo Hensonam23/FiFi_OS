@@ -59,12 +59,6 @@
 #define VIEW_DOWNLOAD  1
 #define VIEW_DONE      2
 
-/* Download URLs */
-#define URL_LIBREWOLF \
-    "https://github.com/librewolf-community/browser-linux/releases/latest/download/librewolf.AppImage"
-#define URL_FIREFOX \
-    "https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US"
-
 /* ── Colour palette (0x00RRGGBB) ── */
 #define C_WIN_BG      0x000b1017u
 #define C_HEADER_BG   0x000e1a26u
@@ -470,7 +464,6 @@ static void start_download(app_t *a) {
     mkdir(BROWSER_DIR, 0755);
     FILE *cf = fopen(BROWSER_CHOICE, "w");
     if (cf) { fputs(a->browser==BROWSER_LIBREWOLF?"librewolf":"firefox", cf); fclose(cf); }
-    const char *url = a->browser==BROWSER_LIBREWOLF ? URL_LIBREWOLF : URL_FIREFOX;
     int pfd[2]; if (pipe(pfd) < 0) return;
     a->dl_pipe = pfd[0]; fcntl(a->dl_pipe, F_SETFL, O_NONBLOCK);
     a->dl_pid = fork();
@@ -482,8 +475,6 @@ static void start_download(app_t *a) {
         const char *browser_name = a->browser==BROWSER_LIBREWOLF ? "librewolf" : "firefox";
         execl("/bin/fifi-download-browser.sh", "fifi-download-browser.sh",
               browser_name, BROWSER_APPIMAGE, NULL);
-        /* Fallback: direct curl if script missing */
-        execlp("curl","curl","-L","--progress-bar","--output",BROWSER_APPIMAGE,url,NULL);
         _exit(1);
     }
     close(pfd[1]);

@@ -5,6 +5,7 @@
 
 BROWSER="$1"
 OUTPUT="$2"
+. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 [ -n "$BROWSER" ] && [ -n "$OUTPUT" ] || { echo "Usage: $0 <librewolf|firefox> <output>"; exit 1; }
 
@@ -29,35 +30,32 @@ if [ "$BROWSER" = "librewolf" ]; then
         | sed 's/.*"tag_name":[ ]*"v*//;s/".*//')
 
     if [ -z "$VER" ]; then
-        echo "Could not get version, using known good version..."
-        VER="151.0.3-1"
+        echo "ERROR: Could not resolve a verified LibreWolf release."
+        exit 1
     fi
 
     echo "Downloading LibreWolf ${VER}..."
     URL="https://gitlab.com/api/v4/projects/${PROJ}/packages/generic/librewolf/${VER}/LibreWolf.x86_64.AppImage"
-    curl -fL --progress-bar --output "$OUTPUT" "$URL"
-    exit $?
+    SHA="$(fifi_gitlab_package_sha256 "$PROJ" "$URL" || true)"
+    [ -n "$SHA" ] || { echo "ERROR: LibreWolf SHA-256 unavailable."; exit 1; }
+    fifi_download_verified "$URL" "$SHA" "$OUTPUT" || exit 1
+    echo "LibreWolf verified and ready"
+    exit 0
 
 elif [ "$BROWSER" = "firefox" ]; then
-    OUTDIR="$(dirname "$OUTPUT")/firefox-bin"
-    TMPTAR="$(dirname "$OUTPUT")/firefox.tar.bz2"
-
-    echo "Downloading Firefox..."
-    curl -L --progress-bar \
-        --output "$TMPTAR" \
-        "https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US"
-    [ $? -eq 0 ] && [ -s "$TMPTAR" ] || { echo "ERROR: Download failed"; rm -f "$TMPTAR"; exit 1; }
-
-    echo "Extracting Firefox..."
-    mkdir -p "$OUTDIR"
-    tar -xjf "$TMPTAR" -C "$OUTDIR" --strip-components=1 2>/dev/null
-    rm -f "$TMPTAR"
-    [ -x "$OUTDIR/firefox" ] || { echo "ERROR: Extract failed"; exit 1; }
-
-    printf '#!/bin/sh\nDIR="%s"\nexport LD_LIBRARY_PATH="$DIR:$LD_LIBRARY_PATH"\nexec "$DIR/firefox" "$@"\n' \
-        "$OUTDIR" > "$OUTPUT"
-    chmod +x "$OUTPUT"
-    echo "Firefox ready"
+    echo "Finding latest verified Firefox AppImage..."
+    REL="$(curl -fsSL --max-time 30 \
+        'https://api.github.com/repos/ivan-hc/Firefox-appimage/releases?per_page=30' || true)"
+    PAIR="$(fifi_pick_x86_64_pair "$(printf '%s' "$REL" |
+        fifi_github_appimage_pairs)")"
+    URL="${PAIR%|*}"
+    SHA="${PAIR##*|}"
+    [ -n "$URL" ] && [ -n "$SHA" ] && [ "$URL" != "$SHA" ] || {
+        echo "ERROR: Firefox SHA-256 unavailable."
+        exit 1
+    }
+    fifi_download_verified "$URL" "$SHA" "$OUTPUT" || exit 1
+    echo "Firefox verified and ready"
     exit 0
 
 else
