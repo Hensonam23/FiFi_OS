@@ -304,11 +304,12 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 #### Phase 7: Harden and make it testable (next; blocks v1.0)
 
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
-- [ ] Non-root user; re-enable per-app sandboxing
+- [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
+- [ ] Privilege brokers for hardware/admin apps; remove the remaining Steam root exception
 - [ ] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
 - [ ] A/B OS updates: never overwrite the only bootable copy
-- [ ] Screenshot-diff test harness + QEMU boot self-test wired into CI
+- [x] Screenshot-diff test harness + QEMU boot self-test wired into CI
 
 #### Phase 8: Consolidate the shared platform
 
@@ -366,6 +367,9 @@ make linux-run
 
 # Serial debug mode
 make linux-rundbg
+
+# Headless boot, non-root app, and screenshot stability gate
+make linux-qemu-test
 
 # Native SDL2 window (smooth VSync, no QEMU needed)
 make sdl-build

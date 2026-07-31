@@ -1,0 +1,45 @@
+name: Linux desktop gate
+
+on:
+  push:
+    branches: [linux-desktop]
+  pull_request:
+    branches: [linux-desktop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot-and-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and QEMU dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            bc busybox cpio elfutils git openssl pahole perl python \
+            qemu-system-x86 qemu-system-x86-firmware
+
+      - name: Run fast security and update tests
+        run: |
+          make linux-security-test
+          make linux-update-test
+
+      - name: Configure and build Linux
+        run: |
+          make linux-setup
+          make linux-kernel
+          make linux-initrd
+
+      - name: Run boot and screenshot gate
+        run: make linux-qemu-test
