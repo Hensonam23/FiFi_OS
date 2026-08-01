@@ -277,7 +277,7 @@ launch_dir() {
     #   - /dev/fd (the steam runtime logger uses bash process substitution;
     #     /init now creates /dev/fd -> /proc/self/fd system-wide);
     #   - libibus (ivan-hc's rootfs omits it, CEF needs it);
-    #   - -no-cef-sandbox + -cef-disable-gpu-sandbox (CEF refuses root+sandbox,
+    #   - -no-cef-sandbox + -cef-disable-gpu-sandbox (CEF sees namespace-root,
     #     and the GPU process's own sandbox couldn't init);
     #   - SDL_VIDEODRIVER=x11 + no WAYLAND_DISPLAY (SDL3 wayland backend fails on
     #     our compositor and won't fall back; the X11/XWayland path works).
@@ -302,7 +302,11 @@ sleep 1
 exec /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox
 STEOF
         chmod +x "$dir/rootfs/fifi-steam-launch.sh"
-        exec busybox unshare -m -- busybox sh -c '
+        # Drop to the desktop identity before creating the container. The user
+        # namespace maps host uid 1000 to root only inside this private mount
+        # namespace, which keeps chroot/mount available without giving Steam or
+        # its runtime host-root privileges.
+        exec /bin/fifi-user-exec busybox unshare -r -m -- busybox sh -c '
             R="$1"
             busybox mount --make-rprivate /
             busybox mount --bind "$R" "$R"

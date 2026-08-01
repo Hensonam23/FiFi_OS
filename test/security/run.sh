@@ -78,6 +78,14 @@ grep -Fq '/bin/fifi-user-exec "$target" --appimage-extract' \
 ! grep -Fq 'export ELECTRON_DISABLE_SANDBOX=1' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 
+echo "[test-security] Steam container cannot retain host-root privileges"
+steam_block="$TMP/steam-block"
+sed -n '/# Steam (ivan-hc RunImage)/,/# Other RunImage\/sharun bundles/p' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run" > "$steam_block"
+grep -Fq 'exec /bin/fifi-user-exec busybox unshare -r -m --' "$steam_block"
+! grep -Eq '^[[:space:]]*exec busybox unshare' "$steam_block"
+grep -Fq 'HOME=/root USER=root LOGNAME=root' "$steam_block"
+
 echo "[test-security] ignored legacy key is removed from staged images"
 stage="$TMP/stage"
 mkdir -p "$stage/usr/share/fifi"

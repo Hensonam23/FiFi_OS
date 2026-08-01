@@ -298,7 +298,8 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
-- [ ] Privilege brokers for hardware/admin apps; remove the remaining Steam root exception
+- [ ] Privilege brokers for hardware/admin apps
+- [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
 - [ ] A/B OS updates: never overwrite the only bootable copy
