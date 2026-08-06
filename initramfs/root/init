@@ -249,7 +249,8 @@ fi
 if [ -s /etc/fifi-build-id ]; then
     _running_build="$(cat /etc/fifi-build-id 2>/dev/null)"
     _recorded_build="$(cat /fifi-data/os-build-id 2>/dev/null)"
-    if [ -n "$_running_build" ] && [ "$_running_build" != "$_recorded_build" ]; then
+    if [ ! -s /fifi-data/os-build-id.pending ] &&
+       [ -n "$_running_build" ] && [ "$_running_build" != "$_recorded_build" ]; then
         [ -n "$_recorded_build" ] &&
             printf '%s\n' "$_recorded_build" > /fifi-data/os-build-id.prev
         printf '%s\n' "$_running_build" > /fifi-data/os-build-id
@@ -670,10 +671,31 @@ fifi_boot_selftest() {
     printf 'FIFI_SELFTEST FAIL compositor-timeout\n' >/dev/ttyS0
 }
 
+# A pending slot becomes trusted only after the shipped compositor creates both
+# desktop sockets. If GRUB selected the previous slot after a failed attempt,
+# this same transition makes that fallback permanent and discards the pending
+# build marker. Until this point the next boot automatically retries the known
+# good slot instead of the unconfirmed image.
+fifi_confirm_boot_success() {
+    [ -f /fifi-data/installed ] || return
+    _tries=0
+    while [ "$_tries" -lt 120 ]; do
+        if [ -S /tmp/fifi-compositor.sock ] && [ -S /tmp/wayland-0 ]; then
+            fifi-confirm-boot >>/fifi-data/boot-slots.log 2>&1 || return
+            return
+        fi
+        _tries=$((_tries + 1))
+        sleep 1
+    done
+    printf '%s\n' "boot slot remains pending: compositor readiness timed out" \
+        >>/fifi-data/boot-slots.log
+}
+
 # Keep the init shell as PID 1. Besides restarting the desktop after a crash,
 # this makes it the permanent parent/reaper for boot-time helpers and prevents
 # exited network/service wrappers from accumulating as zombie processes.
 if [ -n "$FIFI_COMPOSITOR" ]; then
+    fifi_confirm_boot_success &
     while :; do
         if [ "$FIFI_SELFTEST" = 1 ]; then
             fifi_boot_selftest &

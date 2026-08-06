@@ -85,29 +85,19 @@ log "Validating source images..."
 gzip -t "$USB_MNT/boot/initramfs.cpio.gz" ||
     fail "source initramfs failed gzip validation"
 
-log "Saving previous boot pair..."
-cp -f "$BOOT/bzImage" "$BOOT/bzImage.prev.new" ||
-    fail "kernel backup failed"
-cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev.new" ||
-    fail "initramfs backup failed"
-mv -f "$BOOT/bzImage.prev.new" "$BOOT/bzImage.prev"
-mv -f "$BOOT/initramfs.cpio.gz.prev.new" "$BOOT/initramfs.cpio.gz.prev"
-
-log "Installing kernel and initramfs..."
-cp "$USB_MNT/boot/bzImage" "$BOOT/bzImage.new" ||
-    fail "kernel staging failed"
-cp "$USB_MNT/boot/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.new" ||
-    fail "initramfs staging failed"
-mv -f "$BOOT/bzImage.new" "$BOOT/bzImage"
-if ! mv -f "$BOOT/initramfs.cpio.gz.new" "$BOOT/initramfs.cpio.gz"; then
-    cp -f "$BOOT/bzImage.prev" "$BOOT/bzImage"
-    fail "initramfs activation failed; previous kernel restored"
-fi
+log "Installing kernel and initramfs into the inactive boot slot..."
+attempt="usb-$(sha256sum "$USB_MNT/boot/bzImage" | awk '{print substr($1,1,16)}')"
+slot=$(FIFI_DATA_ROOT="$TGT_MNT" fifi-boot-slots install \
+    "$USB_MNT/boot/bzImage" "$USB_MNT/boot/initramfs.cpio.gz" "$attempt") ||
+    fail "inactive-slot installation failed; the active slot is unchanged"
+[ -s /etc/fifi-build-id ] &&
+    cp /etc/fifi-build-id "$TGT_MNT/os-build-id.pending"
 
 # The new image runs security/data migrations immediately at boot, then updates
 # installed applications as soon as the saved network connection is available.
 : > "$TGT_MNT/post-update.pending"
 sync
 log "Done. User data was preserved."
+log "The update is ready in slot $slot with automatic fallback."
 log "App updates and migrations will finish automatically after reboot."
 log "Unplug the USB and reboot. Keep this USB until the new boot is verified."

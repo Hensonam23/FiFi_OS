@@ -301,6 +301,8 @@ if [ "$_src_sz" != "$_dst_sz" ]; then
 fi
 log "Kernel:    $(du -sh "$MNT_DATA/boot/bzImage" 2>/dev/null | cut -f1)"
 log "Initramfs: $(du -sh "$MNT_DATA/boot/initramfs.cpio.gz" 2>/dev/null | cut -f1) ($_dst_sz bytes, verified)"
+FIFI_DATA_ROOT="$MNT_DATA" fifi-boot-slots ensure ||
+    fail "Could not initialize A/B boot slots"
 # Keep the USB mounted — the offline app bundle (apps-bundle/) may be needed
 # in the software step; it is unmounted in section 10.
 prog 22
@@ -390,34 +392,81 @@ prog 30
 
 log "Writing GRUB configuration..."
 mkdir -p "$MNT_EFI/boot/grub"
+if command -v grub-editenv >/dev/null 2>&1; then
+    grub-editenv "$MNT_EFI/boot/grub/grubenv" create ||
+        fail "Could not initialize GRUB boot-attempt state"
+else
+    fail "grub-editenv is required for automatic boot fallback"
+fi
 cat > "$MNT_EFI/boot/grub/grub.cfg" << GRUBCFG
 set timeout=5
 set default=0
+set fifi_grubenv=\$prefix/grubenv
+load_env -f \$fifi_grubenv fifi_attempted
 # Kernel + initramfs live on the DATA partition (ext4), not this EFI partition —
 # switch GRUB's root to it by filesystem UUID before loading them.
 insmod part_gpt
 insmod ext2
 search --no-floppy --fs-uuid --set=root $DATA_UUID
+source /boot/fifi-slot.cfg
 
-menuentry "FiFi OS" {
+if [ "\$fifi_active" = B ]; then
+    set default=1
+fi
+set fifi_boot_fallback=0
+set fifi_arm_attempt=0
+if [ "\$fifi_pending" = 1 ]; then
+    if [ "\$fifi_attempted" = "\$fifi_attempt" ]; then
+        set fifi_boot_fallback=1
+        if [ "\$fifi_previous" = A ]; then
+            set default=0
+        else
+            set default=1
+        fi
+    else
+        set fifi_arm_attempt=1
+    fi
+fi
+
+menuentry "FiFi OS (slot A)" {
     search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
-    initrd /boot/initramfs.cpio.gz
+    set fifi_entry_fallback=\$fifi_boot_fallback
+    if [ "\$fifi_active" != A ]; then
+        set fifi_entry_fallback=1
+    fi
+    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = A ]; then
+        set fifi_attempted=\$fifi_attempt
+        save_env -f \$fifi_grubenv fifi_attempted
+    fi
+    linux /boot/bzImage.A console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=A fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
+    initrd /boot/initramfs.cpio.gz.A
+}
+
+menuentry "FiFi OS (slot B)" {
+    search --no-floppy --fs-uuid --set=root $DATA_UUID
+    set fifi_entry_fallback=\$fifi_boot_fallback
+    if [ "\$fifi_active" != B ]; then
+        set fifi_entry_fallback=1
+    fi
+    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = B ]; then
+        set fifi_attempted=\$fifi_attempt
+        save_env -f \$fifi_grubenv fifi_attempted
+    fi
+    linux /boot/bzImage.B console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=B fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
+    initrd /boot/initramfs.cpio.gz.B
 }
 
 menuentry "FiFi OS (safe mode)" {
     search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage console=tty0 quiet loglevel=3 nomodeset fifi_noswitch fifi_data_uuid=$DATA_UUID
-    initrd /boot/initramfs.cpio.gz
+    linux /boot/bzImage.\$fifi_active console=tty0 quiet loglevel=3 nomodeset fifi_noswitch fifi_data_uuid=$DATA_UUID fifi_slot=\$fifi_active
+    initrd /boot/initramfs.cpio.gz.\$fifi_active
 }
 
-if [ -f /boot/bzImage.prev ] && [ -f /boot/initramfs.cpio.gz.prev ]; then
-menuentry "FiFi OS (previous)" {
+menuentry "FiFi OS (previous slot)" {
     search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage.prev console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
-    initrd /boot/initramfs.cpio.gz.prev
+    linux /boot/bzImage.\$fifi_previous console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=\$fifi_previous fifi_boot_fallback=1 apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
+    initrd /boot/initramfs.cpio.gz.\$fifi_previous
 }
-fi
 GRUBCFG
 
 if [ -n "$WIN_CHAINLOAD" ]; then

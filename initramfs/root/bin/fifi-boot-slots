@@ -1,0 +1,166 @@
+#!/bin/sh
+# fifi-boot-slots — atomic A/B boot-pair state and compatibility links.
+set -eu
+
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+BOOT="$DATA_ROOT/boot"
+STATE="$BOOT/fifi-slot.cfg"
+
+fail() { echo "fifi-boot-slots: $*" >&2; exit 1; }
+
+state_value() {
+    sed -n "s/^set fifi_$1=\([A-Za-z0-9._-]*\)$/\1/p" "$STATE" 2>/dev/null |
+        head -1
+}
+
+valid_slot() {
+    [ "$1" = A ] || [ "$1" = B ]
+}
+
+other_slot() {
+    [ "$1" = A ] && echo B || echo A
+}
+
+write_state() {
+    _ws_active="$1"
+    _ws_previous="$2"
+    _ws_pending="$3"
+    _ws_attempt="$4"
+    valid_slot "$_ws_active" || fail "invalid active slot"
+    valid_slot "$_ws_previous" || fail "invalid previous slot"
+    [ "$_ws_active" != "$_ws_previous" ] || fail "active and previous slots match"
+    [ "$_ws_pending" = 0 ] || [ "$_ws_pending" = 1 ] || fail "invalid pending state"
+    printf '%s\n' "$_ws_attempt" | grep -Eq '^[A-Za-z0-9._-]+$' ||
+        fail "invalid boot attempt identifier"
+
+    state_new="$STATE.new"
+    {
+        printf 'set fifi_active=%s\n' "$_ws_active"
+        printf 'set fifi_previous=%s\n' "$_ws_previous"
+        printf 'set fifi_pending=%s\n' "$_ws_pending"
+        printf 'set fifi_attempt=%s\n' "$_ws_attempt"
+    } > "$state_new"
+    mv -f "$state_new" "$STATE"
+}
+
+link_one() {
+    _lo_name="$1"
+    _lo_target="$2"
+    rm -f "$BOOT/$_lo_name.link-new"
+    ln -s "$_lo_target" "$BOOT/$_lo_name.link-new"
+    mv -f "$BOOT/$_lo_name.link-new" "$BOOT/$_lo_name"
+}
+
+link_compatibility_paths() {
+    _lc_active="$1"
+    _lc_previous="$2"
+    link_one bzImage "bzImage.$_lc_active"
+    link_one initramfs.cpio.gz "initramfs.cpio.gz.$_lc_active"
+    link_one bzImage.prev "bzImage.$_lc_previous"
+    link_one initramfs.cpio.gz.prev "initramfs.cpio.gz.$_lc_previous"
+}
+
+ensure_slots() {
+    mkdir -p "$BOOT"
+    _es_active="$(state_value active)"
+    _es_previous="$(state_value previous)"
+    if valid_slot "$_es_active" && valid_slot "$_es_previous" &&
+       [ "$_es_active" != "$_es_previous" ] &&
+       [ -s "$BOOT/bzImage.$_es_active" ] &&
+       [ -s "$BOOT/initramfs.cpio.gz.$_es_active" ] &&
+       [ -s "$BOOT/bzImage.$_es_previous" ] &&
+       [ -s "$BOOT/initramfs.cpio.gz.$_es_previous" ]; then
+        return
+    fi
+
+    [ -s "$BOOT/bzImage" ] || fail "cannot migrate: active kernel is missing"
+    [ -s "$BOOT/initramfs.cpio.gz" ] ||
+        fail "cannot migrate: active initramfs is missing"
+
+    cp -Lf "$BOOT/bzImage" "$BOOT/bzImage.A.new"
+    cp -Lf "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.A.new"
+    if [ -s "$BOOT/bzImage.prev" ] && [ -s "$BOOT/initramfs.cpio.gz.prev" ]; then
+        cp -Lf "$BOOT/bzImage.prev" "$BOOT/bzImage.B.new"
+        cp -Lf "$BOOT/initramfs.cpio.gz.prev" "$BOOT/initramfs.cpio.gz.B.new"
+    else
+        cp -f "$BOOT/bzImage.A.new" "$BOOT/bzImage.B.new"
+        cp -f "$BOOT/initramfs.cpio.gz.A.new" "$BOOT/initramfs.cpio.gz.B.new"
+    fi
+    mv -f "$BOOT/bzImage.A.new" "$BOOT/bzImage.A"
+    mv -f "$BOOT/initramfs.cpio.gz.A.new" "$BOOT/initramfs.cpio.gz.A"
+    mv -f "$BOOT/bzImage.B.new" "$BOOT/bzImage.B"
+    mv -f "$BOOT/initramfs.cpio.gz.B.new" "$BOOT/initramfs.cpio.gz.B"
+    link_compatibility_paths A B
+    write_state A B 0 bootstrap
+}
+
+current_slot_from_cmdline() {
+    for word in $(cat /proc/cmdline 2>/dev/null); do
+        case "$word" in
+            fifi_slot=A) echo A; return ;;
+            fifi_slot=B) echo B; return ;;
+        esac
+    done
+    state_value active
+}
+
+command="${1:-}"
+case "$command" in
+    ensure)
+        ensure_slots
+        ;;
+    active|previous|pending|attempt)
+        ensure_slots
+        state_value "$command"
+        ;;
+    inactive)
+        ensure_slots
+        other_slot "$(state_value active)"
+        ;;
+    install)
+        [ "$#" = 4 ] || fail "usage: fifi-boot-slots install KERNEL INITRAMFS ATTEMPT"
+        ensure_slots
+        kernel="$2"
+        initramfs="$3"
+        attempt="$4"
+        [ -s "$kernel" ] || fail "staged kernel is missing"
+        [ -s "$initramfs" ] || fail "staged initramfs is missing"
+        active="$(state_value active)"
+        inactive="$(other_slot "$active")"
+        cp -f "$kernel" "$BOOT/bzImage.$inactive.new"
+        cp -f "$initramfs" "$BOOT/initramfs.cpio.gz.$inactive.new"
+        mv -f "$BOOT/bzImage.$inactive.new" "$BOOT/bzImage.$inactive"
+        mv -f "$BOOT/initramfs.cpio.gz.$inactive.new" \
+            "$BOOT/initramfs.cpio.gz.$inactive"
+        link_compatibility_paths "$inactive" "$active"
+        write_state "$inactive" "$active" 1 "$attempt"
+        sync
+        echo "$inactive"
+        ;;
+    mark-success)
+        ensure_slots
+        current="${2:-$(current_slot_from_cmdline)}"
+        valid_slot "$current" || fail "cannot identify the running slot"
+        active="$(state_value active)"
+        if [ "$current" = "$active" ]; then
+            previous="$(state_value previous)"
+        else
+            previous="$(other_slot "$current")"
+        fi
+        link_compatibility_paths "$current" "$previous"
+        write_state "$current" "$previous" 0 "$(state_value attempt)"
+        sync
+        ;;
+    rollback)
+        ensure_slots
+        active="$(state_value active)"
+        previous="$(state_value previous)"
+        link_compatibility_paths "$previous" "$active"
+        write_state "$previous" "$active" 0 rollback
+        sync
+        echo "$previous"
+        ;;
+    *)
+        fail "usage: fifi-boot-slots {ensure|active|previous|pending|attempt|inactive|install|mark-success|rollback}"
+        ;;
+esac

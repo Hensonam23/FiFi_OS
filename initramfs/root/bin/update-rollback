@@ -3,24 +3,14 @@
 set -eu
 
 DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
-BOOT="$DATA_ROOT/boot"
-
 fail() { echo "[rollback] ERROR: $*" >&2; exit 1; }
 
-for file in bzImage initramfs.cpio.gz; do
-    [ -s "$BOOT/$file" ] || fail "missing active $file"
-    [ -s "$BOOT/$file.prev" ] || fail "no previous $file is available"
-done
+was_pending=0
+[ -s "$DATA_ROOT/os-build-id.pending" ] && was_pending=1
+slot=$(FIFI_DATA_ROOT="$DATA_ROOT" fifi-boot-slots rollback) ||
+    fail "could not switch boot slots"
 
-mv "$BOOT/bzImage" "$BOOT/bzImage.rollback-tmp"
-mv "$BOOT/bzImage.prev" "$BOOT/bzImage"
-mv "$BOOT/bzImage.rollback-tmp" "$BOOT/bzImage.prev"
-
-mv "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.rollback-tmp"
-mv "$BOOT/initramfs.cpio.gz.prev" "$BOOT/initramfs.cpio.gz"
-mv "$BOOT/initramfs.cpio.gz.rollback-tmp" "$BOOT/initramfs.cpio.gz.prev"
-
-if [ -f "$DATA_ROOT/os-build-id.prev" ]; then
+if [ "$was_pending" = 0 ] && [ -f "$DATA_ROOT/os-build-id.prev" ]; then
     current=""
     [ -f "$DATA_ROOT/os-build-id" ] &&
         read -r current < "$DATA_ROOT/os-build-id"
@@ -28,6 +18,7 @@ if [ -f "$DATA_ROOT/os-build-id.prev" ]; then
     [ -n "$current" ] &&
         printf '%s\n' "$current" > "$DATA_ROOT/os-build-id.prev"
 fi
+rm -f "$DATA_ROOT/os-build-id.pending"
 
 sync
-echo "[rollback] Previous FiFi OS restored. Reboot to use it."
+echo "[rollback] Previous FiFi OS restored in slot $slot. Reboot to use it."

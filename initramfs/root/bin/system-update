@@ -15,6 +15,7 @@ CHANNEL_FILE="$DATA_ROOT/update-channel"
 DEFAULT_CHANNEL_FILE="$ETC_ROOT/fifi-update-channel"
 RELEASE_PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ETC_ROOT/fifi-release-signing.pub}"
 BUILD_FILE="$DATA_ROOT/os-build-id"
+PENDING_BUILD_FILE="$DATA_ROOT/os-build-id.pending"
 TAG_FILE="$DATA_ROOT/os-release-tag"
 
 MODE=ask
@@ -192,6 +193,15 @@ if [ "$installed_build" = "$build_id" ]; then
     rm -f "$manifest_new"
     exit 0
 fi
+pending_build=""
+[ -s "$PENDING_BUILD_FILE" ] && read -r pending_build < "$PENDING_BUILD_FILE"
+if [ -n "$pending_build" ]; then
+    echo "OS update $pending_build is installed in the inactive slot and awaits reboot."
+    [ "$pending_build" = "$build_id" ] ||
+        echo "Confirm or roll back that pending boot before installing $build_id."
+    rm -f "$manifest_new"
+    exit 0
+fi
 
 echo "OS update available: $installed_build -> $build_id"
 [ "$MODE" = check ] && {
@@ -246,47 +256,28 @@ gzip -t "$initramfs_new" 2>/dev/null || {
 }
 
 echo "Signature, checksums, and initramfs validation passed."
-echo "Saving the previous boot pair..."
-cp -f "$BOOT/bzImage" "$BOOT/bzImage.prev.new" 2>/dev/null || {
-    echo "Could not back up the active kernel." >&2
-    rm -f "$manifest_new" "$kernel_new" "$initramfs_new"
-    exit 1
-}
-cp -f "$BOOT/initramfs.cpio.gz" "$BOOT/initramfs.cpio.gz.prev.new" 2>/dev/null || {
-    echo "Could not back up the active initramfs." >&2
-    rm -f "$manifest_new" "$kernel_new" "$initramfs_new" \
-        "$BOOT/bzImage.prev.new"
-    exit 1
-}
-mv -f "$BOOT/bzImage.prev.new" "$BOOT/bzImage.prev"
-mv -f "$BOOT/initramfs.cpio.gz.prev.new" "$BOOT/initramfs.cpio.gz.prev"
-
 previous_build=""
 [ -s "$BUILD_FILE" ] && read -r previous_build < "$BUILD_FILE"
 [ -n "$previous_build" ] &&
     printf '%s\n' "$previous_build" > "$BUILD_FILE.prev"
 
-echo "Activating the verified boot pair..."
-mv -f "$kernel_new" "$BOOT/bzImage" || {
-    echo "Kernel activation failed." >&2
-    rm -f "$manifest_new" "$initramfs_new"
-    exit 1
-}
-if ! mv -f "$initramfs_new" "$BOOT/initramfs.cpio.gz"; then
-    cp -f "$BOOT/bzImage.prev" "$BOOT/bzImage"
-    echo "Initramfs activation failed; previous kernel restored." >&2
+echo "Installing the verified image into the inactive boot slot..."
+new_slot=$(FIFI_DATA_ROOT="$DATA_ROOT" fifi-boot-slots install \
+    "$kernel_new" "$initramfs_new" "$build_id") || {
+    echo "Inactive-slot installation failed; the active slot is unchanged." >&2
     rm -f "$manifest_new"
     exit 1
-fi
+}
+rm -f "$kernel_new" "$initramfs_new"
 
 mv -f "$manifest_new" "$BOOT/fifi-update.manifest"
-printf '%s\n' "$build_id" > "$BUILD_FILE"
+printf '%s\n' "$build_id" > "$PENDING_BUILD_FILE"
 printf '%s\n' "$tag" > "$TAG_FILE"
 printf '%s\n' "$channel" > "$CHANNEL_FILE"
 : > "$DATA_ROOT/post-update.pending"
 sync
 
-echo "OS updated to $tag ($build_id)."
+echo "OS update $tag ($build_id) is ready in slot $new_slot."
 echo "Reboot to use it: reboot"
-echo "After a successful boot, rollback remains available with: update rollback"
-echo "New installations also include a 'FiFi OS (previous)' GRUB entry."
+echo "FiFi OS will confirm it after the desktop starts or fall back automatically."
+echo "Manual rollback remains available with: update rollback"

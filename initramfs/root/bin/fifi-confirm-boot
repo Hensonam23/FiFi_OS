@@ -1,0 +1,36 @@
+#!/bin/sh
+# fifi-confirm-boot — trust a pending slot after desktop readiness.
+set -eu
+
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+slot="${FIFI_BOOT_SLOT:-}"
+fallback="${FIFI_BOOT_FALLBACK:-}"
+
+if [ -z "$slot" ] || [ -z "$fallback" ]; then
+    for word in $(cat /proc/cmdline 2>/dev/null); do
+        case "$word" in
+            fifi_slot=A) slot=A ;;
+            fifi_slot=B) slot=B ;;
+            fifi_boot_fallback=1) fallback=1 ;;
+        esac
+    done
+fi
+[ -n "$fallback" ] || fallback=0
+
+FIFI_DATA_ROOT="$DATA_ROOT" fifi-boot-slots mark-success "$slot"
+
+if [ "$fallback" = 1 ]; then
+    rm -f "$DATA_ROOT/os-build-id.pending"
+else
+    if [ -s "$DATA_ROOT/os-build-id.pending" ]; then
+        confirmed_build="$(cat "$DATA_ROOT/os-build-id.pending")"
+        old_build="$(cat "$DATA_ROOT/os-build-id" 2>/dev/null || true)"
+        [ -n "$old_build" ] &&
+            printf '%s\n' "$old_build" > "$DATA_ROOT/os-build-id.prev"
+        printf '%s\n' "$confirmed_build" > "$DATA_ROOT/os-build-id"
+        rm -f "$DATA_ROOT/os-build-id.pending"
+    fi
+fi
+
+printf '%s\n' "boot slot confirmed after compositor readiness" \
+    >>"$DATA_ROOT/boot-slots.log"

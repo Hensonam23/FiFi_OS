@@ -122,8 +122,10 @@ fifi version           # show the installed OS version
   USB bundles carry matching hash sidecars.
 - **AI models** are checked against their Hugging Face Git LFS SHA-256 object
   IDs before activation.
-- **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the active boot pair changes. The previous complete pair is retained for `update rollback`.
-- `app-update` updates apps only. New installations also receive a **FiFi OS (previous)** GRUB entry.
+- **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the inactive A/B slot is written. Boot selection changes only after the complete pair is durable.
+- A pending slot is confirmed only after the desktop compositor is ready. New installations record each GRUB boot attempt and automatically select the previous slot if the pending image does not reach that confirmation point. `update rollback` switches slots manually.
+- Existing installations keep their legacy GRUB menu until its bootloader is refreshed; they still receive inactive-slot staging and retain the manual previous-image entry, but do not yet get automatic failed-boot selection.
+- `app-update` updates apps only.
 - A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi
   installs the verified boot pair, powers off safely, then completes migrations
   and application updates automatically on the next normal boot.
@@ -277,7 +279,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 
 - [x] In-OS installer: disk wizard, whole-disk and partition modes, dual-boot alongside Windows
 - [x] OS update command: plain `update` applies the selected stable/test channel in place
-- [x] Verified update staging: manifest hashes, complete-pair backup, rollback, and USB fallback
+- [x] Verified update staging: signed manifest, inactive A/B slot, rollback, and USB fallback
 - [x] Terminal UTF-8: multi-byte sequences decoded correctly, OSC and alternate screen handled
 - [x] Bluetooth: dbus + bluetoothd autostart at boot, pairing via `bt`/bluetoothctl, A2DP audio via PipeWire bluez5
 - [x] Browser: LibreWolf in a FiFi window (chrome-text rendering and typing fixed)
@@ -302,7 +304,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
-- [ ] A/B OS updates: never overwrite the only bootable copy
+- [ ] A/B OS updates: inactive-slot writes and new-install fallback are complete; migrate legacy installed GRUB configurations
 - [x] Screenshot-diff test harness + QEMU boot self-test wired into CI
 
 #### Phase 8: Consolidate the shared platform
@@ -399,7 +401,7 @@ FiFi OS is built with three equal priorities: gaming performance, security, and 
 **Security:**
 - Full disk encryption available. Your data is locked without your key.
 - App sandboxing (per-app isolation is being hardened toward v1.0).
-- OS updates from a signed source, with A/B rollback on the roadmap.
+- OS updates from a signed source into an inactive A/B slot; new installations automatically fall back after an unconfirmed boot.
 - Signed boot chain. Nobody can swap your kernel without you knowing.
 
 **Offensive and defensive tools (legal use only):**

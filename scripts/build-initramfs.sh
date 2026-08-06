@@ -379,6 +379,19 @@ if [ -x "$GRUB_MKIMAGE" ]; then
 else
     echo "[initramfs] WARNING: grub-mkimage not found"
 fi
+# grub-editenv creates the fixed-size environment block used to remember a
+# pending slot attempt across reboots without writing to the data filesystem.
+GRUB_EDITENV="$(command -v grub-editenv 2>/dev/null || true)"
+if [ -x "$GRUB_EDITENV" ]; then
+    cp "$GRUB_EDITENV" "$STAGE/bin/grub-editenv"
+    ldd "$GRUB_EDITENV" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
+        [ -f "$lib" ] || continue
+        dest="$STAGE/usr/lib/$(basename "$lib")"
+        [ -f "$dest" ] || cp "$lib" "$dest"
+    done
+else
+    echo "[initramfs] WARNING: grub-editenv not found -- automatic fallback installation will fail"
+fi
 # efibootmgr — needed to register boot entry in UEFI NVRAM
 EFIBOOTMGR="$(command -v efibootmgr 2>/dev/null || true)"
 if [ -x "$EFIBOOTMGR" ]; then

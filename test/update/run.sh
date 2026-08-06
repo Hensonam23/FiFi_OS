@@ -116,17 +116,29 @@ echo "[test-update] verified one-time bootstrap installation"
 "$ROOT/initramfs/root/bin/system-update" -y --channel test
 cmp "$FIXTURES/bzImage" "$DATA/boot/bzImage"
 cmp "$FIXTURES/initramfs.cpio.gz" "$DATA/boot/initramfs.cpio.gz"
-grep -Fxq build-002 "$DATA/os-build-id"
-grep -Fxq build-001 "$DATA/os-build-id.prev"
+grep -Fxq build-001 "$DATA/os-build-id"
+grep -Fxq build-002 "$DATA/os-build-id.pending"
 grep -Fxq test "$DATA/update-channel"
 grep -Fxq old-kernel "$DATA/boot/bzImage.prev"
+grep -Fxq 'set fifi_active=B' "$DATA/boot/fifi-slot.cfg"
+grep -Fxq 'set fifi_previous=A' "$DATA/boot/fifi-slot.cfg"
+grep -Fxq 'set fifi_pending=1' "$DATA/boot/fifi-slot.cfg"
+test "$(readlink "$DATA/boot/bzImage")" = bzImage.B
 test -e "$DATA/post-update.pending"
 
-echo "[test-update] no-op when already current"
+echo "[test-update] pending update cannot overwrite the known-good slot"
 before_sha="$(sha256sum "$DATA/boot/bzImage" | awk '{print $1}')"
 update -y
 after_sha="$(sha256sum "$DATA/boot/bzImage" | awk '{print $1}')"
 [[ "$before_sha" == "$after_sha" ]]
+
+echo "[test-update] compositor-ready boot confirms the new slot"
+FIFI_BOOT_SLOT=B FIFI_BOOT_FALLBACK=0 fifi-confirm-boot
+grep -Fxq build-002 "$DATA/os-build-id"
+grep -Fxq build-001 "$DATA/os-build-id.prev"
+test ! -e "$DATA/os-build-id.pending"
+grep -Fxq 'set fifi_active=B' "$DATA/boot/fifi-slot.cfg"
+grep -Fxq 'set fifi_pending=0' "$DATA/boot/fifi-slot.cfg"
 
 echo "[test-update] plain update prefers a recognized USB"
 FIFI_TEST_USB_PRESENT=1 update
@@ -157,6 +169,34 @@ grep -Fxq old-kernel "$DATA/boot/bzImage"
 gzip -t "$DATA/boot/initramfs.cpio.gz"
 grep -Fxq build-001 "$DATA/os-build-id"
 grep -Fxq build-002 "$DATA/os-build-id.prev"
+grep -Fxq 'set fifi_active=A' "$DATA/boot/fifi-slot.cfg"
+grep -Fxq 'set fifi_pending=0' "$DATA/boot/fifi-slot.cfg"
+
+echo "[test-update] failed pending boot falls back without trusting its build"
+system-update -y --channel test
+grep -Fxq build-003 "$DATA/os-build-id.pending"
+FIFI_BOOT_SLOT=A FIFI_BOOT_FALLBACK=1 fifi-confirm-boot
+grep -Fxq build-001 "$DATA/os-build-id"
+test ! -e "$DATA/os-build-id.pending"
+grep -Fxq 'set fifi_active=A' "$DATA/boot/fifi-slot.cfg"
+grep -Fxq 'set fifi_pending=0' "$DATA/boot/fifi-slot.cfg"
+
+echo "[test-update] rolling back before reboot preserves the running build ID"
+system-update -y --channel test
+update rollback
+grep -Fxq build-001 "$DATA/os-build-id"
+test ! -e "$DATA/os-build-id.pending"
+grep -Fxq 'set fifi_active=A' "$DATA/boot/fifi-slot.cfg"
+
+echo "[test-update] installer GRUB records attempts and selects fallback slots"
+grep -Fq 'load_env -f \$fifi_grubenv fifi_attempted' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
+grep -Fq 'save_env -f \$fifi_grubenv fifi_attempted' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
+grep -Fq 'fifi_boot_fallback=\$fifi_entry_fallback' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
+grep -Fq 'fifi_boot_fallback=1 apparmor=1' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
 
 echo "[test-update] release packaging"
 PACKAGE_BUILD="$TMP/package-build"
