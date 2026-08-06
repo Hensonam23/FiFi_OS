@@ -329,10 +329,9 @@ echo "[initramfs] GUI runtime libraries bundled"
 # ── Disk installer tools (parted, mkfs.ext4, mkfs.fat, blkid, grub-install) ──
 echo "[initramfs] bundling disk installer tools..."
 cp "$STAGE/bin/fifi-install.sh" "$STAGE/bin/fifi-install.sh" 2>/dev/null || true  # already staged above
-install_tools_ok=true
 mkdir -p "$STAGE/usr/lib"
 for tool in parted mkfs.ext4 mkfs.fat blkid; do
-    bin="$(which $tool 2>/dev/null)"
+    bin="$(command -v "$tool" 2>/dev/null || true)"
     if [ -x "$bin" ]; then
         rm -f "$STAGE/bin/$tool"   # never cp through a busybox applet symlink
         cp "$bin" "$STAGE/bin/$tool"
@@ -344,11 +343,10 @@ for tool in parted mkfs.ext4 mkfs.fat blkid; do
         done
     else
         echo "[initramfs] WARNING: $tool not found -- disk installer will fail"
-        install_tools_ok=false
     fi
 done
 # grub-install + modules
-GRUB_INSTALL="$(which grub-install 2>/dev/null)"
+GRUB_INSTALL="$(command -v grub-install 2>/dev/null || true)"
 if [ -x "$GRUB_INSTALL" ]; then
     cp "$GRUB_INSTALL" "$STAGE/bin/grub-install"
     # Copy grub x86_64-efi modules
@@ -369,7 +367,7 @@ else
     echo "[initramfs] WARNING: grub-install not found -- disk installer will not work"
 fi
 # grub-mkimage — fallback if grub-install fails
-GRUB_MKIMAGE="$(which grub-mkimage 2>/dev/null)"
+GRUB_MKIMAGE="$(command -v grub-mkimage 2>/dev/null || true)"
 if [ -x "$GRUB_MKIMAGE" ]; then
     cp "$GRUB_MKIMAGE" "$STAGE/bin/grub-mkimage"
     ldd "$GRUB_MKIMAGE" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
@@ -382,7 +380,7 @@ else
     echo "[initramfs] WARNING: grub-mkimage not found"
 fi
 # efibootmgr — needed to register boot entry in UEFI NVRAM
-EFIBOOTMGR="$(which efibootmgr 2>/dev/null)"
+EFIBOOTMGR="$(command -v efibootmgr 2>/dev/null || true)"
 if [ -x "$EFIBOOTMGR" ]; then
     cp "$EFIBOOTMGR" "$STAGE/bin/efibootmgr"
     ldd "$EFIBOOTMGR" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
@@ -591,6 +589,7 @@ mkdir -p "$STAGE/usr/lib/spa-0.2/support" "$STAGE/usr/lib/spa-0.2/audiomixer"
 mkdir -p "$STAGE/usr/lib/pipewire-0.3"
 mkdir -p "$STAGE/usr/share/pipewire"
 
+if [ -x /usr/bin/pipewire ] && [ -x /usr/bin/pipewire-pulse ]; then
 # Copy pipewire binaries
 for bin in pipewire pipewire-pulse; do
     [ -x "/usr/bin/$bin" ] && cp "/usr/bin/$bin" "$STAGE/usr/bin/$bin"
@@ -674,6 +673,9 @@ for lib in \
 done
 
 echo "[initramfs] PipeWire bundled"
+else
+    echo "[initramfs] WARNING: PipeWire not found -- audio support disabled"
+fi
 
 # ── XWayland (runs X11 apps through the Wayland compositor) ──────────────────
 echo "[initramfs] bundling XWayland..."
@@ -1079,7 +1081,8 @@ mkdir -p "$STAGE/usr/lib/bluetooth" "$STAGE/usr/lib/spa-0.2/bluez5" \
          "$STAGE/usr/share/dbus-1/system.d" "$STAGE/run/dbus"
 [ -x /usr/lib/bluetooth/bluetoothd ] && cp /usr/lib/bluetooth/bluetoothd "$STAGE/usr/lib/bluetooth/"
 for b in bluetoothctl dbus-daemon dbus-uuidgen; do
-    src="$(command -v $b 2>/dev/null)"; [ -x "$src" ] && cp "$src" "$STAGE/usr/bin/"
+    src="$(command -v "$b" 2>/dev/null || true)"
+    [ -x "$src" ] && cp "$src" "$STAGE/usr/bin/" || true
 done
 cp /usr/lib/spa-0.2/bluez5/*.so "$STAGE/usr/lib/spa-0.2/bluez5/" 2>/dev/null || true
 # D-Bus system bus config: the MAIN system.conf is REQUIRED or `dbus-daemon --system`
@@ -1123,7 +1126,7 @@ cp "$STAGE/etc/machine-id" "$STAGE/var/lib/dbus/machine-id" 2>/dev/null || true
     [ -f "$dest" ] || cp "$real" "$dest" 2>/dev/null || true
     ln="$STAGE/usr/lib/$(basename "$lib")"
     [ -e "$ln" ] || ln -sf "$(basename "$real")" "$ln" 2>/dev/null || true
-done
+done || true
 # BT controller firmware (Intel ibt-*, Realtek rtl_bt, Qualcomm qca); decompress
 # .zst since the kernel firmware loader expects raw files.
 mkdir -p "$STAGE/lib/firmware/intel" "$STAGE/lib/firmware/rtl_bt" "$STAGE/lib/firmware/qca"
@@ -1217,7 +1220,7 @@ fi
 
 # ── curl (for HTTPS downloads: browser AppImage, LibreOffice, etc.) ──────────
 echo "[initramfs] bundling curl..."
-CURL_BIN="$(which curl 2>/dev/null)"
+CURL_BIN="$(command -v curl 2>/dev/null || true)"
 if [ -x "$CURL_BIN" ]; then
     cp "$CURL_BIN" "$STAGE/bin/curl"
     # Copy all shared library dependencies
@@ -1233,7 +1236,7 @@ fi
 
 # OpenSSL verifies the Ed25519 signature on every OS update manifest before any
 # downloaded kernel or initramfs is trusted.
-OPENSSL_BIN="$(which openssl 2>/dev/null)"
+OPENSSL_BIN="$(command -v openssl 2>/dev/null || true)"
 if [ -x "$OPENSSL_BIN" ]; then
     cp "$OPENSSL_BIN" "$STAGE/bin/openssl"
     ldd "$OPENSSL_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | while read lib; do
