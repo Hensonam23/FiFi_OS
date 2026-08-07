@@ -58,29 +58,33 @@ if [ "\$fifi_pending" = 1 ]; then
 fi
 
 menuentry "FiFi OS (slot A)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
     set fifi_entry_fallback=\$fifi_boot_fallback
     if [ "\$fifi_active" != A ]; then
         set fifi_entry_fallback=1
     fi
-    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = A ]; then
-        set fifi_attempted=\$fifi_attempt
-        save_env -f \$fifi_grubenv fifi_attempted
+    if [ "\$fifi_arm_attempt" = 1 ]; then
+        if [ "\$fifi_active" = A ]; then
+            set fifi_attempted=\$fifi_attempt
+            save_env -f \$fifi_grubenv fifi_attempted
+        fi
     fi
+    search --no-floppy --fs-uuid --set=root $DATA_UUID
     linux /boot/bzImage.A console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=A fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
     initrd /boot/initramfs.cpio.gz.A
 }
 
 menuentry "FiFi OS (slot B)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
     set fifi_entry_fallback=\$fifi_boot_fallback
     if [ "\$fifi_active" != B ]; then
         set fifi_entry_fallback=1
     fi
-    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = B ]; then
-        set fifi_attempted=\$fifi_attempt
-        save_env -f \$fifi_grubenv fifi_attempted
+    if [ "\$fifi_arm_attempt" = 1 ]; then
+        if [ "\$fifi_active" = B ]; then
+            set fifi_attempted=\$fifi_attempt
+            save_env -f \$fifi_grubenv fifi_attempted
+        fi
     fi
+    search --no-floppy --fs-uuid --set=root $DATA_UUID
     linux /boot/bzImage.B console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=B fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
     initrd /boot/initramfs.cpio.gz.B
 }

@@ -304,7 +304,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
-- [ ] A/B OS updates: implementation and simulated regressions are complete; validate an actual EFI/GRUB failed-boot recovery cycle on QEMU or hardware
+- [x] A/B OS updates: inactive-slot writes, boot confirmation, rollback, installed-GRUB migration, and two-boot EFI fallback gate
 - [x] Screenshot-diff test harness + QEMU boot self-test wired into CI
 
 #### Phase 8: Consolidate the shared platform
@@ -366,6 +366,9 @@ make linux-rundbg
 
 # Headless boot, non-root app, and screenshot stability gate
 make linux-qemu-test
+
+# Two-boot UEFI/GRUB automatic fallback gate
+make linux-boot-fallback-test
 
 # Native SDL2 window (smooth VSync, no QEMU needed)
 make sdl-build

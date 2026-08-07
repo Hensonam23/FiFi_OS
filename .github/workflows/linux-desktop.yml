@@ -28,7 +28,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub \
-            openssl pahole parted perl python qemu-system-x86 \
+            mtools openssl pahole parted perl python qemu-system-x86 \
             qemu-system-x86-firmware util-linux
 
       - name: Run fast security and update tests
@@ -45,3 +45,6 @@ jobs:
 
       - name: Run boot and screenshot gate
         run: make linux-qemu-test
+
+      - name: Run automatic boot fallback gate
+        run: make linux-boot-fallback-test
