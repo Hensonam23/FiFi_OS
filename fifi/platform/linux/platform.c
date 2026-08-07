@@ -470,6 +470,7 @@ static bool gui_app_runs_unprivileged(const char *path) {
            strcmp(name, "fifi-calc") == 0 ||
            strcmp(name, "fifi-imageviewer") == 0 ||
            strcmp(name, "fifi-sysmon") == 0 ||
+           strcmp(name, "fifi-security") == 0 ||
            strcmp(name, "fifi-aichat") == 0 ||
            strcmp(name, "fifi-gamepad") == 0 ||
            strcmp(name, "fifi-proton") == 0;

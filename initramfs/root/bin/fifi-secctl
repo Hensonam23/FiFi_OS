@@ -3,7 +3,11 @@
 # Keeps the same marker files the Security tab reads (firewall.log, doh-enabled,
 # doh.pid, wg0 iface, tor-enabled, tor.pid) so the status rows stay in sync.
 # Usage: fifi-secctl <firewall|doh|vpn|tor> <on|off>
+set -eu
+[ "$(id -u)" = 0 ] || { echo "fifi-secctl: root broker required" >&2; exit 126; }
+[ "$#" = 2 ] || { echo "usage: fifi-secctl <firewall|doh|vpn|tor> <on|off>" >&2; exit 2; }
 what="$1"; act="$2"
+[ "$act" = on ] || [ "$act" = off ] || { echo "fifi-secctl: invalid action" >&2; exit 2; }
 D=/fifi-data
 
 case "$what" in
@@ -26,36 +30,65 @@ case "$what" in
 
   doh)
     if [ "$act" = on ]; then
+      [ -x /usr/bin/dnscrypt-proxy ] || {
+        echo "doh: dnscrypt-proxy is unavailable" > "$D/doh.log"
+        exit 1
+      }
       : > "$D/doh-enabled"
-      if [ -x /usr/bin/dnscrypt-proxy ]; then
-        /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml >/dev/null 2>&1 &
-        echo $! > "$D/doh.pid"
-      fi
+      /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml >/dev/null 2>&1 &
+      echo $! > "$D/doh.pid"
+      printf '%s\n' 'nameserver 127.0.0.1' > /etc/resolv.conf
     else
       [ -f "$D/doh.pid" ] && kill "$(cat "$D/doh.pid")" 2>/dev/null
       rm -f "$D/doh-enabled" "$D/doh.pid"
+      printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 9.9.9.9' > /etc/resolv.conf
     fi
     ;;
 
   vpn)
     if [ "$act" = on ]; then
-      [ -x /bin/wg-up ] && sh /bin/wg-up
+      [ -x /bin/wg-up ] || { echo "fifi-secctl: WireGuard setup is unavailable" >&2; exit 1; }
+      sh /bin/wg-up
     else
       [ -x /bin/wg-down ] && sh /bin/wg-down 2>/dev/null
-      ip link del wg0 2>/dev/null
+      ip link del wg0 2>/dev/null || true
     fi
     ;;
 
   tor)
     if [ "$act" = on ]; then
+      [ -x /usr/bin/tor ] || {
+        echo "tor: executable is unavailable" > "$D/tor.log"
+        exit 1
+      }
+      mkdir -p "$D/tor"
+      chmod 0700 "$D/tor"
+      cat > "$D/torrc" <<'EOF'
+SocksPort 9050
+DNSPort 5353
+DataDirectory /fifi-data/tor
+Log notice file /fifi-data/tor.log
+FascistFirewall 1
+ReachableAddresses *:80,*:443
+CircuitBuildTimeout 120
+LearnCircuitBuildTimeout 0
+FetchUselessDescriptors 0
+DirReqStatistics 0
+StrictNodes 0
+NumEntryGuards 6
+EOF
+      chmod 0600 "$D/torrc"
+      : > "$D/tor.log"
       : > "$D/tor-enabled"
-      if [ -x /usr/bin/tor ] && [ -f "$D/torrc" ]; then
-        /usr/bin/tor -f "$D/torrc" >/dev/null 2>&1 &
-        echo $! > "$D/tor.pid"
-      fi
+      /usr/bin/tor -f "$D/torrc" >/dev/null 2>&1 &
+      echo $! > "$D/tor.pid"
     else
-      [ -f "$D/tor.pid" ] && kill "$(cat "$D/tor.pid")" 2>/dev/null
+      [ -f "$D/tor.pid" ] && kill "$(cat "$D/tor.pid")" 2>/dev/null || true
       rm -f "$D/tor-enabled" "$D/tor.pid"
     fi
+    ;;
+  *)
+    echo "fifi-secctl: invalid subsystem" >&2
+    exit 2
     ;;
 esac

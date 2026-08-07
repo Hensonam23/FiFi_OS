@@ -270,6 +270,12 @@ if [ -x /usr/share/fifi/migrate-legacy-grub.sh ]; then
     /usr/share/fifi/migrate-legacy-grub.sh
 fi
 
+# Keep GUI applications at the desktop UID. Administrative actions cross this
+# root-owned socket and are limited to the fixed verbs in fifi-admin.c.
+if [ -x /bin/fifi-admin ]; then
+    /bin/fifi-admin --daemon >>/fifi-data/admin-broker.log 2>&1 &
+fi
+
 # ── Loopback interface ────────────────────────────────────────────────────────
 # Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
 ip link set lo up 2>/dev/null

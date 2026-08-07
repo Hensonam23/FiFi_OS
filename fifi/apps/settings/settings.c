@@ -1485,7 +1485,8 @@ static void secctl(const char *what, int on) {
     pid_t pid = fork();
     if (pid == 0) {
         for (int i = 3; i < 64; i++) close(i);
-        execl("/bin/fifi-secctl", "fifi-secctl", what, on ? "on" : "off", (char *)NULL);
+        execl("/bin/fifi-admin", "fifi-admin", "security", what,
+              on ? "on" : "off", (char *)NULL);
         _exit(1);
     }
 }

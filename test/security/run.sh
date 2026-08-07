@@ -3,7 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+broker_pid=""
+cleanup() {
+    if [[ -n "$broker_pid" ]] && kill -0 "$broker_pid" 2>/dev/null; then
+        kill "$broker_pid" 2>/dev/null || true
+        wait "$broker_pid" 2>/dev/null || true
+    fi
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 echo "[test-security] legacy developer key is absent"
 test ! -e "$ROOT/initramfs/root/usr/share/fifi/authorized_keys"
@@ -77,6 +85,53 @@ grep -Fq '/bin/fifi-user-exec "$target" --appimage-extract' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 ! grep -Fq 'export ELECTRON_DISABLE_SANDBOX=1' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+
+echo "[test-security] administrative actions cross a narrow root broker"
+gcc -std=c11 -O2 -Wall -Wextra \
+    "$ROOT/fifi/platform/linux/fifi-admin.c" \
+    -o "$TMP/fifi-admin"
+broker_bin="$TMP/broker-bin"
+broker_socket="$TMP/fifi-admin.sock"
+broker_log="$TMP/admin.log"
+mkdir -p "$broker_bin"
+cat > "$broker_bin/fifi-secctl" <<'EOF'
+#!/bin/sh
+printf 'security %s %s\n' "$1" "$2" >> "$FIFI_TEST_ADMIN_LOG"
+EOF
+cat > "$broker_bin/tcpdump" <<'EOF'
+#!/bin/sh
+printf 'capture args: %s\n' "$*"
+EOF
+chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump"
+FIFI_ADMIN_SOCKET="$broker_socket" \
+FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
+FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
+FIFI_TEST_ADMIN_LOG="$broker_log" \
+    "$TMP/fifi-admin" --daemon &
+broker_pid=$!
+for _ in $(seq 1 50); do
+    [[ -S "$broker_socket" ]] && break
+    sleep 0.05
+done
+[[ -S "$broker_socket" ]]
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security firewall on
+grep -Fxq 'security firewall on' "$broker_log"
+capture_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" capture)"
+grep -Fq 'capture args: -c 20 -nn -i any -q' <<<"$capture_out"
+denied_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" shell root 2>&1)"
+grep -Fq 'operation is not allowed' <<<"$denied_out"
+grep -Fq 'strcmp(name, "fifi-security") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "security"' \
+    "$ROOT/fifi/apps/security/security.c"
+! grep -Fq 'execl("/usr/bin/dnscrypt-proxy"' \
+    "$ROOT/fifi/apps/security/security.c"
+! grep -Fq 'execl("/usr/bin/tor"' "$ROOT/fifi/apps/security/security.c"
+! grep -Fq 'execl("/bin/ip", "ip", "link", "del", "wg0"' \
+    "$ROOT/fifi/apps/security/security.c"
+kill "$broker_pid"
+wait "$broker_pid" 2>/dev/null || true
+broker_pid=""
 
 echo "[test-security] Steam container cannot retain host-root privileges"
 steam_block="$TMP/steam-block"

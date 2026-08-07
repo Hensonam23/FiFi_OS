@@ -142,6 +142,15 @@ gcc -std=c11 -O2 -Wall -Wextra -static \
 chmod 755 "$STAGE/bin/fifi-user-exec"
 echo "[initramfs] non-root app launcher installed"
 
+# Root daemon with a fixed command grammar for desktop administrative actions.
+# The client uses the same binary without elevation; authorization comes from
+# SO_PEERCRED on the root-owned Unix socket, not setuid or a general shell.
+gcc -std=c11 -O2 -Wall -Wextra -static \
+    "$REPO_ROOT/fifi/platform/linux/fifi-admin.c" \
+    -o "$STAGE/bin/fifi-admin"
+chmod 755 "$STAGE/bin/fifi-admin"
+echo "[initramfs] narrow administrative broker installed"
+
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
 (cd "$REPO_ROOT/fifi/compositor" && make -s) || {

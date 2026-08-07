@@ -153,6 +153,20 @@ static void update_firewall(void) {
     }
 }
 
+static void admin_security(const char *what, bool enable) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 3; i < 64; i++) close(i);
+        execl("/bin/fifi-admin", "fifi-admin", "security", what,
+              enable ? "on" : "off", (char *)NULL);
+        _exit(127);
+    }
+    if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
 /* ── Section: DNS over HTTPS ─────────────────────────────────────────────── */
 static bool g_doh_active = false;
 static char g_doh_status[128] = "Disabled";
@@ -205,40 +219,7 @@ static void update_doh(void) {
 }
 
 static void toggle_doh(void) {
-    if (access("/fifi-data/doh-enabled", F_OK) != 0) {
-        int fd = open("/fifi-data/doh-enabled", O_CREAT|O_WRONLY, 0644);
-        if (fd >= 0) close(fd);
-        pid_t pid = fork();
-        if (pid == 0) {
-            for (int i = 3; i < 64; i++) close(i);
-            execl("/usr/bin/dnscrypt-proxy", "dnscrypt-proxy",
-                  "-config", "/etc/dnscrypt-proxy.toml", NULL);
-            _exit(1);
-        }
-        if (pid > 0) {
-            char pidbuf[20];
-            snprintf(pidbuf, sizeof(pidbuf), "%d\n", (int)pid);
-            int pfd = open("/fifi-data/doh.pid", O_CREAT|O_WRONLY|O_TRUNC, 0644);
-            if (pfd >= 0) { write(pfd, pidbuf, strlen(pidbuf)); close(pfd); }
-            usleep(700000);
-            int rfd = open("/etc/resolv.conf", O_WRONLY|O_TRUNC|O_CREAT, 0644);
-            if (rfd >= 0) { write(rfd, "nameserver 127.0.0.1\n", 21); close(rfd); }
-        }
-    } else {
-        unlink("/fifi-data/doh-enabled");
-        int pid_fd = open("/fifi-data/doh.pid", O_RDONLY);
-        if (pid_fd >= 0) {
-            char pidbuf[16] = {0};
-            read(pid_fd, pidbuf, sizeof(pidbuf)-1);
-            close(pid_fd);
-            pid_t pid = (pid_t)atoi(pidbuf);
-            if (pid > 0) kill(pid, SIGTERM);
-            unlink("/fifi-data/doh.pid");
-        }
-        /* Fall back to Cloudflare/Quad9 plain DNS */
-        int rfd = open("/etc/resolv.conf", O_WRONLY|O_TRUNC|O_CREAT, 0644);
-        if (rfd >= 0) { write(rfd, "nameserver 1.1.1.1\nnameserver 9.9.9.9\n", 38); close(rfd); }
-    }
+    admin_security("doh", access("/fifi-data/doh-enabled", F_OK) != 0);
     update_doh();
 }
 
@@ -278,25 +259,7 @@ static void update_vpn(void) {
 }
 
 static void toggle_vpn(void) {
-    if (!g_vpn_active) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            for (int i = 3; i < 64; i++) close(i);
-            execl("/bin/sh", "sh", "/bin/wg-up", NULL);
-            _exit(1);
-        }
-        if (pid > 0) { int st; waitpid(pid, &st, 0); }
-    } else {
-        pid_t pid = fork();
-        if (pid == 0) {
-            for (int i = 3; i < 64; i++) close(i);
-            execl("/bin/ip", "ip", "link", "del", "wg0", NULL);
-            _exit(1);
-        }
-        if (pid > 0) { int st; waitpid(pid, &st, 0); }
-        int fd = open("/fifi-data/vpn.log", O_WRONLY|O_TRUNC|O_CREAT, 0644);
-        if (fd >= 0) { write(fd, "vpn: disconnected\n", 18); close(fd); }
-    }
+    admin_security("vpn", !g_vpn_active);
     update_vpn();
 }
 
@@ -350,60 +313,7 @@ static void update_tor(void) {
 }
 
 static void toggle_tor(void) {
-    if (access("/fifi-data/tor-enabled", F_OK) != 0) {
-        /* Enable: write torrc and start tor */
-        mkdir("/fifi-data/tor", 0700);
-        int cfd = open("/fifi-data/torrc", O_CREAT|O_WRONLY|O_TRUNC, 0600);
-        if (cfd >= 0) {
-            const char *cfg =
-                "SocksPort 9050\n"
-                "DNSPort 5353\n"
-                "DataDirectory /fifi-data/tor\n"
-                "Log notice file /fifi-data/tor.log\n"
-                /* Use ports 80 and 443 as fallbacks if standard Tor ports are blocked */
-                "FascistFirewall 1\n"
-                "ReachableAddresses *:80,*:443\n"
-                /* Longer timeouts for slow directory fetches */
-                "CircuitBuildTimeout 120\n"
-                "LearnCircuitBuildTimeout 0\n"
-                /* Reduce directory traffic so bootstrap is faster */
-                "FetchUselessDescriptors 0\n"
-                "DirReqStatistics 0\n"
-                /* Allow more directory servers to source the authority keys */
-                "StrictNodes 0\n"
-                "NumEntryGuards 6\n";
-            write(cfd, cfg, strlen(cfg));
-            close(cfd);
-        }
-        /* Clear old log */
-        int lfd = open("/fifi-data/tor.log", O_CREAT|O_WRONLY|O_TRUNC, 0644);
-        if (lfd >= 0) close(lfd);
-        /* Mark enabled and start */
-        int efd = open("/fifi-data/tor-enabled", O_CREAT|O_WRONLY, 0644);
-        if (efd >= 0) close(efd);
-        pid_t pid = fork();
-        if (pid == 0) {
-            for (int i = 3; i < 64; i++) close(i);
-            execl("/usr/bin/tor", "tor", "-f", "/fifi-data/torrc", NULL);
-            _exit(1);
-        }
-        if (pid > 0) {
-            char pbuf[20];
-            snprintf(pbuf, sizeof(pbuf), "%d\n", (int)pid);
-            int pfd = open("/fifi-data/tor.pid", O_CREAT|O_WRONLY|O_TRUNC, 0644);
-            if (pfd >= 0) { write(pfd, pbuf, strlen(pbuf)); close(pfd); }
-        }
-    } else {
-        /* Disable: kill tor */
-        int pfd = open("/fifi-data/tor.pid", O_RDONLY);
-        if (pfd >= 0) {
-            char pbuf[16] = {0}; read(pfd, pbuf, sizeof(pbuf)-1); close(pfd);
-            pid_t pid = (pid_t)atoi(pbuf);
-            if (pid > 0) kill(pid, SIGTERM);
-            unlink("/fifi-data/tor.pid");
-        }
-        unlink("/fifi-data/tor-enabled");
-    }
+    admin_security("tor", access("/fifi-data/tor-enabled", F_OK) != 0);
     update_tor();
 }
 
@@ -1371,10 +1281,9 @@ int main(void) {
                                 run_tool("/usr/bin/nmap", nscan_args, tool_label);
                             } else if (key == 't' || key == 'T') {
                                 char *td_args[] = {
-                                    "/usr/bin/tcpdump", "-c", "20", "-nn",
-                                    "-i", "any", "-q", NULL
+                                    "/bin/fifi-admin", "capture", NULL
                                 };
-                                run_tool("/usr/bin/tcpdump", td_args, "tcpdump -c 20 any");
+                                run_tool("/bin/fifi-admin", td_args, "tcpdump -c 20 any");
                             } else if (key == 'o' || key == 'O') {
                                 toggle_tor();
                             } else if (key == 'b' || key == 'B') {
