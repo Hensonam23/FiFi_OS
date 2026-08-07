@@ -146,6 +146,13 @@ grep -Fq 'strcmp(name, "fifi-security") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-wifi") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strcmp(name, "fifi-settings") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'chown 1000:1000 /fifi-data/fifi-settings.conf' \
+    "$ROOT/initramfs/root/init"
+grep -Fq 'chown 0:1000 "$_audio_ctl"' "$ROOT/initramfs/root/init"
+! grep -Fq 'fopen("/fifi-data/wifi-ssid", "w")' \
+    "$ROOT/fifi/apps/settings/settings.c"
 grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "security"' \
     "$ROOT/fifi/apps/security/security.c"
 ! grep -Fq 'execl("/usr/bin/dnscrypt-proxy"' \

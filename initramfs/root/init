@@ -292,6 +292,27 @@ chown 1000:1000 /fifi-data/home /home/fifi
 chmod 0700 /fifi-data/home /home/fifi
 mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
 
+# Settings stores desktop preferences in one persistent file. Keep the data
+# directory root-owned, but let the desktop identity update this exact file.
+# Refuse an existing symlink so ownership changes cannot be redirected.
+if [ ! -e /fifi-data/fifi-settings.conf ] &&
+   [ ! -L /fifi-data/fifi-settings.conf ]; then
+    : > /fifi-data/fifi-settings.conf
+fi
+if [ -f /fifi-data/fifi-settings.conf ] &&
+   [ ! -L /fifi-data/fifi-settings.conf ]; then
+    chown 1000:1000 /fifi-data/fifi-settings.conf
+    chmod 0600 /fifi-data/fifi-settings.conf
+fi
+
+# Volume control is a normal desktop capability. Expose only ALSA mixer control
+# nodes to the desktop group; playback and raw hardware nodes keep their modes.
+for _audio_ctl in /dev/snd/controlC*; do
+    [ -c "$_audio_ctl" ] || continue
+    chown 0:1000 "$_audio_ctl"
+    chmod 0660 "$_audio_ctl"
+done
+
 # Credentials written by older builds may have inherited a permissive umask.
 for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
                /fifi-data/wg0.conf /fifi-data/torrc; do

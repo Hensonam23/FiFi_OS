@@ -838,7 +838,6 @@ static void wifi_check_conn(void) {
         snprintf(g_conn_ssid, sizeof g_conn_ssid, "%s", g_sel < g_net_count ? g_nets[g_sel].ssid : "");
         snprintf(g_wstatus, sizeof g_wstatus, "Connected to %s (%s)", g_conn_ssid, ip);
         g_wstate = ST_CONNECTED;
-        FILE *sf = fopen("/fifi-data/wifi-ssid", "w"); if (sf) { fputs(g_conn_ssid, sf); fclose(sf); }
     }
 }
 
