@@ -124,7 +124,7 @@ fifi version           # show the installed OS version
   IDs before activation.
 - **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the inactive A/B slot is written. Boot selection changes only after the complete pair is durable.
 - A pending slot is confirmed only after the desktop compositor is ready. New installations record each GRUB boot attempt and automatically select the previous slot if the pending image does not reach that confirmation point. `update rollback` switches slots manually.
-- Existing installations keep their legacy GRUB menu until its bootloader is refreshed; they still receive inactive-slot staging and retain the manual previous-image entry, but do not yet get automatic failed-boot selection.
+- Existing installations migrate their matching EFI GRUB menu automatically on the first hardened boot. The old menu is retained as `grub.cfg.before-ab-migration`; unrelated EFI partitions are never rewritten.
 - `app-update` updates apps only.
 - A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi
   installs the verified boot pair, powers off safely, then completes migrations
@@ -304,7 +304,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash
-- [ ] A/B OS updates: inactive-slot writes and new-install fallback are complete; migrate legacy installed GRUB configurations
+- [ ] A/B OS updates: implementation and simulated regressions are complete; validate an actual EFI/GRUB failed-boot recovery cycle on QEMU or hardware
 - [x] Screenshot-diff test harness + QEMU boot self-test wired into CI
 
 #### Phase 8: Consolidate the shared platform

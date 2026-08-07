@@ -398,91 +398,9 @@ if command -v grub-editenv >/dev/null 2>&1; then
 else
     fail "grub-editenv is required for automatic boot fallback"
 fi
-cat > "$MNT_EFI/boot/grub/grub.cfg" << GRUBCFG
-set timeout=5
-set default=0
-set fifi_grubenv=\$prefix/grubenv
-load_env -f \$fifi_grubenv fifi_attempted
-# Kernel + initramfs live on the DATA partition (ext4), not this EFI partition —
-# switch GRUB's root to it by filesystem UUID before loading them.
-insmod part_gpt
-insmod ext2
-search --no-floppy --fs-uuid --set=root $DATA_UUID
-source /boot/fifi-slot.cfg
-
-if [ "\$fifi_active" = B ]; then
-    set default=1
-fi
-set fifi_boot_fallback=0
-set fifi_arm_attempt=0
-if [ "\$fifi_pending" = 1 ]; then
-    if [ "\$fifi_attempted" = "\$fifi_attempt" ]; then
-        set fifi_boot_fallback=1
-        if [ "\$fifi_previous" = A ]; then
-            set default=0
-        else
-            set default=1
-        fi
-    else
-        set fifi_arm_attempt=1
-    fi
-fi
-
-menuentry "FiFi OS (slot A)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
-    set fifi_entry_fallback=\$fifi_boot_fallback
-    if [ "\$fifi_active" != A ]; then
-        set fifi_entry_fallback=1
-    fi
-    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = A ]; then
-        set fifi_attempted=\$fifi_attempt
-        save_env -f \$fifi_grubenv fifi_attempted
-    fi
-    linux /boot/bzImage.A console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=A fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
-    initrd /boot/initramfs.cpio.gz.A
-}
-
-menuentry "FiFi OS (slot B)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
-    set fifi_entry_fallback=\$fifi_boot_fallback
-    if [ "\$fifi_active" != B ]; then
-        set fifi_entry_fallback=1
-    fi
-    if [ "\$fifi_arm_attempt" = 1 ] && [ "\$fifi_active" = B ]; then
-        set fifi_attempted=\$fifi_attempt
-        save_env -f \$fifi_grubenv fifi_attempted
-    fi
-    linux /boot/bzImage.B console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=B fifi_boot_fallback=\$fifi_entry_fallback apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
-    initrd /boot/initramfs.cpio.gz.B
-}
-
-menuentry "FiFi OS (safe mode)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage.\$fifi_active console=tty0 quiet loglevel=3 nomodeset fifi_noswitch fifi_data_uuid=$DATA_UUID fifi_slot=\$fifi_active
-    initrd /boot/initramfs.cpio.gz.\$fifi_active
-}
-
-menuentry "FiFi OS (previous slot)" {
-    search --no-floppy --fs-uuid --set=root $DATA_UUID
-    linux /boot/bzImage.\$fifi_previous console=tty0 quiet loglevel=3 fifi_data_uuid=$DATA_UUID fifi_slot=\$fifi_previous fifi_boot_fallback=1 apparmor=1 security=apparmor i915.enable_psr=0 i915.enable_dc=0
-    initrd /boot/initramfs.cpio.gz.\$fifi_previous
-}
-GRUBCFG
-
+fifi-write-grub-config "$MNT_EFI/boot/grub/grub.cfg" \
+    "$DATA_UUID" "$WIN_CHAINLOAD" || fail "Could not write GRUB configuration"
 if [ -n "$WIN_CHAINLOAD" ]; then
-    cat >> "$MNT_EFI/boot/grub/grub.cfg" << WINCFG
-
-menuentry "Windows Boot Manager" {
-    insmod part_gpt
-    insmod part_msdos
-    insmod fat
-    insmod chain
-    insmod search_fs_file
-    search --no-floppy --file --set=root $WIN_CHAINLOAD
-    chainloader $WIN_CHAINLOAD
-    boot
-}
-WINCFG
     log "GRUB menu: FiFi OS + Windows chainload at $WIN_CHAINLOAD"
 fi
 

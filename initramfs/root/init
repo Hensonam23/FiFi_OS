@@ -263,6 +263,13 @@ if [ -x /usr/share/fifi/migrate-legacy-ssh-keys.sh ]; then
     /usr/share/fifi/migrate-legacy-ssh-keys.sh
 fi
 
+# Older installed EFI menus load the A/B compatibility symlinks but cannot
+# automatically reject an unconfirmed slot. Refresh only the GRUB config whose
+# embedded data UUID matches this installation, keeping a one-time backup.
+if [ -x /usr/share/fifi/migrate-legacy-grub.sh ]; then
+    /usr/share/fifi/migrate-legacy-grub.sh
+fi
+
 # ── Loopback interface ────────────────────────────────────────────────────────
 # Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
 ip link set lo up 2>/dev/null

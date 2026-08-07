@@ -189,14 +189,63 @@ test ! -e "$DATA/os-build-id.pending"
 grep -Fxq 'set fifi_active=A' "$DATA/boot/fifi-slot.cfg"
 
 echo "[test-update] installer GRUB records attempts and selects fallback slots"
+grep -Fq 'fifi-write-grub-config' "$ROOT/initramfs/root/bin/fifi-install.sh"
 grep -Fq 'load_env -f \$fifi_grubenv fifi_attempted' \
-    "$ROOT/initramfs/root/bin/fifi-install.sh"
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
 grep -Fq 'save_env -f \$fifi_grubenv fifi_attempted' \
-    "$ROOT/initramfs/root/bin/fifi-install.sh"
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
 grep -Fq 'fifi_boot_fallback=\$fifi_entry_fallback' \
-    "$ROOT/initramfs/root/bin/fifi-install.sh"
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
 grep -Fq 'fifi_boot_fallback=1 apparmor=1' \
-    "$ROOT/initramfs/root/bin/fifi-install.sh"
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
+
+echo "[test-update] legacy installed GRUB gains automatic A/B fallback"
+EFI="$TMP/efi"
+mkdir -p "$EFI/boot/grub"
+: > "$DATA/installed"
+cat > "$EFI/boot/grub/grub.cfg" <<'EOF'
+set timeout=5
+search --no-floppy --fs-uuid --set=root 1234-ABCD
+menuentry "FiFi OS" {
+    linux /boot/bzImage fifi_data_uuid=1234-ABCD
+    initrd /boot/initramfs.cpio.gz
+}
+menuentry "Windows Boot Manager" {
+    chainloader /EFI/Microsoft/Boot/bootmgfw_backup.efi
+}
+EOF
+cat > "$MOCK_BIN/grub-editenv" <<'EOF'
+#!/bin/sh
+[ "$2" = create ] || exit 2
+: > "$1"
+EOF
+chmod +x "$MOCK_BIN/grub-editenv"
+OTHER_EFI="$TMP/other-efi"
+mkdir -p "$OTHER_EFI/boot/grub"
+printf '%s\n' 'menuentry "Other OS" { linux /boot/vmlinuz fifi_data_uuid=FFFF-0000; }' \
+    > "$OTHER_EFI/boot/grub/grub.cfg"
+other_sha="$(sha256sum "$OTHER_EFI/boot/grub/grub.cfg" | awk '{print $1}')"
+FIFI_EFI_ROOT="$OTHER_EFI" FIFI_DATA_UUID=1234-ABCD \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-legacy-grub.sh"
+[[ "$other_sha" == "$(sha256sum "$OTHER_EFI/boot/grub/grub.cfg" | awk '{print $1}')" ]]
+test ! -e "$DATA/.grub-ab-migrated"
+FIFI_EFI_ROOT="$EFI" FIFI_DATA_UUID=1234-ABCD \
+FIFI_GRUB_EDITENV="$MOCK_BIN/grub-editenv" \
+FIFI_GRUB_CONFIG_WRITER="$ROOT/initramfs/root/bin/fifi-write-grub-config" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-legacy-grub.sh"
+test -e "$DATA/.grub-ab-migrated"
+test -e "$EFI/boot/grub/grubenv"
+grep -Fq 'linux /boot/bzImage fifi_data_uuid=1234-ABCD' \
+    "$EFI/boot/grub/grub.cfg.before-ab-migration"
+grep -Fq 'source /boot/fifi-slot.cfg' "$EFI/boot/grub/grub.cfg"
+grep -Fq 'save_env -f $fifi_grubenv fifi_attempted' "$EFI/boot/grub/grub.cfg"
+grep -Fq 'chainloader /EFI/Microsoft/Boot/bootmgfw_backup.efi' \
+    "$EFI/boot/grub/grub.cfg"
+before_migration_sha="$(sha256sum "$EFI/boot/grub/grub.cfg" | awk '{print $1}')"
+FIFI_EFI_ROOT="$EFI" FIFI_DATA_UUID=1234-ABCD \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-legacy-grub.sh"
+after_migration_sha="$(sha256sum "$EFI/boot/grub/grub.cfg" | awk '{print $1}')"
+[[ "$before_migration_sha" == "$after_migration_sha" ]]
 
 echo "[test-update] release packaging"
 PACKAGE_BUILD="$TMP/package-build"
