@@ -29,7 +29,7 @@ jobs:
           pacman -S --needed --noconfirm \
             bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub \
             mtools openssl pahole parted perl python qemu-system-x86 \
-            qemu-system-x86-firmware util-linux
+            qemu-system-x86-firmware qemu-hw-display-virtio-vga util-linux
 
       - name: Run fast security and update tests
         run: |
