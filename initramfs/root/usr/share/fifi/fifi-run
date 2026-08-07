@@ -58,9 +58,9 @@ if [ ! -x /tmp/fifi-xdg/xdg-open ]; then
 t="$1"
 case "$t" in
     http://*|https://*|ftp://*|*.htm|*.html)
-        exec /fifi-data/apps/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
+        exec /usr/share/fifi/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
     *)
-        exec /fifi-data/apps/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
+        exec /usr/share/fifi/fifi-run /fifi-data/apps/LibreWolf.AppImage "$t" ;;
 esac
 XDGEOF
     chmod +x /tmp/fifi-xdg/xdg-open 2>/dev/null || true

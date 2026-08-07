@@ -416,10 +416,8 @@ prog 34
 #   Offline: falls back to the AppImages bundled on the USB (apps-bundle/);
 #            the App Store's "Check Updates" upgrades them once online.
 
-APPSTORE_SH=""
-for _s in /usr/share/fifi/appstore-install.sh /fifi-data/apps/appstore-install.sh; do
-    [ -f "$_s" ] && APPSTORE_SH="$_s" && break
-done
+APPSTORE_SH=/usr/share/fifi/appstore-install.sh
+[ -f "$APPSTORE_SH" ] || APPSTORE_SH=""
 BUNDLE_DIR=""
 [ -n "$USB_MNT_SRC" ] && [ -d "$USB_MNT_SRC/apps-bundle" ] && BUNDLE_DIR="$USB_MNT_SRC/apps-bundle"
 

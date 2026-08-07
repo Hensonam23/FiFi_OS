@@ -325,32 +325,42 @@ for _a in $(busybox --list); do
     [ -e "/usr/bin/$_a" ] || ln -sf /bin/busybox "/usr/bin/$_a"
 done
 
-# ── App platform: seed fifi-run / App Store / keymap into /fifi-data ─────────
-# These are OS-MANAGED files (not user data), so ALWAYS refresh them from the
-# image copy on every boot — a "first-boot only" copy would let a stale copy on
-# an existing data partition shadow shipped fixes after an update/reinstall.
+# ── App platform: writable library, immutable helpers, and keymap ─────────────
 mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
-for f in fifi-run appstore-install.sh appstore-sync.sh \
-         appstore-uninstall.sh appstore-update-check.sh; do
-    if [ -f "/usr/share/fifi/$f" ]; then
-        cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"
-        chmod +x "/fifi-data/apps/$f"
+# Older builds mirrored root-executed helpers into the persistent app library.
+# Remove those copies once, then migrate installed apps to the desktop identity.
+# Root code below executes only immutable helpers from the signed OS image.
+if [ ! -e /fifi-data/.apps-owned-by-fifi ]; then
+    rm -f /fifi-data/apps/fifi-run \
+          /fifi-data/apps/appstore-install.sh \
+          /fifi-data/apps/appstore-sync.sh \
+          /fifi-data/apps/appstore-uninstall.sh \
+          /fifi-data/apps/appstore-update-check.sh \
+          /fifi-data/apps/fifi-appstore
+    if chown -RhP 1000:1000 /fifi-data/apps; then
+        : > /fifi-data/.apps-owned-by-fifi
     fi
-done
-# Replace any catalog cached by older builds before the App Store can read it.
-[ -f /fifi-data/apps/appstore-sync.sh ] &&
-    sh /fifi-data/apps/appstore-sync.sh >/dev/null 2>&1 || true
+fi
+chown 1000:1000 /fifi-data/apps
+chmod 0700 /fifi-data/apps
+if [ ! -e /fifi-data/fifi-desktop.conf ] &&
+   [ ! -L /fifi-data/fifi-desktop.conf ]; then
+    : > /fifi-data/fifi-desktop.conf
+fi
+if [ -f /fifi-data/fifi-desktop.conf ] &&
+   [ ! -L /fifi-data/fifi-desktop.conf ]; then
+    chown 1000:1000 /fifi-data/fifi-desktop.conf
+    chmod 0600 /fifi-data/fifi-desktop.conf
+fi
+# Replace any cached catalog before the App Store reads it, without root writes
+# into the user-owned library.
+[ -f /usr/share/fifi/appstore-sync.sh ] &&
+    /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-sync.sh \
+        >/dev/null 2>&1 || true
 # Older installs used an unsigned versionless LibreOffice URL. Move its recorded
 # update source to the digest-bearing GitHub release channel.
-if [ -f /fifi-data/apps/LibreOffice.src ] &&
-   grep -Fxq 'url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage' \
-       /fifi-data/apps/LibreOffice.src; then
-    printf '%s' 'ivan-hc/LibreOffice-appimage' \
-        > /fifi-data/apps/LibreOffice.src
-fi
-# App Store binary ships in the image; older data partitions expect it at
-# /fifi-data/apps too (launcher fallback path), so mirror it there.
-[ -f /fifi-data/apps/fifi-appstore ] || cp /bin/fifi-appstore /fifi-data/apps/fifi-appstore 2>/dev/null || true
+/bin/fifi-user-exec /bin/sh /usr/share/fifi/migrate-app-library.sh \
+    >/dev/null 2>&1 || true
 
 # Check installed apps for updates once the network has had time to come up —
 # the App Store then shows Update buttons without a manual "Check Updates".
@@ -362,15 +372,18 @@ fi
   # out of the box. Only when missing AND the network is reachable; offline-safe
   # (fails quietly, retries next boot). Each is ~130MB / ~330MB so this runs
   # detached and the apps simply appear once downloaded.
-  if [ -f /fifi-data/apps/appstore-install.sh ] && \
+  if [ -f /usr/share/fifi/appstore-install.sh ] && \
      curl -fsI --max-time 10 https://gitlab.com >/dev/null 2>&1; then
       [ -f /fifi-data/apps/LibreWolf.AppImage ] || \
-          sh /fifi-data/apps/appstore-install.sh 'gitlab:librewolf-community%2Fbrowser%2Fappimage' LibreWolf >/dev/null 2>&1
+          /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-install.sh \
+              'gitlab:librewolf-community%2Fbrowser%2Fappimage' LibreWolf >/dev/null 2>&1
       [ -f /fifi-data/apps/LibreOffice.AppImage ] || \
-          sh /fifi-data/apps/appstore-install.sh 'ivan-hc/LibreOffice-appimage' LibreOffice >/dev/null 2>&1
+          /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-install.sh \
+              'ivan-hc/LibreOffice-appimage' LibreOffice >/dev/null 2>&1
   fi
-  [ -f /fifi-data/apps/appstore-update-check.sh ] && \
-      sh /fifi-data/apps/appstore-update-check.sh >/dev/null 2>&1 ) &
+  [ -f /usr/share/fifi/appstore-update-check.sh ] && \
+      /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-update-check.sh \
+          >/dev/null 2>&1 ) &
 # OS-managed too — always refresh so keymap/fontconfig fixes are never shadowed
 # by a stale copy on an existing data partition.
 cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
@@ -678,10 +691,20 @@ fifi_boot_selftest() {
         if [ -S /tmp/fifi-compositor.sock ] && [ -S /tmp/wayland-0 ]; then
             _ipc_mode="$(stat -c '%u:%g:%a' /tmp/fifi-compositor.sock 2>/dev/null)"
             _wayland_mode="$(stat -c '%u:%g:%a' /tmp/wayland-0 2>/dev/null)"
+            _apps_mode="$(stat -c '%u:%g:%a' /fifi-data/apps 2>/dev/null)"
+            _desktop_conf_mode="$(stat -c '%u:%g:%a' /fifi-data/fifi-desktop.conf 2>/dev/null)"
+            _settings_mode="$(stat -c '%u:%g:%a' /fifi-data/fifi-settings.conf 2>/dev/null)"
             if [ "$_ipc_mode" != "0:1000:660" ] ||
                [ "$_wayland_mode" != "1000:1000:600" ]; then
                 printf 'FIFI_SELFTEST FAIL socket-permissions ipc=%s wayland=%s\n' \
                     "$_ipc_mode" "$_wayland_mode" >/dev/ttyS0
+                return
+            fi
+            if [ "$_apps_mode" != "1000:1000:700" ] ||
+               [ "$_desktop_conf_mode" != "1000:1000:600" ] ||
+               [ "$_settings_mode" != "1000:1000:600" ]; then
+                printf 'FIFI_SELFTEST FAIL user-storage apps=%s desktop-conf=%s settings=%s\n' \
+                    "$_apps_mode" "$_desktop_conf_mode" "$_settings_mode" >/dev/ttyS0
                 return
             fi
 

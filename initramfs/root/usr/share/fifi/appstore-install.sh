@@ -152,7 +152,7 @@ fi
 # Paths inside the launcher are the FINAL runtime paths (/fifi-data/...), even
 # when installing onto a mounted target partition.
 launcher="$APPS/$name.sh"
-printf '#!/bin/sh\nexec /fifi-data/apps/fifi-run "/fifi-data/apps/%s.AppImage" "$@"\n' "$name" > "$launcher"
+printf '#!/bin/sh\nexec /usr/share/fifi/fifi-run "/fifi-data/apps/%s.AppImage" "$@"\n' "$name" > "$launcher"
 chmod +x "$launcher"
 
 # Register a desktop icon (path<TAB>label; read by gui_desktop_load) — but only

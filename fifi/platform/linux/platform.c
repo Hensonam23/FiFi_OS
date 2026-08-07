@@ -462,6 +462,9 @@ bool net_send_eth(const uint8_t dst[6], uint16_t et,
 static bool gui_app_runs_unprivileged(const char *path) {
     const char *name;
     if (!path) return false;
+    static const char app_library[] = "/fifi-data/apps/";
+    if (strncmp(path, app_library, sizeof(app_library) - 1) == 0)
+        return true;
     name = strrchr(path, '/');
     name = name ? name + 1 : path;
     return strcmp(name, "fifi-terminal") == 0 ||
@@ -473,6 +476,7 @@ static bool gui_app_runs_unprivileged(const char *path) {
            strcmp(name, "fifi-security") == 0 ||
            strcmp(name, "fifi-wifi") == 0 ||
            strcmp(name, "fifi-settings") == 0 ||
+           strcmp(name, "fifi-appstore") == 0 ||
            strcmp(name, "fifi-aichat") == 0 ||
            strcmp(name, "fifi-gamepad") == 0 ||
            strcmp(name, "fifi-proton") == 0;

@@ -148,11 +148,58 @@ grep -Fq 'strcmp(name, "fifi-wifi") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-settings") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strcmp(name, "fifi-appstore") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strncmp(path, app_library, sizeof(app_library) - 1) == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'chown 1000:1000 /fifi-data/fifi-settings.conf' \
     "$ROOT/initramfs/root/init"
 grep -Fq 'chown 0:1000 "$_audio_ctl"' "$ROOT/initramfs/root/init"
 ! grep -Fq 'fopen("/fifi-data/wifi-ssid", "w")' \
     "$ROOT/fifi/apps/settings/settings.c"
+grep -Fq '#define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"' \
+    "$ROOT/fifi/apps/appstore/appstore.c"
+! grep -Fq '"/fifi-data/apps/appstore-install.sh"' \
+    "$ROOT/fifi/apps/appstore/appstore.c"
+! grep -Fq 'execl("/bin/sh", "sh", "-c"' \
+    "$ROOT/fifi/apps/appstore/appstore.c"
+grep -Fq 'exec /bin/fifi-user-exec "$0" "$@"' \
+    "$ROOT/initramfs/root/bin/app-update"
+grep -Fq 'FIFI_APP_HELPERS:-/usr/share/fifi' \
+    "$ROOT/initramfs/root/bin/app-update"
+grep -Fq 'chown -RhP 1000:1000 /fifi-data/apps' "$ROOT/initramfs/root/init"
+grep -Fq '/bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-sync.sh' \
+    "$ROOT/initramfs/root/init"
+! grep -Fq 'cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"' \
+    "$ROOT/initramfs/root/init"
+
+echo "[test-security] app maintenance never executes writable helper copies"
+app_library="$TMP/app-library"
+app_helpers="$TMP/app-helpers"
+app_log="$TMP/app-helper.log"
+mkdir -p "$app_library" "$app_helpers"
+cat > "$app_library/appstore-update-check.sh" <<'EOF'
+#!/bin/sh
+echo writable-helper-ran >&2
+exit 99
+EOF
+cat > "$app_helpers/appstore-update-check.sh" <<'EOF'
+#!/bin/sh
+printf 'trusted-helper-ran\n' >> "$FIFI_TEST_APP_HELPER_LOG"
+EOF
+chmod +x "$app_library/appstore-update-check.sh" \
+    "$app_helpers/appstore-update-check.sh"
+FIFI_APPS_DIR="$app_library" FIFI_APP_HELPERS="$app_helpers" \
+FIFI_TEST_APP_HELPER_LOG="$app_log" \
+    sh "$ROOT/initramfs/root/bin/app-update" -c
+grep -Fxq trusted-helper-ran "$app_log"
+
+printf '%s' \
+    'url:https://appimages.libreitalia.org/LibreOffice-fresh.standard-x86_64.AppImage' \
+    > "$app_library/LibreOffice.src"
+FIFI_APPS_DIR="$app_library" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-app-library.sh"
+grep -Fxq 'ivan-hc/LibreOffice-appimage' "$app_library/LibreOffice.src"
 grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "security"' \
     "$ROOT/fifi/apps/security/security.c"
 ! grep -Fq 'execl("/usr/bin/dnscrypt-proxy"' \

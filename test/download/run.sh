@@ -63,6 +63,8 @@ echo "[test-download] GitHub asset digest permits a matching AppImage"
 sh "$ROOT/initramfs/root/usr/share/fifi/appstore-install.sh" owner/repo Test
 cmp "$FIXTURES/Test.AppImage" "$APPS/Test.AppImage"
 grep -Fxq "$sha" "$APPS/Test.sha256"
+grep -Fq 'exec /usr/share/fifi/fifi-run "/fifi-data/apps/Test.AppImage"' \
+    "$APPS/Test.sh"
 
 echo "[test-download] a changed payload is rejected"
 printf 'tampered\n' >> "$FIXTURES/Test.AppImage"

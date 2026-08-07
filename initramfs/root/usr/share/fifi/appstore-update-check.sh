@@ -7,7 +7,7 @@
 # when <Name>.update exists.
 #
 # Usage: appstore-update-check.sh [AppName]   (no arg = check all installed apps)
-APPS=/fifi-data/apps
+APPS="${FIFI_APPS_DIR:-/fifi-data/apps}"
 . "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"
 
 # pick best x86_64 AppImage from a newline-separated URL list

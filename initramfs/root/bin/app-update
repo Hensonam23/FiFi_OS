@@ -10,7 +10,14 @@
 # NOTE: this updates APPS. To update the OS itself (kernel + initramfs) use the
 # `update` command with a FiFi USB plugged in.
 
-APPS=/fifi-data/apps
+# The app library belongs to the desktop user. Root callers (boot completion or
+# a root shell) cross the same one-way privilege drop as the graphical store.
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
+APPS="${FIFI_APPS_DIR:-/fifi-data/apps}"
+HELPERS="${FIFI_APP_HELPERS:-/usr/share/fifi}"
 MODE=ask
 case "$1" in
     -y|--yes)   MODE=yes ;;
@@ -18,11 +25,11 @@ case "$1" in
     -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
 esac
 
-[ -f "$APPS/appstore-update-check.sh" ] || {
+[ -f "$HELPERS/appstore-update-check.sh" ] || {
     echo "app-update: App Store not available on this system." >&2; exit 1; }
 
 echo "Checking for updates..."
-sh "$APPS/appstore-update-check.sh" 2>/dev/null || true
+sh "$HELPERS/appstore-update-check.sh" 2>/dev/null || true
 
 # Collect apps that have an update marker (<Name>.update) from the check above.
 updates=""
@@ -55,7 +62,7 @@ for n in $updates; do
         continue
     fi
     echo "Updating $n ..."
-    if sh "$APPS/appstore-install.sh" "$src" "$n"; then
+    if sh "$HELPERS/appstore-install.sh" "$src" "$n"; then
         rm -f "$APPS/$n.update"
         echo "  $n updated."
     else

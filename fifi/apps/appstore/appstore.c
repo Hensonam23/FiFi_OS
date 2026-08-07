@@ -35,6 +35,11 @@
 #define IPC_INVALIDATE  0x15u
 #define IPC_NOTIFY      0x16u
 #define IPC_WIN_RESIZE  0x1Bu
+#define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"
+#define APP_UNINSTALLER "/usr/share/fifi/appstore-uninstall.sh"
+#define APP_UPDATE_CHECK "/usr/share/fifi/appstore-update-check.sh"
+#define APP_SYNC        "/usr/share/fifi/appstore-sync.sh"
+#define APP_RUNNER      "/usr/share/fifi/fifi-run"
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 /* The window is user-resizable: the compositor sends IPC_WIN_RESIZE and we
@@ -495,7 +500,7 @@ static void start_uninstall(int fd, int i) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/bin/sh", "sh", "/fifi-data/apps/appstore-uninstall.sh",
+        execl("/bin/sh", "sh", APP_UNINSTALLER,
               g_inst[i].name, (char*)NULL);
         _exit(127);
     }
@@ -510,7 +515,7 @@ static void start_check_updates(int fd) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/bin/sh", "sh", "/fifi-data/apps/appstore-update-check.sh", (char*)NULL);
+        execl("/bin/sh", "sh", APP_UPDATE_CHECK, (char*)NULL);
         _exit(127);
     }
     const char *m = "Checking for updates...";
@@ -519,16 +524,27 @@ static void start_check_updates(int fd) {
 
 /* Update an installed app: re-run the installer with its recorded source. */
 static void start_update(int fd, int i) {
-    char cmd[256];
-    snprintf(cmd, sizeof cmd,
-             "sh /fifi-data/apps/appstore-install.sh \"$(cat /fifi-data/apps/%s.src)\" \"%s\"",
-             g_inst[i].name, g_inst[i].name);
+    char source_path[256], source[192] = {0};
+    snprintf(source_path, sizeof source_path, "/fifi-data/apps/%s.src", g_inst[i].name);
+    FILE *source_file = fopen(source_path, "r");
+    if (source_file) {
+        if (fgets(source, sizeof source, source_file)) {
+            source[strcspn(source, "\r\n")] = '\0';
+        }
+        fclose(source_file);
+    }
+    if (!source[0]) {
+        const char *message = "Cannot update: installed source is missing";
+        send_msg(fd, IPC_NOTIFY, message, (uint32_t)strlen(message));
+        return;
+    }
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
+        execl("/bin/sh", "sh", APP_INSTALLER, source,
+              g_inst[i].name, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -543,7 +559,7 @@ static void launch_app(int fd, int i) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); }
-        execl("/fifi-data/apps/fifi-run", "fifi-run", g_inst[i].path, (char*)NULL);
+        execl(APP_RUNNER, "fifi-run", g_inst[i].path, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -575,7 +591,7 @@ static void launch_by_name(int fd, const char *name) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/fifi-data/apps/fifi-run", "fifi-run", path, (char*)NULL);
+        execl(APP_RUNNER, "fifi-run", path, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -588,7 +604,7 @@ static void uninstall_by_name(int fd, const char *name) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/bin/sh", "sh", "/fifi-data/apps/appstore-uninstall.sh", name, (char*)NULL);
+        execl("/bin/sh", "sh", APP_UNINSTALLER, name, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -882,7 +898,7 @@ static void start_install(int fd, int i) {
         /* child: run installer detached */
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); }
-        execl("/bin/sh", "sh", "/fifi-data/apps/appstore-install.sh", a->repo, a->name, (char*)NULL);
+        execl("/bin/sh", "sh", APP_INSTALLER, a->repo, a->name, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -934,7 +950,7 @@ int main(void) {
             setsid();
             int nul = open("/dev/null", O_RDWR);
             if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-            execl("/bin/sh", "sh", "/fifi-data/apps/appstore-sync.sh", (char*)NULL);
+            execl("/bin/sh", "sh", APP_SYNC, (char*)NULL);
             _exit(127);
         }
     }

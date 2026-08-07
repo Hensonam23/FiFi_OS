@@ -8,7 +8,7 @@
 name="$1"
 [ -n "$name" ] || { echo "usage: appstore-uninstall.sh <AppName>" >&2; exit 2; }
 
-APPS=/fifi-data/apps
+APPS="${FIFI_APPS_DIR:-/fifi-data/apps}"
 status="$APPS/$name.status"
 echo removing > "$status"
 
@@ -27,7 +27,7 @@ rm -f  "$APPS/$name.AppImage" "$APPS/$name.png" "$APPS/$name.sh"
 rm -rf "$APPS/$name.d"
 
 # Strip the desktop-icon line(s) referencing this app (launcher or AppImage path).
-conf=/fifi-data/fifi-desktop.conf
+conf="${FIFI_DESKTOP_CONF:-/fifi-data/fifi-desktop.conf}"
 if [ -f "$conf" ]; then
     grep -v "	$name\$" "$conf" 2>/dev/null > "$conf.tmp" || true
     mv "$conf.tmp" "$conf" 2>/dev/null || true
