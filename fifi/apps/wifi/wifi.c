@@ -1,4 +1,4 @@
-/* FiFi WiFi Manager — scan, select, and connect to WiFi networks via iwd.
+/* FiFi WiFi Manager — scan, select, and connect through the root broker.
  * Build: gcc -O2 -static -o fifi-wifi wifi.c
  */
 
@@ -260,26 +260,6 @@ static void start_scan(void) {
         return;
     }
 
-    /* Kill any running wpa_supplicant first — it blocks the interface for iw scan */
-    pid_t kill_pid = fork();
-    if (kill_pid == 0) {
-        for (int i = 3; i < 64; i++) close(i);
-        execl("/usr/bin/wpa_cli", "wpa_cli", "-i", g_wif, "terminate", NULL);
-        _exit(0);
-    }
-    if (kill_pid > 0) { int st; waitpid(kill_pid, &st, 0); }
-    usleep(200000);
-
-    /* Bring interface up and give it a moment to settle */
-    pid_t up_pid = fork();
-    if (up_pid == 0) {
-        for (int i = 3; i < 64; i++) close(i);
-        execl("/bin/ip", "ip", "link", "set", g_wif, "up", NULL);
-        _exit(1);
-    }
-    if (up_pid > 0) { int st; waitpid(up_pid, &st, 0); }
-    usleep(200000);
-
     int pfd[2];
     if (pipe(pfd) < 0) return;
     g_scan_pid = fork();
@@ -288,7 +268,7 @@ static void start_scan(void) {
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
         close(pfd[1]);
-        execl("/usr/bin/iw", "iw", "dev", g_wif, "scan", NULL);
+        execl("/bin/fifi-admin", "fifi-admin", "wifi", "scan", g_wif, NULL);
         _exit(1);
     }
     close(pfd[1]);
@@ -335,71 +315,47 @@ static void poll_scan(void) {
     }
 }
 
-/* ── Connect — wpa_supplicant (auth) + udhcpc (DHCP), fully async ───────── */
+static int write_credential_bytes(int fd, const void *data, size_t length) {
+    const unsigned char *bytes = data;
+    while (length) {
+        ssize_t wrote = write(fd, bytes, length);
+        if (wrote < 0) { if (errno == EINTR) continue; return -1; }
+        bytes += wrote; length -= (size_t)wrote;
+    }
+    return 0;
+}
+
+/* Credentials cross the broker on stdin, so the password never appears in argv. */
 static void do_connect(const char *ssid, const char *password) {
-    /* Kill any existing wpa_supplicant on this interface */
-    pid_t kill_pid = fork();
-    if (kill_pid == 0) {
-        for (int i = 3; i < 64; i++) close(i);
-        execl("/usr/bin/wpa_cli", "wpa_cli", "-i", g_wif, "terminate", NULL);
-        _exit(0);
+    size_t ssid_len = strlen(ssid), password_len = strlen(password);
+    if (ssid_len > 128 || password_len > 128) {
+        snprintf(g_status, sizeof(g_status), "Network name or password is too long");
+        return;
     }
-    if (kill_pid > 0) { int st; waitpid(kill_pid, &st, 0); }
-    usleep(300000);
-
-    /* Write wpa_supplicant config — key_mgmt=WPA-PSK SAE covers both WPA2 and WPA3 */
-    FILE *wc = fopen("/fifi-data/wpa.conf", "w");
-    if (!wc) { snprintf(g_status, sizeof(g_status), "Error: cannot write config"); return; }
-    fchmod(fileno(wc), 0600);   /* contains the plaintext PSK — owner-only */
-    fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n");
-    /* Write SSID as hex to avoid quoting issues with special chars */
-    fprintf(wc, "    ssid=");
-    for (int i = 0; ssid[i]; i++) fprintf(wc, "%02x", (unsigned char)ssid[i]);
-    fprintf(wc, "\n");
-    fprintf(wc, "    psk=\"");
-    for (int i = 0; password[i]; i++) {
-        if (password[i] == '"' || password[i] == '\\') fputc('\\', wc);
-        fputc(password[i], wc);
-    }
-    fprintf(wc, "\"\n    key_mgmt=WPA-PSK SAE\n    ieee80211w=1\n}\n");
-    fclose(wc);
-
-    /* Launch wpa_supplicant — it handles auth in background */
+    int pfd[2];
+    if (pipe(pfd) != 0) return;
     pid_t pid = fork();
     if (pid == 0) {
+        close(pfd[1]); dup2(pfd[0], STDIN_FILENO); close(pfd[0]);
         for (int i = 3; i < 64; i++) close(i);
-        execl("/usr/bin/wpa_supplicant", "wpa_supplicant",
-              "-B", "-i", g_wif, "-D", "nl80211,wext",
-              "-c", "/fifi-data/wpa.conf", NULL);
+        execl("/bin/fifi-admin", "fifi-admin", "wifi", "connect", g_wif, NULL);
         _exit(1);
     }
-    if (pid > 0) { int st; waitpid(pid, &st, 0); }
-
-    /* After ~5s of association, run udhcpc in background to get an IP */
-    pid_t dhcp_pid = fork();
-    if (dhcp_pid == 0) {
-        sleep(5);
-        for (int i = 3; i < 64; i++) close(i);
-        execl("/bin/udhcpc", "udhcpc", "-i", g_wif,
-              "-q", "-n", "-t", "15", NULL);
-        _exit(1);
-    }
-    /* SIGCHLD=SIG_IGN so the kernel auto-reaps the dhcp child */
-    signal(SIGCHLD, SIG_IGN);
-
-    /* Save credentials for boot auto-connect via init script */
-    FILE *sc = fopen("/fifi-data/wifi.conf", "w");
-    if (sc) {
-        fchmod(fileno(sc), 0600);   /* contains the plaintext PSK — owner-only */
-        /* Sanitize: strip any newlines from SSID/password to keep key=value format valid */
-        char safe_ssid[128] = {0}, safe_pw[128] = {0};
-        int si = 0, pi = 0;
-        for (int i = 0; ssid[i] && si < 127; i++)
-            if (ssid[i] != '\n' && ssid[i] != '\r') safe_ssid[si++] = ssid[i];
-        for (int i = 0; password[i] && pi < 127; i++)
-            if (password[i] != '\n' && password[i] != '\r') safe_pw[pi++] = password[i];
-        fprintf(sc, "SSID=%s\nPASSWORD=%s\n", safe_ssid, safe_pw);
-        fclose(sc);
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return; }
+    close(pfd[0]);
+    unsigned char sizes[2];
+    sizes[0] = (unsigned char)(ssid_len >> 8); sizes[1] = (unsigned char)ssid_len;
+    int failed = write_credential_bytes(pfd[1], sizes, sizeof sizes) ||
+                 write_credential_bytes(pfd[1], ssid, ssid_len);
+    sizes[0] = (unsigned char)(password_len >> 8); sizes[1] = (unsigned char)password_len;
+    failed = failed || write_credential_bytes(pfd[1], sizes, sizeof sizes) ||
+             write_credential_bytes(pfd[1], password, password_len);
+    close(pfd[1]);
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) < 0 || failed ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        snprintf(g_status, sizeof(g_status), "Could not start WiFi connection");
+        return;
     }
 
     g_state = ST_CONNECTING;
@@ -422,10 +378,6 @@ static void check_connection(void) {
                  g_sel < g_net_count ? g_nets[g_sel].ssid : "");
         snprintf(g_status, sizeof(g_status), "Connected to %s  (%s)", g_connected_ssid, ip);
         g_state = ST_CONNECTED;
-        FILE *sf = fopen("/fifi-data/wifi-ssid", "w");
-        if (sf) { fputs(g_connected_ssid, sf); fclose(sf); }
-        FILE *wsf = fopen("/fifi-data/wifi-status", "w");
-        if (wsf) { fputs("connected", wsf); fclose(wsf); }
     }
 }
 
@@ -747,7 +699,7 @@ int main(void) {
                         /* Disconnect */
                         pid_t pid = fork();
                         if (pid == 0) { for(int i=3;i<64;i++) close(i);
-                            execl("/usr/bin/iwctl","iwctl","station",g_wif,"disconnect",NULL); _exit(1); }
+                            execl("/bin/fifi-admin","fifi-admin","wifi","disconnect",g_wif,NULL); _exit(1); }
                         if (pid > 0) { int st; waitpid(pid, &st, 0); }
                         g_state = ST_IDLE;
                         g_connected_ssid[0] = '\0';

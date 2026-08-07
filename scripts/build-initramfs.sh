@@ -151,6 +151,14 @@ gcc -std=c11 -O2 -Wall -Wextra -static \
 chmod 755 "$STAGE/bin/fifi-admin"
 echo "[initramfs] narrow administrative broker installed"
 
+# Fixed-purpose Wi-Fi helper reached only through the authenticated broker.
+# Network names and passwords arrive on stdin, never in argv or logs.
+gcc -std=c11 -O2 -Wall -Wextra -static \
+    "$REPO_ROOT/fifi/platform/linux/fifi-wifi-ctl.c" \
+    -o "$STAGE/bin/fifi-wifi-ctl"
+chmod 755 "$STAGE/bin/fifi-wifi-ctl"
+echo "[initramfs] narrow Wi-Fi control helper installed"
+
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
 (cd "$REPO_ROOT/fifi/compositor" && make -s) || {

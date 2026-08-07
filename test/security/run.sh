@@ -102,10 +102,20 @@ cat > "$broker_bin/tcpdump" <<'EOF'
 #!/bin/sh
 printf 'capture args: %s\n' "$*"
 EOF
-chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump"
+cat > "$broker_bin/fifi-wifi-ctl" <<'EOF'
+#!/bin/sh
+printf 'wifi %s %s\n' "$1" "$2" >> "$FIFI_TEST_ADMIN_LOG"
+if [ "$1" = connect ]; then
+    od -An -v -tx1 >> "$FIFI_TEST_ADMIN_LOG"
+    printf 'FIFI_WIFI_OK\n'
+fi
+EOF
+chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
+    "$broker_bin/fifi-wifi-ctl"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
+FIFI_WIFI_CTL="$broker_bin/fifi-wifi-ctl" \
 FIFI_TEST_ADMIN_LOG="$broker_log" \
     "$TMP/fifi-admin" --daemon &
 broker_pid=$!
@@ -118,9 +128,23 @@ FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security firewall on
 grep -Fxq 'security firewall on' "$broker_log"
 capture_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" capture)"
 grep -Fq 'capture args: -c 20 -nn -i any -q' <<<"$capture_out"
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan wlan0
+printf '\000\010Cafe Net\000\013secret pass' |
+    FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" wifi connect wlan0
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi disconnect wlan0
+grep -Fxq 'wifi scan wlan0' "$broker_log"
+grep -Fxq 'wifi connect wlan0' "$broker_log"
+grep -Fq '00 08 43 61 66 65 20 4e 65 74 00 0b 73 65 63 72' "$broker_log"
+grep -Fq '65 74 20 70 61 73 73' "$broker_log"
+grep -Fxq 'wifi disconnect wlan0' "$broker_log"
 denied_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" shell root 2>&1)"
 grep -Fq 'operation is not allowed' <<<"$denied_out"
+bad_iface="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan 'wlan0;id' 2>&1)"
+grep -Fq 'operation is not allowed' <<<"$bad_iface"
 grep -Fq 'strcmp(name, "fifi-security") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strcmp(name, "fifi-wifi") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "security"' \
     "$ROOT/fifi/apps/security/security.c"
@@ -129,6 +153,15 @@ grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "security"' \
 ! grep -Fq 'execl("/usr/bin/tor"' "$ROOT/fifi/apps/security/security.c"
 ! grep -Fq 'execl("/bin/ip", "ip", "link", "del", "wg0"' \
     "$ROOT/fifi/apps/security/security.c"
+grep -Fq 'execl("/bin/fifi-admin", "fifi-admin", "wifi", "connect", g_wif' \
+    "$ROOT/fifi/apps/wifi/wifi.c"
+! grep -Fq 'execl("/usr/bin/wpa_supplicant"' "$ROOT/fifi/apps/wifi/wifi.c"
+! grep -Fq 'execl("/usr/bin/wpa_supplicant"' "$ROOT/fifi/apps/settings/settings.c"
+gcc -std=c11 -O2 -Wall -Wextra \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c" \
+    -o "$TMP/fifi-wifi-ctl"
+invalid_wifi_out="$("$TMP/fifi-wifi-ctl" scan 'wlan0;id' 2>&1 || true)"
+grep -Fq 'usage: fifi-wifi-ctl' <<<"$invalid_wifi_out"
 kill "$broker_pid"
 wait "$broker_pid" 2>/dev/null || true
 broker_pid=""

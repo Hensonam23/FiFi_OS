@@ -7,8 +7,8 @@
  *                 position, glass/shadow effects, corner radius). Changes are
  *                 written to disk and apply on the NEXT login/reboot; this app
  *                 does NOT (and cannot) hot-reload the running compositor.
- *   Wi-Fi       : scan / select / connect to networks (shells out to iw +
- *                 wpa_supplicant + udhcpc, same as the standalone fifi-wifi).
+ *   Wi-Fi       : scan / select / connect through the fixed Wi-Fi root broker,
+ *                 using the same boundary as the standalone fifi-wifi app.
  *   Network     : live interface / IP / RX-TX throughput (netmon logic).
  *   System      : live CPU freq / memory / uptime / load / processes + volume.
  *   Security    : read-only status of firewall / DoH / VPN / Tor / privacy.
@@ -745,23 +745,12 @@ static void wifi_scan_start(void) {
     find_wifi_if();
     if (!g_wif[0]) { snprintf(g_wstatus, sizeof g_wstatus, "No Wi-Fi interface found"); return; }
 
-    pid_t kp = fork();
-    if (kp == 0) { for (int i=3;i<64;i++) close(i);
-        execl("/usr/bin/wpa_cli","wpa_cli","-i",g_wif,"terminate",NULL); _exit(0); }
-    if (kp > 0) { int st; waitpid(kp, &st, 0); }
-    usleep(200000);
-    pid_t up = fork();
-    if (up == 0) { for (int i=3;i<64;i++) close(i);
-        execl("/bin/ip","ip","link","set",g_wif,"up",NULL); _exit(1); }
-    if (up > 0) { int st; waitpid(up, &st, 0); }
-    usleep(200000);
-
     int pfd[2];
     if (pipe(pfd) < 0) return;
     g_scan_pid = fork();
     if (g_scan_pid == 0) {
         close(pfd[0]); dup2(pfd[1], STDOUT_FILENO); dup2(pfd[1], STDERR_FILENO); close(pfd[1]);
-        execl("/usr/bin/iw","iw","dev",g_wif,"scan",NULL); _exit(1);
+        execl("/bin/fifi-admin","fifi-admin","wifi","scan",g_wif,NULL); _exit(1);
     }
     close(pfd[1]);
     g_scan_pipe = pfd[0];
@@ -793,44 +782,43 @@ static void wifi_scan_poll(void) {
     }
 }
 
-static void wifi_connect(const char *ssid, const char *password) {
-    pid_t kp = fork();
-    if (kp == 0) { for (int i=3;i<64;i++) close(i);
-        execl("/usr/bin/wpa_cli","wpa_cli","-i",g_wif,"terminate",NULL); _exit(0); }
-    if (kp > 0) { int st; waitpid(kp, &st, 0); }
-    usleep(300000);
-
-    FILE *wc = fopen("/fifi-data/wpa.conf", "w");
-    if (!wc) { snprintf(g_wstatus, sizeof g_wstatus, "Error: cannot write config"); return; }
-    fchmod(fileno(wc), 0600);
-    fprintf(wc, "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\nnetwork={\n    ssid=");
-    for (int i = 0; ssid[i]; i++) fprintf(wc, "%02x", (unsigned char)ssid[i]);
-    fprintf(wc, "\n    psk=\"");
-    for (int i = 0; password[i]; i++) {
-        if (password[i] == '"' || password[i] == '\\') fputc('\\', wc);
-        fputc(password[i], wc);
+static int write_admin_bytes(int fd, const void *data, size_t length) {
+    const unsigned char *bytes = data;
+    while (length) {
+        ssize_t wrote = write(fd, bytes, length);
+        if (wrote < 0) { if (errno == EINTR) continue; return -1; }
+        bytes += wrote; length -= (size_t)wrote;
     }
-    fprintf(wc, "\"\n    key_mgmt=WPA-PSK SAE\n    ieee80211w=1\n}\n");
-    fclose(wc);
+    return 0;
+}
 
+static void wifi_connect(const char *ssid, const char *password) {
+    size_t ssid_len = strlen(ssid), password_len = strlen(password);
+    if (ssid_len > 128 || password_len > 128) {
+        snprintf(g_wstatus, sizeof g_wstatus, "Network name or password is too long");
+        return;
+    }
+    int pfd[2];
+    if (pipe(pfd) != 0) return;
     pid_t pid = fork();
-    if (pid == 0) { for (int i=3;i<64;i++) close(i);
-        execl("/usr/bin/wpa_supplicant","wpa_supplicant","-B","-i",g_wif,
-              "-D","nl80211,wext","-c","/fifi-data/wpa.conf",NULL); _exit(1); }
-    if (pid > 0) { int st; waitpid(pid, &st, 0); }
-
-    pid_t dp = fork();
-    if (dp == 0) { sleep(5); for (int i=3;i<64;i++) close(i);
-        execl("/bin/udhcpc","udhcpc","-i",g_wif,"-q","-n","-t","15",NULL); _exit(1); }
-    signal(SIGCHLD, SIG_IGN);
-
-    FILE *sc = fopen("/fifi-data/wifi.conf", "w");
-    if (sc) {
-        fchmod(fileno(sc), 0600);
-        char ss[128]={0}, pw[128]={0}; int si=0, pi=0;
-        for (int i=0; ssid[i] && si<127; i++) if (ssid[i]!='\n'&&ssid[i]!='\r') ss[si++]=ssid[i];
-        for (int i=0; password[i] && pi<127; i++) if (password[i]!='\n'&&password[i]!='\r') pw[pi++]=password[i];
-        fprintf(sc, "SSID=%s\nPASSWORD=%s\n", ss, pw); fclose(sc);
+    if (pid == 0) {
+        close(pfd[1]); dup2(pfd[0], STDIN_FILENO); close(pfd[0]);
+        for (int i=3;i<64;i++) close(i);
+        execl("/bin/fifi-admin","fifi-admin","wifi","connect",g_wif,NULL); _exit(1);
+    }
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return; }
+    close(pfd[0]);
+    unsigned char sizes[2];
+    sizes[0]=(unsigned char)(ssid_len>>8); sizes[1]=(unsigned char)ssid_len;
+    int failed = write_admin_bytes(pfd[1],sizes,2) ||
+                 write_admin_bytes(pfd[1],ssid,ssid_len);
+    sizes[0]=(unsigned char)(password_len>>8); sizes[1]=(unsigned char)password_len;
+    failed = failed || write_admin_bytes(pfd[1],sizes,2) ||
+             write_admin_bytes(pfd[1],password,password_len);
+    close(pfd[1]);
+    int status=0;
+    if (waitpid(pid,&status,0)<0 || failed || !WIFEXITED(status) || WEXITSTATUS(status)!=0) {
+        snprintf(g_wstatus,sizeof g_wstatus,"Could not start WiFi connection"); return;
     }
     g_wstate = ST_CONNECTING;
     snprintf(g_wstatus, sizeof g_wstatus, "Connecting to %s... (~10-20s)", ssid);
@@ -1618,7 +1606,7 @@ int main(int argc, char **argv) {
                             } else if (k == 'd' || k == 'D') {
                                 pid_t pid = fork();
                                 if (pid == 0) { for(int i=3;i<64;i++) close(i);
-                                    execl("/usr/bin/iwctl","iwctl","station",g_wif,"disconnect",NULL); _exit(1); }
+                                    execl("/bin/fifi-admin","fifi-admin","wifi","disconnect",g_wif,NULL); _exit(1); }
                                 if (pid > 0) { int st; waitpid(pid, &st, 0); }
                                 g_wstate = ST_IDLE; g_conn_ssid[0] = '\0';
                                 snprintf(g_wstatus, sizeof g_wstatus, "Disconnected -- press R to scan");

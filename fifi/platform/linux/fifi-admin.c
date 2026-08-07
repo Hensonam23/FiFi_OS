@@ -17,6 +17,23 @@
 #define DESKTOP_GID 1000
 #define REQUEST_MAX 256
 
+static int is_wifi_connect(int argc, char **args) {
+    return argc == 3 && strcmp(args[0], "wifi") == 0 &&
+           strcmp(args[1], "connect") == 0;
+}
+
+static int valid_interface(const char *name) {
+    size_t len = name ? strlen(name) : 0;
+    if (len == 0 || len > 31) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
+            return 0;
+    }
+    return 1;
+}
+
 static const char *socket_path(void) {
     const char *path = getenv("FIFI_ADMIN_SOCKET");
     return path && *path ? path : DEFAULT_SOCKET;
@@ -46,6 +63,7 @@ static void run_fixed_command(char *request) {
          word = strtok_r(NULL, " \t\r\n", &save)) {
         args[argc++] = word;
     }
+    signal(SIGCHLD, SIG_DFL);
 
     if (argc == 3 && strcmp(args[0], "security") == 0 &&
         (strcmp(args[1], "firewall") == 0 ||
@@ -61,6 +79,16 @@ static void run_fixed_command(char *request) {
         if (!tool || !*tool) tool = "/usr/bin/tcpdump";
         execl(tool, "tcpdump", "-c", "20", "-nn", "-i", "any", "-q",
               (char *)NULL);
+    } else if (argc == 3 && strcmp(args[0], "wifi") == 0 &&
+               (strcmp(args[1], "scan") == 0 ||
+                strcmp(args[1], "connect") == 0 ||
+                strcmp(args[1], "disconnect") == 0) &&
+               valid_interface(args[2])) {
+        const char *tool = getenv("FIFI_WIFI_CTL");
+        if (!tool || !*tool) tool = "/bin/fifi-wifi-ctl";
+        if (is_wifi_connect(argc, args))
+            dprintf(STDOUT_FILENO, "READY\n");
+        execl(tool, "fifi-wifi-ctl", args[1], args[2], (char *)NULL);
     } else {
         dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
         _exit(64);
@@ -84,6 +112,7 @@ static void handle_client(int client) {
         dprintf(client, "fifi-admin: malformed request\n");
         _exit(64);
     }
+    dup2(client, STDIN_FILENO);
     dup2(client, STDOUT_FILENO);
     dup2(client, STDERR_FILENO);
     if (client > STDERR_FILENO) close(client);
@@ -168,12 +197,55 @@ static int client_main(int argc, char **argv) {
         die("fifi-admin: connect");
     if (write(sock, request, used) != (ssize_t)used)
         die("fifi-admin: write");
+
+    if (argc == 4 && strcmp(argv[1], "wifi") == 0 &&
+        strcmp(argv[2], "connect") == 0) {
+        char ready[6];
+        size_t have = 0;
+        while (have < sizeof(ready)) {
+            ssize_t got = read(sock, ready + have, sizeof(ready) - have);
+            if (got <= 0) die("fifi-admin: broker handshake");
+            have += (size_t)got;
+        }
+        if (memcmp(ready, "READY\n", sizeof(ready)) != 0) {
+            fprintf(stderr, "fifi-admin: broker refused Wi-Fi request\n");
+            return 1;
+        }
+        char input[1024];
+        ssize_t got;
+        while ((got = read(STDIN_FILENO, input, sizeof(input))) > 0) {
+            size_t sent = 0;
+            while (sent < (size_t)got) {
+                ssize_t wrote = write(sock, input + sent, (size_t)got - sent);
+                if (wrote < 0) {
+                    if (errno == EINTR) continue;
+                    die("fifi-admin: credential stream");
+                }
+                sent += (size_t)wrote;
+            }
+        }
+        if (got < 0) die("fifi-admin: credential input");
+    }
     shutdown(sock, SHUT_WR);
 
     char output[1024];
     ssize_t got;
-    while ((got = read(sock, output, sizeof(output))) > 0)
+    int wifi_ok = 0;
+    const char marker[] = "FIFI_WIFI_OK\n";
+    size_t matched = 0;
+    while ((got = read(sock, output, sizeof(output))) > 0) {
+        for (ssize_t i = 0; i < got; i++) {
+            if (output[i] == marker[matched]) {
+                if (++matched == sizeof(marker) - 1) { wifi_ok = 1; matched = 0; }
+            } else {
+                matched = output[i] == marker[0] ? 1 : 0;
+            }
+        }
         if (write(STDOUT_FILENO, output, (size_t)got) != got) return 1;
+    }
+    if (argc == 4 && strcmp(argv[1], "wifi") == 0 &&
+        strcmp(argv[2], "connect") == 0)
+        return got < 0 || !wifi_ok ? 1 : 0;
     return got < 0 ? 1 : 0;
 }
 
