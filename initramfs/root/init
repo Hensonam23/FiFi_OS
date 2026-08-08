@@ -242,9 +242,12 @@ if [ "$FIFI_UPDATE_BOOT" = 1 ]; then
 fi
 
 # Track the running image on persistent storage. This also makes offline USB
-# updates and GRUB rollback boots visible to the online updater.
-if [ -s /etc/fifi-update-channel ] && [ ! -s /fifi-data/update-channel ]; then
-    cp /etc/fifi-update-channel /fifi-data/update-channel 2>/dev/null || true
+# updates and GRUB rollback boots visible to the online updater. Network work
+# uses private desktop-owned staging; only the fixed broker verbs write slots.
+/bin/sh /usr/share/fifi/migrate-update-storage.sh
+if [ -s /etc/fifi-update-channel ] && [ ! -s /fifi-data/update/channel ]; then
+    /bin/fifi-user-exec /bin/cp /etc/fifi-update-channel \
+        /fifi-data/update/channel 2>/dev/null || true
 fi
 if [ -s /etc/fifi-build-id ]; then
     _running_build="$(cat /etc/fifi-build-id 2>/dev/null)"
@@ -695,6 +698,7 @@ fifi_boot_selftest() {
             _ipc_mode="$(stat -c '%u:%g:%a' /tmp/fifi-compositor.sock 2>/dev/null)"
             _wayland_mode="$(stat -c '%u:%g:%a' /tmp/wayland-0 2>/dev/null)"
             _apps_mode="$(stat -c '%u:%g:%a' /fifi-data/apps 2>/dev/null)"
+            _update_mode="$(stat -c '%u:%g:%a' /fifi-data/update 2>/dev/null)"
             _desktop_conf_mode="$(stat -c '%u:%g:%a' /fifi-data/fifi-desktop.conf 2>/dev/null)"
             _settings_mode="$(stat -c '%u:%g:%a' /fifi-data/fifi-settings.conf 2>/dev/null)"
             if [ "$_ipc_mode" != "0:1000:660" ] ||
@@ -704,10 +708,12 @@ fifi_boot_selftest() {
                 return
             fi
             if [ "$_apps_mode" != "1000:1000:700" ] ||
+               [ "$_update_mode" != "1000:1000:700" ] ||
                [ "$_desktop_conf_mode" != "1000:1000:600" ] ||
                [ "$_settings_mode" != "1000:1000:600" ]; then
-                printf 'FIFI_SELFTEST FAIL user-storage apps=%s desktop-conf=%s settings=%s\n' \
-                    "$_apps_mode" "$_desktop_conf_mode" "$_settings_mode" >/dev/ttyS0
+                printf 'FIFI_SELFTEST FAIL user-storage apps=%s update=%s desktop-conf=%s settings=%s\n' \
+                    "$_apps_mode" "$_update_mode" "$_desktop_conf_mode" \
+                    "$_settings_mode" >/dev/ttyS0
                 return
             fi
 

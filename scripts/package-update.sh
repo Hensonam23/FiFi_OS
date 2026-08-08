@@ -34,13 +34,9 @@ BUILD_ID="${FIFI_BUILD_ID:-$(git -C "$ROOT" rev-parse HEAD)}"
 }
 
 mkdir -p "$OUT"
+rm -f "$OUT/fifi-bootstrap-update"
 cp "$KERNEL" "$OUT/bzImage"
 cp "$INITRAMFS" "$OUT/initramfs.cpio.gz"
-# Older installed FiFi images have a USB-only `update` command. Publish the new
-# verified updater as a small standalone bootstrap so those systems can make
-# their first online transition without downloading or flashing an ISO.
-cp "$ROOT/initramfs/root/bin/system-update" "$OUT/fifi-bootstrap-update"
-chmod +x "$OUT/fifi-bootstrap-update"
 
 kernel_sha="$(sha256sum "$OUT/bzImage" | awk '{print $1}')"
 initramfs_sha="$(sha256sum "$OUT/initramfs.cpio.gz" | awk '{print $1}')"

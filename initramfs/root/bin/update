@@ -14,14 +14,19 @@
 #   update rollback        restore the previous kernel + initramfs
 #   update usb             update from a plugged-in FiFi live USB
 
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
-CHANNEL_FILE="$DATA_ROOT/update-channel"
+CHANNEL_FILE="$DATA_ROOT/update/channel"
+ADMIN="${FIFI_ADMIN_CLIENT:-fifi-admin}"
 
 case "${1:-}" in
     test|stable)
         selected_channel="$1"
         shift
-        mkdir -p "$DATA_ROOT" || exit 1
+        mkdir -p "$(dirname "$CHANNEL_FILE")" || exit 1
         printf '%s\n' "$selected_channel" > "$CHANNEL_FILE" || exit 1
         echo "[update] channel set to $selected_channel"
         exec system-update --channel "$selected_channel" "$@"
@@ -37,11 +42,12 @@ case "${1:-}" in
         echo "$channel"
         ;;
     rollback)
-        exec update-rollback
+        exec "$ADMIN" update rollback
         ;;
     usb|--usb)
         shift
-        exec update-usb "$@"
+        [ "$#" -eq 0 ] || { echo "update usb: unexpected option" >&2; exit 2; }
+        exec "$ADMIN" update usb
         ;;
     -h|--help|help)
         sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
@@ -51,7 +57,7 @@ case "${1:-}" in
         # published: a recognized FiFi USB wins, while exit 2 means no USB was
         # present and the normal online updater should continue.
         if [ $# -eq 0 ] || [ "${1:-}" = "-y" ]; then
-            update-usb --if-present "$@"
+            "$ADMIN" update usb-if-present
             usb_status=$?
             [ "$usb_status" -eq 0 ] && exit 0
             [ "$usb_status" -eq 2 ] || exit "$usb_status"

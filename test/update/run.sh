@@ -3,13 +3,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+broker_pid=""
+cleanup() {
+    if [[ -n "$broker_pid" ]] && kill -0 "$broker_pid" 2>/dev/null; then
+        kill "$broker_pid" 2>/dev/null || true
+        wait "$broker_pid" 2>/dev/null || true
+    fi
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 DATA="$TMP/data"
 ETC="$TMP/etc"
 FIXTURES="$TMP/fixtures"
 MOCK_BIN="$TMP/bin"
-mkdir -p "$DATA/boot" "$ETC" "$FIXTURES" "$MOCK_BIN"
+mkdir -p "$DATA/boot" "$DATA/update/staging" "$ETC" "$FIXTURES" "$MOCK_BIN"
 openssl genpkey -algorithm ED25519 -out "$FIXTURES/test-signing-key.pem"
 openssl pkey -in "$FIXTURES/test-signing-key.pem" -pubout \
     -out "$ETC/fifi-release-signing.pub"
@@ -94,7 +102,7 @@ chmod +x "$MOCK_BIN/curl"
 
 cat > "$MOCK_BIN/update-usb" <<'EOF'
 #!/bin/sh
-if [ "${FIFI_TEST_USB_PRESENT:-0}" = 1 ]; then
+if [ -e "$FIFI_TEST_USB_PRESENT_FILE" ]; then
     printf 'usb\n' >> "$FIFI_TEST_USB_LOG"
     exit 0
 fi
@@ -111,6 +119,26 @@ export FIFI_DATA_ROOT="$DATA"
 export FIFI_ETC_ROOT="$ETC"
 export FIFI_SKIP_APP_UPDATE=1
 export FIFI_TEST_USB_LOG="$TMP/usb-dispatch.log"
+export FIFI_TEST_USB_PRESENT_FILE="$TMP/usb-present"
+export FIFI_UPDATE_STAGING="$DATA/update/staging"
+export FIFI_ALLOW_UNPRIVILEGED_TEST=1
+export FIFI_BOOT_SLOTS="$ROOT/initramfs/root/bin/fifi-boot-slots"
+
+gcc -std=c11 -O2 -Wall -Wextra \
+    "$ROOT/fifi/platform/linux/fifi-admin.c" \
+    -o "$MOCK_BIN/fifi-admin"
+export FIFI_ADMIN_SOCKET="$TMP/fifi-admin.sock"
+FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
+FIFI_UPDATE_APPLY="$ROOT/initramfs/root/bin/fifi-apply-update" \
+FIFI_UPDATE_USB="$MOCK_BIN/update-usb" \
+FIFI_UPDATE_ROLLBACK="$ROOT/initramfs/root/bin/update-rollback" \
+    "$MOCK_BIN/fifi-admin" --daemon &
+broker_pid=$!
+for _ in $(seq 1 50); do
+    [[ -S "$FIFI_ADMIN_SOCKET" ]] && break
+    sleep 0.05
+done
+[[ -S "$FIFI_ADMIN_SOCKET" ]]
 
 echo "[test-update] verified one-time bootstrap installation"
 "$ROOT/initramfs/root/bin/system-update" -y --channel test
@@ -118,7 +146,7 @@ cmp "$FIXTURES/bzImage" "$DATA/boot/bzImage"
 cmp "$FIXTURES/initramfs.cpio.gz" "$DATA/boot/initramfs.cpio.gz"
 grep -Fxq build-001 "$DATA/os-build-id"
 grep -Fxq build-002 "$DATA/os-build-id.pending"
-grep -Fxq test "$DATA/update-channel"
+grep -Fxq test "$DATA/update/channel"
 grep -Fxq old-kernel "$DATA/boot/bzImage.prev"
 grep -Fxq 'set fifi_active=B' "$DATA/boot/fifi-slot.cfg"
 grep -Fxq 'set fifi_previous=A' "$DATA/boot/fifi-slot.cfg"
@@ -140,8 +168,33 @@ test ! -e "$DATA/os-build-id.pending"
 grep -Fxq 'set fifi_active=B' "$DATA/boot/fifi-slot.cfg"
 grep -Fxq 'set fifi_pending=0' "$DATA/boot/fifi-slot.cfg"
 
+echo "[test-update] root broker re-verifies user-owned staging"
+write_manifest build-003 "$kernel_sha"
+cp "$FIXTURES/fifi-update.manifest" "$DATA/update/staging/fifi-update.manifest"
+cp "$FIXTURES/fifi-update.manifest.sig" "$DATA/update/staging/fifi-update.manifest.sig"
+cp "$FIXTURES/bzImage" "$DATA/update/staging/bzImage"
+cp "$FIXTURES/initramfs.cpio.gz" "$DATA/update/staging/initramfs.cpio.gz"
+printf 'linux-desktop-test\n' > "$DATA/update/staging/release-tag"
+printf 'changed-after-download\n' >> "$DATA/update/staging/bzImage"
+before_broker_sha="$(sha256sum "$DATA/boot/bzImage" | awk '{print $1}')"
+if fifi-admin update apply test; then
+    echo "broker accepted modified user staging" >&2
+    exit 1
+fi
+[[ "$before_broker_sha" == "$(sha256sum "$DATA/boot/bzImage" | awk '{print $1}')" ]]
+test ! -e "$DATA/os-build-id.pending"
+rm -f "$DATA/update/staging/bzImage"
+ln -s "$FIXTURES/bzImage" "$DATA/update/staging/bzImage"
+if fifi-admin update apply test; then
+    echo "broker accepted symlinked user staging" >&2
+    exit 1
+fi
+test ! -e "$DATA/os-build-id.pending"
+
 echo "[test-update] plain update prefers a recognized USB"
-FIFI_TEST_USB_PRESENT=1 update
+touch "$FIFI_TEST_USB_PRESENT_FILE"
+update
+rm -f "$FIFI_TEST_USB_PRESENT_FILE"
 grep -Fxq usb "$FIFI_TEST_USB_LOG"
 
 echo "[test-update] checksum failure preserves active files"
@@ -259,9 +312,7 @@ FIFI_RELEASE_PUBLIC_KEY="$ETC/fifi-release-signing.pub" \
 grep -Fxq channel=test "$PACKAGE_BUILD/update-test/fifi-update.manifest"
 grep -Fxq build=build-004 "$PACKAGE_BUILD/update-test/fifi-update.manifest"
 cmp "$FIXTURES/bzImage" "$PACKAGE_BUILD/update-test/bzImage"
-cmp "$ROOT/initramfs/root/bin/system-update" \
-    "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"
-test -x "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"
+test ! -e "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"
 openssl pkeyutl -verify -pubin \
     -inkey "$ETC/fifi-release-signing.pub" -rawin \
     -in "$PACKAGE_BUILD/update-test/fifi-update.manifest" \

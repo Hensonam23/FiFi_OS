@@ -17,7 +17,7 @@ if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; the
 fi
 
 for file in bzImage initramfs.cpio.gz fifi-update.manifest \
-            fifi-update.manifest.sig fifi-bootstrap-update; do
+            fifi-update.manifest.sig; do
     [[ -s "$ASSET_DIR/$file" ]] || {
         echo "[publish-update] missing asset: $ASSET_DIR/$file" >&2
         echo "Run: make linux-test-update" >&2
@@ -29,7 +29,6 @@ ASSETS=(
     "$ASSET_DIR/initramfs.cpio.gz"
     "$ASSET_DIR/fifi-update.manifest"
     "$ASSET_DIR/fifi-update.manifest.sig"
-    "$ASSET_DIR/fifi-bootstrap-update"
 )
 if [[ -s "$TEST_ISO" ]]; then
     ASSETS+=("$TEST_ISO")

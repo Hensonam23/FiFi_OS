@@ -1,0 +1,164 @@
+#!/bin/sh
+# Verify a user-downloaded release again, then install it into the inactive slot.
+set -eu
+
+channel="${1:-}"
+case "$channel" in stable|test) ;; *) exit 2 ;; esac
+
+if [ "$(id -u)" != 0 ] && [ "${FIFI_ALLOW_UNPRIVILEGED_TEST:-0}" != 1 ]; then
+    echo "fifi-apply-update: root broker required" >&2
+    exit 126
+fi
+
+DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+ETC_ROOT="${FIFI_ETC_ROOT:-/etc}"
+STAGING="${FIFI_UPDATE_STAGING:-$DATA_ROOT/update/staging}"
+BOOT="$DATA_ROOT/boot"
+RELEASE_PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ETC_ROOT/fifi-release-signing.pub}"
+BUILD_FILE="$DATA_ROOT/os-build-id"
+PENDING_BUILD_FILE="$DATA_ROOT/os-build-id.pending"
+SLOT_TOOL="${FIFI_BOOT_SLOTS:-/bin/fifi-boot-slots}"
+
+source_manifest="$STAGING/fifi-update.manifest"
+source_signature="$STAGING/fifi-update.manifest.sig"
+source_kernel="$STAGING/bzImage"
+source_initramfs="$STAGING/initramfs.cpio.gz"
+source_tag="$STAGING/release-tag"
+
+for source_file in "$source_manifest" "$source_signature" "$source_kernel" \
+                   "$source_initramfs" "$source_tag"; do
+    [ -f "$source_file" ] && [ ! -L "$source_file" ] || {
+        echo "fifi-apply-update: staged release is incomplete or unsafe" >&2
+        exit 1
+    }
+done
+
+within_limit() {
+    limit_file="$1"
+    limit_max="$2"
+    limit_size="$(stat -c %s "$limit_file" 2>/dev/null || echo invalid)"
+    case "$limit_size" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$limit_size" -le "$limit_max" ]
+}
+within_limit "$source_manifest" 65536 &&
+within_limit "$source_signature" 8192 &&
+within_limit "$source_kernel" 268435456 &&
+within_limit "$source_initramfs" 1073741824 &&
+within_limit "$source_tag" 256 || {
+    echo "fifi-apply-update: staged release exceeds safety limits" >&2
+    exit 1
+}
+
+pending_build=""
+[ -s "$PENDING_BUILD_FILE" ] && read -r pending_build < "$PENDING_BUILD_FILE"
+[ -z "$pending_build" ] || {
+    echo "OS update $pending_build already awaits reboot." >&2
+    exit 1
+}
+
+mkdir -p "$BOOT"
+manifest_new="$BOOT/.fifi-update.manifest.new"
+signature_new="$BOOT/.fifi-update.manifest.sig.new"
+kernel_new="$BOOT/bzImage.new"
+initramfs_new="$BOOT/initramfs.cpio.gz.new"
+tag_new="$BOOT/.fifi-update.tag.new"
+build_prev_new="$DATA_ROOT/.os-build-id.prev.new"
+cleanup() {
+    rm -f "$manifest_new" "$signature_new" "$kernel_new" \
+          "$initramfs_new" "$tag_new" "$build_prev_new"
+}
+trap cleanup EXIT
+
+# Copy out of user-owned staging before trusting any bytes. Every privileged
+# decision below uses only these root-owned snapshots.
+cp -P "$source_manifest" "$manifest_new"
+cp -P "$source_signature" "$signature_new"
+cp -P "$source_kernel" "$kernel_new"
+cp -P "$source_initramfs" "$initramfs_new"
+cp -P "$source_tag" "$tag_new"
+for copied_file in "$manifest_new" "$signature_new" "$kernel_new" \
+                   "$initramfs_new" "$tag_new"; do
+    [ -f "$copied_file" ] && [ ! -L "$copied_file" ] || {
+        echo "fifi-apply-update: unsafe staged file refused" >&2
+        exit 1
+    }
+    chown 0:0 "$copied_file" 2>/dev/null || true
+    chmod 0600 "$copied_file"
+done
+
+[ -s "$RELEASE_PUBLIC_KEY" ] || {
+    echo "FiFi release verification key is missing; update refused." >&2
+    exit 1
+}
+openssl pkeyutl -verify -pubin -inkey "$RELEASE_PUBLIC_KEY" -rawin \
+    -in "$manifest_new" -sigfile "$signature_new" >/dev/null 2>&1 || {
+    echo "Update manifest signature is invalid; update refused." >&2
+    exit 1
+}
+
+manifest_value() {
+    apply_key="$1"
+    sed -n "s/^${apply_key}=\([A-Za-z0-9._-]*\)$/\1/p" "$manifest_new" |
+        head -1
+}
+
+[ "$(manifest_value format)" = 1 ] || {
+    echo "Unsupported or malformed update manifest." >&2
+    exit 1
+}
+[ "$(manifest_value channel)" = "$channel" ] || {
+    echo "Update channel mismatch; refusing the release." >&2
+    exit 1
+}
+build_id="$(manifest_value build)"
+kernel_sha="$(manifest_value kernel_sha256)"
+initramfs_sha="$(manifest_value initramfs_sha256)"
+[ -n "$build_id" ] || { echo "Update manifest has no build identifier." >&2; exit 1; }
+printf '%s\n' "$kernel_sha" | grep -Eq '^[0-9a-fA-F]{64}$' &&
+printf '%s\n' "$initramfs_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+    echo "Update manifest has invalid SHA-256 values." >&2
+    exit 1
+}
+[ "$(sha256sum "$kernel_new" | awk '{print $1}')" = "$kernel_sha" ] &&
+[ "$(sha256sum "$initramfs_new" | awk '{print $1}')" = "$initramfs_sha" ] || {
+    echo "Downloaded image checksum mismatch; active boot files are untouched." >&2
+    exit 1
+}
+gzip -t "$initramfs_new" 2>/dev/null || {
+    echo "Downloaded initramfs failed gzip validation." >&2
+    exit 1
+}
+
+tag="$(cat "$tag_new")"
+case "$tag" in ''|*[!A-Za-z0-9._-]*)
+    echo "Invalid release tag; update refused." >&2
+    exit 1 ;;
+esac
+
+previous_build=""
+[ -s "$BUILD_FILE" ] && read -r previous_build < "$BUILD_FILE"
+[ -n "$previous_build" ] && printf '%s\n' "$previous_build" > "$build_prev_new"
+
+echo "Installing the verified image into the inactive boot slot..."
+new_slot=$(FIFI_DATA_ROOT="$DATA_ROOT" "$SLOT_TOOL" install \
+    "$kernel_new" "$initramfs_new" "$build_id") || {
+    echo "Inactive-slot installation failed; the active slot is unchanged." >&2
+    exit 1
+}
+
+[ -n "$previous_build" ] && mv -f "$build_prev_new" "$BUILD_FILE.prev"
+mv -f "$manifest_new" "$BOOT/fifi-update.manifest"
+rm -f "$signature_new" "$kernel_new" "$initramfs_new"
+printf '%s\n' "$build_id" > "$PENDING_BUILD_FILE"
+printf '%s\n' "$tag" > "$DATA_ROOT/os-release-tag"
+: > "$DATA_ROOT/post-update.pending"
+sync
+trap - EXIT
+rm -f "$tag_new"
+rm -f "$source_manifest" "$source_signature" "$source_kernel" \
+      "$source_initramfs" "$source_tag"
+
+echo "OS update $tag ($build_id) is ready in slot $new_slot."
+echo "Reboot to use it: reboot"
+echo "FiFi OS will confirm it after the desktop starts or fall back automatically."
+echo "Manual rollback remains available with: update rollback"

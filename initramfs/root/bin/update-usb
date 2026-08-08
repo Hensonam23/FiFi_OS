@@ -4,6 +4,9 @@
 log()  { echo "[update-usb] $*"; }
 fail() { echo "[update-usb] ERROR: $*"; exit 1; }
 
+[ "$(id -u)" = 0 ] || [ "${FIFI_ALLOW_UNPRIVILEGED_TEST:-0}" = 1 ] ||
+    fail "root broker required"
+
 IF_PRESENT=0
 if [ "${1:-}" = "--if-present" ]; then
     IF_PRESENT=1
@@ -12,6 +15,7 @@ fi
 
 USB_MNT=/mnt/fifi-upd-src
 TGT_MNT=/mnt/fifi-upd-dst
+SLOT_TOOL="${FIFI_BOOT_SLOTS:-/bin/fifi-boot-slots}"
 mkdir -p "$USB_MNT" "$TGT_MNT"
 TGT_MOUNTED=0
 
@@ -87,7 +91,7 @@ gzip -t "$USB_MNT/boot/initramfs.cpio.gz" ||
 
 log "Installing kernel and initramfs into the inactive boot slot..."
 attempt="usb-$(sha256sum "$USB_MNT/boot/bzImage" | awk '{print substr($1,1,16)}')"
-slot=$(FIFI_DATA_ROOT="$TGT_MNT" fifi-boot-slots install \
+slot=$(FIFI_DATA_ROOT="$TGT_MNT" "$SLOT_TOOL" install \
     "$USB_MNT/boot/bzImage" "$USB_MNT/boot/initramfs.cpio.gz" "$attempt") ||
     fail "inactive-slot installation failed; the active slot is unchanged"
 [ -s /etc/fifi-build-id ] &&

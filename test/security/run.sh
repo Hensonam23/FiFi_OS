@@ -110,12 +110,30 @@ if [ "$1" = connect ]; then
     printf 'FIFI_WIFI_OK\n'
 fi
 EOF
+cat > "$broker_bin/fifi-apply-update" <<'EOF'
+#!/bin/sh
+printf 'update apply %s\n' "$1" >> "$FIFI_TEST_ADMIN_LOG"
+EOF
+cat > "$broker_bin/update-usb" <<'EOF'
+#!/bin/sh
+printf 'update usb %s\n' "${1:-}" >> "$FIFI_TEST_ADMIN_LOG"
+echo 'mock USB failure'
+exit 7
+EOF
+cat > "$broker_bin/update-rollback" <<'EOF'
+#!/bin/sh
+printf 'update rollback\n' >> "$FIFI_TEST_ADMIN_LOG"
+EOF
 chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
-    "$broker_bin/fifi-wifi-ctl"
+    "$broker_bin/fifi-wifi-ctl" "$broker_bin/fifi-apply-update" \
+    "$broker_bin/update-usb" "$broker_bin/update-rollback"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
 FIFI_WIFI_CTL="$broker_bin/fifi-wifi-ctl" \
+FIFI_UPDATE_APPLY="$broker_bin/fifi-apply-update" \
+FIFI_UPDATE_USB="$broker_bin/update-usb" \
+FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
 FIFI_TEST_ADMIN_LOG="$broker_log" \
     "$TMP/fifi-admin" --daemon &
 broker_pid=$!
@@ -138,10 +156,26 @@ grep -Fxq 'wifi connect wlan0' "$broker_log"
 grep -Fq '00 08 43 61 66 65 20 4e 65 74 00 0b 73 65 63 72' "$broker_log"
 grep -Fq '65 74 20 70 61 73 73' "$broker_log"
 grep -Fxq 'wifi disconnect wlan0' "$broker_log"
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update apply stable
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update rollback
+grep -Fxq 'update apply stable' "$broker_log"
+grep -Fxq 'update rollback' "$broker_log"
+if FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" update usb >"$TMP/update-usb.out" 2>&1; then
+    echo "failed privileged USB action reported success" >&2
+    exit 1
+else
+    test "$?" -eq 7
+fi
+grep -Fq 'mock USB failure' "$TMP/update-usb.out"
+! grep -Fq 'FIFI_ADMIN_STATUS' "$TMP/update-usb.out"
 denied_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" shell root 2>&1)"
 grep -Fq 'operation is not allowed' <<<"$denied_out"
 bad_iface="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan 'wlan0;id' 2>&1)"
 grep -Fq 'operation is not allowed' <<<"$bad_iface"
+bad_channel="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" update apply edge 2>&1 || true)"
+grep -Fq 'operation is not allowed' <<<"$bad_channel"
 grep -Fq 'strcmp(name, "fifi-security") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-wifi") == 0' \
@@ -212,6 +246,36 @@ grep -Fq '#define BROWSER_LOG      "/fifi-data/browser/launch.log"' \
     "$ROOT/fifi/apps/browser/browser.c"
 grep -Fq '. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"' \
     "$ROOT/initramfs/root/bin/fifi-download-browser.sh"
+
+echo "[test-security] updater stages privately and crosses fixed broker verbs"
+update_root="$TMP/update-storage"
+mkdir -p "$update_root"
+printf 'test\n' > "$update_root/update-channel"
+FIFI_DATA_ROOT="$update_root" FIFI_DESKTOP_UID="$(id -u)" \
+FIFI_DESKTOP_GID="$(id -g)" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-update-storage.sh"
+grep -Fxq test "$update_root/update/channel"
+test "$(stat -c '%u:%g:%a' "$update_root/update")" = \
+    "$(id -u):$(id -g):700"
+test "$(stat -c '%u:%g:%a' "$update_root/update/staging")" = \
+    "$(id -u):$(id -g):700"
+update_link_root="$TMP/update-directory-symlink"
+mkdir -p "$update_link_root" "$TMP/update-outside"
+ln -s "$TMP/update-outside" "$update_link_root/update"
+if FIFI_DATA_ROOT="$update_link_root" FIFI_DESKTOP_UID="$(id -u)" \
+   FIFI_DESKTOP_GID="$(id -g)" \
+       sh "$ROOT/initramfs/root/usr/share/fifi/migrate-update-storage.sh" \
+           2>/dev/null; then
+    echo "update migration accepted a symlinked directory" >&2
+    exit 1
+fi
+test ! -e "$update_link_root/.update-owned-by-fifi"
+grep -Fq 'exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" update apply "$channel"' \
+    "$ROOT/initramfs/root/bin/system-update"
+grep -Fq 'exec "$ADMIN" update rollback' "$ROOT/initramfs/root/bin/update"
+grep -Fq 'exec "$ADMIN" update usb' "$ROOT/initramfs/root/bin/update"
+grep -Fq 'root broker required' "$ROOT/initramfs/root/bin/fifi-apply-update"
+! grep -Fq 'fifi-boot-slots install' "$ROOT/initramfs/root/bin/system-update"
 
 echo "[test-security] app maintenance never executes writable helper copies"
 app_library="$TMP/app-library"

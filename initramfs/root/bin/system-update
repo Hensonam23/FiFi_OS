@@ -7,16 +7,22 @@
 
 set -u
 
+# Network access, release selection, and prompts run as the desktop user. Only
+# the final re-verification and inactive-slot write cross the root broker.
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 REPO="${FIFI_UPDATE_REPO:-Hensonam23/FiFi_OS}"
 DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
 ETC_ROOT="${FIFI_ETC_ROOT:-/etc}"
-BOOT="$DATA_ROOT/boot"
-CHANNEL_FILE="$DATA_ROOT/update-channel"
+UPDATE_DIR="$DATA_ROOT/update"
+STAGING="${FIFI_UPDATE_STAGING:-$UPDATE_DIR/staging}"
+CHANNEL_FILE="$UPDATE_DIR/channel"
 DEFAULT_CHANNEL_FILE="$ETC_ROOT/fifi-update-channel"
 RELEASE_PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ETC_ROOT/fifi-release-signing.pub}"
 BUILD_FILE="$DATA_ROOT/os-build-id"
 PENDING_BUILD_FILE="$DATA_ROOT/os-build-id.pending"
-TAG_FILE="$DATA_ROOT/os-release-tag"
 
 MODE=ask
 CHANNEL_OVERRIDE=""
@@ -67,9 +73,12 @@ case "$channel" in
         exit 2
         ;;
 esac
-
-mkdir -p "$BOOT" || {
-    echo "system-update: cannot create $BOOT" >&2
+mkdir -p "$STAGING" || {
+    echo "system-update: cannot create private update staging" >&2
+    exit 1
+}
+printf '%s\n' "$channel" > "$CHANNEL_FILE" || {
+    echo "system-update: cannot save the selected update channel" >&2
     exit 1
 }
 
@@ -126,8 +135,8 @@ if [ -z "$manifest_url" ] || [ -z "$manifest_sig_url" ] ||
     exit 1
 fi
 
-manifest_new="$BOOT/.fifi-update.manifest.new"
-manifest_sig_new="$BOOT/.fifi-update.manifest.sig.new"
+manifest_new="$STAGING/fifi-update.manifest"
+manifest_sig_new="$STAGING/fifi-update.manifest.sig"
 curl -fsSL --max-time 60 -o "$manifest_new" "$manifest_url" || {
     echo "Update manifest download failed." >&2
     exit 1
@@ -148,8 +157,6 @@ openssl pkeyutl -verify -pubin -inkey "$RELEASE_PUBLIC_KEY" -rawin \
     rm -f "$manifest_new" "$manifest_sig_new"
     exit 1
 }
-rm -f "$manifest_sig_new"
-
 manifest_value() {
     key="$1"
     sed -n "s/^${key}=\\([A-Za-z0-9._-]*\\)$/\\1/p" "$manifest_new" |
@@ -190,7 +197,7 @@ echo "Available: $tag ($build_id)"
 
 if [ "$installed_build" = "$build_id" ]; then
     echo "OS is already on the newest $channel build."
-    rm -f "$manifest_new"
+    rm -f "$manifest_new" "$manifest_sig_new"
     exit 0
 fi
 pending_build=""
@@ -199,13 +206,13 @@ if [ -n "$pending_build" ]; then
     echo "OS update $pending_build is installed in the inactive slot and awaits reboot."
     [ "$pending_build" = "$build_id" ] ||
         echo "Confirm or roll back that pending boot before installing $build_id."
-    rm -f "$manifest_new"
+    rm -f "$manifest_new" "$manifest_sig_new"
     exit 0
 fi
 
 echo "OS update available: $installed_build -> $build_id"
 [ "$MODE" = check ] && {
-    rm -f "$manifest_new"
+    rm -f "$manifest_new" "$manifest_sig_new"
     exit 0
 }
 
@@ -216,14 +223,14 @@ if [ "$MODE" = ask ]; then
         y|Y|yes|YES) ;;
         *)
             echo "Skipped OS update."
-            rm -f "$manifest_new"
+            rm -f "$manifest_new" "$manifest_sig_new"
             exit 0
             ;;
     esac
 fi
 
-kernel_new="$BOOT/bzImage.new"
-initramfs_new="$BOOT/initramfs.cpio.gz.new"
+kernel_new="$STAGING/bzImage"
+initramfs_new="$STAGING/initramfs.cpio.gz"
 rm -f "$kernel_new" "$initramfs_new"
 
 echo "Downloading kernel..."
@@ -256,28 +263,8 @@ gzip -t "$initramfs_new" 2>/dev/null || {
 }
 
 echo "Signature, checksums, and initramfs validation passed."
-previous_build=""
-[ -s "$BUILD_FILE" ] && read -r previous_build < "$BUILD_FILE"
-[ -n "$previous_build" ] &&
-    printf '%s\n' "$previous_build" > "$BUILD_FILE.prev"
+printf '%s\n' "$tag" > "$STAGING/release-tag"
 
-echo "Installing the verified image into the inactive boot slot..."
-new_slot=$(FIFI_DATA_ROOT="$DATA_ROOT" fifi-boot-slots install \
-    "$kernel_new" "$initramfs_new" "$build_id") || {
-    echo "Inactive-slot installation failed; the active slot is unchanged." >&2
-    rm -f "$manifest_new"
-    exit 1
-}
-rm -f "$kernel_new" "$initramfs_new"
-
-mv -f "$manifest_new" "$BOOT/fifi-update.manifest"
-printf '%s\n' "$build_id" > "$PENDING_BUILD_FILE"
-printf '%s\n' "$tag" > "$TAG_FILE"
-printf '%s\n' "$channel" > "$CHANNEL_FILE"
-: > "$DATA_ROOT/post-update.pending"
-sync
-
-echo "OS update $tag ($build_id) is ready in slot $new_slot."
-echo "Reboot to use it: reboot"
-echo "FiFi OS will confirm it after the desktop starts or fall back automatically."
-echo "Manual rollback remains available with: update rollback"
+# The broker invokes an immutable helper which copies these user-owned files
+# into root-owned snapshots and repeats every signature/hash validation.
+exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" update apply "$channel"

@@ -123,6 +123,9 @@ fifi version           # show the installed OS version
 - **AI models** are checked against their Hugging Face Git LFS SHA-256 object
   IDs before activation.
 - **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the inactive A/B slot is written. Boot selection changes only after the complete pair is durable.
+- Update checks, downloads, and prompts run as the normal desktop user. A fixed
+  root-broker action copies the staged files into root-owned snapshots and
+  repeats the signature, checksum, and gzip checks before writing a boot slot.
 - A pending slot is confirmed only after the desktop compositor is ready. New installations record each GRUB boot attempt and automatically select the previous slot if the pending image does not reach that confirmation point. `update rollback` switches slots manually.
 - Existing installations migrate their matching EFI GRUB menu automatically on the first hardened boot. The old menu is retained as `grub.cfg.before-ab-migration`; unrelated EFI partitions are never rewritten.
 - `app-update` updates apps only.
@@ -300,7 +303,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
-- [ ] Privilege brokers for hardware/admin apps: Security Center, Wi-Fi, Settings, App Store, and browser setup run without root; updater and installer transitions remain
+- [ ] Privilege brokers for hardware/admin apps: Security Center, Wi-Fi, Settings, App Store, browser setup, and updater run without root; installer transition remains
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash

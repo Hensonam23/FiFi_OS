@@ -34,6 +34,11 @@ static int valid_interface(const char *name) {
     return 1;
 }
 
+static int valid_channel(const char *channel) {
+    return channel && (strcmp(channel, "stable") == 0 ||
+                       strcmp(channel, "test") == 0);
+}
+
 static const char *socket_path(void) {
     const char *path = getenv("FIFI_ADMIN_SOCKET");
     return path && *path ? path : DEFAULT_SOCKET;
@@ -52,6 +57,31 @@ static int parse_uid(const char *value, uid_t fallback) {
     parsed = strtoul(value, &end, 10);
     if (errno || !end || *end || parsed > 65535) return (int)fallback;
     return (int)parsed;
+}
+
+static void run_update_command(const char *tool, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        dprintf(STDERR_FILENO, "fifi-admin: cannot start updater: %s\n",
+                strerror(errno));
+        dprintf(STDOUT_FILENO, "\nFIFI_ADMIN_STATUS 126\n");
+        _exit(0);
+    }
+    if (pid == 0) {
+        execv(tool, argv);
+        dprintf(STDERR_FILENO, "fifi-admin: privileged tool unavailable: %s\n",
+                strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        status = 126 << 8;
+        break;
+    }
+    int result = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+    dprintf(STDOUT_FILENO, "\nFIFI_ADMIN_STATUS %d\n", result);
+    _exit(0);
 }
 
 static void run_fixed_command(char *request) {
@@ -89,6 +119,29 @@ static void run_fixed_command(char *request) {
         if (is_wifi_connect(argc, args))
             dprintf(STDOUT_FILENO, "READY\n");
         execl(tool, "fifi-wifi-ctl", args[1], args[2], (char *)NULL);
+    } else if (argc == 3 && strcmp(args[0], "update") == 0 &&
+               strcmp(args[1], "apply") == 0 && valid_channel(args[2])) {
+        const char *tool = getenv("FIFI_UPDATE_APPLY");
+        if (!tool || !*tool) tool = "/bin/fifi-apply-update";
+        char *const update_argv[] = { (char *)tool, args[2], NULL };
+        run_update_command(tool, update_argv);
+    } else if (argc == 2 && strcmp(args[0], "update") == 0 &&
+               (strcmp(args[1], "usb") == 0 ||
+                strcmp(args[1], "usb-if-present") == 0)) {
+        const char *tool = getenv("FIFI_UPDATE_USB");
+        if (!tool || !*tool) tool = "/bin/update-usb";
+        char *const update_argv[] = {
+            (char *)tool,
+            strcmp(args[1], "usb-if-present") == 0 ? "--if-present" : NULL,
+            NULL
+        };
+        run_update_command(tool, update_argv);
+    } else if (argc == 2 && strcmp(args[0], "update") == 0 &&
+               strcmp(args[1], "rollback") == 0) {
+        const char *tool = getenv("FIFI_UPDATE_ROLLBACK");
+        if (!tool || !*tool) tool = "/bin/update-rollback";
+        char *const update_argv[] = { (char *)tool, NULL };
+        run_update_command(tool, update_argv);
     } else {
         dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
         _exit(64);
@@ -96,6 +149,59 @@ static void run_fixed_command(char *request) {
     dprintf(STDERR_FILENO, "fifi-admin: privileged tool unavailable: %s\n",
             strerror(errno));
     _exit(errno == ENOENT ? 127 : 126);
+}
+
+static int copy_update_response(int sock) {
+    char tail[256];
+    size_t tail_len = 0;
+    char input[1024];
+    ssize_t got;
+    while ((got = read(sock, input, sizeof(input))) > 0) {
+        size_t incoming = (size_t)got;
+        if (tail_len + incoming > sizeof(tail) - 1) {
+            size_t emit = tail_len + incoming - (sizeof(tail) / 2);
+            if (emit <= tail_len) {
+                if (write(STDOUT_FILENO, tail, emit) != (ssize_t)emit) return 1;
+                memmove(tail, tail + emit, tail_len - emit);
+                tail_len -= emit;
+            } else {
+                if (tail_len && write(STDOUT_FILENO, tail, tail_len) !=
+                                (ssize_t)tail_len) return 1;
+                emit -= tail_len;
+                if (emit && write(STDOUT_FILENO, input, emit) != (ssize_t)emit)
+                    return 1;
+                memmove(input, input + emit, incoming - emit);
+                incoming -= emit;
+                tail_len = 0;
+            }
+        }
+        memcpy(tail + tail_len, input, incoming);
+        tail_len += incoming;
+    }
+    tail[tail_len] = '\0';
+    const char marker[] = "\nFIFI_ADMIN_STATUS ";
+    char *found = NULL;
+    for (char *p = strstr(tail, marker); p; p = strstr(p + 1, marker))
+        found = p;
+    if (!found) {
+        if (tail_len) write(STDOUT_FILENO, tail, tail_len);
+        return 1;
+    }
+    char *number = found + sizeof(marker) - 1;
+    char *end = NULL;
+    long result = strtol(number, &end, 10);
+    if (!end || *end != '\n' || result < 0 || result > 255) {
+        write(STDOUT_FILENO, tail, tail_len);
+        return 1;
+    }
+    size_t prefix = (size_t)(found - tail);
+    if (prefix && write(STDOUT_FILENO, tail, prefix) != (ssize_t)prefix)
+        return 1;
+    end++;
+    size_t suffix = tail_len - (size_t)(end - tail);
+    if (suffix && write(STDOUT_FILENO, end, suffix) != (ssize_t)suffix)
+        return 1;
+    return (int)result;
 }
 
 static void handle_client(int client) {
@@ -227,6 +333,9 @@ static int client_main(int argc, char **argv) {
         if (got < 0) die("fifi-admin: credential input");
     }
     shutdown(sock, SHUT_WR);
+
+    if (argc >= 3 && strcmp(argv[1], "update") == 0)
+        return copy_update_response(sock);
 
     char output[1024];
     ssize_t got;

@@ -3,11 +3,15 @@
 set -eu
 
 DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
+SLOT_TOOL="${FIFI_BOOT_SLOTS:-/bin/fifi-boot-slots}"
 fail() { echo "[rollback] ERROR: $*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || [ "${FIFI_ALLOW_UNPRIVILEGED_TEST:-0}" = 1 ] ||
+    fail "root broker required"
 
 was_pending=0
 [ -s "$DATA_ROOT/os-build-id.pending" ] && was_pending=1
-slot=$(FIFI_DATA_ROOT="$DATA_ROOT" fifi-boot-slots rollback) ||
+slot=$(FIFI_DATA_ROOT="$DATA_ROOT" "$SLOT_TOOL" rollback) ||
     fail "could not switch boot slots"
 
 if [ "$was_pending" = 0 ] && [ -f "$DATA_ROOT/os-build-id.prev" ]; then
