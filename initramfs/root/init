@@ -327,6 +327,9 @@ done
 
 # ── App platform: writable library, immutable helpers, and keymap ─────────────
 mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
+# The browser chooser and its verified downloader need no administrative
+# access. Migrate older root-owned browser files before launching it as fifi.
+/bin/sh /usr/share/fifi/migrate-browser-storage.sh
 # Older builds mirrored root-executed helpers into the persistent app library.
 # Remove those copies once, then migrate installed apps to the desktop identity.
 # Root code below executes only immutable helpers from the signed OS image.

@@ -150,6 +150,8 @@ grep -Fq 'strcmp(name, "fifi-settings") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-appstore") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strcmp(name, "fifi-browser") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strncmp(path, app_library, sizeof(app_library) - 1) == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'chown 1000:1000 /fifi-data/fifi-settings.conf' \
@@ -172,6 +174,44 @@ grep -Fq '/bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-sync.sh' \
     "$ROOT/initramfs/root/init"
 ! grep -Fq 'cp "/usr/share/fifi/$f" "/fifi-data/apps/$f"' \
     "$ROOT/initramfs/root/init"
+
+echo "[test-security] browser setup owns only private user storage"
+browser_root="$TMP/browser-storage"
+mkdir -p "$browser_root"
+printf 'firefox\n' > "$browser_root/browser-choice"
+FIFI_DATA_ROOT="$browser_root" FIFI_DESKTOP_UID="$(id -u)" \
+FIFI_DESKTOP_GID="$(id -g)" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-browser-storage.sh"
+grep -Fxq firefox "$browser_root/browser/choice"
+test "$(stat -c '%u:%g:%a' "$browser_root/browser")" = \
+    "$(id -u):$(id -g):700"
+browser_symlink_root="$TMP/browser-storage-symlink"
+mkdir -p "$browser_symlink_root/browser"
+printf 'protected\n' > "$browser_symlink_root/outside-choice"
+printf 'firefox\n' > "$browser_symlink_root/browser-choice"
+ln -s "$browser_symlink_root/outside-choice" \
+    "$browser_symlink_root/browser/choice"
+FIFI_DATA_ROOT="$browser_symlink_root" FIFI_DESKTOP_UID="$(id -u)" \
+FIFI_DESKTOP_GID="$(id -g)" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-browser-storage.sh"
+grep -Fxq protected "$browser_symlink_root/outside-choice"
+browser_dir_link_root="$TMP/browser-directory-symlink"
+mkdir -p "$browser_dir_link_root" "$TMP/browser-outside"
+ln -s "$TMP/browser-outside" "$browser_dir_link_root/browser"
+if FIFI_DATA_ROOT="$browser_dir_link_root" \
+   FIFI_DESKTOP_UID="$(id -u)" FIFI_DESKTOP_GID="$(id -g)" \
+       sh "$ROOT/initramfs/root/usr/share/fifi/migrate-browser-storage.sh" \
+           2>/dev/null; then
+    echo "browser migration accepted a symlinked directory" >&2
+    exit 1
+fi
+test ! -e "$browser_dir_link_root/.browser-owned-by-fifi"
+grep -Fq '#define BROWSER_CHOICE   "/fifi-data/browser/choice"' \
+    "$ROOT/fifi/apps/browser/browser.c"
+grep -Fq '#define BROWSER_LOG      "/fifi-data/browser/launch.log"' \
+    "$ROOT/fifi/apps/browser/browser.c"
+grep -Fq '. "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"' \
+    "$ROOT/initramfs/root/bin/fifi-download-browser.sh"
 
 echo "[test-security] app maintenance never executes writable helper copies"
 app_library="$TMP/app-library"

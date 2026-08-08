@@ -50,7 +50,8 @@
 /* Paths */
 #define BROWSER_DIR      "/fifi-data/browser"
 #define BROWSER_APPIMAGE "/fifi-data/browser/browser.AppImage"
-#define BROWSER_CHOICE   "/fifi-data/browser-choice"
+#define BROWSER_CHOICE   "/fifi-data/browser/choice"
+#define BROWSER_LOG      "/fifi-data/browser/launch.log"
 
 #define BROWSER_LIBREWOLF 0
 #define BROWSER_FIREFOX   1
@@ -639,8 +640,8 @@ static void on_click(app_t *a, int mx, int my, int sock) {
             pid_t pid = fork();
             if (pid == 0) {
                 setsid();
-                /* Log all output to /fifi-data/browser-launch.log */
-                int logfd = open("/fifi-data/browser-launch.log",
+                /* Keep browser-owned state inside its private data directory. */
+                int logfd = open(BROWSER_LOG,
                                  O_WRONLY|O_CREAT|O_TRUNC, 0644);
                 if (logfd >= 0) {
                     dup2(logfd, STDOUT_FILENO);
@@ -665,7 +666,7 @@ static void on_click(app_t *a, int mx, int my, int sock) {
                 }
                 if (!survived) {
                     /* Child exited quickly — read log and show error */
-                    FILE *lf = fopen("/fifi-data/browser-launch.log", "r");
+                    FILE *lf = fopen(BROWSER_LOG, "r");
                     if (lf) {
                         char line[192] = {0};
                         /* Read last non-empty line as the error */
@@ -678,7 +679,7 @@ static void on_click(app_t *a, int mx, int my, int sock) {
                             }
                         fclose(lf);
                         if (line[0]) snprintf(a->error, sizeof(a->error), "%s", line);
-                        else snprintf(a->error, sizeof(a->error), "Browser exited immediately. Check /fifi-data/browser-launch.log");
+                        else snprintf(a->error, sizeof(a->error), "Browser exited immediately. Check %s", BROWSER_LOG);
                     } else {
                         snprintf(a->error, sizeof(a->error), "Browser failed to start (no log written).");
                     }
