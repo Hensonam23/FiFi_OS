@@ -23,6 +23,10 @@ EOF
 cat > "$FIXTURES/huggingface.json" <<EOF
 {"siblings":[{"rfilename":"model.gguf","lfs":{"sha256":"$sha","size":70}}]}
 EOF
+cat > "$FIXTURES/codeberg.json" <<EOF
+{"assets":[{"name":"Test-linux-x86_64-appimage.AppImage","browser_download_url":"https://downloads.test/Test-linux-x86_64-appimage.AppImage"},{"name":"Test-linux-x86_64-appimage.AppImage.sha256sum","browser_download_url":"https://downloads.test/Test-linux-x86_64-appimage.AppImage.sha256sum"}]}
+EOF
+printf '%s  Test-linux-x86_64-appimage.AppImage\n' "$sha" > "$FIXTURES/codeberg.sha256sum"
 
 cat > "$BIN/curl" <<'EOF'
 #!/bin/sh
@@ -39,8 +43,11 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
     *api.github.com*) src="$FIFI_TEST_FIXTURES/github.json" ;;
+    *codeberg.org/api/v1/repos/*) src="$FIFI_TEST_FIXTURES/codeberg.json" ;;
     *huggingface.co/api/models/*) src="$FIFI_TEST_FIXTURES/huggingface.json" ;;
     *github.test/*) src="$FIFI_TEST_FIXTURES/Test.AppImage" ;;
+    *downloads.test/*.sha256sum) src="$FIFI_TEST_FIXTURES/codeberg.sha256sum" ;;
+    *downloads.test/*.AppImage) src="$FIFI_TEST_FIXTURES/Test.AppImage" ;;
     *) echo "mock curl: unexpected URL: $url" >&2; exit 22 ;;
 esac
 if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
@@ -65,6 +72,23 @@ cmp "$FIXTURES/Test.AppImage" "$APPS/Test.AppImage"
 grep -Fxq "$sha" "$APPS/Test.sha256"
 grep -Fq 'exec /usr/share/fifi/fifi-run "/fifi-data/apps/Test.AppImage"' \
     "$APPS/Test.sh"
+
+echo "[test-download] Codeberg publisher digest permits a matching AppImage"
+sh "$ROOT/initramfs/root/usr/share/fifi/appstore-install.sh" \
+    codeberg:owner/repo Codeberg
+cmp "$FIXTURES/Test.AppImage" "$APPS/Codeberg.AppImage"
+grep -Fxq "$sha" "$APPS/Codeberg.sha256"
+
+echo "[test-download] legacy LibreWolf sources migrate to Codeberg"
+cp "$FIXTURES/Test.AppImage" "$APPS/LibreWolf.AppImage"
+printf '%s' 'gitlab:librewolf-community%2Fbrowser%2Fappimage' \
+    > "$APPS/LibreWolf.src"
+printf '%s' 'https://gitlab.test/old.AppImage' > "$APPS/LibreWolf.url"
+printf '%064d\n' 0 > "$APPS/LibreWolf.sha256"
+sh "$ROOT/initramfs/root/usr/share/fifi/appstore-update-check.sh" LibreWolf
+grep -Fxq 'codeberg:librewolf/bsys6' "$APPS/LibreWolf.src"
+grep -Fq 'https://downloads.test/Test-linux-x86_64-appimage.AppImage|' \
+    "$APPS/LibreWolf.update"
 
 echo "[test-download] a changed payload is rejected"
 printf 'tampered\n' >> "$FIXTURES/Test.AppImage"

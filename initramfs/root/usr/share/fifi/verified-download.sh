@@ -47,6 +47,29 @@ fifi_pick_x86_64_pair() {
     printf '%s' "$_fifi_pair"
 }
 
+# Resolve the newest x86-64 AppImage published by a Codeberg repository.  Forgejo
+# release assets do not expose a server-computed digest in the JSON response, so
+# require the publisher's adjacent .sha256sum asset and validate its contents.
+fifi_codeberg_appimage_pair() {
+    _fifi_repo="$1"
+    _fifi_release="$(curl -fsSL --max-time 30 \
+        "https://codeberg.org/api/v1/repos/${_fifi_repo}/releases?limit=5")" ||
+        return 1
+    _fifi_urls="$(printf '%s' "$_fifi_release" |
+        grep -oE '"browser_download_url":"[^"]+"' |
+        sed 's/^"browser_download_url":"//;s/"$//')"
+    _fifi_url="$(printf '%s\n' "$_fifi_urls" |
+        grep -iE 'x86_64.*appimage\.AppImage$' | head -1)"
+    [ -n "$_fifi_url" ] || return 1
+    _fifi_sum_url="$(printf '%s\n' "$_fifi_urls" |
+        grep -F "${_fifi_url}.sha256sum" | head -1)"
+    [ -n "$_fifi_sum_url" ] || return 1
+    _fifi_sha="$(curl -fsSL --max-time 30 "$_fifi_sum_url" |
+        awk 'NF {print $1; exit}')" || return 1
+    printf '%s\n' "$_fifi_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || return 1
+    printf '%s|%s' "$_fifi_url" "$_fifi_sha"
+}
+
 # Resolve a GitLab generic-package URL to the SHA-256 recorded by GitLab.
 fifi_gitlab_package_sha256() {
     _fifi_project="$1"

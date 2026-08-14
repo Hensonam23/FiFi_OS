@@ -1,5 +1,5 @@
 LibreOffice	Office	ivan-hc/LibreOffice-appimage		Full-featured office suite: Writer, Calc, Impress and more. Compatible with Microsoft Office documents.
-LibreWolf	Network	gitlab:librewolf-community%2Fbrowser%2Fappimage		A privacy-focused fork of Firefox with telemetry removed and hardened defaults.
+LibreWolf	Network	codeberg:librewolf/bsys6		A privacy-focused fork of Firefox with telemetry removed and hardened defaults.
 Firefox	Network	ivan-hc/Firefox-appimage		Mozilla's fast, private and open-source web browser.
 Brave	Network	ivan-hc/Brave-appimage		Privacy-first web browser with built-in ad and tracker blocking.
 GIMP	Graphics	ivan-hc/GIMP-appimage		The GNU Image Manipulation Program - a powerful free image editor.

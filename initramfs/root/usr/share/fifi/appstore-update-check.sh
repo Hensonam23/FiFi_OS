@@ -24,7 +24,16 @@ resolve() {
     case "$spec" in
     url:*)
         return 1 ;;
+    codeberg:*)
+        fifi_codeberg_appimage_pair "${spec#codeberg:}" ;;
     gitlab:*)
+        # LibreWolf moved its AppImage releases away from GitLab in June 2026.
+        # Existing installations retain the historical source in <Name>.src,
+        # so transparently migrate them when checking for an update.
+        if [ "$spec" = "gitlab:librewolf-community%2Fbrowser%2Fappimage" ]; then
+            fifi_codeberg_appimage_pair "librewolf/bsys6"
+            return
+        fi
         proj="${spec#gitlab:}"
         rel=$(curl -sL --max-time 30 "https://gitlab.com/api/v4/projects/$proj/releases?per_page=10")
         url="$(pick "$(printf '%s' "$rel" | grep -oE '"url":"[^"]*\.AppImage"' | sed 's/^"url":"//;s/"$//')")"
@@ -41,12 +50,16 @@ check_one() {
     [ -f "$APPS/$n.src" ] || return 0
     cur=$(cat "$APPS/$n.url" 2>/dev/null)
     cur_sha=$(cat "$APPS/$n.sha256" 2>/dev/null)
-    pair=$(resolve "$(cat "$APPS/$n.src")")
+    source_spec=$(cat "$APPS/$n.src")
+    pair=$(resolve "$source_spec")
     new="${pair%|*}"
     new_sha="${pair##*|}"
     # Resolution failed (offline / API error): keep any existing marker rather
     # than wrongly clearing a previously detected update.
     [ -n "$new" ] || return 0
+    if [ "$source_spec" = "gitlab:librewolf-community%2Fbrowser%2Fappimage" ]; then
+        printf '%s' 'codeberg:librewolf/bsys6' > "$APPS/$n.src"
+    fi
     if [ "$new" != "$cur" ] || [ "$new_sha" != "$cur_sha" ]; then
         printf '%s|%s' "$new" "$new_sha" > "$APPS/$n.update"
         echo "update available: $n"

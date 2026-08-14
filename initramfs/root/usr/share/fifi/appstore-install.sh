@@ -5,7 +5,8 @@
 # launches it (via the existing desktop-shortcut system, fifi-desktop.conf).
 #
 # Usage: appstore-install.sh <source> <AppName>
-#   <source>: owner/repo (GitHub) | gitlab:<url-encoded-project> |
+#   <source>: owner/repo (GitHub) | codeberg:<owner/repo> |
+#             gitlab:<url-encoded-project> |
 #             url:<direct-AppImage-url> | file:<local-AppImage-path>
 # Writes progress markers to <apps>/<AppName>.status: resolving|downloading|done|error
 #
@@ -44,6 +45,9 @@ url:*)
     echo error > "$status"
     echo "direct URL has no authenticated digest; install refused" >&2
     exit 1
+    ;;
+codeberg:*)
+    allpairs="$(fifi_codeberg_appimage_pair "${repo#codeberg:}" || true)"
     ;;
 gitlab:*)
     proj="${repo#gitlab:}"

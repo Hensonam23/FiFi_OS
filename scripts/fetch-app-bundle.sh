@@ -35,13 +35,10 @@ fetch() {  # <Name> <url> <sha256>
     chmod +x "$OUT/$1.AppImage"
 }
 
-# LibreWolf — GitLab releases API (same source the App Store catalog uses)
-LW_PROJECT='librewolf-community%2Fbrowser%2Fappimage'
-LW_URL="$(curl -sf "https://gitlab.com/api/v4/projects/$LW_PROJECT/releases?per_page=10" \
-    | grep -oE '"url":"[^"]*\.AppImage"' | sed 's/^"url":"//;s/"$//' \
-    | grep -iE 'x86_64' | head -1 || true)"
-LW_SHA="$(fifi_gitlab_package_sha256 "$LW_PROJECT" "$LW_URL" || true)"
-if [ -n "$LW_URL" ] && [ -n "$LW_SHA" ]; then fetch LibreWolf "$LW_URL" "$LW_SHA"
+# LibreWolf — Codeberg releases API (same source the App Store catalog uses)
+LW_PAIR="$(fifi_codeberg_appimage_pair 'librewolf/bsys6' || true)"
+LW_URL="${LW_PAIR%|*}"; LW_SHA="${LW_PAIR##*|}"
+if [ -n "$LW_URL" ] && [ "$LW_URL" != "$LW_SHA" ]; then fetch LibreWolf "$LW_URL" "$LW_SHA"
 else echo "[bundle] WARNING: could not resolve LibreWolf" >&2; fi
 
 # Firefox — ivan-hc AppImage build, GitHub releases API
