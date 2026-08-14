@@ -257,7 +257,7 @@ static void add_hot(int x, int y, int w, int h, int act, int arg) {
 }
 
 /* ── Theme config store (preserves keys we don't manage) ─────────────────── */
-#define CFG_PATH      "/fifi-data/fifi-settings.conf"
+#define CFG_PATH      FIFI_THEME_CONFIG_PATH
 #define MAX_CFG_LINES 48
 static char g_cfg_key[MAX_CFG_LINES][32];
 static char g_cfg_val[MAX_CFG_LINES][160];
@@ -309,6 +309,7 @@ static void cfg_set_int(const char *key, int v)      { char b[32]; snprintf(b, s
 static void cfg_set_uint(const char *key, unsigned v){ char b[32]; snprintf(b, sizeof b, "%u", v); cfg_set_str(key, b); }
 
 static void cfg_save(void) {
+    cfg_set_uint(FIFI_THEME_CONFIG_FORMAT_KEY, FIFI_THEME_CONFIG_VERSION);
     FILE *f = fopen(CFG_PATH, "w");
     if (!f) { snprintf(g_pers_note, sizeof g_pers_note, "ERROR: cannot write %s", CFG_PATH); return; }
     for (int i = 0; i < g_cfg_n; i++)

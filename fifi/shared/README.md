@@ -10,4 +10,6 @@ API version and a compatibility path before either platform adopts it.
 
 `theme.h` is theme API version 1. It fixes the wallpaper, image-fit, panel,
 accent-palette, and font-size identifiers used by both the freestanding GUI and
-Linux Settings app; storage and file permissions remain platform responsibilities.
+Linux Settings app. The persisted key/value file carries `theme_format=1`;
+readers remain compatible with older files that omit it. Storage and file
+permissions remain platform responsibilities.

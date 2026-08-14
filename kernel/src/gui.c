@@ -431,19 +431,20 @@ uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my) {
  * The OS root is RAM and wiped each boot; /fifi-data survives. Persist the user's
  * theme/customizations there and reload them at startup. */
 #ifdef __linux__
-#define FIFI_SETTINGS_PATH "/fifi-data/fifi-settings.conf"
+#define FIFI_SETTINGS_PATH FIFI_THEME_CONFIG_PATH
 /* mtime of the config as of the last load, so the live watch below only reloads
  * on an actual change (and detects the file first appearing on a live boot). */
 static long g_settings_mtime = -1;
 void gui_settings_save(void) {
     FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
     if (!f) return;
-    fprintf(f, "accent=%u\nwallpaper=%d\nwall_fit=%d\nclock_12h=%d\nanimations=%d\n"
+    fprintf(f, FIFI_THEME_CONFIG_FORMAT_KEY "=%u\naccent=%u\nwallpaper=%d\nwall_fit=%d\nclock_12h=%d\nanimations=%d\n"
                "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
                "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
                "dock_float=%d\nfx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
                "font_file=%s\nfont_px=%d\n",
-            (unsigned)g_theme.accent, g_theme.wallpaper, (int)g_theme.wall_fit,
+            FIFI_THEME_CONFIG_VERSION, (unsigned)g_theme.accent,
+            g_theme.wallpaper, (int)g_theme.wall_fit,
             (int)g_theme.clock_12h,
             (int)g_theme.animations, (int)g_theme.statusbar,
             (int)g_theme.desktop_info, (int)g_theme.utc_offset,

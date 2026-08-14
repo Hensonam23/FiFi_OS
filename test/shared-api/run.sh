@@ -25,6 +25,7 @@ cat > "$TMP/theme-contract.c" <<'EOF'
 static const unsigned accents[] = FIFI_ACCENT_PRESETS;
 static const int sizes[] = FIFI_FONT_SIZES;
 _Static_assert(FIFI_THEME_API_VERSION == 1u, "unexpected theme version");
+_Static_assert(FIFI_THEME_CONFIG_VERSION == 1u, "unexpected config version");
 _Static_assert(WALLPAPER_IMAGE == 5 && WALLPAPER_COUNT == 13, "wallpaper IDs changed");
 _Static_assert(PANEL_BOTTOM == 0 && PANEL_RIGHT == 3, "panel IDs changed");
 _Static_assert(sizeof(accents) / sizeof(accents[0]) == FIFI_ACCENT_PRESET_COUNT,
@@ -38,6 +39,9 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
 grep -Fq '#include "../../fifi/shared/theme.h"' \
     "$ROOT/kernel/src/gui_internal.h"
 grep -Fq '#include "../../shared/theme.h"' \
+    "$ROOT/fifi/apps/settings/settings.c"
+grep -Fq 'FIFI_THEME_CONFIG_FORMAT_KEY "=%u' "$ROOT/kernel/src/gui.c"
+grep -Fq 'cfg_set_uint(FIFI_THEME_CONFIG_FORMAT_KEY, FIFI_THEME_CONFIG_VERSION)' \
     "$ROOT/fifi/apps/settings/settings.c"
 
 echo "[test-shared-api] every IPC producer and consumer uses the contract"

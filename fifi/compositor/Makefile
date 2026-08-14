@@ -1,6 +1,7 @@
 CC      := gcc
 OUT     := fifi-compositor
 BUILD   := ../../build-linux
+.DEFAULT_GOAL := all
 
 # Shadow headers must come FIRST to override kernel headers
 INCLUDES := \

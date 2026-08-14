@@ -2,6 +2,9 @@
 #define FIFI_SHARED_THEME_H
 
 #define FIFI_THEME_API_VERSION 1u
+#define FIFI_THEME_CONFIG_VERSION 1u
+#define FIFI_THEME_CONFIG_PATH "/fifi-data/fifi-settings.conf"
+#define FIFI_THEME_CONFIG_FORMAT_KEY "theme_format"
 #define WALLPAPER_GRADIENT 0
 #define WALLPAPER_SOLID 1
 #define WALLPAPER_STARS 2
