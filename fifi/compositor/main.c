@@ -22,6 +22,7 @@
 #include "limine.h"
 #include "mouse.h"
 #include "xwm.h"     /* rootless-XWayland window manager */
+#include "event_handoff.h"
 
 /* Linux platform functions */
 void input_init(void);
@@ -205,6 +206,10 @@ static void apply_perf_defaults(void) {
 
 static pthread_mutex_t g_mx   = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cond = PTHREAD_COND_INITIALIZER;
+/* Set before the event thread waits for g_mx.  A render that overruns its
+ * frame deadline must explicitly hand the mutex over instead of immediately
+ * beginning another frame and making all pointer devices appear to stall. */
+static fifi_event_handoff_t g_event_handoff = FIFI_EVENT_HANDOFF_INIT;
 static volatile bool   g_quit = false;
 
 /* ── Terminal / signal setup ─────────────────────────────────────────────── */
@@ -460,6 +465,13 @@ static void *render_thread_fn(void *arg)
             drm_flush();
             pthread_mutex_lock(&g_mx);
         }
+
+        /* A slow software-composited frame can exceed the next deadline.  In
+         * that case pthread_cond_timedwait() returns immediately and this
+         * thread used to retain g_mx across consecutive frames, starving the
+         * event thread and briefly freezing every mouse/touchpad.  Guarantee
+         * one event-loop handoff after a frame whenever input is waiting. */
+        fifi_event_handoff_yield(&g_event_handoff, &g_mx);
     }
     pthread_mutex_unlock(&g_mx);
     return NULL;
@@ -603,7 +615,28 @@ int main(void) {
          * immediately regardless). 2ms = 500Hz input sampling in gaming. */
         poll(pfd, (nfds_t)nfds, g_gaming_mode ? 2 : 4);
 
+        fifi_event_handoff_request(&g_event_handoff);
         pthread_mutex_lock(&g_mx);
+        fifi_event_handoff_acquired(&g_event_handoff);
+
+        /* Read evdev first after acquiring the compositor state.  App frame
+         * traffic and PTY output can be comparatively expensive; neither
+         * should add latency before physical pointer motion is consumed. */
+        static int _rescan_ticks = 0;
+        if (++_rescan_ticks >= 300) { _rescan_ticks = 0;
+            input_rescan();
+            /* Rebuild the poll set. input_rescan() closes the fds of unplugged
+             * devices; leaving those stale fds in pfd made poll() return
+             * immediately with POLLNVAL every iteration, spinning the event
+             * thread at 100% CPU. This also picks up newly plugged devices. */
+            nevdev = input_get_all_fds(evdev_fds, 20);
+        }
+        int32_t px, py; bool pb_l, pb_r;
+        mouse_get_state(&px, &py, &pb_l, &pb_r);
+        input_poll();
+        int32_t nx, ny; bool nb_l, nb_r;
+        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
+        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
 
         /* ── IPC: accept new connections, read app frame messages ──────── */
         ipc_poll();
@@ -631,24 +664,6 @@ int main(void) {
                     ipc_send_gamepad(btns, lx, ly, rx, ry, lt, rt);
             }
         }
-
-        /* ── evdev: read input events into rings ───────────────────────── */
-        /* Rescan for newly plugged devices every ~5 seconds */
-        static int _rescan_ticks = 0;
-        if (++_rescan_ticks >= 300) { _rescan_ticks = 0;
-            input_rescan();
-            /* Rebuild the poll set. input_rescan() closes the fds of unplugged
-             * devices; leaving those stale fds in pfd made poll() return
-             * immediately with POLLNVAL every iteration, spinning the event
-             * thread at 100% CPU. This also picks up newly plugged devices. */
-            nevdev = input_get_all_fds(evdev_fds, 20);
-        }
-        int32_t px, py; bool pb_l, pb_r;
-        mouse_get_state(&px, &py, &pb_l, &pb_r);
-        input_poll();
-        int32_t nx, ny; bool nb_l, nb_r;
-        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
-        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
 
         /* ── Mouse routing ──────────────────────────────────────────────── */
         {

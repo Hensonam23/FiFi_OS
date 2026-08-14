@@ -39,3 +39,46 @@ grep -Fq 'touchpad_axis_state_t axes' "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'touchpad_axis_select_slot(&dev->axes, cur_slot)' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] persistent touchpad axes and MT slots passed"
+
+cat > "$TMP/event-handoff.c" <<'EOF'
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include "fifi/compositor/event_handoff.h"
+
+static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
+static fifi_event_handoff_t handoff = FIFI_EVENT_HANDOFF_INIT;
+static atomic_bool processed = ATOMIC_VAR_INIT(false);
+
+static void *event_thread(void *unused) {
+    (void)unused;
+    fifi_event_handoff_request(&handoff);
+    pthread_mutex_lock(&mx);
+    fifi_event_handoff_acquired(&handoff);
+    atomic_store_explicit(&processed, true, memory_order_release);
+    pthread_mutex_unlock(&mx);
+    return NULL;
+}
+
+int main(void) {
+    pthread_t thread;
+    pthread_mutex_lock(&mx); /* model a software render in progress */
+    if (pthread_create(&thread, NULL, event_thread, NULL) != 0) return 1;
+    while (!fifi_event_handoff_is_waiting(&handoff)) {}
+
+    fifi_event_handoff_yield(&handoff, &mx);
+    bool event_ran = atomic_load_explicit(&processed, memory_order_acquire);
+    pthread_mutex_unlock(&mx);
+    pthread_join(thread, NULL);
+    return event_ran ? 0 : 2;
+}
+EOF
+
+gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -I"$ROOT" \
+    "$TMP/event-handoff.c" -o "$TMP/event-handoff" -lpthread
+"$TMP/event-handoff"
+
+input_line="$(grep -n '^        input_poll();' "$ROOT/fifi/compositor/main.c" | cut -d: -f1)"
+ipc_line="$(grep -n '^        ipc_poll();' "$ROOT/fifi/compositor/main.c" | cut -d: -f1)"
+test "$input_line" -lt "$ipc_line"
+echo "[input-test] compositor yields to input and reads evdev first"

@@ -328,6 +328,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [ ] Desktop UX polish and settings parity
 - [ ] Smooth pointer and touchpad input on the real laptop
   - [x] Preserve unchanged evdev axes and multitouch slots across poll batches
+  - [x] Prevent slow compositor frames from starving all pointer input
   - [ ] Re-test the laptop and tune acceleration/smoothing from hardware feedback
 - [ ] App framework/SDK and a verifying package manager
 - [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
