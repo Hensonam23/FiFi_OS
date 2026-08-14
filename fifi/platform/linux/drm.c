@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -23,6 +24,11 @@ static uint32_t g_fb_id   = 0;
 static void    *g_map_ptr = NULL;
 static size_t   g_map_sz  = 0;
 static uint32_t g_handle  = 0;
+static uint32_t g_crtc_id = 0;
+static uint32_t g_cursor_handle = 0;
+static void    *g_cursor_map = NULL;
+static size_t   g_cursor_map_sz = 0;
+static atomic_bool g_cursor_enabled = ATOMIC_VAR_INIT(false);
 
 static struct limine_framebuffer g_lmfb;
 
@@ -140,6 +146,7 @@ struct limine_framebuffer *drm_open(void) {
             crtc_id = enc.crtc_id;
     }
     if (!crtc_id && res.count_crtcs > 0) crtc_id = crtc_ids[0];
+    g_crtc_id = crtc_id;
     free(crtc_ids);
 
     uint32_t w = mode.hdisplay, h = mode.vdisplay;
@@ -190,6 +197,60 @@ struct limine_framebuffer *drm_open(void) {
         fprintf(stderr, "[drm] SETCRTC failed errno=%d\n", errno); goto fail;
     }
 
+    /* Prefer a KMS cursor plane so pointer motion is scanned out without
+     * waiting for a slow software-composited desktop frame. */
+    {
+        enum { CW = 64, CH = 64 };
+        struct drm_mode_create_dumb cur = {0};
+        cur.width = CW; cur.height = CH; cur.bpp = 32;
+        if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cur) == 0) {
+            struct drm_mode_map_dumb cmap = { .handle = cur.handle };
+            if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_MAP_DUMB, &cmap) == 0) {
+                void *p = mmap(NULL, cur.size, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, g_fd, (off_t)cmap.offset);
+                if (p != MAP_FAILED) {
+                    static const uint16_t arrow[20] = {
+                        0x800u,0xc00u,0xe00u,0xf00u,0xf80u,0xfc0u,0xfe0u,0xff0u,
+                        0xff8u,0xffcu,0xfc0u,0xdc0u,0x1c0u,0x1c0u,0x0c0u,0x0c0u,
+                        0x040u,0,0,0
+                    };
+                    memset(p, 0, cur.size);
+                    uint32_t *pix = p;
+                    uint32_t pitch = cur.pitch / 4u;
+                    for (uint32_t y = 0; y < 20; y++) {
+                        for (uint32_t x = 0; x < 12; x++) {
+                            bool fg = (arrow[y] & (0x800u >> x)) != 0;
+                            bool edge = !fg &&
+                                ((x && (arrow[y] & (0x800u >> (x - 1)))) ||
+                                 (x + 1 < 12 && (arrow[y] & (0x800u >> (x + 1)))) ||
+                                 (y && (arrow[y - 1] & (0x800u >> x))) ||
+                                 (y + 1 < 20 && (arrow[y + 1] & (0x800u >> x))));
+                            if (fg) pix[y * pitch + x] = 0xffffffffu;
+                            else if (edge) pix[y * pitch + x] = 0xff000000u;
+                        }
+                    }
+                    struct drm_mode_cursor cursor = {
+                        .flags = DRM_MODE_CURSOR_BO, .crtc_id = crtc_id,
+                        .width = CW, .height = CH, .handle = cur.handle,
+                    };
+                    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CURSOR, &cursor) == 0) {
+                        g_cursor_handle = cur.handle;
+                        g_cursor_map = p;
+                        g_cursor_map_sz = cur.size;
+                        atomic_store_explicit(&g_cursor_enabled, true, memory_order_release);
+                        fprintf(stderr, "[drm] hardware cursor enabled\n");
+                    } else {
+                        munmap(p, cur.size);
+                    }
+                }
+            }
+            if (!atomic_load_explicit(&g_cursor_enabled, memory_order_acquire)) {
+                struct drm_mode_destroy_dumb dd = { .handle = cur.handle };
+                ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+            }
+        }
+    }
+
     /* ── Initial DIRTYFB to activate the virtio-gpu scanout in QEMU ─────── */
     {
         struct drm_mode_fb_dirty_cmd dirty = {0};
@@ -220,7 +281,7 @@ fail:
         ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
     }
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
-    g_map_ptr = NULL; g_fb_id = 0; g_handle = 0;
+    g_map_ptr = NULL; g_fb_id = 0; g_handle = 0; g_crtc_id = 0;
     return NULL;
 }
 
@@ -234,6 +295,25 @@ void drm_flush(void) {
     drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
 }
 
+bool drm_cursor_enabled(void) {
+    return atomic_load_explicit(&g_cursor_enabled, memory_order_acquire);
+}
+
+void drm_cursor_move(int32_t x, int32_t y) {
+    if (!drm_cursor_enabled() || g_fd < 0) return;
+    struct drm_mode_cursor cursor = {
+        .flags = DRM_MODE_CURSOR_MOVE, .crtc_id = g_crtc_id, .x = x, .y = y,
+    };
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CURSOR, &cursor) < 0) {
+        cursor.flags = DRM_MODE_CURSOR_BO;
+        cursor.handle = 0;
+        cursor.width = 0;
+        cursor.height = 0;
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CURSOR, &cursor);
+        atomic_store_explicit(&g_cursor_enabled, false, memory_order_release);
+    }
+}
+
 int drm_fd(void) { return g_fd; }
 
 /* Fill the DRM frontbuffer with black and flush — used for screen blanking. */
@@ -245,6 +325,19 @@ void drm_blank_display(void) {
 
 void drm_close(void) {
     if (g_fd < 0) return;
+    if (drm_cursor_enabled()) {
+        struct drm_mode_cursor cursor = {
+            .flags = DRM_MODE_CURSOR_BO, .crtc_id = g_crtc_id,
+        };
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CURSOR, &cursor);
+    }
+    if (g_cursor_map) { munmap(g_cursor_map, g_cursor_map_sz); g_cursor_map = NULL; }
+    if (g_cursor_handle) {
+        struct drm_mode_destroy_dumb dd = { .handle = g_cursor_handle };
+        ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+        g_cursor_handle = 0;
+    }
+    atomic_store_explicit(&g_cursor_enabled, false, memory_order_release);
     if (g_map_ptr) { munmap(g_map_ptr, g_map_sz); g_map_ptr = NULL; }
     if (g_fb_id)   { ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &g_fb_id); g_fb_id = 0; }
     if (g_handle) {

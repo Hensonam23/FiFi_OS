@@ -78,7 +78,16 @@ gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/event-handoff.c" -o "$TMP/event-handoff" -lpthread
 "$TMP/event-handoff"
 
-input_line="$(grep -n '^        input_poll();' "$ROOT/fifi/compositor/main.c" | cut -d: -f1)"
+input_line="$(grep -n '^        input_poll_motion();' "$ROOT/fifi/compositor/main.c" | cut -d: -f1)"
 ipc_line="$(grep -n '^        ipc_poll();' "$ROOT/fifi/compositor/main.c" | cut -d: -f1)"
 test "$input_line" -lt "$ipc_line"
 echo "[input-test] compositor yields to input and reads evdev first"
+
+grep -Fq 'DRM_MODE_CURSOR_BO' "$ROOT/fifi/platform/linux/drm.c"
+grep -Fq 'DRM_MODE_CURSOR_MOVE' "$ROOT/fifi/platform/linux/drm.c"
+grep -Fq 'while (pthread_mutex_trylock(&g_mx) != 0)' \
+    "$ROOT/fifi/compositor/main.c"
+grep -Fq 'input_flush_deferred_clicks();' "$ROOT/fifi/compositor/main.c"
+grep -Fq 'pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE)' \
+    "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] KMS cursor keeps draining input during slow frames"

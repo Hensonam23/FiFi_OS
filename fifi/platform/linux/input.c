@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 /* Include mouse.h BEFORE linux/input.h — mouse.h has no KEY_* conflicts */
 #include "mouse.h"
@@ -129,6 +130,9 @@ static bool g_alt   = false;
 static bool g_super = false;
 static bool g_super_used = false;  /* a combo key was pressed during the Super hold */
 
+static void input_state_lock(void);
+static void input_state_unlock(void);
+
 /* Raw evdev key queue for Wayland clients (evdev code + press/release) */
 #define RAW_KEY_RING 64
 typedef struct { uint16_t code; uint8_t state; } raw_key_t;
@@ -141,10 +145,12 @@ static void raw_key_push(uint16_t code, uint8_t state) {
     g_raw_tail = next;
 }
 int keyboard_try_get_raw(uint16_t *code, uint8_t *state) {
-    if (g_raw_head == g_raw_tail) return 0;
+    input_state_lock();
+    if (g_raw_head == g_raw_tail) { input_state_unlock(); return 0; }
     *code  = g_raw_ring[g_raw_head].code;
     *state = g_raw_ring[g_raw_head].state;
     g_raw_head = (g_raw_head + 1) % RAW_KEY_RING;
+    input_state_unlock();
     return 1;
 }
 
@@ -161,7 +167,52 @@ static uint32_t g_clk_used = 0;
 static click_t  g_rclk_ring[CLK_RING];
 static uint32_t g_rclk_head = 0;
 static uint32_t g_rclk_used = 0;
+static click_t  g_deferred_clk[CLK_RING], g_deferred_rclk[CLK_RING];
+static uint32_t g_deferred_clk_used = 0, g_deferred_rclk_used = 0;
+static bool     g_motion_only = false;
 static int8_t   g_scroll_pending = 0;
+
+/* Input can be drained while a slow render owns the compositor lock. */
+static pthread_mutex_t g_input_mx;
+static pthread_once_t g_input_mx_once = PTHREAD_ONCE_INIT;
+static void input_mx_init_once(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_input_mx, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+static void input_state_lock(void) {
+    pthread_once(&g_input_mx_once, input_mx_init_once);
+    pthread_mutex_lock(&g_input_mx);
+}
+static void input_state_unlock(void) { pthread_mutex_unlock(&g_input_mx); }
+
+static void input_queue_click(bool right, int32_t x, int32_t y) {
+    click_t *ring;
+    uint32_t *used;
+    uint32_t head;
+    if (g_motion_only) {
+        ring = right ? g_deferred_rclk : g_deferred_clk;
+        used = right ? &g_deferred_rclk_used : &g_deferred_clk_used;
+        head = 0;
+    } else {
+        ring = right ? g_rclk_ring : g_clk_ring;
+        used = right ? &g_rclk_used : &g_clk_used;
+        head = right ? g_rclk_head : g_clk_head;
+    }
+    if (*used < CLK_RING) ring[(head + (*used)++) % CLK_RING] = (click_t){ x, y };
+}
+
+void input_flush_deferred_clicks(void) {
+    input_state_lock();
+    for (uint32_t i = 0; i < g_deferred_clk_used; i++)
+        input_queue_click(false, g_deferred_clk[i].x, g_deferred_clk[i].y);
+    for (uint32_t i = 0; i < g_deferred_rclk_used; i++)
+        input_queue_click(true, g_deferred_rclk[i].x, g_deferred_rclk[i].y);
+    g_deferred_clk_used = g_deferred_rclk_used = 0;
+    input_state_unlock();
+}
 
 /* ── Mouse cursor (drawn on real framebuffer after backbuf flip) ─────────── */
 static uint32_t *g_fb_ptr   = NULL;
@@ -353,7 +404,8 @@ static const uint8_t s_cursor[CUR_H][CUR_W] = {
 };
 
 void mouse_cursor_update(void) {
-    if (!g_fb_ptr) return;
+    input_state_lock();
+    if (!g_fb_ptr) { input_state_unlock(); return; }
 
     uint32_t *bb       = console_backbuf_ptr();
     uint64_t  bb_pitch = console_backbuf_pitch32();
@@ -423,6 +475,7 @@ void mouse_cursor_update(void) {
             }
         }
     }
+    input_state_unlock();
 }
 
 /* ── Evdev device detection ─────────────────────────────────────────────── */
@@ -646,10 +699,12 @@ void input_rescan(void) {
 
 /* ── Poll — call each frame ─────────────────────────────────────────────── */
 
-void input_poll(void) {
+static void input_poll_mode(bool motion_only) {
+    input_state_lock();
+    g_motion_only = motion_only;
     struct input_event ev;
 
-    for (int ki = 0; ki < g_kbd_cnt; ki++) {
+    for (int ki = 0; !motion_only && ki < g_kbd_cnt; ki++) {
         while (read(g_kbd_fds[ki], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type != EV_KEY) continue;
             bool pressed = (ev.value == 1 || ev.value == 2);
@@ -713,11 +768,7 @@ void input_poll(void) {
                 if (ev.code == BTN_RIGHT) {
                     bool new_r = (ev.value != 0);
                     if (new_r && !rbtn) {  /* rising edge — capture before release can clear it */
-                        if (g_rclk_used < CLK_RING) {
-                            g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
-                                (click_t){ g_mx, g_my };
-                            g_rclk_used++;
-                        }
+                        input_queue_click(true, g_mx, g_my);
                     }
                     rbtn = new_r;
                 }
@@ -730,11 +781,7 @@ void input_poll(void) {
             if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
             mouse_push_rel(dx, dy, lbtn, rbtn);
             if (lbtn && !prev_l) {
-                if (g_clk_used < CLK_RING) {
-                    g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =
-                        (click_t){ g_mx, g_my };
-                    g_clk_used++;
-                }
+                input_queue_click(false, g_mx, g_my);
             }
         }
     }
@@ -881,11 +928,7 @@ void input_poll(void) {
                             /* Two-finger click = right-click on buttonpad */
                             bool new_r = new_lbtn;
                             if (new_r && !rbtn) {
-                                if (g_rclk_used < CLK_RING) {
-                                    g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
-                                        (click_t){ g_mx, g_my };
-                                    g_rclk_used++;
-                                }
+                                input_queue_click(true, g_mx, g_my);
                             }
                             rbtn = new_r;
                             /* Do NOT update lbtn — prevent a left-click from also firing */
@@ -896,11 +939,7 @@ void input_poll(void) {
                     if (ev.code == BTN_RIGHT) {
                         bool new_r = (ev.value != 0);
                         if (new_r && !rbtn) {
-                            if (g_rclk_used < CLK_RING) {
-                                g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
-                                    (click_t){ g_mx, g_my };
-                                g_rclk_used++;
-                            }
+                            input_queue_click(true, g_mx, g_my);
                         }
                         rbtn = new_r;
                     }
@@ -910,11 +949,7 @@ void input_poll(void) {
                     if (ev.code == BTN_RIGHT) {
                         bool new_r = (ev.value != 0);
                         if (new_r && !rbtn) {
-                            if (g_rclk_used < CLK_RING) {
-                                g_rclk_ring[(g_rclk_head + g_rclk_used) % CLK_RING] =
-                                    (click_t){ g_mx, g_my };
-                                g_rclk_used++;
-                            }
+                            input_queue_click(true, g_mx, g_my);
                         }
                         rbtn = new_r;
                     }
@@ -1029,17 +1064,13 @@ void input_poll(void) {
                 if (g_my >= g_fb_h) g_my = g_fb_h - 1;
             }
             if (lbtn && !prev) {
-                if (g_clk_used < CLK_RING) {
-                    g_clk_ring[(g_clk_head + g_clk_used) % CLK_RING] =
-                        (click_t){ g_mx, g_my };
-                    g_clk_used++;
-                }
+                input_queue_click(false, g_mx, g_my);
             }
         }
     }
 
     /* ── Gamepad events ────────────────────────────────────────────────── */
-    for (int gi = 0; gi < g_gp_cnt; gi++) {
+    for (int gi = 0; !motion_only && gi < g_gp_cnt; gi++) {
         gamepad_t *gp = &g_gamepads[gi];
         struct input_event ev;
         gp->changed = false;
@@ -1089,16 +1120,24 @@ void input_poll(void) {
             }
         }
     }
+    g_motion_only = false;
+    input_state_unlock();
 }
 
+void input_poll(void) { input_poll_mode(false); }
+void input_poll_motion(void) { input_poll_mode(true); }
+
 /* Gamepad query API */
-bool input_gamepad_connected(void)   { return g_gp_cnt > 0; }
+bool input_gamepad_connected(void)   {
+    input_state_lock(); bool connected = g_gp_cnt > 0; input_state_unlock(); return connected;
+}
 
 bool input_gamepad_state(int idx, uint16_t *btns,
                          int16_t *lx, int16_t *ly,
                          int16_t *rx, int16_t *ry,
                          int16_t *lt, int16_t *rt) {
-    if (idx < 0 || idx >= g_gp_cnt) return false;
+    input_state_lock();
+    if (idx < 0 || idx >= g_gp_cnt) { input_state_unlock(); return false; }
     gamepad_t *gp = &g_gamepads[idx];
     if (btns) *btns = gp->buttons;
     if (lx)   *lx   = gp->lx;
@@ -1107,45 +1146,54 @@ bool input_gamepad_state(int idx, uint16_t *btns,
     if (ry)   *ry   = gp->ry;
     if (lt)   *lt   = gp->lt;
     if (rt)   *rt   = gp->rt;
+    input_state_unlock();
     return true;
 }
 
 bool input_gamepad_changed(int idx) {
-    if (idx < 0 || idx >= g_gp_cnt) return false;
+    input_state_lock();
+    if (idx < 0 || idx >= g_gp_cnt) { input_state_unlock(); return false; }
     bool c = g_gamepads[idx].changed;
     g_gamepads[idx].changed = false;
+    input_state_unlock();
     return c;
 }
 
 /* ── keyboard.h API (implemented without including keyboard.h to avoid
  * KEY_* define conflicts with linux/input.h) ─────────────────────────────── */
 
-void keyboard_push_char(uint8_t c) { kb_push_internal(c); }
+void keyboard_push_char(uint8_t c) { input_state_lock(); kb_push_internal(c); input_state_unlock(); }
 
 int keyboard_try_getchar(void) {
-    if (!g_kb_used) return -1;
+    input_state_lock();
+    if (!g_kb_used) { input_state_unlock(); return -1; }
     uint8_t c = g_kb_ring[g_kb_head];
     g_kb_head = (g_kb_head + 1) % KB_RING;
     g_kb_used--;
+    input_state_unlock();
     return (int)(unsigned int)c;
 }
 
 void keyboard_set_gui_capture(bool on) {
+    input_state_lock();
     g_gui_capture = on;
     g_kb_used = g_gui_used = 0;
+    input_state_unlock();
 }
 
 int keyboard_gui_try_getchar(void) {
-    if (!g_gui_used) return -1;
+    input_state_lock();
+    if (!g_gui_used) { input_state_unlock(); return -1; }
     uint8_t c = g_gui_ring[g_gui_head];
     g_gui_head = (g_gui_head + 1) % GUI_RING;
     g_gui_used--;
+    input_state_unlock();
     return (int)(unsigned int)c;
 }
 
-bool kbd_shift_down(void) { return g_shift; }
-bool kbd_ctrl_down(void)  { return g_ctrl;  }
-bool kbd_alt_down(void)   { return g_alt;   }
+bool kbd_shift_down(void) { input_state_lock(); bool v = g_shift; input_state_unlock(); return v; }
+bool kbd_ctrl_down(void)  { input_state_lock(); bool v = g_ctrl;  input_state_unlock(); return v; }
+bool kbd_alt_down(void)   { input_state_lock(); bool v = g_alt;   input_state_unlock(); return v; }
 
 /* Stub keyboard functions unused on Linux */
 void keyboard_on_scancode(uint8_t sc)     { (void)sc; }
@@ -1158,14 +1206,14 @@ void keyboard_ps2_diag(void)              { }
 void keyboard_ps2_full_init(void)         { }
 uint32_t keyboard_sc_make(uint8_t sc)     { (void)sc; return 0; }
 uint32_t keyboard_sc_break(uint8_t sc)    { (void)sc; return 0; }
-void keyboard_clear_state(void)           { g_kb_used = g_gui_used = 0; }
+void keyboard_clear_state(void)           { input_state_lock(); g_kb_used = g_gui_used = 0; input_state_unlock(); }
 void keyboard_hid_make(uint8_t kc, uint8_t ch) { (void)kc; keyboard_push_char(ch); }
 void keyboard_hid_break(uint8_t kc)       { (void)kc; }
 void keyboard_set_hid_present(void)       { }
 void keyboard_set_raw_capture(int on)     { (void)on; }
 uint32_t keyboard_raw_total(void)         { return 0; }
 uint32_t keyboard_raw_aux(void)           { return 0; }
-int keyboard_has_data(void)               { return g_kb_used > 0 ? 1 : 0; }
+int keyboard_has_data(void)               { input_state_lock(); int v = g_kb_used > 0 ? 1 : 0; input_state_unlock(); return v; }
 
 /* ── mouse.h API ─────────────────────────────────────────────────────────── */
 
@@ -1174,49 +1222,62 @@ static cursor_type_t g_cursor_type = CURSOR_ARROW;
 void mouse_init(void) { g_mx = g_fb_w / 2; g_my = g_fb_h / 2; }
 
 void mouse_push_rel(int32_t dx, int32_t dy, bool lbtn, bool rbtn) {
+    input_state_lock();
     g_mx += dx; g_my += dy;
     if (g_mx < 0)       g_mx = 0;
     if (g_my < 0)       g_my = 0;
     if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;
     if (g_my >= g_fb_h) g_my = g_fb_h - 1;
     g_lbtn = lbtn; g_rbtn = rbtn;
+    input_state_unlock();
 }
 
 void mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn) {
+    input_state_lock();
     if (x)    *x    = g_mx;
     if (y)    *y    = g_my;
     if (lbtn) *lbtn = g_lbtn;
     if (rbtn) *rbtn = g_rbtn;
+    input_state_unlock();
 }
 
 bool mouse_consume_click(int32_t *x, int32_t *y) {
-    if (!g_clk_used) return false;
+    input_state_lock();
+    if (!g_clk_used) { input_state_unlock(); return false; }
     click_t c = g_clk_ring[g_clk_head];
     g_clk_head = (g_clk_head + 1) % CLK_RING;
     g_clk_used--;
     if (x) *x = c.x;
     if (y) *y = c.y;
+    input_state_unlock();
     return true;
 }
 
 bool mouse_consume_rclick(int32_t *x, int32_t *y) {
-    if (!g_rclk_used) return false;
+    input_state_lock();
+    if (!g_rclk_used) { input_state_unlock(); return false; }
     click_t c = g_rclk_ring[g_rclk_head];
     g_rclk_head = (g_rclk_head + 1) % CLK_RING;
     g_rclk_used--;
     if (x) *x = c.x;
     if (y) *y = c.y;
+    input_state_unlock();
     return true;
 }
 
 int8_t mouse_consume_scroll(void) {
-    int8_t v = g_scroll_pending; g_scroll_pending = 0; return v;
+    input_state_lock();
+    int8_t v = g_scroll_pending; g_scroll_pending = 0;
+    input_state_unlock();
+    return v;
 }
 
-void mouse_warp(int32_t x, int32_t y)   { g_mx = x; g_my = y; }
+void mouse_warp(int32_t x, int32_t y)   { input_state_lock(); g_mx = x; g_my = y; input_state_unlock(); }
 void mouse_click(int32_t x, int32_t y) {
+    input_state_lock();
     if (g_clk_used < CLK_RING)
         g_clk_ring[(g_clk_head + g_clk_used++) % CLK_RING] = (click_t){ x, y };
+    input_state_unlock();
 }
 void mouse_irq_handler(void)            { }
 void mouse_on_byte(uint8_t b)           { (void)b; }
@@ -1226,7 +1287,7 @@ cursor_type_t mouse_get_cursor(void)    { return g_cursor_type; }
 
 /* ── Compositor-visible helpers ──────────────────────────────────────────── */
 
-bool keyboard_gui_capture_active(void) { return g_gui_capture; }
+bool keyboard_gui_capture_active(void) { input_state_lock(); bool v = g_gui_capture; input_state_unlock(); return v; }
 
 int input_get_all_fds(int *buf, int maxn) {
     int n = 0;

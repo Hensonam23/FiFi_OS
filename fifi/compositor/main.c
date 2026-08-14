@@ -27,6 +27,8 @@
 /* Linux platform functions */
 void input_init(void);
 void input_poll(void);
+void input_poll_motion(void);
+void input_flush_deferred_clicks(void);
 void input_rescan(void);
 void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h);
 void mouse_init(void);
@@ -38,6 +40,8 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
 /* DRM/KMS backend (drm.c) — try first, fall back to /dev/fb0 */
 struct limine_framebuffer *drm_open(void);
 void drm_flush(void);
+bool drm_cursor_enabled(void);
+void drm_cursor_move(int32_t x, int32_t y);
 void drm_close(void);
 void drm_blank_display(void);
 
@@ -400,7 +404,8 @@ static void *render_thread_fn(void *arg)
             int32_t cx, cy; bool lb, rb;
             mouse_get_state(&cx, &cy, &lb, &rb);
             bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
-            if (cursor_moved && s_last_cy >= 0) {
+            bool hw_cursor = drm_cursor_enabled();
+            if (!hw_cursor && cursor_moved && s_last_cy >= 0) {
                 uint32_t ey0 = (uint32_t)s_last_cy;
                 console_mark_dirty_rows(ey0, ey0 + CUR_H);
             }
@@ -427,12 +432,12 @@ static void *render_thread_fn(void *arg)
                 s_wl_prev = wl_now;
             }
             bool flipped = console_flip_if_dirty();
-            if (flipped || cursor_moved) {
+            if (!hw_cursor && (flipped || cursor_moved)) {
                 mouse_cursor_update();
-                s_last_cx = cx; s_last_cy = cy;
             }
+            s_last_cx = cx; s_last_cy = cy;
 
-            do_flush = (flipped || cursor_moved) && g_using_drm;
+            do_flush = (flipped || (!hw_cursor && cursor_moved)) && g_using_drm;
         } else {
             /* Keep state ticking even when blanked (clock, animations). */
             gui_on_tick();
@@ -526,7 +531,8 @@ int main(void) {
     input_init();
 
     gui_init();  /* loads resolution-appropriate font before terminal size is computed */
-    mouse_cursor_update();
+    if (drm_cursor_enabled()) drm_cursor_move(g_lmfb.width / 2, g_lmfb.height / 2);
+    else mouse_cursor_update();
 
     /* Compute the terminal grid size, THEN spawn the shell at exactly that size.
      * Spawning first and resizing afterward sent a SIGWINCH that made the shell
@@ -615,13 +621,38 @@ int main(void) {
          * immediately regardless). 2ms = 500Hz input sampling in gaming. */
         poll(pfd, (nfds_t)nfds, g_gaming_mode ? 2 : 4);
 
-        fifi_event_handoff_request(&g_event_handoff);
-        pthread_mutex_lock(&g_mx);
-        fifi_event_handoff_acquired(&g_event_handoff);
+        /* Drain evdev before waiting for compositor state. If a slow software
+         * frame still owns g_mx, keep draining and move the KMS cursor directly
+         * instead of freezing the pointer until that frame ends. */
+        int32_t px, py; bool pb_l, pb_r;
+        mouse_get_state(&px, &py, &pb_l, &pb_r);
+        input_poll_motion();
+        int32_t nx, ny; bool nb_l, nb_r;
+        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
+        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
+        if (drm_cursor_enabled() && (nx != px || ny != py)) drm_cursor_move(nx, ny);
 
-        /* Read evdev first after acquiring the compositor state.  App frame
-         * traffic and PTY output can be comparatively expensive; neither
-         * should add latency before physical pointer motion is consumed. */
+        fifi_event_handoff_request(&g_event_handoff);
+        while (pthread_mutex_trylock(&g_mx) != 0) {
+            const struct timespec input_pause = {
+                .tv_sec = 0,
+                .tv_nsec = g_gaming_mode ? 2000000 : 4000000,
+            };
+            nanosleep(&input_pause, NULL);
+            int32_t ox = nx, oy = ny;
+            input_poll_motion();
+            mouse_get_state(&nx, &ny, &nb_l, &nb_r);
+            if (nx != ox || ny != oy || nb_l != pb_l || nb_r != pb_r)
+                had_input = true;
+            if (drm_cursor_enabled() && (nx != ox || ny != oy))
+                drm_cursor_move(nx, ny);
+        }
+        fifi_event_handoff_acquired(&g_event_handoff);
+        input_flush_deferred_clicks();
+        input_poll(); /* keyboard and gamepad events stayed queued while rendering */
+
+        /* App frame traffic and PTY output can be comparatively expensive;
+         * physical pointer motion has already been consumed above. */
         static int _rescan_ticks = 0;
         if (++_rescan_ticks >= 300) { _rescan_ticks = 0;
             input_rescan();
@@ -631,13 +662,6 @@ int main(void) {
              * thread at 100% CPU. This also picks up newly plugged devices. */
             nevdev = input_get_all_fds(evdev_fds, 20);
         }
-        int32_t px, py; bool pb_l, pb_r;
-        mouse_get_state(&px, &py, &pb_l, &pb_r);
-        input_poll();
-        int32_t nx, ny; bool nb_l, nb_r;
-        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
-        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
-
         /* ── IPC: accept new connections, read app frame messages ──────── */
         ipc_poll();
         wayland_poll();
