@@ -20,8 +20,7 @@
 #include <errno.h>
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 #define WIN_W   480
 #define WIN_H   340
@@ -107,32 +106,14 @@ static void draw_card(uint32_t *fb, int win_w, int win_h,
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
-static void write_all(int fd, const void *buf, size_t n) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
-}
-
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr + 4, &len, 4);
-    write_all(fd, hdr, 8);
-    if (len && data) write_all(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static int g_win_w = WIN_W, g_win_h = WIN_H;
 
 static void send_frame(int sock, uint32_t *fb) {
-    uint32_t w = (uint32_t)g_win_w, h = (uint32_t)g_win_h;
-    size_t pix = (size_t)w * h * 4;   /* size_t: avoid 32-bit overflow */
-    size_t pld_sz = 16 + pix;
-    if (pld_sz > 0xFFFFFFFFu) return;
-    uint8_t *msg = malloc(pld_sz);
-    if (!msg) return;
-    uint32_t hdr[4] = {0, 0, w, h};
-    memcpy(msg, hdr, 16);
-    memcpy(msg + 16, fb, pix);
-    ipc_send_msg(sock, IPC_APP_FRAME, msg, (uint32_t)pld_sz);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(sock, (uint16_t)g_win_w, (uint16_t)g_win_h, fb);
 }
 
 /* ── Network stats ───────────────────────────────────────────────────────── */
@@ -417,22 +398,8 @@ int main(void) {
     uint32_t *fb = calloc((size_t)WIN_W * WIN_H, 4);
     if (!fb) return 1;
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "Network Monitor");
     if (sock < 0) { free(fb); return 1; }
-
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock); free(fb); return 1;
-    }
-
-    /* IPC_APP_CONNECT: {uint16_t w, h; char title[60]} */
-    uint8_t conn[64] = {0};
-    uint16_t cw = WIN_W, ch = WIN_H;
-    memcpy(conn, &cw, 2); memcpy(conn + 2, &ch, 2);
-    snprintf((char *)(conn + 4), 60, "Network Monitor");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     /* Read IPC_WIN_CREATED */
     {

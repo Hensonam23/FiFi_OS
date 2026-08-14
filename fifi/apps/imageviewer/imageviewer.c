@@ -17,8 +17,7 @@
 #include <sys/un.h>
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
-#define FIFI_SOCK         "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 static int g_win_w = 720;
@@ -398,24 +397,11 @@ static void render(uint32_t *fb) {
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr + 4, &len, 4);
-    write(fd, hdr, 8);
-    if (len && data) write(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static void send_frame(int sock, uint32_t *fb) {
-    uint32_t hdr[4] = {0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h};
-    /* Compute in size_t: 16 + w*h*4 overflows uint32 for large windows */
-    size_t px     = (size_t)g_win_w * (size_t)g_win_h * 4;
-    size_t pld_sz = 16 + px;
-    if (pld_sz > 0xFFFFFFFFu) return;   /* len field is 32-bit */
-    uint8_t *msg = malloc(pld_sz);
-    if (!msg) return;
-    memcpy(msg, hdr, 16);
-    memcpy(msg + 16, fb, px);
-    ipc_send_msg(sock, IPC_APP_FRAME, msg, (uint32_t)pld_sz);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(sock, (uint16_t)g_win_w, (uint16_t)g_win_h, fb);
 }
 
 static void send_title(int sock) {
@@ -483,22 +469,9 @@ int main(int argc, char **argv) {
     uint32_t *fb = calloc((size_t)g_win_w * g_win_h, 4);
     if (!fb) return 1;
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect((uint16_t)g_win_w, (uint16_t)g_win_h,
+                                    "Image Viewer");
     if (sock < 0) { free(fb); return 1; }
-
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock); free(fb); return 1;
-    }
-
-    /* IPC_APP_CONNECT */
-    uint8_t conn[64] = {0};
-    uint16_t cw = (uint16_t)g_win_w, ch = (uint16_t)g_win_h;
-    memcpy(conn, &cw, 2); memcpy(conn + 2, &ch, 2);
-    snprintf((char *)(conn + 4), 60, "Image Viewer");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     /* Read IPC_WIN_CREATED */
     {

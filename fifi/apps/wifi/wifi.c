@@ -20,8 +20,7 @@
 #include <time.h>
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W   540
@@ -490,37 +489,12 @@ static void render(uint32_t *fb) {
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
-static void write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
-        if (n > 0) { p += n; len -= (size_t)n; }
-        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct timespec ts = {0, 500000}; nanosleep(&ts, NULL);
-        } else if (n < 0 && errno == EINTR) { /* retry */
-        } else break;
-    }
-}
-
 static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    write_all(fd, hdr, 8);
-    if (len > 0 && data) write_all(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static void send_frame(int fd, uint32_t *fb) {
-    uint32_t frm[4] = {0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h};
-    /* Compute in size_t: 16 + w*h*4 overflows uint32 for large windows */
-    size_t px    = (size_t)g_win_w * (size_t)g_win_h * 4;
-    size_t total = 16 + px;
-    if (total > 0xFFFFFFFFu) return;   /* len field is 32-bit */
-    uint8_t *msg = malloc(total);
-    if (!msg) return;
-    memcpy(msg, frm, 16);
-    memcpy(msg+16, fb, px);
-    ipc_send(fd, IPC_APP_FRAME, msg, (uint32_t)total);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(fd, (uint16_t)g_win_w, (uint16_t)g_win_h, fb);
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
@@ -550,18 +524,8 @@ int main(void) {
     uint32_t *fb = malloc((size_t)WIN_W * WIN_H * 4);
     if (!fb) return 1;
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "WiFi Manager");
     if (sock < 0) return 1;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) return 1;
-
-    uint8_t conn[68] = {0};
-    uint16_t w = WIN_W, h = WIN_H;
-    memcpy(conn, &w, 2); memcpy(conn+2, &h, 2);
-    snprintf((char*)(conn+4), 64, "WiFi Manager");
-    ipc_send(sock, IPC_APP_CONNECT, conn, sizeof(conn));
     { uint8_t hdr[8]; read(sock, hdr, 8); uint32_t pl; memcpy(&pl, hdr+4, 4);
       if (pl > 0 && pl < 64) { uint8_t r[64]; read(sock, r, pl); } }
 
