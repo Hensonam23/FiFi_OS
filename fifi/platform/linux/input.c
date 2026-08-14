@@ -12,6 +12,7 @@
 /* Include mouse.h BEFORE linux/input.h — mouse.h has no KEY_* conflicts */
 #include "mouse.h"
 #include "console.h"
+#include "touchpad_axis.h"
 
 /* linux/input.h defines its own KEY_LEFT=105, KEY_F1=59, etc.
  * We keep this include isolated: after mouse.h, before keyboard.h.
@@ -72,6 +73,7 @@ typedef struct {
     int64_t sub_x, sub_y;   /* subpixel accumulator for slow movement precision */
     int64_t ema_x_q8,  ema_y_q8;      /* Q8 EMA of abs position; negative = uninit */
     int64_t pema_x_q8, pema_y_q8;     /* previous EMA snapshot for delta (full Q8, no truncation) */
+    touchpad_axis_state_t axes; /* persistent coordinates and MT slot across polls */
     char phys[64];           /* EVIOCGPHYS — used to skip companion REL node */
 } abs_dev_t;
 static abs_dev_t g_abs_devs[MAX_EVDEV];
@@ -505,6 +507,7 @@ void input_init(void) {
                 dev->is_touchpad = (is_pointer && !is_direct);
                 dev->prev_x = -1;
                 dev->prev_y = -1;
+                touchpad_axis_reset(&dev->axes);
                 snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
                 fprintf(stderr, "[input] -> %s %s range %dx%d\n",
                         dev->is_touchpad ? "touchpad" : "touchscreen/tablet",
@@ -632,6 +635,7 @@ void input_rescan(void) {
             dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
             dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
             dev->prev_x = -1; dev->prev_y = -1;
+            touchpad_axis_reset(&dev->axes);
             fprintf(stderr, "[input] rescan: new abs device %s\n", path);
             continue;
         }
@@ -738,12 +742,12 @@ void input_poll(void) {
     /* ── Absolute pointer devices (USB tablet / virtio-tablet / touchpad) ── */
     for (int ai = 0; ai < g_abs_cnt; ai++) {
         abs_dev_t *dev = &g_abs_devs[ai];
-        int32_t abs_x = -1, abs_y = -1;
-        int32_t abs_x1 = -1, abs_y1 = -1; /* slot 1 — dragging finger in 2-finger mode */
+        int32_t abs_x = dev->axes.x[0], abs_y = dev->axes.y[0];
+        int32_t abs_x1 = dev->axes.x[1], abs_y1 = dev->axes.y[1];
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
         int8_t scroll = 0;  /* wheel: virtio-tablet reports EV_ABS + EV_REL on one node */
-        int cur_slot = 0;   /* MT Type B: track active slot */
+        int cur_slot = dev->axes.current_slot;
 
         /* Debounce: count down after finger lift; reset origin when it expires */
         if (dev->lift_cooldown > 0 && --dev->lift_cooldown == 0) {
@@ -760,16 +764,25 @@ void input_poll(void) {
                  * pad (tool_doubletap) the kernel synthesises ABS_X by alternating
                  * between slot 0 and slot 1 positions, causing wild cursor jumps.
                  * Ignore it in that state; ABS_MT_POSITION_X slot 0/1 are used instead. */
-                case ABS_X: if (!dev->tool_doubletap) abs_x = ev.value; break;
-                case ABS_Y: if (!dev->tool_doubletap) abs_y = ev.value; break;
-                case ABS_MT_SLOT:         cur_slot = ev.value; break;
+                case ABS_X:
+                    if (!dev->tool_doubletap) { abs_x = ev.value; dev->axes.x[0] = ev.value; }
+                    break;
+                case ABS_Y:
+                    if (!dev->tool_doubletap) { abs_y = ev.value; dev->axes.y[0] = ev.value; }
+                    break;
+                case ABS_MT_SLOT:
+                    cur_slot = ev.value;
+                    touchpad_axis_select_slot(&dev->axes, cur_slot);
+                    break;
                 /* MT Type B: track slot 0 (click/anchor finger) and slot 1 (drag finger) */
                 case ABS_MT_POSITION_X:
-                    if (cur_slot == 0) abs_x  = ev.value;
+                    touchpad_axis_set_x(&dev->axes, ev.value);
+                    if (cur_slot == 0) abs_x = ev.value;
                     else if (cur_slot == 1) abs_x1 = ev.value;
                     break;
                 case ABS_MT_POSITION_Y:
-                    if (cur_slot == 0) abs_y  = ev.value;
+                    touchpad_axis_set_y(&dev->axes, ev.value);
+                    if (cur_slot == 0) abs_y = ev.value;
                     else if (cur_slot == 1) abs_y1 = ev.value;
                     break;
                 /* MT tracking ID = -1 means finger lifted */
@@ -830,6 +843,8 @@ void input_poll(void) {
                             /* Finger lifted — start debounce before resetting origin. */
                             if (dev->lift_cooldown == 0)
                                 dev->lift_cooldown = 100;
+                            touchpad_axis_reset(&dev->axes);
+                            abs_x = abs_y = abs_x1 = abs_y1 = -1;
                         } else {
                             dev->lift_cooldown = 0;
                             /* Fresh contact from lifted state: reset anchor so the

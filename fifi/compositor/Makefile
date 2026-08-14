@@ -60,7 +60,7 @@ $(BUILD)/comp/%.o: %.c | $(BUILD)/comp
 $(BUILD)/comp/platform.o: ../platform/linux/platform.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/comp/input.o: ../platform/linux/input.c | $(BUILD)/comp
+$(BUILD)/comp/input.o: ../platform/linux/input.c ../platform/linux/include/touchpad_axis.h | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/vfs_posix.o: ../platform/linux/vfs_posix.c | $(BUILD)/comp

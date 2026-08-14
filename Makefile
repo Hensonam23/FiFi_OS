@@ -251,6 +251,9 @@ linux-download-test:
 linux-shared-api-test:
 	bash test/shared-api/run.sh
 
+linux-input-test:
+	bash test/input/run.sh
+
 linux-test-update: linux-kernel
 	BUILD_ID="$$(git rev-parse HEAD)"; \
 	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then BUILD_ID="$$BUILD_ID-dirty"; fi; \
