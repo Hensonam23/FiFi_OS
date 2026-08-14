@@ -19,8 +19,7 @@
 #include <time.h>
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 #define WIN_W   480
 #define WIN_H   420
@@ -130,26 +129,12 @@ static void fill_round(uint32_t *fb, int x, int y, int w, int h, uint32_t col, i
 static int g_sock = -1;
 
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    send(fd, hdr, 8, 0);
-    if (len && data) send(fd, data, len, 0);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static bool ipc_connect(void) {
-    g_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    g_sock = fifi_app_ipc_connect(WIN_W, WIN_H, "Proton Config");
     if (g_sock < 0) return false;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-    if (connect(g_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(g_sock); g_sock = -1; return false;
-    }
-    uint8_t conn[68] = {0};
-    uint16_t cw = WIN_W, ch = WIN_H;
-    memcpy(conn, &cw, 2); memcpy(conn+2, &ch, 2);
-    snprintf((char*)(conn+4), 64, "Proton Config");
-    ipc_send_msg(g_sock, IPC_APP_CONNECT, conn, sizeof(conn));
     /* Read IPC_WIN_CREATED response */
     uint8_t hdr8[8] = {0};
     recv(g_sock, hdr8, 8, 0);
@@ -162,17 +147,8 @@ static bool ipc_connect(void) {
 }
 
 static void ipc_send_frame(uint32_t *fb) {
-    uint32_t fw = (uint32_t)g_win_w, fh = (uint32_t)g_win_h;
-    size_t pix = (size_t)fw * fh * 4;   /* size_t: avoid 32-bit overflow */
-    size_t total = 16 + pix;
-    if (total > 0xFFFFFFFFu) return;
-    uint8_t *msg = malloc(total);
-    if (!msg) return;
-    uint32_t frm[4] = {0, 0, fw, fh};
-    memcpy(msg, frm, 16);
-    memcpy(msg+16, fb, pix);
-    ipc_send_msg(g_sock, IPC_APP_FRAME, msg, (uint32_t)total);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(g_sock, (uint16_t)g_win_w,
+                                  (uint16_t)g_win_h, fb);
 }
 
 /* ── Status checks ───────────────────────────────────────────────────────── */

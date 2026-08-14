@@ -21,8 +21,7 @@
 #include <time.h>
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Grid limits ─────────────────────────────────────────────────────────── */
 #define MAX_COLS   220
@@ -859,38 +858,13 @@ static void render(void) {
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
-static void write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
-        if (n > 0) { p += n; len -= (size_t)n; }
-        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL);
-        } else if (n < 0 && errno == EINTR) { /* retry */ }
-        else break;
-    }
-}
-
 static void ipc_send(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr,     &type, 4);
-    memcpy(hdr + 4, &len,  4);
-    write_all(fd, hdr, 8);
-    if (len > 0 && data) write_all(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static void send_frame(int fd) {
     if (!g_fb) return;
-    size_t npix  = (size_t)g_win_w * g_win_h;    /* size_t: W*H*4 overflows u32 */
-    size_t total = 16 + npix * 4;
-    if (total > 0xFFFFFFFFu) return;             /* won't fit the u32 length field */
-    uint32_t frm[4] = { 0, 0, (uint32_t)g_win_w, (uint32_t)g_win_h };
-    uint8_t *msg    = malloc(total);
-    if (!msg) return;
-    memcpy(msg,      frm,  16);
-    memcpy(msg + 16, g_fb, npix * 4);
-    ipc_send(fd, IPC_APP_FRAME, msg, (uint32_t)total);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(fd, (uint16_t)g_win_w, (uint16_t)g_win_h, g_fb);
 }
 
 /* ── Font size change ────────────────────────────────────────────────────── */
@@ -1132,20 +1106,9 @@ int main(void) {
     if (!g_fb) return 1;
 
     /* Connect to compositor */
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(DEF_WIN_W, DEF_WIN_H, "Terminal");
     if (sock < 0) return 1;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(sock); return 1; }
     g_ipc_fd = sock;
-
-    uint8_t conn[68] = {0};
-    uint16_t cw = (uint16_t)DEF_WIN_W, ch = (uint16_t)DEF_WIN_H;
-    memcpy(conn,     &cw, 2);
-    memcpy(conn + 2, &ch, 2);
-    snprintf((char *)(conn + 4), 64, "Terminal");
-    ipc_send(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     {
         uint8_t hdr[8] = {0};
