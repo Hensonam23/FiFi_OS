@@ -486,7 +486,7 @@ static void ipc_read_client(ipc_client_t *c) {
 
             /* Parse header */
             memcpy(&c->pld_len, c->hdr + 4, 4);
-            if (c->pld_len > 64 * 1024 * 1024u) {
+            if (c->pld_len > FIFI_IPC_MAX_PAYLOAD) {
                 /* Absurd payload — drop client */
                 ipc_disconnect_client(c);
                 return;

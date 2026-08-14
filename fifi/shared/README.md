@@ -3,6 +3,8 @@
 This directory owns contracts shared by the FiFi Linux compositor and its
 applications. `ipc.h` is wire API version 1: messages use an eight-byte
 header containing little-endian 32-bit type and payload-length fields.
+The frozen public contract and change rules are documented in
+[`docs/LINUX_DESKTOP_API.md`](../../docs/LINUX_DESKTOP_API.md).
 
 Compatible additions may define a new message ID without changing the version.
 Changing framing, an existing ID, or an existing payload layout requires a new

@@ -10,6 +10,7 @@ cat > "$TMP/ipc-contract.c" <<'EOF'
 #include "fifi/shared/ipc.h"
 _Static_assert(FIFI_IPC_VERSION == 1u, "unexpected IPC version");
 _Static_assert(IPC_HDR_SZ == 8u, "wire header changed");
+_Static_assert(FIFI_IPC_MAX_PAYLOAD == 64u * 1024u * 1024u, "payload limit changed");
 _Static_assert(IPC_APP_CONNECT == 0x01u, "application IDs changed");
 _Static_assert(IPC_WIN_CREATED == 0x10u, "compositor IDs changed");
 _Static_assert(IPC_ADD_DESK_ICON == 0x1fu, "message range changed");
@@ -126,6 +127,9 @@ done < <(grep -Rl --include='*.c' 'IPC_APP_CONNECT' "$ROOT/fifi/apps" \
 
 grep -Fq '$(BUILD)/comp/ipc.o: ../platform/linux/ipc.c ../shared/ipc.h' \
     "$ROOT/fifi/compositor/Makefile"
+grep -Fq 'FIFI_IPC_MAX_PAYLOAD' "$ROOT/fifi/platform/linux/ipc.c"
+grep -Fq 'IPC and theme API version 1 are stable' \
+    "$ROOT/docs/LINUX_DESKTOP_API.md"
 
 if grep -REn --include='*.[ch]' '^#define IPC_(APP_(CONNECT|FRAME|TITLE|CLOSE)|WIN_(CREATED|RESIZE)|INPUT_(KEY|MOUSE|GAMEPAD)|FOCUS|INVALIDATE|NOTIFY|CLIP_(SET|GET|DATA)|OPEN_FILE|DRAG_START|DROP_FILE|SET_WALLPAPER|ADD_DESK_ICON)' \
     "$ROOT/fifi/apps" "$ROOT/fifi/platform"; then

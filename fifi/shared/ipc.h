@@ -8,6 +8,7 @@
 #define IPC_HDR_SZ       8
 #define FIFI_IPC_SOCKET_PATH "/tmp/fifi-compositor.sock"
 #define FIFI_IPC_APP_TITLE_BYTES 64u
+#define FIFI_IPC_MAX_PAYLOAD (64u * 1024u * 1024u)
 
 /* Application to compositor. */
 #define IPC_APP_CONNECT   0x01u /* uint16_t width, height; char title[64] */
