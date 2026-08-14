@@ -179,7 +179,9 @@ keys. The pre-migration file is retained as
 
 ## Roadmap
 
-**Platform:** Linux only. FiFi OS ships as a Linux-based desktop/laptop system. Any future ARM64, tablet, phone, or headless profile will also use Linux; embedded and automotive are out of scope.
+**Active development:** The Linux version is the sole focus for the foreseeable future. FiFi OS first ships as a polished, reliable Linux-based desktop/laptop system; future ARM64, tablet, phone, and headless profiles also use Linux. Embedded and automotive are out of scope.
+
+**Long-term direction:** Bare-metal remains a future project, not an active parallel track. Work on it resumes only after the Linux version is mature and reliably shipping; Linux development will not be delayed to maintain bare-metal parity in the meantime.
 
 **Near-term priority:** **Desktop v1.0 is the sole goal.** Everything past it (ARM64, tablet, and phone) waits until Desktop v1.0 ships. The on-device AI ("Machine Spirit") stays a desktop/laptop feature and is designed as a cleanly-removable module, so mobile builds omit the local model entirely (a battery cannot run llama.cpp locally).
 
@@ -337,11 +339,13 @@ Goals in the order they unlock, each defined by the milestone that proves it. Mo
 - [ ] **ARM64.** Goal: FiFi Desktop running on a Raspberry Pi CM5 driving an external display. Cross-compile the compositor and apps for aarch64, swap Intel/Mesa for the CM5's VideoCore VII (Mesa V3D), move the boot chain to u-boot/UEFI + device tree. Hourglass, gated by CM5 stock.
 - [ ] **FiFi Tablet.** Goal: a CM5 + touchscreen + battery handheld running FiFi. Needs a platform-neutral touch/gesture model, a DPI-aware touch-sized responsive toolkit, an on-screen keyboard, real power management and suspend/resume, rotation, notifications, and non-root per-app isolation.
 - [ ] **FiFi Phone.** Goal: FiFi making calls and sending texts on real hardware, proven on a repairable phone (PinePhone Pro / Fairphone) first, then the custom CM5 carrier from the hardware plan below. Needs cellular modem integration, a phone/SMS framework, call audio routing, and the sensor stack. No built-in AI on the phone; mobile builds omit the local model.
+- [ ] **Future bare-metal project.** Goal: eventually build the from-scratch kernel into a complete FiFi platform. This is intentionally deferred until the Linux version is mature, polished, and reliably shipping; it is not part of the current Linux roadmap or release gates.
+
 ### Hardware plan (the CM5 handheld/phone)
 
 Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (the tablet goal above) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
 
-An historical technical assessment of the former two-track plan lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
+A technical assessment of the longer-term platform plan lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). Its bare-metal findings describe future work, while the root roadmap defines current Linux priorities. The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
 
 ---
 
