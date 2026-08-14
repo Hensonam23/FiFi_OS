@@ -8,6 +8,11 @@ Compatible additions may define a new message ID without changing the version.
 Changing framing, an existing ID, or an existing payload layout requires a new
 API version and a compatibility path before Linux desktop consumers adopt it.
 
+`app_ipc.h` is the Linux native-application transport for that wire contract.
+It owns reliable complete writes, compositor socket registration, and bounded
+frame construction so applications do not each implement subtly different
+framing and partial-write behavior.
+
 `theme.h` is theme API version 1. It fixes the wallpaper, image-fit, panel,
 accent-palette, and font-size identifiers used by the compositor GUI and
 Settings app. It also owns the persisted configuration's keys and defaults so

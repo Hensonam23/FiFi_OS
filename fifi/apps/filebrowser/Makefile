@@ -3,7 +3,7 @@ OUT := fifi-filebrowser
 
 all: $(OUT)
 
-$(OUT): filebrowser.c ../../shared/ipc.h
+$(OUT): filebrowser.c ../../shared/ipc.h ../../shared/app_ipc.h
 	$(CC) -O2 -static -o $@ $<
 	@echo "[filebrowser] built: $@"
 

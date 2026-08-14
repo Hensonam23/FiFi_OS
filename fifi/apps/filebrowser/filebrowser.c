@@ -25,8 +25,7 @@
 #include "../fifi_u8.h"
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
-#define FIFI_SOCK         "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 /* Current framebuffer size. Updated on IPC_WIN_RESIZE so the listing re-renders
@@ -292,22 +291,11 @@ static void render(uint32_t *fb) {
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr,     &type, 4);
-    memcpy(hdr + 4, &len,  4);
-    write(fd, hdr, 8);
-    if (len > 0 && data) write(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static void send_frame(int fd, uint32_t *pixels) {
-    uint32_t frm[4] = {0, 0, g_w, g_h};
-    uint32_t total  = 16 + g_w * g_h * 4;
-    uint8_t *msg    = malloc(total);
-    if (!msg) return;
-    memcpy(msg,      frm,    16);
-    memcpy(msg + 16, pixels, g_w * g_h * 4);
-    ipc_send_msg(fd, IPC_APP_FRAME, msg, total);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(fd, (uint16_t)g_w, (uint16_t)g_h, pixels);
 }
 
 /* ── Navigation helpers ──────────────────────────────────────────────────── */
@@ -386,22 +374,8 @@ int main(void) {
     if (!fb) return 1;
 
     /* Connect to compositor */
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect((uint16_t)g_w, (uint16_t)g_h, "File Browser");
     if (sock < 0) { perror("socket"); return 1; }
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("connect"); return 1;
-    }
-
-    /* Register window */
-    uint8_t conn[68] = {0};
-    uint16_t w = g_w, h = g_h;
-    memcpy(conn,     &w, 2);
-    memcpy(conn + 2, &h, 2);
-    snprintf((char *)(conn + 4), 64, "File Browser");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     /* Wait for WIN_CREATED */
     uint8_t hdr[8] = {0};

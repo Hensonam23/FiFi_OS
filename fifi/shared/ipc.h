@@ -6,9 +6,11 @@
  * change. New optional message types do not require a version bump. */
 #define FIFI_IPC_VERSION 1u
 #define IPC_HDR_SZ       8
+#define FIFI_IPC_SOCKET_PATH "/tmp/fifi-compositor.sock"
+#define FIFI_IPC_APP_TITLE_BYTES 64u
 
 /* Application to compositor. */
-#define IPC_APP_CONNECT   0x01u /* uint16_t width, height; char title[60] */
+#define IPC_APP_CONNECT   0x01u /* uint16_t width, height; char title[64] */
 #define IPC_APP_FRAME     0x02u /* uint32_t x, y, width, height, pixels[] */
 #define IPC_APP_TITLE     0x03u /* UTF-8 title bytes */
 #define IPC_APP_CLOSE     0x04u /* no payload */

@@ -313,6 +313,9 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [x] Centralize and version the compositor/application IPC message contract
   - [x] Share theme identifiers, palettes, and font-size choices across the compositor and Settings
   - [x] Share the persisted theme configuration keys and defaults
+  - [ ] Move every native application onto the shared app-side IPC transport
+    - [x] Centralize reliable writes, compositor registration, and frame uploads
+    - [x] Migrate Calculator, File Browser, Settings, and System Monitor
 - [ ] Freeze and document the Linux desktop APIs so the compositor and applications stop drifting
 
 #### Phase 9: Desktop/Laptop v1.0

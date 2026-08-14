@@ -19,8 +19,7 @@
 #include <time.h>
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W    480
@@ -400,30 +399,8 @@ sys_section:
 }
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
-static void write_all(int fd, const void *buf, size_t n) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
-}
-
-static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr+4, &len, 4);
-    write_all(fd, hdr, 8);
-    if (len && data) write_all(fd, data, len);
-}
-
 static void send_frame(int fd, uint32_t *px) {
-    uint32_t fw = (uint32_t)g_win_w, fh = (uint32_t)g_win_h;
-    uint32_t frm[4] = {0, 0, fw, fh};
-    size_t pix = (size_t)fw * fh * 4;   /* size_t: avoid 32-bit overflow */
-    size_t total = 16 + pix;
-    if (total > 0xFFFFFFFFu) return;
-    uint8_t *msg = malloc(total);
-    if (!msg) return;
-    memcpy(msg, frm, 16);
-    memcpy(msg+16, px, pix);
-    ipc_send_msg(fd, IPC_APP_FRAME, msg, (uint32_t)total);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(fd, (uint16_t)g_win_w, (uint16_t)g_win_h, px);
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
@@ -438,18 +415,8 @@ int main(void) {
     update_cpu();
     update_mem();
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "System Monitor");
     if (sock < 0) return 1;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) return 1;
-
-    uint8_t conn[68] = {0};
-    uint16_t cw = WIN_W, ch = WIN_H;
-    memcpy(conn, &cw, 2); memcpy(conn+2, &ch, 2);
-    snprintf((char*)(conn+4), 64, "System Monitor");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     uint8_t hdr8[8] = {0};
     read(sock, hdr8, 8);
@@ -554,7 +521,7 @@ int main(void) {
 
     }
 
-    ipc_send_msg(sock, IPC_APP_CLOSE, NULL, 0);
+    (void)fifi_app_ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
     return 0;

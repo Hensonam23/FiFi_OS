@@ -3,7 +3,7 @@ OUT := fifi-sysmon
 
 all: $(OUT)
 
-$(OUT): sysmon.c ../../shared/ipc.h
+$(OUT): sysmon.c ../../shared/ipc.h ../../shared/app_ipc.h
 	$(CC) -O2 -static -Wall -o $@ $<
 	@echo "[sysmon] built: $@"
 

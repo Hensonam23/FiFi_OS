@@ -12,12 +12,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W   280
@@ -333,27 +330,8 @@ static void btn_click(int row, int col) {
 }
 
 /* ── IPC message reader ───────────────────────────────────────────────────── */
-static void write_all(int fd, const void *buf, size_t n) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (n > 0) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; }
-}
-
-static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr, &type, 4); memcpy(hdr + 4, &len, 4);
-    write_all(fd, hdr, 8);
-    if (len && data) write_all(fd, data, len);
-}
-
 static void send_frame(int sock, uint32_t *fb) {
-    uint32_t hdr[4] = {0, 0, WIN_W, WIN_H};
-    uint32_t pld_sz = 16 + WIN_W * WIN_H * 4;
-    uint8_t *msg = malloc(pld_sz);
-    if (!msg) return;
-    memcpy(msg, hdr, 16);
-    memcpy(msg + 16, fb, WIN_W * WIN_H * 4);
-    ipc_send_msg(sock, IPC_APP_FRAME, msg, pld_sz);
-    free(msg);
+    (void)fifi_app_ipc_send_frame(sock, WIN_W, WIN_H, fb);
 }
 
 typedef struct {
@@ -401,22 +379,8 @@ int main(void) {
     uint32_t *fb = calloc(WIN_W * WIN_H, 4);
     if (!fb) return 1;
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "Calculator");
     if (sock < 0) { free(fb); return 1; }
-
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock); free(fb); return 1;
-    }
-
-    /* IPC_APP_CONNECT */
-    uint8_t conn[64] = {0};
-    uint16_t cw = WIN_W, ch = WIN_H;
-    memcpy(conn, &cw, 2); memcpy(conn + 2, &ch, 2);
-    snprintf((char *)(conn + 4), 60, "Calculator");
-    ipc_send_msg(sock, IPC_APP_CONNECT, conn, sizeof(conn));
 
     /* Read IPC_WIN_CREATED */
     {
@@ -503,7 +467,7 @@ int main(void) {
         }
     }
 
-    ipc_send_msg(sock, IPC_APP_CLOSE, NULL, 0);
+    (void)fifi_app_ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
     free(g_glyph);
