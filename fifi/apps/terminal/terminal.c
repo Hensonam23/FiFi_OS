@@ -22,17 +22,7 @@
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#define IPC_APP_CONNECT  0x01u
-#define IPC_APP_FRAME    0x02u
-#define IPC_APP_TITLE    0x03u
-#define IPC_APP_CLOSE    0x04u
-#define IPC_WIN_CREATED  0x10u
-#define IPC_INPUT_KEY    0x11u
-#define IPC_INPUT_MOUSE  0x12u
-#define IPC_INVALIDATE   0x15u
-#define IPC_CLIP_GET     0x18u
-#define IPC_CLIP_DATA    0x19u
-#define IPC_WIN_RESIZE   0x1Bu
+#include "../../shared/ipc.h"
 
 /* ── Grid limits ─────────────────────────────────────────────────────────── */
 #define MAX_COLS   220

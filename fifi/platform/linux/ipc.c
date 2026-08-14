@@ -21,35 +21,13 @@
 
 #include "console.h"
 #include "gui.h"
+#include "../../shared/ipc.h"
 
 __attribute__((weak)) void gui_toast_extern(const char *msg, uint32_t col);
 __attribute__((weak)) void gui_snap_focused(int zone);
 
 #define FIFI_SOCK     "/tmp/fifi-compositor.sock"
 #define IPC_MAX_APPS  8
-#define IPC_HDR_SZ    8        /* uint32_t type + uint32_t len */
-
-/* Message type IDs */
-#define IPC_APP_CONNECT   0x01u
-#define IPC_APP_FRAME     0x02u
-#define IPC_APP_TITLE     0x03u
-#define IPC_APP_CLOSE     0x04u
-#define IPC_WIN_CREATED   0x10u
-#define IPC_INPUT_KEY     0x11u
-#define IPC_INPUT_MOUSE   0x12u
-#define IPC_FOCUS         0x13u
-#define IPC_INPUT_GAMEPAD 0x14u  /* {uint16_t btns; int16_t lx,ly,rx,ry,lt,rt} = 14 bytes */
-#define IPC_INVALIDATE    0x15u  /* ask app to push a fresh full frame (no payload) */
-#define IPC_NOTIFY        0x16u  /* app → compositor: {char text[]} — show toast notification */
-#define IPC_CLIP_SET      0x17u  /* app → compositor: {char text[]} — set shared clipboard */
-#define IPC_CLIP_GET      0x18u  /* app → compositor: (no payload) — request clipboard contents */
-#define IPC_CLIP_DATA     0x19u  /* compositor → app: {char text[]} — clipboard contents */
-#define IPC_OPEN_FILE     0x1Au  /* app → compositor: {char path[]} — open path in text viewer */
-#define IPC_WIN_RESIZE    0x1Bu  /* compositor → app: {uint16_t new_w, new_h} — window resized */
-#define IPC_DRAG_START    0x1Cu  /* app → compositor: {char path[]} — begin file drag */
-#define IPC_DROP_FILE     0x1Du  /* compositor → app: {char path[]} — file dropped on window */
-#define IPC_SET_WALLPAPER 0x1Eu  /* app → compositor: {char path[]} — set image as wallpaper */
-#define IPC_ADD_DESK_ICON 0x1Fu  /* app → compositor: {char path[]\0char label[]} — add desktop icon */
 
 typedef struct {
     int      fd;

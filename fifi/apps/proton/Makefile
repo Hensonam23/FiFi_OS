@@ -3,7 +3,7 @@ OUT := fifi-proton
 
 all: $(OUT)
 
-$(OUT): proton.c
+$(OUT): proton.c ../../shared/ipc.h
 	$(CC) -O2 -static -Wall -Wextra -Wno-unused-parameter -o $@ $< -s
 	@echo "[proton] built: $@"
 

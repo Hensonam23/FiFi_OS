@@ -36,6 +36,7 @@ jobs:
           make linux-security-test
           make linux-update-test
           make linux-download-test
+          make linux-shared-api-test
 
       - name: Configure and build Linux
         run: |

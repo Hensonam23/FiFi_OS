@@ -3,7 +3,7 @@ OUT := fifi-settings
 
 all: $(OUT)
 
-$(OUT): settings.c
+$(OUT): settings.c ../../shared/ipc.h
 	$(CC) -O2 -static -I../../platform/linux/vendor -o $@ $< -lm
 	@echo "[settings] built: $@"
 

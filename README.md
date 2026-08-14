@@ -313,6 +313,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 #### Phase 8: Consolidate the shared platform
 
 - [ ] Extract the genuinely shared code (GUI toolkit, IPC protocol, config/theme formats, app framework) into one versioned library
+  - [x] Centralize and version the compositor/application IPC message contract
 - [ ] Freeze and document that API; both tracks (Linux and bare-metal) consume it so the branches stop drifting
 
 #### Phase 9: Desktop/Laptop v1.0

@@ -3,7 +3,7 @@ OUT := fifi-browser
 
 all: $(OUT)
 
-$(OUT): browser.c
+$(OUT): browser.c ../../shared/ipc.h
 	$(CC) -O2 -static -Wall -Wextra -Wno-unused-parameter -o $@ $< -s
 	@echo "[browser] built: $@"
 

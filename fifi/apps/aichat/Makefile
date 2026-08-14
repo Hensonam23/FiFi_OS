@@ -3,7 +3,7 @@ CFLAGS  = -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS = -static -s
 TARGET  = fifi-aichat
 
-$(TARGET): aichat.c
+$(TARGET): aichat.c ../../shared/ipc.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 	@echo "[aichat] built: $@"
 

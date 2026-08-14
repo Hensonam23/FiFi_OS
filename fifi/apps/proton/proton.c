@@ -20,13 +20,7 @@
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 #define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#define IPC_APP_CONNECT  0x01u
-#define IPC_APP_FRAME    0x02u
-#define IPC_APP_CLOSE    0x04u
-#define IPC_WIN_CREATED  0x10u
-#define IPC_INPUT_KEY    0x11u
-#define IPC_WIN_RESIZE   0x1Bu
-#define IPC_INVALIDATE   0x15u
+#include "../../shared/ipc.h"
 
 #define WIN_W   480
 #define WIN_H   420

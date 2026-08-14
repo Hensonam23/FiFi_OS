@@ -3,7 +3,7 @@ OUT := fifi-installer
 
 all: $(OUT)
 
-$(OUT): installer.c
+$(OUT): installer.c ../../shared/ipc.h
 	$(CC) -O2 -static -Wall -Wextra -Wno-unused-parameter -o $@ $< -s
 	@echo "[installer] built: $@"
 

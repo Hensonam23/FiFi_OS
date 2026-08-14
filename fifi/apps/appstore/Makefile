@@ -5,7 +5,7 @@ all: $(OUT)
 
 LODEPNG := ../../platform/linux/vendor/lodepng.c
 
-$(OUT): appstore.c $(LODEPNG)
+$(OUT): appstore.c $(LODEPNG) ../../shared/ipc.h
 	$(CC) -O2 -static -o $@ $< $(LODEPNG)
 	@echo "[appstore] built: $@"
 

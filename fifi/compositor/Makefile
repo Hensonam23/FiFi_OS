@@ -72,7 +72,7 @@ $(BUILD)/comp/drm.o: ../platform/linux/drm.c | $(BUILD)/comp
 $(BUILD)/comp/audio.o: ../platform/linux/audio.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/comp/ipc.o: ../platform/linux/ipc.c | $(BUILD)/comp
+$(BUILD)/comp/ipc.o: ../platform/linux/ipc.c ../shared/ipc.h | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/wayland.o: ../platform/linux/wayland.c | $(BUILD)/comp
