@@ -24,8 +24,7 @@
 #include <dirent.h>
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
-#define FIFI_SOCK       "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 #define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"
 #define APP_UNINSTALLER "/usr/share/fifi/appstore-uninstall.sh"
 #define APP_UPDATE_CHECK "/usr/share/fifi/appstore-update-check.sh"
@@ -863,17 +862,10 @@ static void render(uint32_t *fb) {
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 static void send_msg(int fd, uint32_t type, const void *d, uint32_t len) {
-    uint8_t h[8]; memcpy(h, &type, 4); memcpy(h+4, &len, 4);
-    write(fd, h, 8); if (len && d) write(fd, d, len);
+    (void)fifi_app_ipc_send(fd, type, d, len);
 }
 static void send_frame(int fd, uint32_t *px) {
-    size_t npix = (size_t)WIN_W * WIN_H;         /* size_t: W*H*4 overflows int */
-    size_t total = 16 + npix * 4;
-    if (total > 0xFFFFFFFFu) return;             /* won't fit the u32 length field */
-    uint32_t frm[4] = {0,0,(uint32_t)WIN_W,(uint32_t)WIN_H};
-    uint8_t *m = malloc(total); if (!m) return;
-    memcpy(m, frm, 16); memcpy(m+16, px, npix * 4);
-    send_msg(fd, IPC_APP_FRAME, m, (uint32_t)total); free(m);
+    (void)fifi_app_ipc_send_frame(fd, WIN_W, WIN_H, px);
 }
 
 /* Kick off install of app index i (fork the install script). */
@@ -949,17 +941,8 @@ int main(void) {
     uint32_t *fb = malloc(WIN_W*WIN_H*4);
     if (!fb) return 1;
 
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "App Store");
     if (sock < 0) { perror("socket"); return 1; }
-    struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof addr) < 0) { perror("connect"); return 1; }
-
-    uint8_t conn[68] = {0};
-    uint16_t w = WIN_W, h = WIN_H;
-    memcpy(conn, &w, 2); memcpy(conn+2, &h, 2);
-    snprintf((char*)(conn+4), 64, "App Store");
-    send_msg(sock, IPC_APP_CONNECT, conn, sizeof conn);
     uint8_t hdr[8] = {0}; read(sock, hdr, 8);
     uint32_t type, plen; memcpy(&type, hdr, 4); memcpy(&plen, hdr+4, 4);
     if (type == IPC_WIN_CREATED && plen >= 20) { uint8_t r[20]; read(sock, r, 20); }

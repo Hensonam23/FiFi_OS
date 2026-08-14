@@ -17,8 +17,7 @@
 #include <sys/un.h>
 #include <time.h>
 
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
-#include "../../shared/ipc.h"
+#include "../../shared/app_ipc.h"
 
 /* Gamepad button bit masks (must match compositor input.c) */
 #define GP_BTN_A      (1u<<0)
@@ -380,44 +379,12 @@ static void render(void) {
 
 /* ── IPC helpers ─────────────────────────────────────────────────────────── */
 
-static void write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
-        if (n > 0) { p += n; len -= (size_t)n; }
-        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct timespec ts = {0, 1000000};
-            nanosleep(&ts, NULL);
-        } else if (n < 0 && errno == EINTR) {
-            /* retry */
-        } else { break; }
-    }
-}
-
 static void ipc_send_msg(int fd, uint32_t type, const void *data, uint32_t len) {
-    uint8_t hdr[8];
-    memcpy(hdr,     &type, 4);
-    memcpy(hdr + 4, &len,  4);
-    write_all(fd, hdr, 8);
-    if (len > 0 && data) write_all(fd, data, len);
+    (void)fifi_app_ipc_send(fd, type, data, len);
 }
 
 static void push_frame(int fd) {
-    /* Header: x=0, y=0, w=WIN_W, h=WIN_H */
-    uint8_t frame_hdr[16];
-    uint32_t zero = 0, ww = WIN_W, wh = WIN_H;
-    memcpy(frame_hdr,      &zero, 4);
-    memcpy(frame_hdr + 4,  &zero, 4);
-    memcpy(frame_hdr + 8,  &ww,   4);
-    memcpy(frame_hdr + 12, &wh,   4);
-    uint32_t pld_len = 16 + WIN_W * WIN_H * 4;
-    uint8_t hdr[8];
-    uint32_t type = IPC_APP_FRAME;
-    memcpy(hdr,     &type,    4);
-    memcpy(hdr + 4, &pld_len, 4);
-    write_all(fd, hdr, 8);
-    write_all(fd, frame_hdr, 16);
-    write_all(fd, g_fb, WIN_W * WIN_H * 4);
+    (void)fifi_app_ipc_send_frame(fd, WIN_W, WIN_H, g_fb);
 }
 
 static void dispatch_msg(uint32_t type, const uint8_t *pld, uint32_t len) {
@@ -476,27 +443,8 @@ static bool ipc_read_once(int fd) {
 
 int main(void) {
     /* Connect to compositor */
-    g_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    g_sock = fifi_app_ipc_connect_retry(WIN_W, WIN_H, "Gamepad", 20, 200);
     if (g_sock < 0) { perror("socket"); return 1; }
-
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path) - 1);
-
-    int retries = 20;
-    while (connect(g_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        if (--retries == 0) { perror("connect"); return 1; }
-        struct timespec ts = {0, 200000000};
-        nanosleep(&ts, NULL);
-    }
-
-    /* Register window */
-    uint8_t conn_pld[68] = {0};
-    uint16_t ww = WIN_W, wh = WIN_H;
-    memcpy(conn_pld,     &ww, 2);
-    memcpy(conn_pld + 2, &wh, 2);
-    snprintf((char *)conn_pld + 4, 64, "Gamepad");
-    ipc_send_msg(g_sock, IPC_APP_CONNECT, conn_pld, 68);
 
     /* Make socket non-blocking */
     fcntl(g_sock, F_SETFL, O_NONBLOCK);

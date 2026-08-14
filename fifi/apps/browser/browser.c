@@ -37,8 +37,7 @@
 #define WIN_H  440
 
 /* IPC protocol — must match fifi/platform/linux/ipc.c */
-#include "../../shared/ipc.h"
-#define FIFI_SOCK        "/tmp/fifi-compositor.sock"
+#include "../../shared/app_ipc.h"
 
 /* Paths */
 #define BROWSER_DIR      "/fifi-data/browser"
@@ -693,23 +692,13 @@ static void on_click(app_t *a, int mx, int my, int sock) {
 
 /* ── 10. IPC transport and main ────────────────────────────────────────────── */
 
-static void write_all(int fd, const void *buf, size_t n) {
-    const uint8_t *p = buf;
-    while (n > 0) { ssize_t w = write(fd,p,n); if (w<=0) break; p+=w; n-=(size_t)w; }
-}
-
 static void send_frame(app_t *a, int sock) {
-    size_t fbsz = (size_t)a->win_w * (size_t)a->win_h * 4;
-    uint8_t th[8]; uint32_t t=IPC_APP_FRAME, l=(uint32_t)(16+fbsz);
-    memcpy(th,&t,4); memcpy(th+4,&l,4); write_all(sock,th,8);
-    uint32_t fh[4]={0,0,(uint32_t)a->win_w,(uint32_t)a->win_h};
-    write_all(sock,fh,16);
-    write_all(sock,a->fb,fbsz);
+    (void)fifi_app_ipc_send_frame(sock, (uint16_t)a->win_w,
+                                  (uint16_t)a->win_h, a->fb);
 }
 
 static void ipc_send(int sock, uint32_t type, const void *data, uint32_t len) {
-    uint8_t h[8]; memcpy(h,&type,4); memcpy(h+4,&len,4);
-    write_all(sock,h,8); if (len&&data) write_all(sock,data,len);
+    (void)fifi_app_ipc_send(sock, type, data, len);
 }
 
 static int saved_choice(void) {
@@ -758,17 +747,8 @@ int main(void) {
     if (!a.fb) return 1;
 
     /* Connect to compositor */
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sock = fifi_app_ipc_connect(WIN_W, WIN_H, "FiFi OS  /  Browser Setup");
     if (sock < 0) return 1;
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, FIFI_SOCK, sizeof(addr.sun_path)-1);
-    if (connect(sock,(struct sockaddr*)&addr,sizeof(addr))<0) { close(sock); return 1; }
-
-    uint8_t conn[68]={0}; uint16_t w=WIN_W, h=WIN_H;
-    memcpy(conn,&w,2); memcpy(conn+2,&h,2);
-    snprintf((char*)(conn+4),64,"FiFi OS  /  Browser Setup");
-    ipc_send(sock, IPC_APP_CONNECT, conn, sizeof(conn));
     { uint8_t rh[8]; read(sock,rh,8); uint32_t pl; memcpy(&pl,rh+4,4);
       if (pl&&pl<64) { uint8_t r[64]; read(sock,r,pl); } }
 

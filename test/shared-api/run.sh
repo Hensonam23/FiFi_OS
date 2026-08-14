@@ -67,7 +67,7 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/app-ipc-contract.c" -o "$TMP/app-ipc-contract"
 "$TMP/app-ipc-contract"
 
-for app in aichat calc editor filebrowser imageviewer netmon proton security settings sysmon terminal wifi; do
+for app in aichat appstore browser calc editor filebrowser gamepad imageviewer installer netmon proton security settings sysmon terminal wifi; do
     grep -Fq '#include "../../shared/app_ipc.h"' "$ROOT/fifi/apps/$app/$app.c"
     grep -Fq '../../shared/app_ipc.h' "$ROOT/fifi/apps/$app/Makefile"
     if grep -Fq 'socket(AF_UNIX' "$ROOT/fifi/apps/$app/$app.c" ||

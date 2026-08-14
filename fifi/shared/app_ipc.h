@@ -62,18 +62,28 @@ static inline bool fifi_app_ipc_send_frame(int fd, uint16_t width,
     return sent;
 }
 
-static inline int fifi_app_ipc_connect(uint16_t width, uint16_t height,
-                                       const char *title) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    struct sockaddr_un address = {0};
-    address.sun_family = AF_UNIX;
-    memcpy(address.sun_path, FIFI_IPC_SOCKET_PATH, sizeof(FIFI_IPC_SOCKET_PATH));
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+static inline int fifi_app_ipc_connect_retry(uint16_t width, uint16_t height,
+                                             const char *title,
+                                             unsigned attempts,
+                                             unsigned retry_delay_ms) {
+    if (attempts == 0) attempts = 1;
+    int fd = -1;
+    while (attempts-- > 0) {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        struct sockaddr_un address = {0};
+        address.sun_family = AF_UNIX;
+        memcpy(address.sun_path, FIFI_IPC_SOCKET_PATH, sizeof(FIFI_IPC_SOCKET_PATH));
+        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) break;
         close(fd);
-        return -1;
+        fd = -1;
+        if (attempts > 0 && retry_delay_ms > 0) {
+            int delay = retry_delay_ms > 2147483647u
+                      ? 2147483647 : (int)retry_delay_ms;
+            while (poll(NULL, 0, delay) < 0 && errno == EINTR) {}
+        }
     }
+    if (fd < 0) return -1;
 
     uint8_t payload[4u + FIFI_IPC_APP_TITLE_BYTES] = {0};
     memcpy(payload, &width, sizeof(width));
@@ -85,6 +95,11 @@ static inline int fifi_app_ipc_connect(uint16_t width, uint16_t height,
         return -1;
     }
     return fd;
+}
+
+static inline int fifi_app_ipc_connect(uint16_t width, uint16_t height,
+                                       const char *title) {
+    return fifi_app_ipc_connect_retry(width, height, title, 1, 0);
 }
 
 #endif
