@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/reboot.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -59,10 +60,10 @@ static int parse_uid(const char *value, uid_t fallback) {
     return (int)parsed;
 }
 
-static void run_update_command(const char *tool, char *const argv[]) {
+static void run_status_command(const char *tool, char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) {
-        dprintf(STDERR_FILENO, "fifi-admin: cannot start updater: %s\n",
+        dprintf(STDERR_FILENO, "fifi-admin: cannot start privileged action: %s\n",
                 strerror(errno));
         dprintf(STDOUT_FILENO, "\nFIFI_ADMIN_STATUS 126\n");
         _exit(0);
@@ -84,12 +85,55 @@ static void run_update_command(const char *tool, char *const argv[]) {
     _exit(0);
 }
 
+static int valid_install_target(const char *target) {
+    struct stat st;
+    if (!target || strncmp(target, "/dev/", 5) != 0 || !target[5]) return 0;
+    for (const char *p = target + 5; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-'))
+            return 0;
+    }
+    return lstat(target, &st) == 0 && S_ISBLK(st.st_mode);
+}
+
+static int valid_install_choice(const char *browser, const char *software,
+                                const char *model) {
+    static const char *const models[] = {
+        "none", "qwen2.5-0.5b", "llama3.2-1b", "qwen2.5-1.5b",
+        "gemma2-2b", "llama3.2-3b", "phi3.5-mini", "mistral-7b",
+        "qwen2.5-7b", "llama3.1-8b", "gemma2-9b", "qwen2.5-14b",
+        "qwen2.5-32b"
+    };
+    int model_ok = 0;
+    for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++)
+        if (model && strcmp(model, models[i]) == 0) model_ok = 1;
+    return browser && (strcmp(browser, "librewolf") == 0 ||
+                       strcmp(browser, "firefox") == 0) &&
+           software && (strcmp(software, "libreoffice") == 0 ||
+                        strcmp(software, "none") == 0) && model_ok;
+}
+
+static int install_allowed(void) {
+    const char *override = getenv("FIFI_INSTALL_ALLOWED");
+    if (override && *override) return strcmp(override, "1") == 0;
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    char line[4096] = "";
+    if (!cmdline) return 0;
+    (void)fgets(line, sizeof(line), cmdline);
+    fclose(cmdline);
+    char *save = NULL;
+    for (char *word = strtok_r(line, " \t\r\n", &save); word;
+         word = strtok_r(NULL, " \t\r\n", &save))
+        if (strcmp(word, "fifi_live") == 0) return 1;
+    return 0;
+}
+
 static void run_fixed_command(char *request) {
-    char *args[5] = {0};
+    char *args[7] = {0};
     int argc = 0;
     char *save = NULL;
     for (char *word = strtok_r(request, " \t\r\n", &save);
-         word && argc < 5;
+         word && argc < 7;
          word = strtok_r(NULL, " \t\r\n", &save)) {
         args[argc++] = word;
     }
@@ -124,7 +168,7 @@ static void run_fixed_command(char *request) {
         const char *tool = getenv("FIFI_UPDATE_APPLY");
         if (!tool || !*tool) tool = "/bin/fifi-apply-update";
         char *const update_argv[] = { (char *)tool, args[2], NULL };
-        run_update_command(tool, update_argv);
+        run_status_command(tool, update_argv);
     } else if (argc == 2 && strcmp(args[0], "update") == 0 &&
                (strcmp(args[1], "usb") == 0 ||
                 strcmp(args[1], "usb-if-present") == 0)) {
@@ -135,13 +179,30 @@ static void run_fixed_command(char *request) {
             strcmp(args[1], "usb-if-present") == 0 ? "--if-present" : NULL,
             NULL
         };
-        run_update_command(tool, update_argv);
+        run_status_command(tool, update_argv);
     } else if (argc == 2 && strcmp(args[0], "update") == 0 &&
                strcmp(args[1], "rollback") == 0) {
         const char *tool = getenv("FIFI_UPDATE_ROLLBACK");
         if (!tool || !*tool) tool = "/bin/update-rollback";
         char *const update_argv[] = { (char *)tool, NULL };
-        run_update_command(tool, update_argv);
+        run_status_command(tool, update_argv);
+    } else if (argc == 6 && strcmp(args[0], "install") == 0 &&
+               strcmp(args[1], "apply") == 0 && install_allowed() &&
+               valid_install_target(args[2]) &&
+               valid_install_choice(args[3], args[4], args[5])) {
+        const char *tool = getenv("FIFI_INSTALL_APPLY");
+        if (!tool || !*tool) tool = "/bin/fifi-install.sh";
+        char *const install_argv[] = {
+            (char *)tool, args[2], args[3], args[4], args[5], NULL
+        };
+        run_status_command(tool, install_argv);
+    } else if (argc == 2 && strcmp(args[0], "install") == 0 &&
+               strcmp(args[1], "reboot") == 0 && install_allowed()) {
+        sync();
+        if (reboot(RB_AUTOBOOT) != 0)
+            dprintf(STDERR_FILENO, "fifi-admin: reboot failed: %s\n",
+                    strerror(errno));
+        _exit(1);
     } else {
         dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
         _exit(64);
@@ -334,7 +395,9 @@ static int client_main(int argc, char **argv) {
     }
     shutdown(sock, SHUT_WR);
 
-    if (argc >= 3 && strcmp(argv[1], "update") == 0)
+    if ((argc >= 3 && strcmp(argv[1], "update") == 0) ||
+        (argc >= 3 && strcmp(argv[1], "install") == 0 &&
+         strcmp(argv[2], "apply") == 0))
         return copy_update_response(sock);
 
     char output[1024];

@@ -124,9 +124,14 @@ cat > "$broker_bin/update-rollback" <<'EOF'
 #!/bin/sh
 printf 'update rollback\n' >> "$FIFI_TEST_ADMIN_LOG"
 EOF
+cat > "$broker_bin/fifi-install.sh" <<'EOF'
+#!/bin/sh
+printf 'install %s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$FIFI_TEST_ADMIN_LOG"
+EOF
 chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
     "$broker_bin/fifi-wifi-ctl" "$broker_bin/fifi-apply-update" \
-    "$broker_bin/update-usb" "$broker_bin/update-rollback"
+    "$broker_bin/update-usb" "$broker_bin/update-rollback" \
+    "$broker_bin/fifi-install.sh"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
@@ -134,6 +139,8 @@ FIFI_WIFI_CTL="$broker_bin/fifi-wifi-ctl" \
 FIFI_UPDATE_APPLY="$broker_bin/fifi-apply-update" \
 FIFI_UPDATE_USB="$broker_bin/update-usb" \
 FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
+FIFI_INSTALL_APPLY="$broker_bin/fifi-install.sh" \
+FIFI_INSTALL_ALLOWED=1 \
 FIFI_TEST_ADMIN_LOG="$broker_log" \
     "$TMP/fifi-admin" --daemon &
 broker_pid=$!
@@ -176,6 +183,20 @@ grep -Fq 'operation is not allowed' <<<"$bad_iface"
 bad_channel="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update apply edge 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_channel"
+bad_target="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" install apply /dev/null librewolf none none 2>&1 || true)"
+grep -Fq 'operation is not allowed' <<<"$bad_target"
+install_target="$(find /dev -maxdepth 1 -type b -print -quit 2>/dev/null || true)"
+if [[ -n "$install_target" ]]; then
+    FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" install apply \
+        "$install_target" librewolf libreoffice llama3.2-1b
+    grep -Fxq "install $install_target librewolf libreoffice llama3.2-1b" \
+        "$broker_log"
+    bad_model="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+        "$TMP/fifi-admin" install apply "$install_target" librewolf none \
+        '../../root' 2>&1 || true)"
+    grep -Fq 'operation is not allowed' <<<"$bad_model"
+fi
 grep -Fq 'strcmp(name, "fifi-security") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-wifi") == 0' \
@@ -185,6 +206,8 @@ grep -Fq 'strcmp(name, "fifi-settings") == 0' \
 grep -Fq 'strcmp(name, "fifi-appstore") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strcmp(name, "fifi-browser") == 0' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'strcmp(name, "fifi-installer") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'strncmp(path, app_library, sizeof(app_library) - 1) == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
@@ -276,6 +299,20 @@ grep -Fq 'exec "$ADMIN" update rollback' "$ROOT/initramfs/root/bin/update"
 grep -Fq 'exec "$ADMIN" update usb' "$ROOT/initramfs/root/bin/update"
 grep -Fq 'root broker required' "$ROOT/initramfs/root/bin/fifi-apply-update"
 ! grep -Fq 'fifi-boot-slots install' "$ROOT/initramfs/root/bin/system-update"
+
+echo "[test-security] installer UI uses only live-gated broker actions"
+grep -Fq 'execl("/bin/fifi-admin","fifi-admin","install","apply",disk' \
+    "$ROOT/fifi/apps/installer/installer.c"
+grep -Fq 'execl("/bin/fifi-admin","fifi-admin","install","reboot",NULL)' \
+    "$ROOT/fifi/apps/installer/installer.c"
+! grep -Fq 'execl("/bin/fifi-install.sh"' \
+    "$ROOT/fifi/apps/installer/installer.c"
+grep -Fq 'install_allowed()' "$ROOT/fifi/platform/linux/fifi-admin.c"
+grep -Fq 'S_ISBLK(st.st_mode)' "$ROOT/fifi/platform/linux/fifi-admin.c"
+grep -Fq 'mktemp /run/fifi-install-debug.XXXXXX' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
+! grep -Fq '/tmp/fifi-install-debug.log' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
 
 echo "[test-security] app maintenance never executes writable helper copies"
 app_library="$TMP/app-library"

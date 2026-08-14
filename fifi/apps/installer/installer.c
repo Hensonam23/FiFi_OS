@@ -38,7 +38,6 @@
 #include <signal.h>
 #include <poll.h>
 #include <errno.h>
-#include <sys/reboot.h>
 
 #define WIN_W 820
 #define WIN_H 600
@@ -945,11 +944,11 @@ static void start_install(app_t *a) {
     if (a->install_pid==0) {
         close(pfd[0]); dup2(pfd[1],STDOUT_FILENO); dup2(pfd[1],STDERR_FILENO); close(pfd[1]);
         char disk[40]; snprintf(disk,sizeof(disk),"/dev/%s",a->disks[a->sel_disk].name);
-        execl("/bin/fifi-install.sh","fifi-install.sh",disk,
+        execl("/bin/fifi-admin","fifi-admin","install","apply",disk,
               a->browser==BROWSER_LIBREWOLF?"librewolf":"firefox",
               (a->software&SW_LIBREOFFICE)?"libreoffice":"none",
               AI_MODELS[a->ai_model].id,NULL);
-        printf("ERROR: /bin/fifi-install.sh not found\n"); fflush(stdout); _exit(1);
+        printf("ERROR: installer privilege broker unavailable\n"); fflush(stdout); _exit(1);
     }
     close(pfd[1]);
 }
@@ -1119,14 +1118,14 @@ static void on_click(app_t *a, int mx, int my, int sock) {
     case VIEW_CONFIRM:  click_confirm(a,mx,my);  break;
     case VIEW_DONE:
         if (a->hover==0) {
-            if (a->done_ok) { sync(); reboot(RB_AUTOBOOT); }
+            if (a->done_ok) execl("/bin/fifi-admin","fifi-admin","install","reboot",NULL);
             uint8_t h[8]; uint32_t t=IPC_APP_CLOSE,l=0;
             memcpy(h,&t,4); memcpy(h+4,&l,4); write(sock,h,8);
         }
         break;
     case VIEW_PROGRESS:
         if (a->install_pipe<0 && a->hover==200) {
-            if (a->done_ok) { sync(); reboot(RB_AUTOBOOT); }
+            if (a->done_ok) execl("/bin/fifi-admin","fifi-admin","install","reboot",NULL);
             else { uint8_t h[8]; uint32_t t=IPC_APP_CLOSE,l=0;
                    memcpy(h,&t,4); memcpy(h+4,&l,4); write(sock,h,8); }
         }

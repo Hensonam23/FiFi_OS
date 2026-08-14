@@ -35,8 +35,17 @@ AI_MODEL="${4:-none}"
 
 MNT_EFI="/mnt/fifi-install-efi"
 MNT_DATA="/mnt/fifi-install-data"
-DEBUGLOG="/tmp/fifi-install-debug.log"
-: > "$DEBUGLOG"   # create/clear log file
+LOCK_DIR="/run/fifi-install.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "[fifi-install] FATAL: another installation is already running" >&2
+    exit 1
+fi
+DEBUGLOG="$(mktemp /run/fifi-install-debug.XXXXXX)" || {
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    exit 1
+}
+GENERATED_INITRD=""
+GRUB_EARLY=""
 
 # sh-compatible logging: write to stdout AND log file
 log() {
@@ -78,6 +87,10 @@ cleanup() {
     umount "$MNT_DATA" 2>/dev/null || true
     umount "$MNT_EFI"  2>/dev/null || true
     rmdir  "$MNT_DATA" "$MNT_EFI" 2>/dev/null || true
+    [ -z "$GENERATED_INITRD" ] || rm -f "$GENERATED_INITRD"
+    [ -z "$GRUB_EARLY" ] || rm -f "$GRUB_EARLY"
+    rm -f "$DEBUGLOG"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -143,7 +156,9 @@ USB_MNT_SRC=""
 # silently "reverted" to the previous version. -xdev keeps the pack on the root
 # filesystem only (never descends into the mounted /fifi-data, /proc, etc.).
 log "Packing the running system into an installable initramfs..."
-INITRD_SRC="/tmp/fifi-install-initramfs.cpio.gz"
+GENERATED_INITRD="$(mktemp /run/fifi-install-initramfs.XXXXXX)" ||
+    fail "Cannot create private initramfs workspace"
+INITRD_SRC="$GENERATED_INITRD"
 ( cd / && find . -xdev \
       ! -path './proc/*' ! -path './sys/*'  ! -path './dev/*' \
       ! -path './run/*'  ! -path './tmp/*'  ! -path './mnt/*' \
@@ -330,11 +345,13 @@ if [ ! -f "$GRUB_EFI" ]; then
     log "grub-install did not create grubx64.efi — trying grub-mkimage fallback"
     mkdir -p "$MNT_EFI/EFI/FiFiOS"
     # Embed a config that searches for grub.cfg by file path (finds NVMe EFI partition)
+    GRUB_EARLY="$(mktemp /run/fifi-grub-early.XXXXXX)" ||
+        fail "Cannot create private GRUB workspace"
     printf 'search --file --no-floppy --set=root /boot/grub/grub.cfg\nset prefix=($root)/boot/grub\n' \
-        > /tmp/grub_early.cfg
+        > "$GRUB_EARLY"
     MKIMG_EXIT=0
     MKIMG_OUT="$(grub-mkimage \
-        -c /tmp/grub_early.cfg \
+        -c "$GRUB_EARLY" \
         -O x86_64-efi \
         -o "$GRUB_EFI" \
         -p /boot/grub \
@@ -537,9 +554,11 @@ log "Unmounting..."
 umount "$MNT_DATA" 2>/dev/null || true
 umount "$MNT_EFI"  2>/dev/null || true
 rmdir  "$MNT_DATA" "$MNT_EFI" 2>/dev/null || true
-trap - EXIT
-
 sync; sleep 1
 prog 100
 log "Installation complete! Remove the USB and reboot."
+trap - EXIT
+
+rm -f "$GENERATED_INITRD" "$GRUB_EARLY" "$DEBUGLOG"
+rmdir "$LOCK_DIR" 2>/dev/null || true
 exit 0

@@ -303,7 +303,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
-- [ ] Privilege brokers for hardware/admin apps: Security Center, Wi-Fi, Settings, App Store, browser setup, and updater run without root; installer transition remains
+- [x] Privilege brokers for hardware/admin apps: Security Center, Wi-Fi, Settings, App Store, browser setup, updater, and installer run without root
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash

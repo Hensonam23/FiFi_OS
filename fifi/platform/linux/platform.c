@@ -478,6 +478,7 @@ static bool gui_app_runs_unprivileged(const char *path) {
            strcmp(name, "fifi-settings") == 0 ||
            strcmp(name, "fifi-appstore") == 0 ||
            strcmp(name, "fifi-browser") == 0 ||
+           strcmp(name, "fifi-installer") == 0 ||
            strcmp(name, "fifi-aichat") == 0 ||
            strcmp(name, "fifi-gamepad") == 0 ||
            strcmp(name, "fifi-proton") == 0;
