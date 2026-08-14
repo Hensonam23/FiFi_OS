@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  boot-and-security:
+  build-and-security:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -28,8 +28,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub \
-            mtools openssl pahole parted perl python qemu-system-x86 \
-            qemu-system-x86-firmware qemu-hw-display-virtio-vga util-linux
+            mtools openssl pahole parted perl python util-linux
 
       - name: Run fast security and update tests
         run: |
@@ -46,8 +45,42 @@ jobs:
           make linux-kernel
           make linux-initrd
 
+      - name: Export the clean Linux boot pair
+        uses: actions/upload-artifact@v4
+        with:
+          name: fifi-linux-ci-boot-pair
+          path: |
+            build-linux/bzImage
+            build-linux/initramfs.cpio.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  boot-and-fallback:
+    needs: build-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host QEMU and UEFI test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            busybox-static cpio dosfstools e2fsprogs grub-common \
+            grub-efi-amd64-bin mtools ovmf parted qemu-system-x86
+
+      - name: Restore the clean Linux boot pair
+        uses: actions/download-artifact@v4
+        with:
+          name: fifi-linux-ci-boot-pair
+          path: build-linux
+
       - name: Run boot and screenshot gate
         run: make linux-qemu-test
 
       - name: Run automatic boot fallback gate
+        env:
+          FIFI_OVMF_CODE: /usr/share/OVMF/OVMF_CODE_4M.fd
+          FIFI_OVMF_VARS: /usr/share/OVMF/OVMF_VARS_4M.fd
         run: make linux-boot-fallback-test
