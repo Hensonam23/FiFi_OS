@@ -19,6 +19,27 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/ipc-contract.c" -o "$TMP/ipc-contract"
 "$TMP/ipc-contract"
 
+echo "[test-shared-api] shared theme contract compiles for both tracks"
+cat > "$TMP/theme-contract.c" <<'EOF'
+#include "fifi/shared/theme.h"
+static const unsigned accents[] = FIFI_ACCENT_PRESETS;
+static const int sizes[] = FIFI_FONT_SIZES;
+_Static_assert(FIFI_THEME_API_VERSION == 1u, "unexpected theme version");
+_Static_assert(WALLPAPER_IMAGE == 5 && WALLPAPER_COUNT == 13, "wallpaper IDs changed");
+_Static_assert(PANEL_BOTTOM == 0 && PANEL_RIGHT == 3, "panel IDs changed");
+_Static_assert(sizeof(accents) / sizeof(accents[0]) == FIFI_ACCENT_PRESET_COUNT,
+               "accent count changed");
+_Static_assert(sizeof(sizes) / sizeof(sizes[0]) == 13, "font sizes changed");
+int main(void) { return 0; }
+EOF
+gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
+    "$TMP/theme-contract.c" -o "$TMP/theme-contract"
+"$TMP/theme-contract"
+grep -Fq '#include "../../fifi/shared/theme.h"' \
+    "$ROOT/kernel/src/gui_internal.h"
+grep -Fq '#include "../../shared/theme.h"' \
+    "$ROOT/fifi/apps/settings/settings.c"
+
 echo "[test-shared-api] every IPC producer and consumer uses the contract"
 while IFS= read -r source; do
     grep -Fq '#include "../../shared/ipc.h"' "$source" || {

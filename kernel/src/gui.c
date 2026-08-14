@@ -70,24 +70,7 @@ __attribute__((weak)) bool platform_load_image(const char *path __attribute__((u
     uint32_t *w  __attribute__((unused)),
     uint32_t *h  __attribute__((unused))) { return false; }
 
-const uint32_t g_accent_presets[ACCENT_PRESET_COUNT] = {
-    0x003060c0u,   /* FiFi Blue (default)  */
-    0x00307830u,   /* Forest Green         */
-    0x00802060u,   /* Violet               */
-    0x00b04010u,   /* Rust Orange          */
-    0x00408080u,   /* Teal                 */
-    0x00606020u,   /* Olive                */
-    0x00204060u,   /* Navy                 */
-    0x00803030u,   /* Crimson              */
-    0x00906010u,   /* Gold                 */
-    0x00208060u,   /* Emerald              */
-    0x00601880u,   /* Purple               */
-    0x00107888u,   /* Cyan                 */
-    0x008040a0u,   /* Mauve                */
-    0x005BD9E3u,   /* FiFi Cyan (design)   */
-    0x008F7BFFu,   /* FiFi Purple (design) */
-    0x00FF9A6Bu,   /* FiFi Coral (design)  */
-};
+const uint32_t g_accent_presets[ACCENT_PRESET_COUNT] = FIFI_ACCENT_PRESETS;
 
 const int g_anim_open_scale[ANIM_TICKS]  = { 36, 64, 84, 96, 100 };
 const int g_anim_close_scale[ANIM_TICKS] = { 64, 36, 16,  4,   0 };

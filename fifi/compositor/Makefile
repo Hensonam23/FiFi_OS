@@ -42,6 +42,8 @@ SRCS := \
 
 OBJS := $(patsubst %.c,$(BUILD)/comp/%.o,$(notdir $(SRCS)))
 
+$(OBJS): ../shared/theme.h
+
 .PHONY: all clean
 
 all: $(BUILD)/$(OUT)
@@ -92,7 +94,7 @@ $(BUILD)/comp/font_ttf.o: ../platform/linux/font_ttf.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -Wno-all -Wno-extra -c $< -o $@
 
 # Kernel source files (compiled with Linux stubs)
-$(BUILD)/comp/gui.o: ../../kernel/src/gui.c | $(BUILD)/comp
+$(BUILD)/comp/gui.o: ../../kernel/src/gui.c ../shared/theme.h | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/gui_text_util.o: ../../kernel/src/gui_text_util.c | $(BUILD)/comp

@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "../../shared/theme.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -440,7 +441,7 @@ static void ttf_draw(uint32_t *fb, const char *path, const char *text,
 
 /* Font size ladder + dropdown state (family=1, size=2). Geometry captured at
  * render time for the click/wheel math in pers_click. */
-static const int g_font_sizes[] = { 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48 };
+static const int g_font_sizes[] = FIFI_FONT_SIZES;
 #define N_FONT_SIZES ((int)(sizeof(g_font_sizes) / sizeof(g_font_sizes[0])))
 static int g_font_dd = 0, g_font_dd_scroll = 0;
 static int g_ff_bx, g_ff_by, g_ff_bw, g_ff_bh;   /* family combo box */
@@ -448,14 +449,9 @@ static int g_fs_bx, g_fs_by, g_fs_bw, g_fs_bh;   /* size combo box */
 static int g_dd_x, g_dd_y, g_dd_w, g_dd_rowh, g_dd_vis;  /* open list */
 
 /* Accent presets mirror the compositor's g_accent_presets[] (gui.c). */
-#define N_ACCENT 16
-static const uint32_t g_accent_presets[N_ACCENT] = {
-    0x003060c0u, 0x00307830u, 0x00802060u, 0x00b04010u,
-    0x00408080u, 0x00606020u, 0x00204060u, 0x00803030u,
-    0x00906010u, 0x00208060u, 0x00601880u, 0x00107888u,
-    0x008040a0u, 0x005BD9E3u, 0x008F7BFFu, 0x00FF9A6Bu,
-};
-#define WALL_N 13
+#define N_ACCENT FIFI_ACCENT_PRESET_COUNT
+static const uint32_t g_accent_presets[N_ACCENT] = FIFI_ACCENT_PRESETS;
+#define WALL_N WALLPAPER_COUNT
 static const char *g_wall_names[WALL_N] = {
     "Gradient", "Solid", "Stars", "Grid", "Waves", "Image",
     "Aurora", "Northern", "Nebula", "Dusk", "Ocean", "Spring", "Ember"

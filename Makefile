@@ -77,6 +77,8 @@ OBJS := \
     $(BUILD)/hda.o \
     $(BUILD)/isr_asm.o
 
+$(OBJS): fifi/shared/theme.h
+
 .PHONY: all kernel iso clean run
 
 all: iso
@@ -393,7 +395,7 @@ $(BUILD)/splash.o: kernel/src/splash.c | $(BUILD)
 $(BUILD)/mouse.o: kernel/src/mouse.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/gui.o: kernel/src/gui.c | $(BUILD)
+$(BUILD)/gui.o: kernel/src/gui.c fifi/shared/theme.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/i2c_hid.o: kernel/src/i2c_hid.c | $(BUILD)

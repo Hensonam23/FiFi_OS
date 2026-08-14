@@ -19,6 +19,7 @@
 #include "net.h"
 #include "rtc.h"
 #include "hda.h"
+#include "../../fifi/shared/theme.h"
 
 /* ── Layout ──────────────────────────────────────────────────────────── */
 /* Reserved top strip for the floating "horizon bar" (16px margin + 44px card
@@ -124,33 +125,10 @@
 #define COL_FB_MATCH_HL   0x00183060u
 
 /* ── Theme ───────────────────────────────────────────────────────────── */
-#define WALLPAPER_GRADIENT  0
-#define WALLPAPER_SOLID     1
-#define WALLPAPER_STARS     2
-#define WALLPAPER_GRID      3
-#define WALLPAPER_WAVES     4
-#define WALLPAPER_IMAGE     5
-#define WALLPAPER_AURORA    6   /* smooth field: accent-adaptive northern-lights curtain */
-#define WALLPAPER_NORTHERN  7   /* smooth field: true-to-life emerald aurora */
-#define WALLPAPER_NEBULA    8   /* smooth field: deep-space nebula blooms */
-#define WALLPAPER_DUSK      9   /* smooth field: coral/amber sunset */
-#define WALLPAPER_OCEAN     10  /* smooth field: abyssal teal/cyan depths */
-#define WALLPAPER_SPRING    11  /* smooth field: mint/aqua/gold spring dawn */
-#define WALLPAPER_EMBER     12  /* smooth field: molten crimson/orange/gold */
-#define WALLPAPER_COUNT     13
 /* Field wallpapers (rendered by smoothfield_render) are the contiguous range
  * [WALLPAPER_AURORA, WALLPAPER_COUNT); desktop_bg_at() relies on that ordering. */
 
 /* Image wallpaper fit modes (how a picture fills the desktop). */
-#define WALLFIT_FILL    0   /* cover: scale to fill, crop overflow (keeps aspect) */
-#define WALLFIT_FIT     1   /* contain: scale to fit inside, letterbox (keeps aspect) */
-#define WALLFIT_STRETCH 2   /* stretch to exact desktop size (distorts aspect) */
-#define WALLFIT_CENTER  3   /* 1:1 centred (crop if larger, letterbox if smaller) */
-#define WALLFIT_COUNT   4
-
-/* Panel edge + item-run alignment for the configurable taskbar/panel. */
-typedef enum { PANEL_BOTTOM = 0, PANEL_TOP = 1, PANEL_LEFT = 2, PANEL_RIGHT = 3 } panel_edge_t;
-typedef enum { PALIGN_START = 0, PALIGN_CENTER = 1, PALIGN_END = 2 } panel_align_t;
 
 typedef struct {
     uint32_t accent;        /* primary accent colour (borders, highlights) */
@@ -211,7 +189,7 @@ typedef struct {
     int32_t x, y;       /* custom top-left (valid when placed) */
 } desk_icon_t;
 
-#define ACCENT_PRESET_COUNT 16
+#define ACCENT_PRESET_COUNT FIFI_ACCENT_PRESET_COUNT
 #define ANIM_TICKS 5
 
 typedef enum { WIN_HIDDEN, WIN_NORMAL, WIN_MAXIMIZED } win_state_t;
