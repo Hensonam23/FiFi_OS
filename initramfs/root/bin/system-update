@@ -101,8 +101,12 @@ echo "Channel:   $channel"
 echo "Installed: $(cat "$ETC_ROOT/fifi-version" 2>/dev/null || echo unknown)"
 echo "Checking GitHub release metadata..."
 
-json=$(curl -fsSL --max-time 30 "$API" 2>/dev/null) || {
-    echo "Could not retrieve the $channel update channel." >&2
+json=$(curl -sSL --fail-with-body --max-time 30 "$API" 2>/dev/null) || {
+    if printf '%s' "$json" | grep -q '"message"[[:space:]]*:[[:space:]]*"Not Found"'; then
+        echo "The $channel channel has no published update yet." >&2
+    else
+        echo "Could not retrieve the $channel update channel. Check the network connection." >&2
+    fi
     exit 1
 }
 

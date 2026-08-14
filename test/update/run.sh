@@ -85,7 +85,13 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 case "$url" in
-    *api.github.com*) src="$FIFI_TEST_FIXTURES/api.json" ;;
+    *api.github.com*)
+        if [ "${FIFI_TEST_API_MISSING:-0}" = 1 ]; then
+            printf '{"message":"Not Found"}\n'
+            exit 22
+        fi
+        src="$FIFI_TEST_FIXTURES/api.json"
+        ;;
     */fifi-update.manifest) src="$FIFI_TEST_FIXTURES/fifi-update.manifest" ;;
     */fifi-update.manifest.sig) src="$FIFI_TEST_FIXTURES/fifi-update.manifest.sig" ;;
     */bzImage) src="$FIFI_TEST_FIXTURES/bzImage" ;;
@@ -139,6 +145,16 @@ for _ in $(seq 1 50); do
     sleep 0.05
 done
 [[ -S "$FIFI_ADMIN_SOCKET" ]]
+
+echo "[test-update] missing release is distinct from a network failure"
+export FIFI_TEST_API_MISSING=1
+if "$ROOT/initramfs/root/bin/system-update" -c --channel test \
+    >"$TMP/missing-release.out" 2>&1; then
+    echo "missing test release unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -Fq 'test channel has no published update yet' "$TMP/missing-release.out"
+unset FIFI_TEST_API_MISSING
 
 echo "[test-update] verified one-time bootstrap installation"
 "$ROOT/initramfs/root/bin/system-update" -y --channel test
