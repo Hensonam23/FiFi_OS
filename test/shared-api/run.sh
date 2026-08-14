@@ -19,7 +19,7 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/ipc-contract.c" -o "$TMP/ipc-contract"
 "$TMP/ipc-contract"
 
-echo "[test-shared-api] shared theme contract compiles for both tracks"
+echo "[test-shared-api] shared theme contract compiles for Linux consumers"
 cat > "$TMP/theme-contract.c" <<'EOF'
 #include "fifi/shared/theme.h"
 static const unsigned accents[] = FIFI_ACCENT_PRESETS;

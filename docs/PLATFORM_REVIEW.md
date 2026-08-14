@@ -1,5 +1,9 @@
 # FiFi Platform — Comprehensive Technical Assessment (Final)
 
+> **Historical document:** This assessment reviewed an earlier two-track plan.
+> FiFi OS is now Linux-only, so its bare-metal recommendations are no longer on
+> the active roadmap. See the root README for current priorities.
+
 *Scope: one git repo, two worktrees — `fifi-os` @38026cf (branch `bare-metal`, ~31.5K LOC) and `linux-desktop` @5505d5b (branch `linux-desktop`, ~78K LOC). `linux-desktop` is 191 commits ahead of the `bare-metal` merge-base and 0 behind (verified); `bare-metal` HEAD is the exact merge-base. All drift is one-directional (~3 months: 2026-04-21 vs 2026-07-14). Philosophy under assessment: "Linux is the proving ground; bare metal is the end goal."*
 
 ---

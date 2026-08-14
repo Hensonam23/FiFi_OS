@@ -179,14 +179,9 @@ keys. The pre-migration file is retained as
 
 ## Roadmap
 
-**Scope:** Desktop, Laptop, Tablet, Phone. "Server" is not a separate build; it is the headless/CLI profile of the same platform. Embedded and automotive are out of scope.
+**Platform:** Linux only. FiFi OS ships as a Linux-based desktop/laptop system. Any future ARM64, tablet, phone, or headless profile will also use Linux; embedded and automotive are out of scope.
 
-**Two tracks, kept in parallel:**
-
-- **Linux track** (this repo) is both the proving ground and a first-class product. It always ships and stays up to date. This is the daily driver for years.
-- **Bare-metal track** is the end goal: a kernel written from scratch with no Linux underneath. It catches up subsystem by subsystem behind frozen shared APIs and eventually becomes the production kernel. Linux is never discarded; it is the co-development platform until bare metal is genuinely better.
-
-**Near-term priority:** Linux **Desktop v1.0 is the sole goal.** Everything past it (ARM64, tablet, phone, bare-metal ARM) waits until Desktop v1.0 ships. Note also that the on-device AI ("Machine Spirit") stays a desktop/laptop feature and is designed as a cleanly-removable module, so mobile builds omit the local model entirely (a battery cannot run llama.cpp locally).
+**Near-term priority:** **Desktop v1.0 is the sole goal.** Everything past it (ARM64, tablet, and phone) waits until Desktop v1.0 ships. The on-device AI ("Machine Spirit") stays a desktop/laptop feature and is designed as a cleanly-removable module, so mobile builds omit the local model entirely (a battery cannot run llama.cpp locally).
 
 ### The Linux plan
 
@@ -310,12 +305,12 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [x] A/B OS updates: inactive-slot writes, boot confirmation, rollback, installed-GRUB migration, and two-boot EFI fallback gate
 - [x] Screenshot-diff test harness + QEMU boot self-test wired into CI
 
-#### Phase 8: Consolidate the shared platform
+#### Phase 8: Consolidate the Linux desktop platform
 
-- [ ] Extract the genuinely shared code (GUI toolkit, IPC protocol, config/theme formats, app framework) into one versioned library
+- [ ] Extract duplicated Linux desktop code (GUI toolkit, IPC protocol, config/theme formats, app framework) into versioned shared modules
   - [x] Centralize and version the compositor/application IPC message contract
-  - [x] Share theme identifiers, palettes, and font-size choices across both tracks
-- [ ] Freeze and document that API; both tracks (Linux and bare-metal) consume it so the branches stop drifting
+  - [x] Share theme identifiers, palettes, and font-size choices across the compositor and Settings
+- [ ] Freeze and document the Linux desktop APIs so the compositor and applications stop drifting
 
 #### Phase 9: Desktop/Laptop v1.0
 
@@ -341,13 +336,11 @@ Goals in the order they unlock, each defined by the milestone that proves it. Mo
 - [ ] **ARM64.** Goal: FiFi Desktop running on a Raspberry Pi CM5 driving an external display. Cross-compile the compositor and apps for aarch64, swap Intel/Mesa for the CM5's VideoCore VII (Mesa V3D), move the boot chain to u-boot/UEFI + device tree. Hourglass, gated by CM5 stock.
 - [ ] **FiFi Tablet.** Goal: a CM5 + touchscreen + battery handheld running FiFi. Needs a platform-neutral touch/gesture model, a DPI-aware touch-sized responsive toolkit, an on-screen keyboard, real power management and suspend/resume, rotation, notifications, and non-root per-app isolation.
 - [ ] **FiFi Phone.** Goal: FiFi making calls and sending texts on real hardware, proven on a repairable phone (PinePhone Pro / Fairphone) first, then the custom CM5 carrier from the hardware plan below. Needs cellular modem integration, a phone/SMS framework, call audio routing, and the sensor stack. No built-in AI on the phone; mobile builds omit the local model.
-- [ ] **Bare-metal catch-up (the end goal).** Goal: the from-scratch kernel reaches parity and becomes the production kernel. Continuous and multi-year. Behind the frozen APIs, port matured subsystems in: fix the x86-64 ring0 holes, add the windowing syscalls, reach GUI/WM/IPC parity, add SMP, then the ARM64 port, then the irreducibly hard parts with no Linux head start (GPU driver, filesystem, TLS, power management).
-
 ### Hardware plan (the CM5 handheld/phone)
 
 Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (the tablet goal above) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
 
-A full technical assessment (maturity scoring, technical debt, architectural risks, and the longer five/ten-year plans) lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
+An historical technical assessment of the former two-track plan lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
 
 ---
 
