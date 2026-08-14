@@ -310,6 +310,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [ ] Extract duplicated Linux desktop code (GUI toolkit, IPC protocol, config/theme formats, app framework) into versioned shared modules
   - [x] Centralize and version the compositor/application IPC message contract
   - [x] Share theme identifiers, palettes, and font-size choices across the compositor and Settings
+  - [x] Share the persisted theme configuration keys and defaults
 - [ ] Freeze and document the Linux desktop APIs so the compositor and applications stop drifting
 
 #### Phase 9: Desktop/Laptop v1.0

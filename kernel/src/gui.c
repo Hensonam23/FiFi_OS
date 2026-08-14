@@ -17,13 +17,17 @@ void gui_term_scroll_page(int dir);
 /* ── Global variable definitions ─────────────────────────────────────── */
 
 gui_theme_t g_theme = {
-    0x00409cffu, WALLPAPER_GRADIENT, true, true, true, true, 0,
+    FIFI_THEME_DEFAULT_ACCENT, FIFI_THEME_DEFAULT_WALLPAPER,
+    FIFI_THEME_DEFAULT_WALL_FIT, true, true, FIFI_THEME_DEFAULT_STATUSBAR,
+    FIFI_THEME_DEFAULT_DESKTOP_INFO, 0,
     /* panel: bottom edge, centered (modern dock), always visible, base thickness */
-    PANEL_BOTTOM, PALIGN_CENTER, false, 0,
+    FIFI_THEME_DEFAULT_PANEL_EDGE, FIFI_THEME_DEFAULT_PANEL_ALIGN,
+    FIFI_THEME_DEFAULT_PANEL_AUTOHIDE, FIFI_THEME_DEFAULT_PANEL_SIZE,
     /* dock_float ON: detached, rounded, floating dock over the wallpaper (next-gen default) */
-    true,
+    FIFI_THEME_DEFAULT_DOCK_FLOAT,
     /* effects: frosted glass panels ON, window shadows ON, 9px corners */
-    true, true, 9,
+    FIFI_THEME_DEFAULT_FX_GLASS, FIFI_THEME_DEFAULT_FX_SHADOWS,
+    FIFI_THEME_DEFAULT_CORNER_RADIUS,
 };
 
 /* Theme accessors for translation units that don't include gui_internal.h
@@ -139,7 +143,7 @@ int g_term_scroll = 0;
 font_entry_t g_fonts[FONT_MAX];
 int  g_font_count  = 0;
 int  g_font_family = 0;    /* index into g_fonts */
-int  g_font_px     = 20;   /* selected size in px */
+int  g_font_px     = FIFI_THEME_DEFAULT_FONT_PX; /* selected size in px */
 char g_font_saved_path[72] = "";
 bool g_font_from_config = false;
 
@@ -438,11 +442,16 @@ static long g_settings_mtime = -1;
 void gui_settings_save(void) {
     FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
     if (!f) return;
-    fprintf(f, FIFI_THEME_CONFIG_FORMAT_KEY "=%u\naccent=%u\nwallpaper=%d\nwall_fit=%d\nclock_12h=%d\nanimations=%d\n"
-               "statusbar=%d\ndesktop_info=%d\nutc_offset=%d\n"
-               "panel_edge=%d\npanel_align=%d\npanel_autohide=%d\npanel_size=%d\n"
-               "dock_float=%d\nfx_glass=%d\nfx_shadows=%d\ncorner_radius=%d\n"
-               "font_file=%s\nfont_px=%d\n",
+    fprintf(f, FIFI_THEME_CONFIG_FORMAT_KEY "=%u\n"
+               FIFI_THEME_KEY_ACCENT "=%u\n" FIFI_THEME_KEY_WALLPAPER "=%d\n"
+               FIFI_THEME_KEY_WALL_FIT "=%d\n" FIFI_THEME_KEY_CLOCK_12H "=%d\n"
+               FIFI_THEME_KEY_ANIMATIONS "=%d\n" FIFI_THEME_KEY_STATUSBAR "=%d\n"
+               FIFI_THEME_KEY_DESKTOP_INFO "=%d\n" FIFI_THEME_KEY_UTC_OFFSET "=%d\n"
+               FIFI_THEME_KEY_PANEL_EDGE "=%d\n" FIFI_THEME_KEY_PANEL_ALIGN "=%d\n"
+               FIFI_THEME_KEY_PANEL_AUTOHIDE "=%d\n" FIFI_THEME_KEY_PANEL_SIZE "=%d\n"
+               FIFI_THEME_KEY_DOCK_FLOAT "=%d\n" FIFI_THEME_KEY_FX_GLASS "=%d\n"
+               FIFI_THEME_KEY_FX_SHADOWS "=%d\n" FIFI_THEME_KEY_CORNER_RADIUS "=%d\n"
+               FIFI_THEME_KEY_FONT_FILE "=%s\n" FIFI_THEME_KEY_FONT_PX "=%d\n",
             FIFI_THEME_CONFIG_VERSION, (unsigned)g_theme.accent,
             g_theme.wallpaper, (int)g_theme.wall_fit,
             (int)g_theme.clock_12h,
@@ -454,7 +463,8 @@ void gui_settings_save(void) {
             (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius,
             (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px);
     /* Image-wallpaper path last, read line-wise on load so paths with spaces work. */
-    if (g_wall_img_path[0]) fprintf(f, "wallpaper_image=%s\n", g_wall_img_path);
+    if (g_wall_img_path[0])
+        fprintf(f, FIFI_THEME_KEY_WALLPAPER_IMAGE "=%s\n", g_wall_img_path);
     fclose(f);
 }
 void gui_settings_load(void) {
@@ -464,33 +474,33 @@ void gui_settings_load(void) {
     char line[128];
     while (fgets(line, sizeof line, f)) {
         int v; unsigned uv;
-        if      (sscanf(line, "accent=%u", &uv) == 1)       g_theme.accent = uv;
-        else if (sscanf(line, "wallpaper=%d", &v) == 1)     { if (v >= 0 && v < WALLPAPER_COUNT) g_theme.wallpaper = v; }
-        else if (sscanf(line, "wall_fit=%d", &v) == 1)      { if (v >= 0 && v < WALLFIT_COUNT) g_theme.wall_fit = (uint8_t)v; }
-        else if (strncmp(line, "wallpaper_image=", 16) == 0) {
-            char *val = line + 16;
+        if      (sscanf(line, FIFI_THEME_KEY_ACCENT "=%u", &uv) == 1)       g_theme.accent = uv;
+        else if (sscanf(line, FIFI_THEME_KEY_WALLPAPER "=%d", &v) == 1)     { if (v >= 0 && v < WALLPAPER_COUNT) g_theme.wallpaper = v; }
+        else if (sscanf(line, FIFI_THEME_KEY_WALL_FIT "=%d", &v) == 1)      { if (v >= 0 && v < WALLFIT_COUNT) g_theme.wall_fit = (uint8_t)v; }
+        else if (strncmp(line, FIFI_THEME_KEY_WALLPAPER_IMAGE "=", sizeof(FIFI_THEME_KEY_WALLPAPER_IMAGE)) == 0) {
+            char *val = line + sizeof(FIFI_THEME_KEY_WALLPAPER_IMAGE);
             char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
             snprintf(g_wall_img_path, sizeof g_wall_img_path, "%s", val);
         }
-        else if (sscanf(line, "clock_12h=%d", &v) == 1)     g_theme.clock_12h = (v != 0);
-        else if (sscanf(line, "animations=%d", &v) == 1)    g_theme.animations = (v != 0);
-        else if (sscanf(line, "statusbar=%d", &v) == 1)     g_theme.statusbar = (v != 0);
-        else if (sscanf(line, "desktop_info=%d", &v) == 1)  g_theme.desktop_info = (v != 0);
-        else if (sscanf(line, "utc_offset=%d", &v) == 1)    { if (v >= -12 && v <= 14) g_theme.utc_offset = (int8_t)v; }
-        else if (sscanf(line, "panel_edge=%d", &v) == 1)    { if (v >= 0 && v <= 3) g_theme.panel_edge = (uint8_t)v; }
-        else if (sscanf(line, "panel_align=%d", &v) == 1)   { if (v >= 0 && v <= 2) g_theme.panel_align = (uint8_t)v; }
-        else if (sscanf(line, "panel_autohide=%d", &v) == 1) g_theme.panel_autohide = (v != 0);
-        else if (sscanf(line, "panel_size=%d", &v) == 1)    { if (v >= 0 && v <= 64) g_theme.panel_size = (uint8_t)v; }
-        else if (sscanf(line, "dock_float=%d", &v) == 1)    g_theme.dock_float = (v != 0);
-        else if (sscanf(line, "fx_glass=%d", &v) == 1)      g_theme.fx_glass = (v != 0);
-        else if (sscanf(line, "fx_shadows=%d", &v) == 1)    g_theme.fx_shadows = (v != 0);
-        else if (sscanf(line, "corner_radius=%d", &v) == 1) { if (v >= 0 && v <= 12) g_theme.corner_radius = (uint8_t)v; }
-        else if (strncmp(line, "font_file=", 10) == 0) {
-            char *val = line + 10;
+        else if (sscanf(line, FIFI_THEME_KEY_CLOCK_12H "=%d", &v) == 1)     g_theme.clock_12h = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_ANIMATIONS "=%d", &v) == 1)    g_theme.animations = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_STATUSBAR "=%d", &v) == 1)     g_theme.statusbar = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_DESKTOP_INFO "=%d", &v) == 1)  g_theme.desktop_info = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_UTC_OFFSET "=%d", &v) == 1)    { if (v >= -12 && v <= 14) g_theme.utc_offset = (int8_t)v; }
+        else if (sscanf(line, FIFI_THEME_KEY_PANEL_EDGE "=%d", &v) == 1)    { if (v >= 0 && v <= 3) g_theme.panel_edge = (uint8_t)v; }
+        else if (sscanf(line, FIFI_THEME_KEY_PANEL_ALIGN "=%d", &v) == 1)   { if (v >= 0 && v <= 2) g_theme.panel_align = (uint8_t)v; }
+        else if (sscanf(line, FIFI_THEME_KEY_PANEL_AUTOHIDE "=%d", &v) == 1) g_theme.panel_autohide = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_PANEL_SIZE "=%d", &v) == 1)    { if (v >= 0 && v <= 64) g_theme.panel_size = (uint8_t)v; }
+        else if (sscanf(line, FIFI_THEME_KEY_DOCK_FLOAT "=%d", &v) == 1)    g_theme.dock_float = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_FX_GLASS "=%d", &v) == 1)      g_theme.fx_glass = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_FX_SHADOWS "=%d", &v) == 1)    g_theme.fx_shadows = (v != 0);
+        else if (sscanf(line, FIFI_THEME_KEY_CORNER_RADIUS "=%d", &v) == 1) { if (v >= 0 && v <= 12) g_theme.corner_radius = (uint8_t)v; }
+        else if (strncmp(line, FIFI_THEME_KEY_FONT_FILE "=", sizeof(FIFI_THEME_KEY_FONT_FILE)) == 0) {
+            char *val = line + sizeof(FIFI_THEME_KEY_FONT_FILE);
             char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
             if (val[0]) { snprintf(g_font_saved_path, sizeof g_font_saved_path, "%s", val); g_font_from_config = true; }
         }
-        else if (sscanf(line, "font_px=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
+        else if (sscanf(line, FIFI_THEME_KEY_FONT_PX "=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
     }
     fclose(f);
 }

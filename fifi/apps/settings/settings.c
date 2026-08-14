@@ -5,8 +5,7 @@
  *   Personalize : read/write the compositor's persisted theme config
  *                 (/fifi-data/fifi-settings.conf — accent, wallpaper, panel
  *                 position, glass/shadow effects, corner radius). Changes are
- *                 written to disk and apply on the NEXT login/reboot; this app
- *                 does NOT (and cannot) hot-reload the running compositor.
+ *                 written to disk and live-reloaded by the compositor.
  *   Wi-Fi       : scan / select / connect through the fixed Wi-Fi root broker,
  *                 using the same boundary as the standalone fifi-wifi app.
  *   Network     : live interface / IP / RX-TX throughput (netmon logic).
@@ -81,7 +80,7 @@ static int g_win_h = WIN_H;
 #define C_YELLOW    0x00c8a828u
 
 /* Accent colour — read from config so the hub matches the user's theme. */
-static uint32_t g_accent = 0x003060c0u;
+static uint32_t g_accent = FIFI_THEME_DEFAULT_ACCENT;
 
 /* ── PSF1 font (shared with the other native apps) ───────────────────────── */
 #define PSF1_MAGIC 0x0436u
@@ -262,7 +261,7 @@ static void add_hot(int x, int y, int w, int h, int act, int arg) {
 static char g_cfg_key[MAX_CFG_LINES][32];
 static char g_cfg_val[MAX_CFG_LINES][160];
 static int  g_cfg_n = 0;
-static char g_pers_note[96] = "Changes apply on next login / reboot.";
+static char g_pers_note[96] = "Changes apply live.";
 
 static void cfg_load(void) {
     g_cfg_n = 0;
@@ -356,7 +355,7 @@ static void font_list_scan(void) {
 }
 /* Index of the conf's font_file in the list, or -1 (unset / not found). */
 static int font_cur_index(void) {
-    int ci = cfg_find("font_file");
+    int ci = cfg_find(FIFI_THEME_KEY_FONT_FILE);
     if (ci < 0) return -1;
     const char *base = strrchr(g_cfg_val[ci], '/');
     base = base ? base + 1 : g_cfg_val[ci];
@@ -890,14 +889,14 @@ static void sec_update(void) {
 static void render_personalize(uint32_t *fb) {
     hot_reset();
     int x = CX, y = CTOP;
-    unsigned cur_accent = cfg_get_uint("accent", 0x003060c0u);
-    int cur_wall  = cfg_get_int("wallpaper", 0);
-    int cur_panel = cfg_get_int("panel_edge", 0);
-    int glass     = cfg_get_int("fx_glass", 1);
-    int shadow    = cfg_get_int("fx_shadows", 1);
-    int dockf     = cfg_get_int("dock_float", 1);
-    int topbar    = cfg_get_int("statusbar", 1);
-    int radius    = cfg_get_int("corner_radius", 8);
+    unsigned cur_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
+    int cur_wall  = cfg_get_int(FIFI_THEME_KEY_WALLPAPER, FIFI_THEME_DEFAULT_WALLPAPER);
+    int cur_panel = cfg_get_int(FIFI_THEME_KEY_PANEL_EDGE, FIFI_THEME_DEFAULT_PANEL_EDGE);
+    int glass     = cfg_get_int(FIFI_THEME_KEY_FX_GLASS, FIFI_THEME_DEFAULT_FX_GLASS);
+    int shadow    = cfg_get_int(FIFI_THEME_KEY_FX_SHADOWS, FIFI_THEME_DEFAULT_FX_SHADOWS);
+    int dockf     = cfg_get_int(FIFI_THEME_KEY_DOCK_FLOAT, FIFI_THEME_DEFAULT_DOCK_FLOAT);
+    int topbar    = cfg_get_int(FIFI_THEME_KEY_STATUSBAR, FIFI_THEME_DEFAULT_STATUSBAR);
+    int radius    = cfg_get_int(FIFI_THEME_KEY_CORNER_RADIUS, FIFI_THEME_DEFAULT_CORNER_RADIUS);
 
     /* Accent swatches */
     y = section_hdr(fb, "Accent Color", x, y);
@@ -928,7 +927,7 @@ static void render_personalize(uint32_t *fb) {
     /* Image fit modes — only relevant for the Image wallpaper (id 5). */
     if (cur_wall == 5) {
         static const char *fit_names[4] = { "Fill", "Fit", "Stretch", "Center" };
-        int cur_fit = cfg_get_int("wall_fit", 0);
+        int cur_fit = cfg_get_int(FIFI_THEME_KEY_WALL_FIT, FIFI_THEME_DEFAULT_WALL_FIT);
         int bw = 92, bh = 28, gap = 6;
         for (int i = 0; i < 4; i++) {
             int bx = x + i*(bw+gap);
@@ -970,8 +969,8 @@ static void render_personalize(uint32_t *fb) {
 
       /* Desk info overlay + taskbar auto-hide toggles. When the top bar is off,
        * the clock/battery/network indicators fold into the taskbar. */
-      int deskinfo = cfg_get_int("desktop_info", 1);
-      int autohide = cfg_get_int("panel_autohide", 0);
+      int deskinfo = cfg_get_int(FIFI_THEME_KEY_DESKTOP_INFO, FIFI_THEME_DEFAULT_DESKTOP_INFO);
+      int autohide = cfg_get_int(FIFI_THEME_KEY_PANEL_AUTOHIDE, FIFI_THEME_DEFAULT_PANEL_AUTOHIDE);
       char di[32], ah[40];
       snprintf(di, sizeof di, "Desk info: %s",   deskinfo ? "On" : "Off");
       snprintf(ah, sizeof ah, "Auto-hide bar: %s", autohide ? "On" : "Off");
@@ -980,8 +979,8 @@ static void render_personalize(uint32_t *fb) {
       y += bh + 12;
 
       /* Clock format + taskbar thickness. */
-      int clock12  = cfg_get_int("clock_12h", 1);
-      int tbsize   = cfg_get_int("panel_size", 0);
+      int clock12  = cfg_get_int(FIFI_THEME_KEY_CLOCK_12H, FIFI_THEME_DEFAULT_CLOCK_12H);
+      int tbsize   = cfg_get_int(FIFI_THEME_KEY_PANEL_SIZE, FIFI_THEME_DEFAULT_PANEL_SIZE);
       char ck[32];
       snprintf(ck, sizeof ck, "Clock: %s", clock12 ? "12h" : "24h");
       draw_btn(fb, x, y, bw, bh, ck, clock12);                add_hot(x, y, bw, bh, ACT_CLOCK, 0);
@@ -998,7 +997,7 @@ static void render_personalize(uint32_t *fb) {
     y = section_hdr(fb, "Taskbar Alignment", x, y);
     { int bw = 100, bh = 30, gap = 8;
       static const char *align_names[3] = { "Left", "Center", "Right" };
-      int cur_align = cfg_get_int("panel_align", 1);
+      int cur_align = cfg_get_int(FIFI_THEME_KEY_PANEL_ALIGN, FIFI_THEME_DEFAULT_PANEL_ALIGN);
       for (int i = 0; i < 3; i++) {
           int bx = x + i*(bw+gap);
           draw_btn(fb, bx, y, bw, bh, align_names[i], i == cur_align);
@@ -1025,7 +1024,7 @@ static void render_personalize(uint32_t *fb) {
     y = section_hdr(fb, "System Font", x, y);
     { int bh = 32;
       int cur = font_cur_index();
-      int fpx = cfg_get_int("font_px", 20);
+      int fpx = cfg_get_int(FIFI_THEME_KEY_FONT_PX, FIFI_THEME_DEFAULT_FONT_PX);
       /* Family combo */
       int fw = 300;
       g_ff_bx = x; g_ff_by = y; g_ff_bw = fw; g_ff_bh = bh;
@@ -1092,7 +1091,7 @@ static void render_personalize(uint32_t *fb) {
         g_dd_x = dx; g_dd_y = dy; g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
         fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
         rect_border(fb, dx, dy, dw, rowh * vis, C_WHITE);
-        int fpx = cfg_get_int("font_px", 20);
+        int fpx = cfg_get_int(FIFI_THEME_KEY_FONT_PX, FIFI_THEME_DEFAULT_FONT_PX);
         for (int r = 0; r < vis; r++) {
             int ry = dy + r * rowh;
             if (g_font_sizes[r] == fpx) fill(fb, dx + 1, ry, dw - 2, rowh, g_accent);
@@ -1403,7 +1402,7 @@ static void pers_click(int mx, int my) {
             if (idx >= 0 && idx < g_font_n) {
                 char pathbuf[96];
                 snprintf(pathbuf, sizeof pathbuf, "/fonts/%s", g_font_files[idx]);
-                cfg_set_str("font_file", pathbuf); cfg_save();
+                cfg_set_str(FIFI_THEME_KEY_FONT_FILE, pathbuf); cfg_save();
             }
         }
         g_font_dd = 0; return;
@@ -1412,7 +1411,7 @@ static void pers_click(int mx, int my) {
         if (mx >= g_dd_x && mx < g_dd_x + g_dd_w &&
             my >= g_dd_y && my < g_dd_y + g_dd_rowh * g_dd_vis) {
             int r = (my - g_dd_y) / g_dd_rowh;
-            if (r >= 0 && r < N_FONT_SIZES) { cfg_set_int("font_px", g_font_sizes[r]); cfg_save(); }
+            if (r >= 0 && r < N_FONT_SIZES) { cfg_set_int(FIFI_THEME_KEY_FONT_PX, g_font_sizes[r]); cfg_save(); }
         }
         g_font_dd = 0; return;
     }
@@ -1420,26 +1419,26 @@ static void pers_click(int mx, int my) {
         Hot *h = &g_hots[i];
         if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
         switch (h->act) {
-            case ACT_ACCENT: cfg_set_uint("accent", g_accent_presets[h->arg]);
+            case ACT_ACCENT: cfg_set_uint(FIFI_THEME_KEY_ACCENT, g_accent_presets[h->arg]);
                              g_accent = g_accent_presets[h->arg]; break;
-            case ACT_WALL:   cfg_set_int("wallpaper", h->arg); break;
-            case ACT_WALLFIT: cfg_set_int("wall_fit", h->arg); break;
-            case ACT_PANEL:  cfg_set_int("panel_edge", h->arg); break;
-            case ACT_GLASS:  cfg_set_int("fx_glass", cfg_get_int("fx_glass", 1) ? 0 : 1); break;
-            case ACT_SHADOW: cfg_set_int("fx_shadows", cfg_get_int("fx_shadows", 1) ? 0 : 1); break;
-            case ACT_DOCK:   cfg_set_int("dock_float", cfg_get_int("dock_float", 1) ? 0 : 1); break;
-            case ACT_STATUS: cfg_set_int("statusbar", cfg_get_int("statusbar", 1) ? 0 : 1); break;
-            case ACT_DESKINFO: cfg_set_int("desktop_info", cfg_get_int("desktop_info", 1) ? 0 : 1); break;
-            case ACT_AUTOHIDE: cfg_set_int("panel_autohide", cfg_get_int("panel_autohide", 0) ? 0 : 1); break;
-            case ACT_ALIGN:  cfg_set_int("panel_align", h->arg); break;
-            case ACT_CLOCK:  cfg_set_int("clock_12h", cfg_get_int("clock_12h", 1) ? 0 : 1); break;
-            case ACT_TBSIZE: { int s = cfg_get_int("panel_size", 0) + h->arg;
+            case ACT_WALL:   cfg_set_int(FIFI_THEME_KEY_WALLPAPER, h->arg); break;
+            case ACT_WALLFIT: cfg_set_int(FIFI_THEME_KEY_WALL_FIT, h->arg); break;
+            case ACT_PANEL:  cfg_set_int(FIFI_THEME_KEY_PANEL_EDGE, h->arg); break;
+            case ACT_GLASS:  cfg_set_int(FIFI_THEME_KEY_FX_GLASS, cfg_get_int(FIFI_THEME_KEY_FX_GLASS, FIFI_THEME_DEFAULT_FX_GLASS) ? 0 : 1); break;
+            case ACT_SHADOW: cfg_set_int(FIFI_THEME_KEY_FX_SHADOWS, cfg_get_int(FIFI_THEME_KEY_FX_SHADOWS, FIFI_THEME_DEFAULT_FX_SHADOWS) ? 0 : 1); break;
+            case ACT_DOCK:   cfg_set_int(FIFI_THEME_KEY_DOCK_FLOAT, cfg_get_int(FIFI_THEME_KEY_DOCK_FLOAT, FIFI_THEME_DEFAULT_DOCK_FLOAT) ? 0 : 1); break;
+            case ACT_STATUS: cfg_set_int(FIFI_THEME_KEY_STATUSBAR, cfg_get_int(FIFI_THEME_KEY_STATUSBAR, FIFI_THEME_DEFAULT_STATUSBAR) ? 0 : 1); break;
+            case ACT_DESKINFO: cfg_set_int(FIFI_THEME_KEY_DESKTOP_INFO, cfg_get_int(FIFI_THEME_KEY_DESKTOP_INFO, FIFI_THEME_DEFAULT_DESKTOP_INFO) ? 0 : 1); break;
+            case ACT_AUTOHIDE: cfg_set_int(FIFI_THEME_KEY_PANEL_AUTOHIDE, cfg_get_int(FIFI_THEME_KEY_PANEL_AUTOHIDE, FIFI_THEME_DEFAULT_PANEL_AUTOHIDE) ? 0 : 1); break;
+            case ACT_ALIGN:  cfg_set_int(FIFI_THEME_KEY_PANEL_ALIGN, h->arg); break;
+            case ACT_CLOCK:  cfg_set_int(FIFI_THEME_KEY_CLOCK_12H, cfg_get_int(FIFI_THEME_KEY_CLOCK_12H, FIFI_THEME_DEFAULT_CLOCK_12H) ? 0 : 1); break;
+            case ACT_TBSIZE: { int s = cfg_get_int(FIFI_THEME_KEY_PANEL_SIZE, FIFI_THEME_DEFAULT_PANEL_SIZE) + h->arg;
                                if (s < 0) s = 0; if (s > 48) s = 48;
-                               cfg_set_int("panel_size", s); } break;
-            case ACT_RADIUS: { int r = cfg_get_int("corner_radius", 8) + h->arg;
+                               cfg_set_int(FIFI_THEME_KEY_PANEL_SIZE, s); } break;
+            case ACT_RADIUS: { int r = cfg_get_int(FIFI_THEME_KEY_CORNER_RADIUS, FIFI_THEME_DEFAULT_CORNER_RADIUS) + h->arg;
                                if (r < 0) r = 0;
                                if (r > 12) r = 12;
-                               cfg_set_int("corner_radius", r); } break;
+                               cfg_set_int(FIFI_THEME_KEY_CORNER_RADIUS, r); } break;
             case ACT_FONT_FAM: {              /* open family dropdown */
                 if (g_font_n == 0) return;
                 g_font_dd = 1;
@@ -1498,7 +1497,7 @@ int main(int argc, char **argv) {
     alsa_init();
     cfg_load();
     font_list_scan();
-    g_accent = cfg_get_uint("accent", 0x003060c0u);
+    g_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
     net_update();
     sec_update();
 
