@@ -13,6 +13,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BZIMAGE="$REPO_ROOT/build-linux/bzImage"
 INITRAMFS="$REPO_ROOT/build-linux/initramfs.cpio.gz"
 OUT_ISO="$REPO_ROOT/build-linux/fifi-linux.iso"
+ISO_RELEASE_INFO="$OUT_ISO.release-info"
 
 if [ ! -f "$BZIMAGE" ]; then
     echo "[usb] ERROR: No kernel found at $BZIMAGE"
@@ -116,8 +117,27 @@ grub-mkrescue \
     "$STAGE" \
     2>/dev/null
 
+# Record exactly which boot pair went into the ISO. The release publisher uses
+# this sidecar to avoid attaching an older recovery image to newer signed
+# online-update assets.
+kernel_sha="$(sha256sum "$BZIMAGE" | awk '{print $1}')"
+initramfs_sha="$(sha256sum "$INITRAMFS" | awk '{print $1}')"
+iso_sha="$(sha256sum "$OUT_ISO" | awk '{print $1}')"
+build_id="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]; then
+    build_id="$build_id-dirty"
+fi
+{
+    printf 'format=1\n'
+    printf 'build=%s\n' "$build_id"
+    printf 'kernel_sha256=%s\n' "$kernel_sha"
+    printf 'initramfs_sha256=%s\n' "$initramfs_sha"
+    printf 'iso_sha256=%s\n' "$iso_sha"
+} > "$ISO_RELEASE_INFO"
+
 ISO_SIZE=$(du -sh "$OUT_ISO" | cut -f1)
 echo "[usb] Done: $OUT_ISO ($ISO_SIZE)"
+echo "[usb] Release provenance: $ISO_RELEASE_INFO"
 echo ""
 echo "  !! Secure Boot must be DISABLED in BIOS before booting this USB !!"
 echo ""

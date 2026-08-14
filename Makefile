@@ -202,7 +202,7 @@ clean:
 # These targets build and run the linux-desktop branch version.
 # The bare-metal targets above (run, rundbg, iso, etc.) are unchanged.
 
-.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-qemu-test linux-boot-fallback-test linux-usb linux-flash linux-test-update linux-test-usb linux-publish-test linux-update-test linux-security-test linux-download-test linux-shared-api-test linux-clean
+.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-qemu-test linux-boot-fallback-test linux-usb linux-flash linux-test-update linux-test-usb linux-publish-test-check linux-publish-test linux-release-test linux-update-test linux-security-test linux-download-test linux-shared-api-test linux-input-test linux-clean
 
 linux-setup:
 	bash scripts/setup-linux.sh
@@ -254,6 +254,9 @@ linux-shared-api-test:
 linux-input-test:
 	bash test/input/run.sh
 
+linux-release-test:
+	bash test/release/run.sh
+
 linux-test-update: linux-kernel
 	BUILD_ID="$$(git rev-parse HEAD)"; \
 	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then BUILD_ID="$$BUILD_ID-dirty"; fi; \
@@ -264,6 +267,9 @@ linux-test-update: linux-kernel
 
 linux-test-usb: linux-test-update
 	bash scripts/build-linux-usb.sh
+
+linux-publish-test-check:
+	bash scripts/publish-test-update.sh --check
 
 linux-publish-test:
 	bash scripts/publish-test-update.sh

@@ -152,16 +152,21 @@ requirement for updating an existing installation.
 
 ```sh
 make linux-update-test    # simulated install, corruption, no-op, and rollback tests
+make linux-release-test   # publisher integrity and no-mutation preflight tests
 make linux-test-update    # real kernel + test-channel initramfs + release package
 make linux-test-usb       # also produce the hardware-test ISO
+make linux-publish-test-check # verify assets and remote commit without publishing
 make linux-publish-test   # publish update assets (+ ISO when built); never commits/pushes
 ```
 
-`linux-publish-test` refuses a dirty working tree. Verify locally first, commit
-and push the reviewed `linux-desktop` changes, rebuild with
-`make linux-test-update`, and only then publish the fixed `linux-desktop-test`
-prerelease. Running `make linux-test-usb` first also includes the optional live
-hardware-test and recovery ISO.
+The publishing commands refuse a dirty working tree and independently verify
+the manifest signature, artifact hashes, gzip image, and remote commit. Verify
+locally first, commit and push the reviewed `linux-desktop` changes, rebuild
+with `make linux-test-update`, run `make linux-publish-test-check`, and only then
+publish the fixed `linux-desktop-test` prerelease. Running `make linux-test-usb`
+first also includes the optional live hardware-test and recovery ISO. The ISO is
+attached only when its generated provenance matches the exact signed boot pair;
+an older ISO is ignored rather than being mislabeled as the current build.
 
 ### Remote access
 
