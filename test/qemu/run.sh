@@ -40,8 +40,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-ACCEL=(-accel tcg,thread=multi -cpu max)
-if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+# GitHub's Arch Linux job runs QEMU inside a container without KVM. MTTCG has
+# repeatedly segfaulted there before the guest executes its first instruction,
+# so the portable fallback deliberately uses single-threaded TCG. Hardware KVM
+# remains the fast path wherever it is available.
+ACCEL=(-accel tcg,thread=single -cpu max)
+if [ "${FIFI_QEMU_FORCE_TCG:-0}" != 1 ] &&
+   [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL=(-enable-kvm -cpu host)
 fi
 
