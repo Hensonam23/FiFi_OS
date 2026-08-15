@@ -91,3 +91,9 @@ grep -Fq 'input_flush_deferred_clicks();' "$ROOT/fifi/compositor/main.c"
 grep -Fq 'pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE)' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] KMS cursor keeps draining input during slow frames"
+
+grep -Fq 'inotify_add_watch(g_hotplug_fd, "/dev/input"' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"
+! grep -Fq '_rescan_ticks' "$ROOT/fifi/compositor/main.c"
+echo "[input-test] device rescans happen only after hotplug notifications"

@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <pthread.h>
 
@@ -79,6 +80,7 @@ typedef struct {
 } abs_dev_t;
 static abs_dev_t g_abs_devs[MAX_EVDEV];
 static int g_abs_cnt = 0;
+static int g_hotplug_fd = -1;
 
 /* ── Gamepad state ──────────────────────────────────────────────────────────
  * Supports up to 2 gamepads. Each one tracks buttons + 4 axes + 2 triggers. */
@@ -487,6 +489,15 @@ static bool evdev_has_bit(int fd, int type, int bit) {
 }
 
 void input_init(void) {
+    g_hotplug_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (g_hotplug_fd >= 0 &&
+        inotify_add_watch(g_hotplug_fd, "/dev/input",
+                          IN_CREATE | IN_DELETE | IN_MOVED_TO |
+                          IN_MOVED_FROM | IN_ATTRIB) < 0) {
+        close(g_hotplug_fd);
+        g_hotplug_fd = -1;
+    }
+
     DIR *d = opendir("/dev/input");
     if (!d) { fprintf(stderr, "[input] /dev/input not found\n"); return; }
 
@@ -610,6 +621,22 @@ void input_init(void) {
 
     if (g_kbd_cnt == 0) fprintf(stderr, "[input] warning: no keyboard found\n");
     if (g_ptr_cnt == 0 && g_abs_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
+}
+
+int input_hotplug_fd(void) {
+    return g_hotplug_fd;
+}
+
+/* Drain queued directory changes. The caller rescans only when this reports a
+ * real hotplug notification, keeping filesystem walks out of normal motion. */
+bool input_hotplug_pending(void) {
+    if (g_hotplug_fd < 0) return false;
+    char events[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    bool changed = false;
+    ssize_t got;
+    while ((got = read(g_hotplug_fd, events, sizeof(events))) > 0)
+        changed = true;
+    return changed;
 }
 
 /* Drop devices whose fd has gone dead (unplugged / uinput destroyed).

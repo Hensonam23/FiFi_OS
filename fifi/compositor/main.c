@@ -30,6 +30,8 @@ void input_poll(void);
 void input_poll_motion(void);
 void input_flush_deferred_clicks(void);
 void input_rescan(void);
+int input_hotplug_fd(void);
+bool input_hotplug_pending(void);
 void input_set_fb(uint32_t *ptr, uint64_t pitch32, int32_t w, int32_t h);
 void mouse_init(void);
 void mouse_cursor_update(void);
@@ -569,7 +571,7 @@ int main(void) {
     int evdev_fds[20];
     int nevdev = input_get_all_fds(evdev_fds, 20);
 
-#define MAX_PFD 24
+#define MAX_PFD 32
     struct pollfd pfd[MAX_PFD];
 
     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
@@ -614,6 +616,12 @@ int main(void) {
             pfd[nfds].events = POLLIN;
             nfds++;
         }
+        int hotplug_fd = input_hotplug_fd();
+        if (hotplug_fd >= 0 && nfds < MAX_PFD) {
+            pfd[nfds].fd     = hotplug_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
 
         /* poll() outside the mutex — render thread can flush concurrently.
          * Never use timeout 0: that made gaming mode busy-poll a whole core for
@@ -653,8 +661,7 @@ int main(void) {
 
         /* App frame traffic and PTY output can be comparatively expensive;
          * physical pointer motion has already been consumed above. */
-        static int _rescan_ticks = 0;
-        if (++_rescan_ticks >= 300) { _rescan_ticks = 0;
+        if (input_hotplug_pending()) {
             input_rescan();
             /* Rebuild the poll set. input_rescan() closes the fds of unplugged
              * devices; leaving those stale fds in pfd made poll() return
