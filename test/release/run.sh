@@ -7,6 +7,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+echo "[test-release] CI embeds the exact workflow commit in release images"
+grep -Fq 'FIFI_BUILD_ID: ${{ github.sha }}' \
+    "$ROOT/.github/workflows/linux-desktop.yml"
+grep -Fq 'GITHUB_SHA:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD' \
+    "$ROOT/scripts/build-initramfs.sh"
+
 REPO="$TMP/repo"
 MOCK_BIN="$TMP/bin"
 LOG="$TMP/gh.log"

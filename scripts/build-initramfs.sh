@@ -46,7 +46,7 @@ case "$FIFI_UPDATE_CHANNEL" in
         exit 1
         ;;
 esac
-FIFI_BUILD_ID="${FIFI_BUILD_ID:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
+FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}}"
 printf '%s\n' "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-update-channel"
 printf '%s\n' "$FIFI_BUILD_ID" > "$STAGE/etc/fifi-build-id"
 echo "[initramfs] update channel: $FIFI_UPDATE_CHANNEL  build: $FIFI_BUILD_ID"

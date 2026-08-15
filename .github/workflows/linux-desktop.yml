@@ -40,6 +40,8 @@ jobs:
           make linux-release-test
 
       - name: Configure and build Linux
+        env:
+          FIFI_BUILD_ID: ${{ github.sha }}
         run: |
           make linux-setup
           make linux-kernel
