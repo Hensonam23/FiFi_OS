@@ -320,14 +320,21 @@ grep -Fq 'fifi-admin}" power poweroff' "$ROOT/initramfs/root/bin/poweroff"
 grep -Fq 'busybox|bash|blkid|reboot|poweroff' \
     "$ROOT/scripts/build-initramfs.sh"
 power_wrapper_log="$TMP/power-wrapper.log"
+mkdir -p "$TMP/power-wrapper-bin"
+cat > "$TMP/power-wrapper-bin/id" <<'EOF'
+#!/bin/sh
+test "${1:-}" = -u && echo 1000
+EOF
 cat > "$TMP/fifi-admin-client" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FIFI_TEST_POWER_WRAPPER_LOG"
 EOF
-chmod +x "$TMP/fifi-admin-client"
+chmod +x "$TMP/power-wrapper-bin/id" "$TMP/fifi-admin-client"
+PATH="$TMP/power-wrapper-bin:$PATH" \
 FIFI_ADMIN_CLIENT="$TMP/fifi-admin-client" \
 FIFI_TEST_POWER_WRAPPER_LOG="$power_wrapper_log" \
     "$ROOT/initramfs/root/bin/reboot"
+PATH="$TMP/power-wrapper-bin:$PATH" \
 FIFI_ADMIN_CLIENT="$TMP/fifi-admin-client" \
 FIFI_TEST_POWER_WRAPPER_LOG="$power_wrapper_log" \
     "$ROOT/initramfs/root/bin/poweroff"
