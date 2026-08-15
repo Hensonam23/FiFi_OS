@@ -92,6 +92,14 @@ grep -Fq 'pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE)' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] KMS cursor keeps draining input during slow frames"
 
+grep -Fq 'pointer_thread_fn' "$ROOT/fifi/compositor/main.c"
+grep -Fq 'input_get_pointer_fds(pointer_fds, 64)' \
+    "$ROOT/fifi/compositor/main.c"
+grep -Fq 'input_poll_controls();' "$ROOT/fifi/compositor/main.c"
+grep -Fq 'input_poll_mode(false, true)' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'pthread_join(pointer_tid, NULL)' "$ROOT/fifi/compositor/main.c"
+echo "[input-test] pointer evdev has an independent event-driven thread"
+
 grep -Fq 'inotify_add_watch(g_hotplug_fd, "/dev/input"' \
     "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"

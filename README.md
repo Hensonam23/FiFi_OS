@@ -61,7 +61,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 | Text viewer/editor: syntax highlight, edit mode, undo | **Working** |
 | Settings panel: theme, clock, audio, gaming, network, VPN | **Working** |
 | PTY terminal: real shell in a FiFi window, multiple instances, full UTF-8 | **Working** |
-| Pointer input: hardware cursor remains responsive during rendering; input-device rescans run only on actual hotplug events | **Working** |
+| Pointer input: dedicated event-driven mouse/touchpad thread and hardware cursor remain responsive independently of rendering, apps, terminal output, and hotplug work | **Working** |
 | DRM/KMS display: direct GPU, no polling lag | **Working** |
 | Audio: ALSA + PipeWire volume and routing | **Working** |
 | Gamepad: evdev HID input routed to focused IPC app | **Working** |

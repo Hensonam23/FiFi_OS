@@ -28,6 +28,7 @@
 void input_init(void);
 void input_poll(void);
 void input_poll_motion(void);
+void input_poll_controls(void);
 void input_flush_deferred_clicks(void);
 void input_rescan(void);
 int input_hotplug_fd(void);
@@ -130,6 +131,8 @@ void  pty_set_initial_winsize(uint16_t cols, uint16_t rows);
 /* Input query functions */
 bool  keyboard_gui_capture_active(void);
 int   input_get_all_fds(int *buf, int maxn);
+int   input_get_pointer_fds(int *buf, int maxn);
+int   input_get_control_fds(int *buf, int maxn);
 int   keyboard_try_getchar(void);
 void  keyboard_clear_state(void);
 void  mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
@@ -322,6 +325,48 @@ static void take_screenshot(void) {
 /* DEV: kill -USR1 <pid> requests a screenshot (handled in the event loop). */
 static volatile sig_atomic_t g_want_shot = 0;
 static void shot_sig_handler(int sig) { (void)sig; g_want_shot = 1; }
+
+/* ── Pointer thread ──────────────────────────────────────────────────────── */
+/*
+ * Physical pointer devices have a dedicated event-driven reader.  It never
+ * takes the compositor mutex, so app frames, PTY output, Wayland/X11 traffic,
+ * filesystem work, and software rendering cannot delay evdev consumption.
+ * Button edges are deferred by input.c until the desktop event thread can
+ * route them against a consistent window stack.
+ */
+static void *pointer_thread_fn(void *arg)
+{
+    (void)arg;
+    int pointer_fds[64];
+    struct pollfd pointer_poll[64];
+
+    while (!g_quit) {
+        int count = input_get_pointer_fds(pointer_fds, 64);
+        if (count == 0) {
+            const struct timespec pause = { .tv_sec = 0, .tv_nsec = 20000000L };
+            nanosleep(&pause, NULL);
+            continue;
+        }
+        for (int i = 0; i < count; i++) {
+            pointer_poll[i].fd = pointer_fds[i];
+            pointer_poll[i].events = POLLIN;
+            pointer_poll[i].revents = 0;
+        }
+        int ready = poll(pointer_poll, (nfds_t)count, 50);
+        if (ready <= 0) continue;
+
+        int32_t old_x, old_y; bool old_l, old_r;
+        mouse_get_state(&old_x, &old_y, &old_l, &old_r);
+        input_poll_motion();
+        int32_t new_x, new_y; bool new_l, new_r;
+        mouse_get_state(&new_x, &new_y, &new_l, &new_r);
+        if (new_x == old_x && new_y == old_y) continue;
+
+        if (drm_cursor_enabled()) drm_cursor_move(new_x, new_y);
+        if (!drm_cursor_enabled()) mouse_cursor_update();
+    }
+    return NULL;
+}
 
 /* ── Render thread ───────────────────────────────────────────────────────── */
 /*
@@ -569,16 +614,20 @@ int main(void) {
     fprintf(stderr, "[compositor] running\n");
 
     int evdev_fds[20];
-    int nevdev = input_get_all_fds(evdev_fds, 20);
+    int nevdev = input_get_control_fds(evdev_fds, 20);
 
 #define MAX_PFD 32
     struct pollfd pfd[MAX_PFD];
 
     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
 
-    /* Spawn the render thread — it takes over all compositing + DRM flush. */
-    pthread_t render_tid;
+    /* Pointer I/O and rendering run independently from desktop event routing. */
+    pthread_t pointer_tid, render_tid;
+    pthread_create(&pointer_tid, NULL, pointer_thread_fn, NULL);
     pthread_create(&render_tid, NULL, render_thread_fn, NULL);
+
+    int32_t routed_x, routed_y; bool routed_l, routed_r;
+    mouse_get_state(&routed_x, &routed_y, &routed_l, &routed_r);
 
     int s_xwm_probe = 0;   /* throttles X-WM connect attempts while X is down */
 
@@ -629,16 +678,8 @@ int main(void) {
          * immediately regardless). 2ms = 500Hz input sampling in gaming. */
         poll(pfd, (nfds_t)nfds, g_gaming_mode ? 2 : 4);
 
-        /* Drain evdev before waiting for compositor state. If a slow software
-         * frame still owns g_mx, keep draining and move the KMS cursor directly
-         * instead of freezing the pointer until that frame ends. */
-        int32_t px, py; bool pb_l, pb_r;
-        mouse_get_state(&px, &py, &pb_l, &pb_r);
-        input_poll_motion();
-        int32_t nx, ny; bool nb_l, nb_r;
-        mouse_get_state(&nx, &ny, &nb_l, &nb_r);
-        bool had_input = (nx != px || ny != py || nb_l != pb_l || nb_r != pb_r);
-        if (drm_cursor_enabled() && (nx != px || ny != py)) drm_cursor_move(nx, ny);
+        bool pb_l = routed_l;
+        bool had_input = false;
 
         fifi_event_handoff_request(&g_event_handoff);
         while (pthread_mutex_trylock(&g_mx) != 0) {
@@ -647,17 +688,10 @@ int main(void) {
                 .tv_nsec = g_gaming_mode ? 2000000 : 4000000,
             };
             nanosleep(&input_pause, NULL);
-            int32_t ox = nx, oy = ny;
-            input_poll_motion();
-            mouse_get_state(&nx, &ny, &nb_l, &nb_r);
-            if (nx != ox || ny != oy || nb_l != pb_l || nb_r != pb_r)
-                had_input = true;
-            if (drm_cursor_enabled() && (nx != ox || ny != oy))
-                drm_cursor_move(nx, ny);
         }
         fifi_event_handoff_acquired(&g_event_handoff);
         input_flush_deferred_clicks();
-        input_poll(); /* keyboard and gamepad events stayed queued while rendering */
+        input_poll_controls();
 
         /* App frame traffic and PTY output can be comparatively expensive;
          * physical pointer motion has already been consumed above. */
@@ -667,7 +701,7 @@ int main(void) {
              * devices; leaving those stale fds in pfd made poll() return
              * immediately with POLLNVAL every iteration, spinning the event
              * thread at 100% CPU. This also picks up newly plugged devices. */
-            nevdev = input_get_all_fds(evdev_fds, 20);
+            nevdev = input_get_control_fds(evdev_fds, 20);
         }
         /* ── IPC: accept new connections, read app frame messages ──────── */
         ipc_poll();
@@ -700,6 +734,8 @@ int main(void) {
         {
             int32_t mcx, mcy; bool mlb, mrb;
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
+            had_input = mcx != routed_x || mcy != routed_y ||
+                        mlb != routed_l || mrb != routed_r;
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
             /* Cross-layer z-order: the Wayland browser participates in the same
@@ -784,6 +820,8 @@ int main(void) {
                 int8_t sc = mouse_consume_scroll();
                 if (sc) wayland_send_scroll(sc);
             }
+            routed_x = mcx; routed_y = mcy;
+            routed_l = mlb; routed_r = mrb;
         }
 
         /* ── Activity tracking ──────────────────────────────────────────── */
@@ -957,6 +995,7 @@ int main(void) {
 
     g_quit = true;
     pthread_cond_signal(&g_cond);
+    pthread_join(pointer_tid, NULL);
     pthread_join(render_tid, NULL);
     return 0;
 }

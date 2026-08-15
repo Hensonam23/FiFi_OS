@@ -669,9 +669,10 @@ static void input_prune_dead(void) {
 /* Rescan /dev/input for newly plugged devices not already open.
  * Safe to call repeatedly; skips devices already in the fd lists. */
 void input_rescan(void) {
+    input_state_lock();
     input_prune_dead();
     DIR *d = opendir("/dev/input");
-    if (!d) return;
+    if (!d) { input_state_unlock(); return; }
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strncmp(de->d_name, "event", 5) != 0) continue;
@@ -722,16 +723,17 @@ void input_rescan(void) {
         close(fd);
     }
     closedir(d);
+    input_state_unlock();
 }
 
 /* ── Poll — call each frame ─────────────────────────────────────────────── */
 
-static void input_poll_mode(bool motion_only) {
+static void input_poll_mode(bool poll_pointer, bool poll_controls) {
     input_state_lock();
-    g_motion_only = motion_only;
+    g_motion_only = !poll_controls;
     struct input_event ev;
 
-    for (int ki = 0; !motion_only && ki < g_kbd_cnt; ki++) {
+    for (int ki = 0; poll_controls && ki < g_kbd_cnt; ki++) {
         while (read(g_kbd_fds[ki], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type != EV_KEY) continue;
             bool pressed = (ev.value == 1 || ev.value == 2);
@@ -778,7 +780,7 @@ static void input_poll_mode(bool motion_only) {
         }
     }
 
-    for (int pi = 0; pi < g_ptr_cnt; pi++) {
+    for (int pi = 0; poll_pointer && pi < g_ptr_cnt; pi++) {
         int32_t dx = 0, dy = 0;
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
@@ -814,7 +816,7 @@ static void input_poll_mode(bool motion_only) {
     }
 
     /* ── Absolute pointer devices (USB tablet / virtio-tablet / touchpad) ── */
-    for (int ai = 0; ai < g_abs_cnt; ai++) {
+    for (int ai = 0; poll_pointer && ai < g_abs_cnt; ai++) {
         abs_dev_t *dev = &g_abs_devs[ai];
         int32_t abs_x = dev->axes.x[0], abs_y = dev->axes.y[0];
         int32_t abs_x1 = dev->axes.x[1], abs_y1 = dev->axes.y[1];
@@ -1097,7 +1099,7 @@ static void input_poll_mode(bool motion_only) {
     }
 
     /* ── Gamepad events ────────────────────────────────────────────────── */
-    for (int gi = 0; !motion_only && gi < g_gp_cnt; gi++) {
+    for (int gi = 0; poll_controls && gi < g_gp_cnt; gi++) {
         gamepad_t *gp = &g_gamepads[gi];
         struct input_event ev;
         gp->changed = false;
@@ -1151,8 +1153,9 @@ static void input_poll_mode(bool motion_only) {
     input_state_unlock();
 }
 
-void input_poll(void) { input_poll_mode(false); }
-void input_poll_motion(void) { input_poll_mode(true); }
+void input_poll(void) { input_poll_mode(true, true); }
+void input_poll_motion(void) { input_poll_mode(true, false); }
+void input_poll_controls(void) { input_poll_mode(false, true); }
 
 /* Gamepad query API */
 bool input_gamepad_connected(void)   {
@@ -1317,10 +1320,30 @@ cursor_type_t mouse_get_cursor(void)    { return g_cursor_type; }
 bool keyboard_gui_capture_active(void) { input_state_lock(); bool v = g_gui_capture; input_state_unlock(); return v; }
 
 int input_get_all_fds(int *buf, int maxn) {
+    input_state_lock();
     int n = 0;
     for (int i = 0; i < g_kbd_cnt && n < maxn; i++) buf[n++] = g_kbd_fds[i];
     for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
     for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
     for (int i = 0; i < g_gp_cnt  && n < maxn; i++) buf[n++] = g_gamepads[i].fd;
+    input_state_unlock();
+    return n;
+}
+
+int input_get_pointer_fds(int *buf, int maxn) {
+    input_state_lock();
+    int n = 0;
+    for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
+    for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
+    input_state_unlock();
+    return n;
+}
+
+int input_get_control_fds(int *buf, int maxn) {
+    input_state_lock();
+    int n = 0;
+    for (int i = 0; i < g_kbd_cnt && n < maxn; i++) buf[n++] = g_kbd_fds[i];
+    for (int i = 0; i < g_gp_cnt && n < maxn; i++) buf[n++] = g_gamepads[i].fd;
+    input_state_unlock();
     return n;
 }
