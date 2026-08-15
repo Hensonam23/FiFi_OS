@@ -41,9 +41,10 @@
 
 /* Paths */
 #define BROWSER_DIR      "/fifi-data/browser"
-#define BROWSER_APPIMAGE "/fifi-data/browser/browser.AppImage"
+#define LEGACY_BROWSER_APPIMAGE "/fifi-data/browser/browser.AppImage"
 #define BROWSER_CHOICE   "/fifi-data/browser/choice"
 #define BROWSER_LOG      "/fifi-data/browser/launch.log"
+#define APP_INSTALLER    "/usr/share/fifi/appstore-install.sh"
 
 #define BROWSER_LIBREWOLF 0
 #define BROWSER_FIREFOX   1
@@ -51,6 +52,20 @@
 #define VIEW_CHOICE    0
 #define VIEW_DOWNLOAD  1
 #define VIEW_DONE      2
+
+static const char *browser_appimage(int browser) {
+    return browser == BROWSER_FIREFOX
+        ? "/fifi-data/apps/Firefox.AppImage"
+        : "/fifi-data/apps/LibreWolf.AppImage";
+}
+
+static const char *installed_browser(int browser) {
+    const char *managed = browser_appimage(browser);
+    if (access(managed, X_OK) == 0) return managed;
+    if (access(LEGACY_BROWSER_APPIMAGE, X_OK) == 0)
+        return LEGACY_BROWSER_APPIMAGE;
+    return managed;
+}
 
 /* ── Colour palette (0x00RRGGBB) ── */
 #define C_WIN_BG      0x000b1017u
@@ -464,10 +479,13 @@ static void start_download(app_t *a) {
         close(pfd[0]);
         dup2(pfd[1], STDOUT_FILENO); dup2(pfd[1], STDERR_FILENO);
         close(pfd[1]);
-        /* Use the download script which handles GitHub API and proper URLs */
-        const char *browser_name = a->browser==BROWSER_LIBREWOLF ? "librewolf" : "firefox";
-        execl("/bin/fifi-download-browser.sh", "fifi-download-browser.sh",
-              browser_name, BROWSER_APPIMAGE, NULL);
+        /* Install into the managed app library so App Store and app-update can
+         * replace it; upstream AppImage self-updaters cannot do that safely. */
+        const char *source = a->browser == BROWSER_LIBREWOLF
+            ? "codeberg:librewolf/bsys6" : "ivan-hc/Firefox-appimage";
+        const char *name = a->browser == BROWSER_LIBREWOLF
+            ? "LibreWolf" : "Firefox";
+        execl("/bin/sh", "sh", APP_INSTALLER, source, name, NULL);
         _exit(1);
     }
     close(pfd[1]);
@@ -515,11 +533,12 @@ static void poll_download(app_t *a) {
         close(a->dl_pipe); a->dl_pipe = -1;
         int st = 0;
         if (a->dl_pid > 0) { waitpid(a->dl_pid, &st, 0); a->dl_pid = -1; }
-        a->done_ok = (st==0 && access(BROWSER_APPIMAGE,F_OK)==0);
+        const char *appimage = browser_appimage(a->browser);
+        a->done_ok = (st==0 && access(appimage,F_OK)==0);
         if (a->done_ok) {
-            chmod(BROWSER_APPIMAGE, 0755);
+            chmod(appimage, 0755);
             /* Validate it's actually an ELF binary, not an HTML error page */
-            int vfd = open(BROWSER_APPIMAGE, O_RDONLY);
+            int vfd = open(appimage, O_RDONLY);
             if (vfd >= 0) {
                 uint8_t magic[4] = {0};
                 bool elf_ok = (read(vfd, magic, 4) == 4 &&
@@ -528,7 +547,7 @@ static void poll_download(app_t *a) {
                 close(vfd);
                 if (!elf_ok) {
                     /* Not a real binary — curl got a redirect page or error */
-                    remove(BROWSER_APPIMAGE);
+                    remove(appimage);
                     a->done_ok = false;
                     snprintf(a->error, sizeof(a->error),
                              "Download incomplete — got an HTML page instead of the "
@@ -578,7 +597,7 @@ static void render_done(app_t *a) {
         const char *name = a->browser==BROWSER_LIBREWOLF ? "LibreWolf" : "Firefox";
         char line[80]; snprintf(line, sizeof(line), "%s installed successfully.", name);
         text(a, line, 20, y, C_OK,0); y += g_fh + 8;
-        text(a, "Saved to /fifi-data/browser.  Launches directly next time.", 20, y, C_TEXT_SUB,0);
+        text(a, "Managed by App Store and app-update. Launches directly next time.", 20, y, C_TEXT_SUB,0);
         y += g_fh + 24;
         hline(a, 20, y, a->win_w-40, C_SEP); y += 14;
         text(a, "Clicking Browser in the launcher will now open your browser directly.", 20, y, C_TEXT_DIM, a->win_w-40);
@@ -640,10 +659,8 @@ static void on_click(app_t *a, int mx, int my, int sock) {
                     dup2(logfd, STDERR_FILENO);
                     close(logfd);
                 }
-                execl("/bin/fifi-user-exec", "fifi-user-exec",
-                      BROWSER_APPIMAGE, "--appimage-extract-and-run", NULL);
-                execl("/bin/fifi-user-exec", "fifi-user-exec",
-                      BROWSER_APPIMAGE, NULL);
+                execl("/usr/share/fifi/fifi-run", "fifi-run",
+                      browser_appimage(a->browser), NULL);
                 write(STDERR_FILENO, "exec failed\n", 12);
                 _exit(1);
             }
@@ -709,18 +726,17 @@ static int saved_choice(void) {
 
 int main(void) {
     /* Launch immediately if already installed */
+    int choice = saved_choice();
+    const char *installed = installed_browser(choice);
     struct stat _st;
-    if (stat(BROWSER_APPIMAGE,&_st)==0 && (_st.st_mode&S_IXUSR)) {
+    if (stat(installed,&_st)==0 && (_st.st_mode&S_IXUSR)) {
         setenv("DISPLAY",":0",1);
         setenv("MOZ_ENABLE_WAYLAND","0",1);
         unsetenv("WAYLAND_DISPLAY");
         pid_t pid = fork();
         if (pid == 0) {
             setsid();
-            execl("/bin/fifi-user-exec", "fifi-user-exec",
-                  BROWSER_APPIMAGE, "--appimage-extract-and-run", NULL);
-            execl("/bin/fifi-user-exec", "fifi-user-exec",
-                  BROWSER_APPIMAGE, NULL);
+            execl("/usr/share/fifi/fifi-run", "fifi-run", installed, NULL);
             _exit(1);
         }
         return 0;
@@ -728,7 +744,7 @@ int main(void) {
 
     app_t a = {0};
     a.win_w = WIN_W; a.win_h = WIN_H;
-    a.view = VIEW_CHOICE; a.browser = saved_choice();
+    a.view = VIEW_CHOICE; a.browser = choice;
     a.dirty = true; a.dl_pipe = -1; a.dl_pid = -1;
 
     /* Load PSF2 font — try in preference order */

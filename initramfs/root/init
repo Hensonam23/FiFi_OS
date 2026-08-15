@@ -378,11 +378,10 @@ fi
   # out of the box. Only when missing AND the network is reachable; offline-safe
   # (fails quietly, retries next boot). Each is ~130MB / ~330MB so this runs
   # detached and the apps simply appear once downloaded.
-  if [ -f /usr/share/fifi/appstore-install.sh ] && \
-     curl -fsI --max-time 10 https://gitlab.com >/dev/null 2>&1; then
+  if [ -f /usr/share/fifi/appstore-install.sh ]; then
       [ -f /fifi-data/apps/LibreWolf.AppImage ] || \
           /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-install.sh \
-              'gitlab:librewolf-community%2Fbrowser%2Fappimage' LibreWolf >/dev/null 2>&1
+              'codeberg:librewolf/bsys6' LibreWolf >/dev/null 2>&1
       [ -f /fifi-data/apps/LibreOffice.AppImage ] || \
           /bin/fifi-user-exec /bin/sh /usr/share/fifi/appstore-install.sh \
               'ivan-hc/LibreOffice-appimage' LibreOffice >/dev/null 2>&1

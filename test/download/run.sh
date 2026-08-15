@@ -90,6 +90,26 @@ grep -Fxq 'codeberg:librewolf/bsys6' "$APPS/LibreWolf.src"
 grep -Fq 'https://downloads.test/Test-linux-x86_64-appimage.AppImage|' \
     "$APPS/LibreWolf.update"
 
+echo "[test-download] Browser Setup migrates into the managed app library"
+browser_data="$TMP/browser-data"
+mkdir -p "$browser_data/browser" "$browser_data/apps"
+cp "$FIXTURES/Test.AppImage" "$browser_data/browser/browser.AppImage"
+printf '%s' librewolf > "$browser_data/browser/choice"
+FIFI_DATA_ROOT="$browser_data" FIFI_APPS_DIR="$browser_data/apps" \
+    sh "$ROOT/initramfs/root/usr/share/fifi/migrate-app-library.sh"
+cmp "$FIXTURES/Test.AppImage" "$browser_data/apps/LibreWolf.AppImage"
+grep -Fxq 'codeberg:librewolf/bsys6' "$browser_data/apps/LibreWolf.src"
+grep -Fxq "$sha" "$browser_data/apps/LibreWolf.sha256"
+grep -Fq '/fifi-data/apps/LibreWolf.AppImage' \
+    "$browser_data/apps/LibreWolf.sh"
+test ! -e "$browser_data/browser/browser.AppImage"
+
+grep -Fq "fifi_codeberg_appimage_pair 'librewolf/bsys6'" \
+    "$ROOT/initramfs/root/bin/fifi-download-browser.sh"
+grep -Fq 'codeberg:librewolf/bsys6' "$ROOT/initramfs/root/init"
+grep -Fq 'codeberg:librewolf/bsys6' \
+    "$ROOT/initramfs/root/bin/fifi-install.sh"
+
 echo "[test-download] a changed payload is rejected"
 printf 'tampered\n' >> "$FIXTURES/Test.AppImage"
 if sh "$ROOT/initramfs/root/usr/share/fifi/appstore-install.sh" owner/repo Tampered; then

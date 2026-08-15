@@ -91,6 +91,7 @@ Recent work:
 
 - **App window controls.** LibreOffice (rootful XWayland) now gets a real FiFi titlebar with working close and minimize buttons above its menu bar, and the top bar auto-hides while it is maximized. LibreWolf draws its own titlebar with minimize/maximize/close. Steam stays borderless with its own chrome. Window buttons are large and easy to hit.
 - **Update from the terminal.** Plain `update` now applies an in-place OS update from the selected stable or test channel. `fifi update` remains the check-only command and `fifi upgrade` applies app and OS updates together. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
+- **One managed browser copy.** Browser Setup and App Store now share the same LibreWolf/Firefox installation and verified update metadata; older Browser Setup copies migrate automatically, and LibreWolf updates come from its current Codeberg releases.
 - **Desktop visuals.** A smooth, seam-free aurora wallpaper plus six more presets, and 2K/4K image backgrounds with fit modes. Desktop icons open on double-click. The Files window re-renders crisply when resized.
 - **Audit + optimization.** Correctness fixes (integer-overflow heap writes, use-after-free, resource leaks) and cleanup across the compositor and every app.
 

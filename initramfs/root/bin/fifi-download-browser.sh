@@ -1,7 +1,7 @@
 #!/bin/sh
 # Download a browser to the specified output path.
 # Usage: fifi-download-browser.sh <librewolf|firefox> <output_path>
-# LibreWolf AppImage: GitLab project 24386000 (librewolf-community/browser/linux)
+# LibreWolf AppImage: verified Codeberg release + publisher SHA-256 sidecar.
 
 BROWSER="$1"
 OUTPUT="$2"
@@ -21,23 +21,14 @@ ip route show 2>/dev/null | grep -q 'default' || { echo "ERROR: No network after
 
 if [ "$BROWSER" = "librewolf" ]; then
     echo "Finding latest LibreWolf release..."
-    # GitLab API — project 24386000 is the Linux AppImage project
-    PROJ="24386000"
-    VER=$(curl -s --max-time 10 \
-        "https://gitlab.com/api/v4/projects/${PROJ}/releases?per_page=1" \
-        | grep '"tag_name"' \
-        | head -1 \
-        | sed 's/.*"tag_name":[ ]*"v*//;s/".*//')
-
-    if [ -z "$VER" ]; then
+    PAIR="$(fifi_codeberg_appimage_pair 'librewolf/bsys6' || true)"
+    URL="${PAIR%|*}"
+    SHA="${PAIR##*|}"
+    if [ -z "$URL" ] || [ -z "$SHA" ] || [ "$URL" = "$SHA" ]; then
         echo "ERROR: Could not resolve a verified LibreWolf release."
         exit 1
     fi
-
-    echo "Downloading LibreWolf ${VER}..."
-    URL="https://gitlab.com/api/v4/projects/${PROJ}/packages/generic/librewolf/${VER}/LibreWolf.x86_64.AppImage"
-    SHA="$(fifi_gitlab_package_sha256 "$PROJ" "$URL" || true)"
-    [ -n "$SHA" ] || { echo "ERROR: LibreWolf SHA-256 unavailable."; exit 1; }
+    echo "Downloading the latest LibreWolf..."
     fifi_download_verified "$URL" "$SHA" "$OUTPUT" || exit 1
     echo "LibreWolf verified and ready"
     exit 0

@@ -468,7 +468,7 @@ install_app() {   # $1 = App Store source spec   $2 = Name
 
 mkdir -p "$MNT_DATA/apps"
 case "$BROWSER" in
-    librewolf) install_app "gitlab:librewolf-community%2Fbrowser%2Fappimage" "LibreWolf" ;;
+    librewolf) install_app "codeberg:librewolf/bsys6" "LibreWolf" ;;
     firefox)   install_app "ivan-hc/Firefox-appimage" "Firefox" ;;
 esac
 prog 62
