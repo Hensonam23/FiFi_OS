@@ -128,6 +128,19 @@ static int install_allowed(void) {
     return 0;
 }
 
+static void perform_power_action(const char *action) {
+    const char *tool = getenv("FIFI_POWERCTL");
+    if (tool && *tool)
+        execl(tool, "fifi-powerctl", action, (char *)NULL);
+
+    int command = strcmp(action, "reboot") == 0 ? RB_AUTOBOOT : RB_POWER_OFF;
+    sync();
+    if (reboot(command) != 0)
+        dprintf(STDERR_FILENO, "fifi-admin: %s failed: %s\n", action,
+                strerror(errno));
+    _exit(1);
+}
+
 static void run_fixed_command(char *request) {
     char *args[7] = {0};
     int argc = 0;
@@ -198,11 +211,11 @@ static void run_fixed_command(char *request) {
         run_status_command(tool, install_argv);
     } else if (argc == 2 && strcmp(args[0], "install") == 0 &&
                strcmp(args[1], "reboot") == 0 && install_allowed()) {
-        sync();
-        if (reboot(RB_AUTOBOOT) != 0)
-            dprintf(STDERR_FILENO, "fifi-admin: reboot failed: %s\n",
-                    strerror(errno));
-        _exit(1);
+        perform_power_action("reboot");
+    } else if (argc == 2 && strcmp(args[0], "power") == 0 &&
+               (strcmp(args[1], "reboot") == 0 ||
+                strcmp(args[1], "poweroff") == 0)) {
+        perform_power_action(args[1]);
     } else {
         dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
         _exit(64);

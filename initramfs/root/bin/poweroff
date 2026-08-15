@@ -1,0 +1,11 @@
+#!/bin/sh
+# PID 1 and recovery code retain BusyBox's direct root-only behavior.
+if [ "$(id -u)" -eq 0 ]; then
+    exec /bin/busybox poweroff "$@"
+fi
+
+if [ "$#" -ne 0 ]; then
+    echo "usage: poweroff" >&2
+    exit 2
+fi
+exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" power poweroff

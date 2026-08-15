@@ -51,7 +51,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 | Desktop icons: drag to reposition (persisted), right-click menu, Properties, double-click to open | **Working** |
 | Window controls for apps: LibreOffice gets a FiFi titlebar with close/minimize; LibreWolf draws its own minimize/maximize/close; Steam keeps its own chrome | **Working** |
 | X11 apps via XWayland: built-in X window manager presents apps as titled FiFi windows, no black X-root border | **Working** |
-| Update commands: `fifi update` / `fifi upgrade` check and apply app + OS updates from the terminal | **Working** |
+| Update and power commands: updates plus `reboot` / `poweroff` work from the non-root terminal through fixed root-broker actions | **Working** |
 | Wallpapers: smooth aurora plus 6 presets (Northern, Nebula, Dusk, Ocean, Spring, Ember), and 2K/4K image backgrounds with Fill/Fit/Stretch/Center | **Working** |
 | System tray: battery (laptop-only, charge + charging bolt), volume, network, clock | **Working** |
 | Tray hover tooltips: battery time-remaining, network IP, volume, memory, full date | **Working** |
@@ -305,7 +305,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [x] Strip the dev SSH key from release images; keep SSH owner-opt-in
 - [x] Non-root desktop identity; ordinary apps and browser content sandboxes restored
-- [x] Privilege brokers for hardware/admin apps: Security Center, Wi-Fi, Settings, App Store, browser setup, updater, and installer run without root
+- [x] Privilege brokers for hardware/admin actions: Security Center, Wi-Fi, Settings, App Store, browser setup, updater, installer, reboot, and power off run without root
 - [x] Run Steam as namespace-root mapped to the non-root desktop identity
 - [x] Verify signatures/hashes on every download (apps, AI models, OS updates)
 - [x] Run the compositor under a PID 1 supervisor with automatic restart on crash

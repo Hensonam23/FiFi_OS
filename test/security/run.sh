@@ -128,10 +128,14 @@ cat > "$broker_bin/fifi-install.sh" <<'EOF'
 #!/bin/sh
 printf 'install %s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$FIFI_TEST_ADMIN_LOG"
 EOF
+cat > "$broker_bin/fifi-powerctl" <<'EOF'
+#!/bin/sh
+printf 'power %s\n' "$1" >> "$FIFI_TEST_ADMIN_LOG"
+EOF
 chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
     "$broker_bin/fifi-wifi-ctl" "$broker_bin/fifi-apply-update" \
     "$broker_bin/update-usb" "$broker_bin/update-rollback" \
-    "$broker_bin/fifi-install.sh"
+    "$broker_bin/fifi-install.sh" "$broker_bin/fifi-powerctl"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
@@ -141,6 +145,7 @@ FIFI_UPDATE_USB="$broker_bin/update-usb" \
 FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
 FIFI_INSTALL_APPLY="$broker_bin/fifi-install.sh" \
 FIFI_INSTALL_ALLOWED=1 \
+FIFI_POWERCTL="$broker_bin/fifi-powerctl" \
 FIFI_TEST_ADMIN_LOG="$broker_log" \
     "$TMP/fifi-admin" --daemon &
 broker_pid=$!
@@ -167,6 +172,13 @@ FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update apply stable
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update rollback
 grep -Fxq 'update apply stable' "$broker_log"
 grep -Fxq 'update rollback' "$broker_log"
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" power reboot
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" power poweroff
+grep -Fxq 'power reboot' "$broker_log"
+grep -Fxq 'power poweroff' "$broker_log"
+bad_power="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" power suspend 2>&1 || true)"
+grep -Fq 'operation is not allowed' <<<"$bad_power"
 if FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update usb >"$TMP/update-usb.out" 2>&1; then
     echo "failed privileged USB action reported success" >&2
@@ -299,6 +311,28 @@ grep -Fq 'exec "$ADMIN" update rollback' "$ROOT/initramfs/root/bin/update"
 grep -Fq 'exec "$ADMIN" update usb' "$ROOT/initramfs/root/bin/update"
 grep -Fq 'root broker required' "$ROOT/initramfs/root/bin/fifi-apply-update"
 ! grep -Fq 'fifi-boot-slots install' "$ROOT/initramfs/root/bin/system-update"
+
+echo "[test-security] terminal power commands use only fixed broker verbs"
+test -x "$ROOT/initramfs/root/bin/reboot"
+test -x "$ROOT/initramfs/root/bin/poweroff"
+grep -Fq 'fifi-admin}" power reboot' "$ROOT/initramfs/root/bin/reboot"
+grep -Fq 'fifi-admin}" power poweroff' "$ROOT/initramfs/root/bin/poweroff"
+grep -Fq 'busybox|bash|blkid|reboot|poweroff' \
+    "$ROOT/scripts/build-initramfs.sh"
+power_wrapper_log="$TMP/power-wrapper.log"
+cat > "$TMP/fifi-admin-client" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FIFI_TEST_POWER_WRAPPER_LOG"
+EOF
+chmod +x "$TMP/fifi-admin-client"
+FIFI_ADMIN_CLIENT="$TMP/fifi-admin-client" \
+FIFI_TEST_POWER_WRAPPER_LOG="$power_wrapper_log" \
+    "$ROOT/initramfs/root/bin/reboot"
+FIFI_ADMIN_CLIENT="$TMP/fifi-admin-client" \
+FIFI_TEST_POWER_WRAPPER_LOG="$power_wrapper_log" \
+    "$ROOT/initramfs/root/bin/poweroff"
+grep -Fxq 'power reboot' "$power_wrapper_log"
+grep -Fxq 'power poweroff' "$power_wrapper_log"
 
 echo "[test-security] installer UI uses only live-gated broker actions"
 grep -Fq 'execl("/bin/fifi-admin","fifi-admin","install","apply",disk' \
