@@ -135,22 +135,36 @@ grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/calc/calc.c"
 grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/sysmon/sysmon.c"
 grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/proton/proton.c"
 grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/netmon/netmon.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/wifi/wifi.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/security/security.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/imageviewer/imageviewer.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/filebrowser/filebrowser.c"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/browser/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/installer/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/calc/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/sysmon/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/proton/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/netmon/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/wifi/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/security/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/imageviewer/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/filebrowser/Makefile"
 if grep -Eq 'static (uint32_t psf2_u32|bool load_font.+open\()' \
     "$ROOT/fifi/apps/browser/browser.c" "$ROOT/fifi/apps/installer/installer.c" \
     "$ROOT/fifi/apps/calc/calc.c" "$ROOT/fifi/apps/sysmon/sysmon.c" \
-    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c"; then
+    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c" \
+    "$ROOT/fifi/apps/wifi/wifi.c" "$ROOT/fifi/apps/security/security.c" \
+    "$ROOT/fifi/apps/imageviewer/imageviewer.c" \
+    "$ROOT/fifi/apps/filebrowser/filebrowser.c"; then
     echo "private bitmap-font loader remains in a migrated native app" >&2
     exit 1
 fi
 if grep -Eq 'PSF1_MAGIC|Psf1Hdr' \
     "$ROOT/fifi/apps/calc/calc.c" "$ROOT/fifi/apps/sysmon/sysmon.c" \
-    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c"; then
+    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c" \
+    "$ROOT/fifi/apps/wifi/wifi.c" "$ROOT/fifi/apps/security/security.c" \
+    "$ROOT/fifi/apps/imageviewer/imageviewer.c" \
+    "$ROOT/fifi/apps/filebrowser/filebrowser.c"; then
     echo "private PSF1 definition remains in a migrated native app" >&2
     exit 1
 fi
