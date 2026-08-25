@@ -40,6 +40,51 @@ grep -Fq 'touchpad_axis_select_slot(&dev->axes, cur_slot)' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] persistent touchpad axes and MT slots passed"
 
+cat > "$TMP/touchpad-motion.c" <<'EOF'
+#include "fifi/platform/linux/include/touchpad_motion.h"
+
+int main(void) {
+    touchpad_motion_state_t motion;
+    int32_t dx, dy;
+    touchpad_motion_reset(&motion);
+
+    /* First contact is an anchor, never a cursor jump. */
+    if (touchpad_motion_update(&motion, 1000, 500, 4000, 1000,
+                               2000, 1000, &dx, &dy)) return 1;
+
+    /* Equal normalized X/Y movement must cover the same fraction of each
+     * screen axis even when the hardware ranges differ. Motion is immediate. */
+    if (!touchpad_motion_update(&motion, 1040, 510, 4000, 1000,
+                                2000, 1000, &dx, &dy)) return 2;
+    if (dx != 30 || dy != 15) return 3;
+
+    /* Slow subpixel motion accumulates instead of being rounded away. */
+    touchpad_motion_reset(&motion);
+    touchpad_motion_update(&motion, 0, 0, 4000, 4000, 1000, 1000, &dx, &dy);
+    for (int i = 1; i <= 3; ++i) {
+        if (touchpad_motion_update(&motion, i, 0, 4000, 4000,
+                                   1000, 1000, &dx, &dy)) return 4;
+    }
+    if (!touchpad_motion_update(&motion, 4, 0, 4000, 4000,
+                                1000, 1000, &dx, &dy) || dx != 1) return 5;
+
+    /* A contact discontinuity re-anchors without crossing the screen. */
+    if (touchpad_motion_update(&motion, 1000, 1000, 4000, 4000,
+                               1000, 1000, &dx, &dy)) return 6;
+    if (touchpad_motion_update(&motion, 1001, 1001, 4000, 4000,
+                               1000, 1000, &dx, &dy)) return 7;
+    return 0;
+}
+EOF
+
+gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
+    "$TMP/touchpad-motion.c" -o "$TMP/touchpad-motion"
+"$TMP/touchpad-motion"
+grep -Fq '#include "touchpad_motion.h"' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'dev->x_max + 1, dev->y_max + 1' "$ROOT/fifi/platform/linux/input.c"
+! grep -Fq 'ema_x_q8' "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] touchpad motion is immediate and axis-correct"
+
 cat > "$TMP/event-handoff.c" <<'EOF'
 #include <pthread.h>
 #include <stdatomic.h>

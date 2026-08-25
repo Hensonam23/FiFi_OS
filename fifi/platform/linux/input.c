@@ -15,6 +15,7 @@
 #include "mouse.h"
 #include "console.h"
 #include "touchpad_axis.h"
+#include "touchpad_motion.h"
 
 /* linux/input.h defines its own KEY_LEFT=105, KEY_F1=59, etc.
  * We keep this include isolated: after mouse.h, before keyboard.h.
@@ -69,12 +70,9 @@ typedef struct {
     bool tool_doubletap;      /* two fingers on pad — BTN_LEFT while set = right-click */
     bool prev_tool_doubletap; /* previous frame state — detects 0→1 transition */
     bool btn_touch;      /* BTN_TOUCH state: finger physically on pad */
-    int32_t prev_x, prev_y;  /* last known position; -1 = finger not down */
     int32_t click_cooldown;  /* frames to skip delta after BTN_LEFT change (spring-back) */
-    int32_t lift_cooldown;   /* debounce: ticks until prev_x resets after id=-1 */
-    int64_t sub_x, sub_y;   /* subpixel accumulator for slow movement precision */
-    int64_t ema_x_q8,  ema_y_q8;      /* Q8 EMA of abs position; negative = uninit */
-    int64_t pema_x_q8, pema_y_q8;     /* previous EMA snapshot for delta (full Q8, no truncation) */
+    int32_t lift_cooldown;   /* debounce ticks before motion anchor resets after lift */
+    touchpad_motion_state_t motion;
     touchpad_axis_state_t axes; /* persistent coordinates and MT slot across polls */
     char phys[64];           /* EVIOCGPHYS — used to skip companion REL node */
 } abs_dev_t;
@@ -569,8 +567,7 @@ void input_init(void) {
                 /* INPUT_PROP_POINTER = touchpad: use delta tracking, not abs mapping.
                  * INPUT_PROP_DIRECT  = touchscreen/tablet: map abs coords to screen. */
                 dev->is_touchpad = (is_pointer && !is_direct);
-                dev->prev_x = -1;
-                dev->prev_y = -1;
+                touchpad_motion_reset(&dev->motion);
                 touchpad_axis_reset(&dev->axes);
                 snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
                 fprintf(stderr, "[input] -> %s %s range %dx%d\n",
@@ -715,7 +712,7 @@ void input_rescan(void) {
             dev->fd    = fd;
             dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
             dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
-            dev->prev_x = -1; dev->prev_y = -1;
+            touchpad_motion_reset(&dev->motion);
             touchpad_axis_reset(&dev->axes);
             fprintf(stderr, "[input] rescan: new abs device %s\n", path);
             continue;
@@ -827,10 +824,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
 
         /* Debounce: count down after finger lift; reset origin when it expires */
         if (dev->lift_cooldown > 0 && --dev->lift_cooldown == 0) {
-            dev->prev_x    = -1; dev->prev_y    = -1;
-            dev->sub_x     = 0;  dev->sub_y     = 0;
-            dev->ema_x_q8  = -1; dev->ema_y_q8  = -1;
-            dev->pema_x_q8 = -1; dev->pema_y_q8 = -1;
+            touchpad_motion_reset(&dev->motion);
         }
 
         while (read(dev->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
@@ -881,21 +875,14 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                         } else {
                             /* New contact — cancel pending debounce reset.
                              * If btn_touch=0 (real lift already seen), the finger
-                             * may land at a different raw position. Reset prev_x
+                             * may land at a different raw position. Reset the anchor
                              * so the first abs_x is an anchor, not a delta source.
                              * This prevents new-contact cursor jumps.
                              * If btn_touch=1 (light-touch id cycling, finger never
-                             * left), keep prev_x so movement stays continuous. */
+                             * left), keep the anchor so movement stays continuous. */
                             dev->lift_cooldown = 0;
                             if (!dev->btn_touch) {
-                                dev->prev_x    = -1;
-                                dev->prev_y    = -1;
-                                dev->sub_x     = 0;
-                                dev->sub_y     = 0;
-                                dev->ema_x_q8  = -1;
-                                dev->ema_y_q8  = -1;
-                                dev->pema_x_q8 = -1;
-                                dev->pema_y_q8 = -1;
+                                touchpad_motion_reset(&dev->motion);
                             }
                         }
                     }
@@ -927,14 +914,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                              * first abs_x of the new contact doesn't produce a delta
                              * against the old position (which could be far away). */
                             if (!was) {
-                                dev->prev_x    = -1;
-                                dev->prev_y    = -1;
-                                dev->sub_x     = 0;
-                                dev->sub_y     = 0;
-                                dev->ema_x_q8  = -1;
-                                dev->ema_y_q8  = -1;
-                                dev->pema_x_q8 = -1;
-                                dev->pema_y_q8 = -1;
+                                touchpad_motion_reset(&dev->motion);
                             }
                         }
                     }
@@ -949,8 +929,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                         bool changed  = (new_lbtn != lbtn);
                         /* Always absorb spring-back regardless of click type */
                         if (changed) {
-                            dev->prev_x = -1;
-                            dev->prev_y = -1;
+                            touchpad_motion_reset(&dev->motion);
                             dev->click_cooldown = 4;
                         }
                         if (dev->tool_doubletap) {
@@ -1004,10 +983,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                  * When doubletap active and slot 1 reported a position, use it as movement source. */
                 bool cur_dt = dev->tool_doubletap;
                 if (cur_dt && !dev->prev_tool_doubletap) {
-                    dev->ema_x_q8  = -1; dev->ema_y_q8  = -1;
-                    dev->pema_x_q8 = -1; dev->pema_y_q8 = -1;
-                    dev->prev_x    = -1; dev->prev_y    = -1;
-                    dev->sub_x     = 0;  dev->sub_y     = 0;
+                    touchpad_motion_reset(&dev->motion);
                 }
                 dev->prev_tool_doubletap = cur_dt;
                 if (cur_dt && abs_x1 >= 0 && abs_y1 >= 0) {
@@ -1015,70 +991,28 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                     abs_y = abs_y1;
                 }
 
-                /* Delta tracking: compute movement relative to last known position.
-                 * Scale so a full-width swipe moves ~half the screen width. */
+                /* Translate absolute pad coordinates into immediate relative motion.
+                 * The shared filter preserves subpixel movement, uses independent
+                 * X/Y ranges, and accelerates quick swipes without trailing the
+                 * finger through a multi-poll position average. */
                 if (abs_x >= 0 && abs_y >= 0) {
                     if (dev->click_cooldown > 0) {
                         /* Skip delta for a few frames after BTN_LEFT change to
                          * absorb the clickpad spring-back position drift. */
                         dev->click_cooldown--;
-                        dev->prev_x = abs_x;
-                        dev->prev_y = abs_y;
-                    } else if (dev->prev_x >= 0) {
-                        /* EMA position smoother (alpha=1/4, Q8 fixed-point).
-                         * The FTCS0038 sensor produces large per-event noise on a
-                         * stationary finger. EMA reduces cursor shimmer while
-                         * pema_x_q8 tracks the full Q8 previous EMA (no integer
-                         * truncation) so noise doesn't get re-counted each step. */
-                        if (dev->ema_x_q8 < 0) {
-                            dev->ema_x_q8  = (int64_t)abs_x << 8;
-                            dev->ema_y_q8  = (int64_t)abs_y << 8;
-                            dev->pema_x_q8 = dev->ema_x_q8;
-                            dev->pema_y_q8 = dev->ema_y_q8;
-                        } else {
-                            dev->ema_x_q8 = (dev->ema_x_q8 * 3 + ((int64_t)abs_x << 8)) >> 2;
-                            dev->ema_y_q8 = (dev->ema_y_q8 * 3 + ((int64_t)abs_y << 8)) >> 2;
-                        }
-
-                        /* Delta from full Q8 previous — no truncation re-counting */
-                        int64_t dx_q8 = dev->ema_x_q8 - dev->pema_x_q8;
-                        int64_t dy_q8 = dev->ema_y_q8 - dev->pema_y_q8;
-                        dev->pema_x_q8 = dev->ema_x_q8;
-                        dev->pema_y_q8 = dev->ema_y_q8;
-                        dev->prev_x = (int32_t)(dev->ema_x_q8 >> 8);
-                        dev->prev_y = (int32_t)(dev->ema_y_q8 >> 8);
-
-                        /* Jump guard (in Q8 space) */
-                        int64_t xg = ((int64_t)dev->x_max / 8) << 8;
-                        int64_t yg = ((int64_t)dev->y_max / 8) << 8;
-                        if (dx_q8 > xg || dx_q8 < -xg || dy_q8 > yg || dy_q8 < -yg) {
-                            dev->ema_x_q8  = (int64_t)abs_x << 8;
-                            dev->ema_y_q8  = (int64_t)abs_y << 8;
-                            dev->pema_x_q8 = dev->ema_x_q8;
-                            dev->pema_y_q8 = dev->ema_y_q8;
-                            dev->prev_x = abs_x;
-                            dev->prev_y = abs_y;
-                            dev->sub_x = 0; dev->sub_y = 0;
-                        } else {
-                            /* Subpixel accumulation in Q8 space: denom * 256 to match */
-                            int64_t denom = (int64_t)(dev->x_max + 1) * 4 * 256;
-                            dev->sub_x += dx_q8 * g_fb_w * 4;
-                            dev->sub_y += dy_q8 * g_fb_h * 4;
-                            int32_t dxpx = (int32_t)(dev->sub_x / denom);
-                            int32_t dypx = (int32_t)(dev->sub_y / denom);
-                            dev->sub_x -= (int64_t)dxpx * denom;
-                            dev->sub_y -= (int64_t)dypx * denom;
-                            if (dxpx || dypx)
-                                mouse_push_rel(dxpx, dypx, lbtn, rbtn);
-                        }
+                        touchpad_motion_reset(&dev->motion);
+                        int32_t ignored_x, ignored_y;
+                        touchpad_motion_update(&dev->motion, abs_x, abs_y,
+                                               dev->x_max + 1, dev->y_max + 1,
+                                               g_fb_w, g_fb_h,
+                                               &ignored_x, &ignored_y);
                     } else {
-                        dev->prev_x    = abs_x;
-                        dev->prev_y    = abs_y;
-                        dev->ema_x_q8  = (int64_t)abs_x << 8;
-                        dev->ema_y_q8  = (int64_t)abs_y << 8;
-                        dev->pema_x_q8 = dev->ema_x_q8;
-                        dev->pema_y_q8 = dev->ema_y_q8;
-                        dev->sub_x = 0; dev->sub_y = 0;
+                        int32_t dxpx, dypx;
+                        if (touchpad_motion_update(&dev->motion, abs_x, abs_y,
+                                                   dev->x_max + 1, dev->y_max + 1,
+                                                   g_fb_w, g_fb_h,
+                                                   &dxpx, &dypx))
+                            mouse_push_rel(dxpx, dypx, lbtn, rbtn);
                     }
                 }
             } else {
