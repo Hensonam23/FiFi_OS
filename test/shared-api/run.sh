@@ -68,6 +68,69 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/app-ipc-contract.c" -o "$TMP/app-ipc-contract"
 "$TMP/app-ipc-contract"
 
+echo "[test-shared-api] shared bitmap UI validates fonts and clips drawing"
+cat > "$TMP/app-ui-contract.c" <<'EOF'
+#include "fifi/shared/app_ui.h"
+#include <stdio.h>
+#include <string.h>
+
+static void put_le32(uint8_t *bytes, uint32_t value) {
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8);
+    bytes[2] = (uint8_t)(value >> 16);
+    bytes[3] = (uint8_t)(value >> 24);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3) return 1;
+    _Static_assert(FIFI_APP_UI_API_VERSION == 1u, "unexpected UI version");
+
+    uint8_t font_file[32 + 256 * 8] = {0};
+    put_le32(font_file, 0x864ab572u);
+    put_le32(font_file + 8, 32);
+    put_le32(font_file + 16, 256);
+    put_le32(font_file + 20, 8);
+    put_le32(font_file + 24, 8);
+    put_le32(font_file + 28, 8);
+    memset(font_file + 32 + 'A' * 8, 0x81, 8);
+    FILE *file = fopen(argv[1], "wb");
+    if (!file || fwrite(font_file, 1, sizeof(font_file), file) != sizeof(font_file) ||
+        fclose(file) != 0) return 2;
+
+    fifi_ui_font_t font = {0};
+    if (!fifi_ui_font_load_psf2(&font, argv[1]) || font.advance != 9 ||
+        font.height != 8 || font.glyph_count != 256) return 3;
+
+    uint32_t pixels[6 * 4] = {0};
+    fifi_ui_canvas_t canvas = { pixels, 6, 4 };
+    fifi_ui_fill(canvas, -2, -2, 4, 4, 0x11u);
+    if (pixels[0] != 0x11u || pixels[1] != 0x11u || pixels[2] != 0) return 4;
+    fifi_ui_glyph(canvas, &font, 4, 0, 'A', 0x22u, 0);
+    if (pixels[4] != 0x22u || pixels[5] == 0x22u) return 5;
+
+    file = fopen(argv[2], "wb");
+    if (!file || fwrite(font_file, 1, 40, file) != 40 || fclose(file) != 0) return 6;
+    if (fifi_ui_font_load_psf2(&font, argv[2])) return 7;
+    if (!font.glyphs || font.advance != 9) return 8;
+    fifi_ui_font_destroy(&font);
+    return 0;
+}
+EOF
+gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
+    "$TMP/app-ui-contract.c" -o "$TMP/app-ui-contract"
+"$TMP/app-ui-contract" "$TMP/valid.psf" "$TMP/truncated.psf"
+grep -Fq '#include "../../shared/app_ui.h"' \
+    "$ROOT/fifi/apps/browser/browser.c"
+grep -Fq '#include "../../shared/app_ui.h"' \
+    "$ROOT/fifi/apps/installer/installer.c"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/browser/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/installer/Makefile"
+if grep -Eq 'static (uint32_t psf2_u32|bool load_font.+open\()' \
+    "$ROOT/fifi/apps/browser/browser.c" "$ROOT/fifi/apps/installer/installer.c"; then
+    echo "private PSF2 loader remains in a migrated native app" >&2
+    exit 1
+fi
+
 for app in aichat appstore browser calc editor filebrowser gamepad imageviewer installer netmon proton security settings sysmon terminal wifi; do
     grep -Fq '#include "../../shared/app_ipc.h"' "$ROOT/fifi/apps/$app/$app.c"
     grep -Fq '../../shared/app_ipc.h' "$ROOT/fifi/apps/$app/Makefile"
@@ -128,7 +191,7 @@ done < <(grep -Rl --include='*.c' 'IPC_APP_CONNECT' "$ROOT/fifi/apps" \
 grep -Fq '$(BUILD)/comp/ipc.o: ../platform/linux/ipc.c ../shared/ipc.h' \
     "$ROOT/fifi/compositor/Makefile"
 grep -Fq 'FIFI_IPC_MAX_PAYLOAD' "$ROOT/fifi/platform/linux/ipc.c"
-grep -Fq 'IPC and theme API version 1 are stable' \
+grep -Fq 'IPC, bitmap UI, and theme API version 1 are stable' \
     "$ROOT/docs/LINUX_DESKTOP_API.md"
 
 if grep -REn --include='*.[ch]' '^#define IPC_(APP_(CONNECT|FRAME|TITLE|CLOSE)|WIN_(CREATED|RESIZE)|INPUT_(KEY|MOUSE|GAMEPAD)|FOCUS|INVALIDATE|NOTIFY|CLIP_(SET|GET|DATA)|OPEN_FILE|DRAG_START|DROP_FILE|SET_WALLPAPER|ADD_DESK_ICON)' \

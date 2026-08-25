@@ -2,12 +2,14 @@
 
 This document freezes the first public contract between the FiFi compositor,
 native desktop applications, and Settings. The canonical definitions are
-`fifi/shared/ipc.h`, `fifi/shared/app_ipc.h`, and `fifi/shared/theme.h`.
+`fifi/shared/ipc.h`, `fifi/shared/app_ipc.h`, `fifi/shared/app_ui.h`, and
+`fifi/shared/theme.h`.
 
 ## Compatibility rules
 
-- IPC and theme API version 1 are stable. Existing message numbers, payload
-  layouts, identifiers, configuration keys, and their meanings must not change.
+- IPC, bitmap UI, and theme API version 1 are stable. Existing message numbers,
+  payload layouts, public types and functions, identifiers, configuration keys,
+  and their meanings must not change.
 - Additive message types and optional configuration keys may be introduced
   without changing a version. Existing readers must safely ignore what they do
   not understand.
@@ -76,6 +78,17 @@ Stable value ranges are:
 Boolean keys use `0` or `1`. Accent values are unsigned `0x00RRGGBB` values
 written in decimal. Unknown keys are ignored when read. Storage ownership,
 atomicity, and permissions remain Linux platform responsibilities.
+
+## Native bitmap UI foundation version 1
+
+`app_ui.h` defines the shared PSF2 font and framebuffer canvas types used by
+native applications. Font loading validates the complete glyph table before
+replacing the current font. Drawing primitives clip to the canvas; text is
+transparent by default and supports bounded ellipsis and word wrapping.
+
+Version 1 fixes the public type and function names and their clipping and text
+layout behavior. Applications still own colors, components, screen layouts,
+input handling, and lifecycle policy.
 
 ## Change checklist
 

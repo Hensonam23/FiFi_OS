@@ -15,6 +15,11 @@ It owns reliable complete writes, compositor socket registration, and bounded
 frame construction so applications do not each implement subtly different
 framing and partial-write behavior.
 
+`app_ui.h` is bitmap UI foundation API version 1. It owns validated PSF2 font
+loading, clipped framebuffer primitives, glyph and text drawing, truncation,
+and word wrapping. Native applications can share these mechanics while keeping
+their own layouts and visual identities.
+
 `theme.h` is theme API version 1. It fixes the wallpaper, image-fit, panel,
 accent-palette, and font-size identifiers used by the compositor GUI and
 Settings app. It also owns the persisted configuration's keys and defaults so
