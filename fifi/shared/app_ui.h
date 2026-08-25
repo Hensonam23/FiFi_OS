@@ -36,6 +36,59 @@ static inline void fifi_ui_font_destroy(fifi_ui_font_t *font) {
     *font = (fifi_ui_font_t){0};
 }
 
+static inline bool fifi_ui_font_init_blank(fifi_ui_font_t *font,
+                                           uint32_t glyph_count,
+                                           uint32_t width, uint32_t height) {
+    if (!font || glyph_count == 0 || width == 0 || width > 32 ||
+        height == 0 || height > 128) return false;
+    uint32_t bytes_per_line = (width + 7u) / 8u;
+    uint32_t glyph_size = bytes_per_line * height;
+    uint64_t total = (uint64_t)glyph_count * glyph_size;
+    if (total > SIZE_MAX) return false;
+    uint8_t *glyphs = (uint8_t *)calloc((size_t)total, 1);
+    if (!glyphs) return false;
+    fifi_ui_font_destroy(font);
+    font->glyphs = glyphs;
+    font->glyph_count = glyph_count;
+    font->glyph_size = glyph_size;
+    font->width = (int)width;
+    font->height = (int)height;
+    font->advance = (int)width + 1;
+    font->bytes_per_line = (int)bytes_per_line;
+    return true;
+}
+
+static inline bool fifi_ui_font_load_psf1(fifi_ui_font_t *font,
+                                           const char *path) {
+    if (!font || !path) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    uint8_t header[4];
+    if (fread(header, 1, sizeof(header), file) != sizeof(header) ||
+        header[0] != 0x36 || header[1] != 0x04 || header[3] == 0) {
+        fclose(file);
+        return false;
+    }
+    uint32_t glyph_count = header[2] & 1u ? 512u : 256u;
+    uint32_t glyph_size = header[3];
+    size_t total = (size_t)glyph_count * glyph_size;
+    uint8_t *glyphs = (uint8_t *)malloc(total);
+    if (!glyphs) { fclose(file); return false; }
+    bool read_ok = fread(glyphs, 1, total, file) == total;
+    fclose(file);
+    if (!read_ok) { free(glyphs); return false; }
+
+    fifi_ui_font_destroy(font);
+    font->glyphs = glyphs;
+    font->glyph_count = glyph_count;
+    font->glyph_size = glyph_size;
+    font->width = 8;
+    font->height = (int)glyph_size;
+    font->advance = 9;
+    font->bytes_per_line = 1;
+    return true;
+}
+
 static inline bool fifi_ui_font_load_psf2(fifi_ui_font_t *font,
                                            const char *path) {
     if (!font || !path) return false;

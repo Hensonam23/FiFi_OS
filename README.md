@@ -326,6 +326,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [ ] Move native applications onto the shared bitmap UI foundation
     - [x] Extract the common PSF2 font, framebuffer, and text primitives
     - [x] Migrate Browser Setup and Installer from their forked drawing code
+    - [x] Add shared PSF1 loading and migrate Calculator, System Monitor, Proton, and Network Monitor
 - [x] Freeze and document the Linux desktop APIs so the compositor and applications stop drifting ([contract](docs/LINUX_DESKTOP_API.md))
 
 #### Phase 9: Desktop/Laptop v1.0

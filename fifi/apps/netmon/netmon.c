@@ -21,45 +21,27 @@
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 #define WIN_W   480
 #define WIN_H   340
 #define TITLE_H 24
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
-#define PSF1_MAGIC 0x0436
-typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
-static uint8_t *g_glyph = NULL;
+static fifi_ui_font_t g_font;
 static uint32_t g_fw = 8, g_fh = 16;
 
 static bool font_load(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    Psf1Hdr h;
-    if (read(fd, &h, sizeof(h)) < (ssize_t)sizeof(h) || h.magic != PSF1_MAGIC) {
-        close(fd); return false;
-    }
-    g_fh = h.charsize; g_fw = 8;
-    size_t sz = 256 * g_fh;
-    g_glyph = malloc(sz);
-    if (!g_glyph) { close(fd); return false; }
-    ssize_t got = read(fd, g_glyph, sz);
-    close(fd);
-    if (got < (ssize_t)sz) { free(g_glyph); g_glyph = NULL; return false; }
+    if (!fifi_ui_font_load_psf1(&g_font, path)) return false;
+    g_fh = (uint32_t)g_font.height;
+    g_fw = (uint32_t)g_font.width;
     return true;
 }
 
 static void draw_char(uint32_t *fb, int win_w, int win_h, int cx, int cy,
                       unsigned char c, uint32_t fg, uint32_t bg) {
-    if (!g_glyph) return;
-    uint8_t *row = g_glyph + (unsigned)c * g_fh;
-    for (uint32_t y = 0; y < g_fh; y++) {
-        for (uint32_t x = 0; x < g_fw; x++) {
-            int px = cx + (int)x, py = cy + (int)y;
-            if (px < 0 || py < 0 || px >= win_w || py >= win_h) continue;
-            fb[py * win_w + px] = (row[y] & (0x80u >> x)) ? fg : bg;
-        }
-    }
+    fifi_ui_canvas_t canvas = { fb, win_w, win_h };
+    fifi_ui_glyph(canvas, &g_font, cx, cy, c, fg, bg);
 }
 
 static void draw_str(uint32_t *fb, int win_w, int win_h, int x, int y,
@@ -482,6 +464,6 @@ int main(void) {
     ipc_send_msg(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
-    free(g_glyph);
+    fifi_ui_font_destroy(&g_font);
     return 0;
 }

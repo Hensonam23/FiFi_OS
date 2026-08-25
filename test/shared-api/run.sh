@@ -82,7 +82,7 @@ static void put_le32(uint8_t *bytes, uint32_t value) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) return 1;
+    if (argc != 4) return 1;
     _Static_assert(FIFI_APP_UI_API_VERSION == 1u, "unexpected UI version");
 
     uint8_t font_file[32 + 256 * 8] = {0};
@@ -112,22 +112,46 @@ int main(int argc, char **argv) {
     if (!file || fwrite(font_file, 1, 40, file) != 40 || fclose(file) != 0) return 6;
     if (fifi_ui_font_load_psf2(&font, argv[2])) return 7;
     if (!font.glyphs || font.advance != 9) return 8;
+
+    uint8_t psf1[4 + 256 * 16] = {0x36, 0x04, 0x00, 0x10};
+    memset(psf1 + 4 + 'B' * 16, 0x81, 16);
+    file = fopen(argv[3], "wb");
+    if (!file || fwrite(psf1, 1, sizeof(psf1), file) != sizeof(psf1) ||
+        fclose(file) != 0) return 9;
+    if (!fifi_ui_font_load_psf1(&font, argv[3]) || font.height != 16 ||
+        font.glyph_count != 256 || font.bytes_per_line != 1) return 10;
     fifi_ui_font_destroy(&font);
     return 0;
 }
 EOF
 gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/app-ui-contract.c" -o "$TMP/app-ui-contract"
-"$TMP/app-ui-contract" "$TMP/valid.psf" "$TMP/truncated.psf"
+"$TMP/app-ui-contract" "$TMP/valid.psf" "$TMP/truncated.psf" "$TMP/valid-psf1.psf"
 grep -Fq '#include "../../shared/app_ui.h"' \
     "$ROOT/fifi/apps/browser/browser.c"
 grep -Fq '#include "../../shared/app_ui.h"' \
     "$ROOT/fifi/apps/installer/installer.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/calc/calc.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/sysmon/sysmon.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/proton/proton.c"
+grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/netmon/netmon.c"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/browser/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/installer/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/calc/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/sysmon/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/proton/Makefile"
+grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/netmon/Makefile"
 if grep -Eq 'static (uint32_t psf2_u32|bool load_font.+open\()' \
-    "$ROOT/fifi/apps/browser/browser.c" "$ROOT/fifi/apps/installer/installer.c"; then
-    echo "private PSF2 loader remains in a migrated native app" >&2
+    "$ROOT/fifi/apps/browser/browser.c" "$ROOT/fifi/apps/installer/installer.c" \
+    "$ROOT/fifi/apps/calc/calc.c" "$ROOT/fifi/apps/sysmon/sysmon.c" \
+    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c"; then
+    echo "private bitmap-font loader remains in a migrated native app" >&2
+    exit 1
+fi
+if grep -Eq 'PSF1_MAGIC|Psf1Hdr' \
+    "$ROOT/fifi/apps/calc/calc.c" "$ROOT/fifi/apps/sysmon/sysmon.c" \
+    "$ROOT/fifi/apps/proton/proton.c" "$ROOT/fifi/apps/netmon/netmon.c"; then
+    echo "private PSF1 definition remains in a migrated native app" >&2
     exit 1
 fi
 

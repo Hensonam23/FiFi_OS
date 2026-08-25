@@ -15,6 +15,7 @@
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W   280
@@ -42,35 +43,25 @@
 #define C_BORDER     0xFF243448u   /* subtle divider */
 
 /* ── PSF1 font ───────────────────────────────────────────────────────────── */
-#define PSF1_MAGIC 0x0436u
-typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
-static uint8_t *g_glyph = NULL;
+static fifi_ui_font_t g_font;
 static int g_glyph_h = 16;
 
 static bool font_load(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    Psf1Hdr h;
-    if (read(fd, &h, 4) != 4 || h.magic != PSF1_MAGIC) { close(fd); return false; }
-    g_glyph_h = h.charsize;
-    int sz = 256 * g_glyph_h;
-    g_glyph = malloc(sz);
-    if (!g_glyph) { close(fd); return false; }
-    ssize_t got = read(fd, g_glyph, sz);
-    close(fd);
-    if (got < sz) { free(g_glyph); g_glyph = NULL; return false; }
+    if (!fifi_ui_font_load_psf1(&g_font, path)) return false;
+    g_glyph_h = g_font.height;
     return true;
 }
 
+static fifi_ui_canvas_t canvas(uint32_t *fb) {
+    return (fifi_ui_canvas_t){ fb, WIN_W, WIN_H };
+}
+
 static void put_pixel(uint32_t *fb, int x, int y, uint32_t col) {
-    if (x >= 0 && y >= 0 && x < WIN_W && y < WIN_H)
-        fb[y * WIN_W + x] = col;
+    fifi_ui_pixel(canvas(fb), x, y, col);
 }
 
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    for (int row = y; row < y + h; row++)
-        for (int col2 = x; col2 < x + w; col2++)
-            put_pixel(fb, col2, row, col);
+    fifi_ui_fill(canvas(fb), x, y, w, h, col);
 }
 
 /* Filled rect with softened (notched) corners — reads as a rounded card. */
@@ -90,15 +81,7 @@ static void fill_round(uint32_t *fb, int x, int y, int w, int h,
 
 /* Draw a character at 8×g_glyph_h using font */
 static void draw_char(uint32_t *fb, int x, int y, unsigned char c, uint32_t fg) {
-    if (!g_glyph) return;
-    const uint8_t *bits = g_glyph + c * g_glyph_h;
-    for (int row = 0; row < g_glyph_h; row++) {
-        uint8_t b = bits[row];
-        for (int col = 0; col < 8; col++) {
-            if (b & (0x80u >> col))
-                put_pixel(fb, x + col, y + row, fg);
-        }
-    }
+    fifi_ui_glyph(canvas(fb), &g_font, x, y, c, fg, 0);
 }
 
 static void draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
@@ -470,6 +453,6 @@ int main(void) {
     (void)fifi_app_ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
-    free(g_glyph);
+    fifi_ui_font_destroy(&g_font);
     return 0;
 }

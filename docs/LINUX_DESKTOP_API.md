@@ -81,7 +81,7 @@ atomicity, and permissions remain Linux platform responsibilities.
 
 ## Native bitmap UI foundation version 1
 
-`app_ui.h` defines the shared PSF2 font and framebuffer canvas types used by
+`app_ui.h` defines the shared PSF1/PSF2 font and framebuffer canvas types used by
 native applications. Font loading validates the complete glyph table before
 replacing the current font. Drawing primitives clip to the canvas; text is
 transparent by default and supports bounded ellipsis and word wrapping.
