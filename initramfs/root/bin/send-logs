@@ -16,35 +16,28 @@ if [ -z "$TARGET_IP" ]; then
     exit 1
 fi
 
-echo "Bringing up ethernet..."
-for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
-    ip link set "$iface" up 2>/dev/null
-done
-NET_IFACE=""
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
-        carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null)
-        if [ "$carrier" = "1" ]; then
-            NET_IFACE="$iface"
-            break 2
-        fi
-    done
-    echo "Waiting for link... $i"
-    sleep 1
-done
-if [ -n "$NET_IFACE" ]; then
-    udhcpc -i "$NET_IFACE" -q -n -t 5 2>/dev/null && echo "Network up on $NET_IFACE" || echo "DHCP failed on $NET_IFACE"
-else
-    echo "No ethernet carrier found after 10s"
+echo "Sending logs to $TARGET_IP:9999..."
+if ! ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
+    echo "No active IPv4 connection. Connect Wi-Fi or Ethernet first."
+    exit 1
 fi
 
-echo "Sending logs to $TARGET_IP:9999..."
-{
-    echo "=== compositor.log ==="
-    cat /fifi-data/compositor.log 2>/dev/null
+if {
+    echo "=== FiFi version ==="
+    fifi version 2>&1
+    echo ""
+    echo "=== network ==="
+    ip -4 addr show scope global 2>/dev/null
+    ip -4 route 2>/dev/null
+    echo ""
+    echo "=== recent compositor.log ==="
+    tail -n 2000 /fifi-data/compositor.log 2>/dev/null
     echo ""
     echo "=== input-devices.txt ==="
     cat /fifi-data/input-devices.txt 2>/dev/null
-} | nc "$TARGET_IP" 9999
-
-echo "Done."
+} | nc -w 15 "$TARGET_IP" 9999; then
+    echo "Done."
+else
+    echo "Log transfer failed. Check the receiver address and firewall."
+    exit 1
+fi

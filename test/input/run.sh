@@ -184,3 +184,10 @@ grep -Fq '[input] rescan: touchpad companion still skipped' \
 grep -Fq 'dev->is_touchpad = is_pointer && !is_direct;' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] rescans cannot restore a duplicate touchpad companion"
+
+SEND_LOGS="$ROOT/initramfs/root/bin/send-logs"
+grep -Fq "ip -4 addr show scope global" "$SEND_LOGS"
+grep -Fq "tail -n 2000 /fifi-data/compositor.log" "$SEND_LOGS"
+grep -Fq "nc -w 15" "$SEND_LOGS"
+! grep -Fq "udhcpc" "$SEND_LOGS"
+echo "[input-test] log transfer preserves the active Wi-Fi connection"
