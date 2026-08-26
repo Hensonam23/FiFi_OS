@@ -27,6 +27,7 @@ static inline int64_t touchpad_motion_abs64(int64_t value) {
 static inline bool touchpad_motion_update(touchpad_motion_state_t *state,
                                           int32_t raw_x, int32_t raw_y,
                                           int32_t range_x, int32_t range_y,
+                                          int32_t fuzz_x, int32_t fuzz_y,
                                           int32_t screen_w, int32_t screen_h,
                                           int32_t *out_dx, int32_t *out_dy) {
     if (out_dx) *out_dx = 0;
@@ -41,10 +42,23 @@ static inline bool touchpad_motion_update(touchpad_motion_state_t *state,
         return false;
     }
 
-    int64_t raw_dx = (int64_t)raw_x - state->raw_x;
-    int64_t raw_dy = (int64_t)raw_y - state->raw_y;
-    state->raw_x = raw_x;
-    state->raw_y = raw_y;
+    /* Linux's axis fuzz is the device's declared measurement uncertainty.
+     * Keep a hysteresis box around the last accepted coordinate: stationary
+     * sensor chatter disappears, but genuine motion crosses the box in the
+     * same report instead of waiting for a multi-frame smoothing filter. */
+    if (fuzz_x < 0) fuzz_x = 0;
+    if (fuzz_y < 0) fuzz_y = 0;
+    int64_t raw_dx = 0, raw_dy = 0;
+    if ((int64_t)raw_x > (int64_t)state->raw_x + fuzz_x)
+        raw_dx = (int64_t)raw_x - ((int64_t)state->raw_x + fuzz_x);
+    else if ((int64_t)raw_x < (int64_t)state->raw_x - fuzz_x)
+        raw_dx = (int64_t)raw_x - ((int64_t)state->raw_x - fuzz_x);
+    if ((int64_t)raw_y > (int64_t)state->raw_y + fuzz_y)
+        raw_dy = (int64_t)raw_y - ((int64_t)state->raw_y + fuzz_y);
+    else if ((int64_t)raw_y < (int64_t)state->raw_y - fuzz_y)
+        raw_dy = (int64_t)raw_y - ((int64_t)state->raw_y - fuzz_y);
+    state->raw_x += (int32_t)raw_dx;
+    state->raw_y += (int32_t)raw_dy;
 
     if (touchpad_motion_abs64(raw_dx) > range_x / 8 ||
         touchpad_motion_abs64(raw_dy) > range_y / 8) {

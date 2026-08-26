@@ -64,7 +64,8 @@ static int g_ptr_fds[MAX_EVDEV];   /* relative mice */
 static int g_ptr_cnt = 0;
 typedef struct {
     int fd;
-    int32_t x_max, y_max;
+    int32_t x_min, x_max, y_min, y_max;
+    int32_t x_fuzz, y_fuzz;
     bool is_mt;
     bool is_touchpad;  /* INPUT_PROP_POINTER: use delta tracking, not abs mapping */
     bool tool_doubletap;      /* two fingers on pad — BTN_LEFT while set = right-click */
@@ -486,6 +487,41 @@ static bool evdev_has_bit(int fd, int type, int bit) {
     return (bits[bit / 8] >> (bit % 8)) & 1;
 }
 
+static void evdev_abs_axis_info(int fd, unsigned int code,
+                                int32_t *minimum, int32_t *maximum,
+                                int32_t *fuzz) {
+    struct input_absinfo info;
+    if (ioctl(fd, EVIOCGABS(code), &info) == 0 && info.maximum > info.minimum) {
+        *minimum = info.minimum;
+        *maximum = info.maximum;
+        *fuzz = info.fuzz > 0 ? info.fuzz : 0;
+    } else {
+        *minimum = 0;
+        *maximum = 32767;
+        *fuzz = 0;
+    }
+}
+
+/* Device enumeration order is not stable.  If the kernel's relative mouse
+ * companion was encountered before its absolute touchpad node, remove it now
+ * so one physical gesture cannot enter FiFi through two conflicting paths. */
+static void input_remove_touchpad_companion(const char *touchpad_phys) {
+    if (!touchpad_phys || !touchpad_phys[0]) return;
+    for (int i = 0; i < g_ptr_cnt; ) {
+        char phys[64] = "";
+        ioctl(g_ptr_fds[i], EVIOCGPHYS(sizeof(phys)), phys);
+        phys[sizeof(phys) - 1] = '\0';
+        if (strcmp(phys, touchpad_phys) == 0) {
+            fprintf(stderr, "[input] removed duplicate touchpad companion fd=%d\n",
+                    g_ptr_fds[i]);
+            close(g_ptr_fds[i]);
+            g_ptr_fds[i] = g_ptr_fds[--g_ptr_cnt];
+        } else {
+            i++;
+        }
+    }
+}
+
 void input_init(void) {
     g_hotplug_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (g_hotplug_fd >= 0 &&
@@ -548,21 +584,21 @@ void input_init(void) {
         /* Check absolute BEFORE relative — virtio-tablet has both EV_ABS and EV_REL */
         if ((has_legacy_abs || has_mt_abs) && has_touch) {
             if (g_abs_cnt < MAX_EVDEV) {
-                struct input_absinfo ai;
                 abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
+                memset(dev, 0, sizeof(*dev));
                 dev->fd   = fd;
                 dev->is_mt = !has_legacy_abs && has_mt_abs;
                 /* Prefer legacy axis range; fall back to MT axis range */
                 if (has_legacy_abs) {
-                    dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0)
-                                 ? ai.maximum : 32767;
-                    dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0)
-                                 ? ai.maximum : 32767;
+                    evdev_abs_axis_info(fd, ABS_X, &dev->x_min, &dev->x_max,
+                                        &dev->x_fuzz);
+                    evdev_abs_axis_info(fd, ABS_Y, &dev->y_min, &dev->y_max,
+                                        &dev->y_fuzz);
                 } else {
-                    dev->x_max = (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ai) == 0 && ai.maximum > 0)
-                                 ? ai.maximum : 32767;
-                    dev->y_max = (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ai) == 0 && ai.maximum > 0)
-                                 ? ai.maximum : 32767;
+                    evdev_abs_axis_info(fd, ABS_MT_POSITION_X,
+                                        &dev->x_min, &dev->x_max, &dev->x_fuzz);
+                    evdev_abs_axis_info(fd, ABS_MT_POSITION_Y,
+                                        &dev->y_min, &dev->y_max, &dev->y_fuzz);
                 }
                 /* INPUT_PROP_POINTER = touchpad: use delta tracking, not abs mapping.
                  * INPUT_PROP_DIRECT  = touchscreen/tablet: map abs coords to screen. */
@@ -570,9 +606,13 @@ void input_init(void) {
                 touchpad_motion_reset(&dev->motion);
                 touchpad_axis_reset(&dev->axes);
                 snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
-                fprintf(stderr, "[input] -> %s %s range %dx%d\n",
+                if (dev->is_touchpad) input_remove_touchpad_companion(dev->phys);
+                fprintf(stderr,
+                        "[input] -> %s %s axes x=%d..%d fuzz=%d y=%d..%d fuzz=%d\n",
                         dev->is_touchpad ? "touchpad" : "touchscreen/tablet",
-                        dev->is_mt ? "(MT)" : "(abs)", dev->x_max, dev->y_max);
+                        dev->is_mt ? "(MT)" : "(abs)",
+                        dev->x_min, dev->x_max, dev->x_fuzz,
+                        dev->y_min, dev->y_max, dev->y_fuzz);
                 continue;
             }
         }
@@ -781,9 +821,23 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         int32_t dx = 0, dy = 0;
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
+        bool dropped_report = false;
         int8_t scroll = 0;
 
         while (read(g_ptr_fds[pi], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+            if (ev.type == EV_SYN) {
+                if (ev.code == SYN_DROPPED) {
+                    /* The kernel overran its client queue.  Discard the partial
+                     * report instead of turning it into a large pointer jump. */
+                    dx = dy = 0;
+                    scroll = 0;
+                    had_event = false;
+                    dropped_report = true;
+                    continue;
+                }
+                if (ev.code == SYN_REPORT) break;
+            }
+            if (dropped_report) continue;
             had_event = true;
             if (ev.type == EV_REL) {
                 if (ev.code == REL_X)      dx += ev.value;
@@ -819,6 +873,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         int32_t abs_x1 = dev->axes.x[1], abs_y1 = dev->axes.y[1];
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
+        bool dropped_report = false;
         int8_t scroll = 0;  /* wheel: virtio-tablet reports EV_ABS + EV_REL on one node */
         int cur_slot = dev->axes.current_slot;
 
@@ -828,6 +883,22 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         }
 
         while (read(dev->fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+            if (ev.type == EV_SYN) {
+                if (ev.code == SYN_DROPPED) {
+                    /* Do not combine coordinates from opposite sides of an evdev
+                     * queue overrun.  The first complete report after this one
+                     * establishes a fresh touchpad anchor. */
+                    dropped_report = true;
+                    had_event = false;
+                    scroll = 0;
+                    abs_x = abs_y = abs_x1 = abs_y1 = -1;
+                    touchpad_axis_reset(&dev->axes);
+                    touchpad_motion_reset(&dev->motion);
+                    continue;
+                }
+                if (ev.code == SYN_REPORT) break;
+            }
+            if (dropped_report) continue;
             if (ev.type == EV_ABS) {
                 switch (ev.code) {
                 /* ABS_X is the legacy single-touch axis.  When 2 fingers are on the
@@ -968,8 +1039,6 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                  * wheel as REL_WHEEL on the same node as their absolute axes. */
                 if (ev.code == REL_WHEEL) scroll += (int8_t)ev.value;
                 had_event = true;
-            } else if (ev.type == EV_SYN) {
-                had_event = true;
             }
         }
 
@@ -1003,13 +1072,17 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                         touchpad_motion_reset(&dev->motion);
                         int32_t ignored_x, ignored_y;
                         touchpad_motion_update(&dev->motion, abs_x, abs_y,
-                                               dev->x_max + 1, dev->y_max + 1,
+                                               dev->x_max - dev->x_min + 1,
+                                               dev->y_max - dev->y_min + 1,
+                                               dev->x_fuzz, dev->y_fuzz,
                                                g_fb_w, g_fb_h,
                                                &ignored_x, &ignored_y);
                     } else {
                         int32_t dxpx, dypx;
                         if (touchpad_motion_update(&dev->motion, abs_x, abs_y,
-                                                   dev->x_max + 1, dev->y_max + 1,
+                                                   dev->x_max - dev->x_min + 1,
+                                                   dev->y_max - dev->y_min + 1,
+                                                   dev->x_fuzz, dev->y_fuzz,
                                                    g_fb_w, g_fb_h,
                                                    &dxpx, &dypx))
                             mouse_push_rel(dxpx, dypx, lbtn, rbtn);
@@ -1018,9 +1091,11 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
             } else {
                 /* Touchscreen / tablet: map abs coords directly to screen */
                 if (abs_x >= 0)
-                    g_mx = (int32_t)((int64_t)abs_x * g_fb_w / (dev->x_max + 1));
+                    g_mx = (int32_t)((int64_t)(abs_x - dev->x_min) * g_fb_w /
+                                     (dev->x_max - dev->x_min + 1));
                 if (abs_y >= 0)
-                    g_my = (int32_t)((int64_t)abs_y * g_fb_h / (dev->y_max + 1));
+                    g_my = (int32_t)((int64_t)(abs_y - dev->y_min) * g_fb_h /
+                                     (dev->y_max - dev->y_min + 1));
                 if (g_mx < 0) g_mx = 0;
                 if (g_my < 0) g_my = 0;
                 if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;

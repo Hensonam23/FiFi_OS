@@ -49,30 +49,42 @@ int main(void) {
     touchpad_motion_reset(&motion);
 
     /* First contact is an anchor, never a cursor jump. */
-    if (touchpad_motion_update(&motion, 1000, 500, 4000, 1000,
+    if (touchpad_motion_update(&motion, 1000, 500, 4000, 1000, 0, 0,
                                2000, 1000, &dx, &dy)) return 1;
 
     /* Equal normalized X/Y movement must cover the same fraction of each
      * screen axis even when the hardware ranges differ. Motion is immediate. */
-    if (!touchpad_motion_update(&motion, 1040, 510, 4000, 1000,
+    if (!touchpad_motion_update(&motion, 1040, 510, 4000, 1000, 0, 0,
                                 2000, 1000, &dx, &dy)) return 2;
     if (dx != 30 || dy != 15) return 3;
 
     /* Slow subpixel motion accumulates instead of being rounded away. */
     touchpad_motion_reset(&motion);
-    touchpad_motion_update(&motion, 0, 0, 4000, 4000, 1000, 1000, &dx, &dy);
+    touchpad_motion_update(&motion, 0, 0, 4000, 4000, 0, 0,
+                           1000, 1000, &dx, &dy);
     for (int i = 1; i <= 3; ++i) {
-        if (touchpad_motion_update(&motion, i, 0, 4000, 4000,
+        if (touchpad_motion_update(&motion, i, 0, 4000, 4000, 0, 0,
                                    1000, 1000, &dx, &dy)) return 4;
     }
-    if (!touchpad_motion_update(&motion, 4, 0, 4000, 4000,
+    if (!touchpad_motion_update(&motion, 4, 0, 4000, 4000, 0, 0,
                                 1000, 1000, &dx, &dy) || dx != 1) return 5;
 
     /* A contact discontinuity re-anchors without crossing the screen. */
-    if (touchpad_motion_update(&motion, 1000, 1000, 4000, 4000,
+    if (touchpad_motion_update(&motion, 1000, 1000, 4000, 4000, 0, 0,
                                1000, 1000, &dx, &dy)) return 6;
-    if (touchpad_motion_update(&motion, 1001, 1001, 4000, 4000,
+    if (touchpad_motion_update(&motion, 1001, 1001, 4000, 4000, 0, 0,
                                1000, 1000, &dx, &dy)) return 7;
+
+    /* Hardware-declared fuzz suppresses stationary chatter without averaging
+     * genuine movement across later frames. */
+    touchpad_motion_reset(&motion);
+    touchpad_motion_update(&motion, 100, 100, 1000, 1000, 3, 3,
+                           1000, 1000, &dx, &dy);
+    if (touchpad_motion_update(&motion, 102, 98, 1000, 1000, 3, 3,
+                               1000, 1000, &dx, &dy)) return 8;
+    if (!touchpad_motion_update(&motion, 108, 100, 1000, 1000, 3, 3,
+                                1000, 1000, &dx, &dy) || dx != 6 || dy != 0)
+        return 9;
     return 0;
 }
 EOF
@@ -81,7 +93,10 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/touchpad-motion.c" -o "$TMP/touchpad-motion"
 "$TMP/touchpad-motion"
 grep -Fq '#include "touchpad_motion.h"' "$ROOT/fifi/platform/linux/input.c"
-grep -Fq 'dev->x_max + 1, dev->y_max + 1' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'dev->x_max - dev->x_min + 1' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'dev->x_fuzz, dev->y_fuzz' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'input_remove_touchpad_companion(dev->phys)' \
+    "$ROOT/fifi/platform/linux/input.c"
 ! grep -Fq 'ema_x_q8' "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] touchpad motion is immediate and axis-correct"
 
@@ -144,6 +159,17 @@ grep -Fq 'input_poll_controls();' "$ROOT/fifi/compositor/main.c"
 grep -Fq 'input_poll_mode(false, true)' "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'pthread_join(pointer_tid, NULL)' "$ROOT/fifi/compositor/main.c"
 echo "[input-test] pointer evdev has an independent event-driven thread"
+
+# Pointer readers must stop at each kernel report. Draining through several
+# SYN_REPORT boundaries collapses a batched touchpad gesture into one jump and
+# makes the hardware cursor visibly stall between those jumps.
+test "$(grep -c 'if (ev.code == SYN_REPORT) break;' \
+    "$ROOT/fifi/platform/linux/input.c")" -eq 2
+test "$(grep -c 'ev.code == SYN_DROPPED' \
+    "$ROOT/fifi/platform/linux/input.c")" -eq 2
+grep -Fq 'touchpad_motion_reset(&dev->motion);' \
+    "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] every evdev motion report reaches the hardware cursor"
 
 grep -Fq 'inotify_add_watch(g_hotplug_fd, "/dev/input"' \
     "$ROOT/fifi/platform/linux/input.c"
