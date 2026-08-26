@@ -16,6 +16,10 @@ CFLAGS := \
     -D_GNU_SOURCE \
     $(INCLUDES)
 
+LIBINPUT_CFLAGS := $(shell pkg-config --cflags libinput 2>/dev/null)
+LIBINPUT_LIBS   := $(shell pkg-config --libs libinput 2>/dev/null)
+CFLAGS          += $(LIBINPUT_CFLAGS)
+
 SRCS := \
     main.c \
     ../platform/linux/platform.c \
@@ -126,8 +130,9 @@ $(BUILD)/comp/console.o: ../../kernel/src/console.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/$(OUT): $(OBJS)
-	$(CC) -static $(OBJS) -o $@ -lm -lpthread
-	@echo "[compositor] Built: $@ (static)"
+	@test -n "$(LIBINPUT_LIBS)" || { echo "libinput development files are required" >&2; exit 1; }
+	$(CC) $(OBJS) -o $@ $(LIBINPUT_LIBS) -lm -lpthread
+	@echo "[compositor] Built: $@ (libinput)"
 
 clean:
 	rm -rf $(BUILD)/comp $(BUILD)/$(OUT)

@@ -2,6 +2,8 @@
 #ifdef __linux__
 #include "font_ttf.h"   /* ttf_family_name for the font scanner */
 #include <sys/stat.h>   /* stat() for the live settings-config watch */
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 /* Forward declarations for public API functions used inside gui_on_tick */
@@ -438,10 +440,29 @@ uint32_t gui_topmost_z_at_nonterm(int32_t mx, int32_t my) {
 #define FIFI_SETTINGS_PATH FIFI_THEME_CONFIG_PATH
 /* mtime of the config as of the last load, so the live watch below only reloads
  * on an actual change (and detects the file first appearing on a live boot). */
-static long g_settings_mtime = -1;
+static time_t g_settings_mtime_sec = (time_t)-1;
+static long g_settings_mtime_nsec = -1;
+static int g_settings_mouse_speed = FIFI_INPUT_DEFAULT_MOUSE_SPEED;
+static int g_settings_touchpad_speed = FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED;
 void gui_settings_save(void) {
-    FILE *f = fopen(FIFI_SETTINGS_PATH, "w");
-    if (!f) return;
+    int fd = open(FIFI_SETTINGS_PATH,
+                  O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+                  0600);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
+        close(fd);
+        return;
+    }
+    /* The standalone Settings app runs as the desktop user and must retain
+     * ownership even when the root compositor creates the file first. */
+    if (geteuid() == 0 && fchown(fd, 1000, 1000) != 0) {
+        close(fd);
+        return;
+    }
+    if (ftruncate(fd, 0) != 0) { close(fd); return; }
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); return; }
     fprintf(f, FIFI_THEME_CONFIG_FORMAT_KEY "=%u\n"
                FIFI_THEME_KEY_ACCENT "=%u\n" FIFI_THEME_KEY_WALLPAPER "=%d\n"
                FIFI_THEME_KEY_WALL_FIT "=%d\n" FIFI_THEME_KEY_CLOCK_12H "=%d\n"
@@ -451,7 +472,9 @@ void gui_settings_save(void) {
                FIFI_THEME_KEY_PANEL_AUTOHIDE "=%d\n" FIFI_THEME_KEY_PANEL_SIZE "=%d\n"
                FIFI_THEME_KEY_DOCK_FLOAT "=%d\n" FIFI_THEME_KEY_FX_GLASS "=%d\n"
                FIFI_THEME_KEY_FX_SHADOWS "=%d\n" FIFI_THEME_KEY_CORNER_RADIUS "=%d\n"
-               FIFI_THEME_KEY_FONT_FILE "=%s\n" FIFI_THEME_KEY_FONT_PX "=%d\n",
+               FIFI_THEME_KEY_FONT_FILE "=%s\n" FIFI_THEME_KEY_FONT_PX "=%d\n"
+               FIFI_INPUT_KEY_MOUSE_SPEED "=%d\n"
+               FIFI_INPUT_KEY_TOUCHPAD_SPEED "=%d\n",
             FIFI_THEME_CONFIG_VERSION, (unsigned)g_theme.accent,
             g_theme.wallpaper, (int)g_theme.wall_fit,
             (int)g_theme.clock_12h,
@@ -461,14 +484,20 @@ void gui_settings_save(void) {
             (int)g_theme.panel_autohide, (int)g_theme.panel_size,
             (int)g_theme.dock_float,
             (int)g_theme.fx_glass, (int)g_theme.fx_shadows, (int)g_theme.corner_radius,
-            (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px);
+            (gui_font_current_path() ? gui_font_current_path() : ""), g_font_px,
+            g_settings_mouse_speed, g_settings_touchpad_speed);
     /* Image-wallpaper path last, read line-wise on load so paths with spaces work. */
     if (g_wall_img_path[0])
         fprintf(f, FIFI_THEME_KEY_WALLPAPER_IMAGE "=%s\n", g_wall_img_path);
     fclose(f);
 }
 void gui_settings_load(void) {
-    { struct stat st; if (stat(FIFI_SETTINGS_PATH, &st) == 0) g_settings_mtime = (long)st.st_mtime; }
+    g_settings_mouse_speed = FIFI_INPUT_DEFAULT_MOUSE_SPEED;
+    g_settings_touchpad_speed = FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED;
+    { struct stat st; if (stat(FIFI_SETTINGS_PATH, &st) == 0) {
+        g_settings_mtime_sec = st.st_mtim.tv_sec;
+        g_settings_mtime_nsec = st.st_mtim.tv_nsec;
+    } }
     FILE *f = fopen(FIFI_SETTINGS_PATH, "r");
     if (!f) return;
     char line[128];
@@ -501,6 +530,8 @@ void gui_settings_load(void) {
             if (val[0]) { snprintf(g_font_saved_path, sizeof g_font_saved_path, "%s", val); g_font_from_config = true; }
         }
         else if (sscanf(line, FIFI_THEME_KEY_FONT_PX "=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
+        else if (sscanf(line, FIFI_INPUT_KEY_MOUSE_SPEED "=%d", &v) == 1)   { if (v >= -100 && v <= 100) g_settings_mouse_speed = v; }
+        else if (sscanf(line, FIFI_INPUT_KEY_TOUCHPAD_SPEED "=%d", &v) == 1){ if (v >= -100 && v <= 100) g_settings_touchpad_speed = v; }
     }
     fclose(f);
 }
@@ -514,11 +545,14 @@ void gui_settings_load(void) {
 void gui_settings_poll_reload(void) {
     struct stat st;
     if (stat(FIFI_SETTINGS_PATH, &st) != 0) return;
-    if ((long)st.st_mtime == g_settings_mtime) return;
+    if (st.st_mtim.tv_sec == g_settings_mtime_sec &&
+        st.st_mtim.tv_nsec == g_settings_mtime_nsec) return;
     char old_font[sizeof g_font_saved_path];
     int  old_px = g_font_px;
     snprintf(old_font, sizeof old_font, "%s", g_font_saved_path);
     gui_settings_load();          /* re-reads keys into g_theme + updates g_settings_mtime */
+    __attribute__((weak)) void input_settings_reload(void);
+    if (input_settings_reload) input_settings_reload();
     /* Switched to (or still on) an image wallpaper: make sure it's loaded. */
     if (g_theme.wallpaper == WALLPAPER_IMAGE) gui_load_wallpaper_image();
 #ifdef __linux__

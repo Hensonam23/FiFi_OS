@@ -159,16 +159,65 @@ gcc -std=c11 -O2 -Wall -Wextra -static \
 chmod 755 "$STAGE/bin/fifi-wifi-ctl"
 echo "[initramfs] narrow Wi-Fi control helper installed"
 
+# libinput relies on the standard udev input properties (ID_INPUT_MOUSE,
+# ID_INPUT_TOUCHPAD, device grouping, fuzz overrides). FiFi keeps its custom
+# init/service model, but runs the small device manager and only the input rules
+# needed to describe evdev hardware correctly.
+UDEVADM_BIN="$(command -v udevadm 2>/dev/null || true)"
+UDEVD_BIN=""
+for candidate in /usr/lib/systemd/systemd-udevd /lib/systemd/systemd-udevd; do
+    [ -x "$candidate" ] && { UDEVD_BIN="$candidate"; break; }
+done
+[ -n "$UDEVADM_BIN" ] && [ -n "$UDEVD_BIN" ] || {
+    echo "[initramfs] ERROR: udev is required for reliable input discovery" >&2
+    exit 1
+}
+cp "$UDEVADM_BIN" "$STAGE/usr/bin/udevadm"
+mkdir -p "$STAGE/usr/lib/systemd" "$STAGE/usr/lib/udev/rules.d"
+cp -L "$UDEVD_BIN" "$STAGE/usr/lib/systemd/systemd-udevd"
+for binary in "$UDEVADM_BIN" "$UDEVD_BIN"; do
+    ldd "$binary" 2>/dev/null | awk '/=>/{print $3}' | while read -r lib; do
+        [ -f "$lib" ] || continue
+        cp -L "$lib" "$STAGE/usr/lib/$(basename "$lib")"
+    done
+done
+for rule in 60-evdev.rules 60-input-id.rules 60-persistent-input.rules \
+            70-touchpad.rules 80-libinput-device-groups.rules \
+            90-libinput-fuzz-override.rules; do
+    [ -f "/usr/lib/udev/rules.d/$rule" ] && \
+        cp "/usr/lib/udev/rules.d/$rule" "$STAGE/usr/lib/udev/rules.d/"
+done
+echo "[initramfs] udev input discovery bundled"
+
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
-(cd "$REPO_ROOT/fifi/compositor" && make -s) || {
-    echo "[initramfs] WARNING: fifi-compositor build failed — falling back to shell"
-}
 COMP_BIN="$REPO_ROOT/build-linux/fifi-compositor"
-if [ -x "$COMP_BIN" ]; then
-    cp "$COMP_BIN" "$STAGE/bin/fifi-compositor"
-    echo "[initramfs] included fifi-compositor"
+rm -f "$COMP_BIN"
+(cd "$REPO_ROOT/fifi/compositor" && make -s) || {
+    echo "[initramfs] ERROR: fifi-compositor build failed" >&2
+    exit 1
+}
+[ -x "$COMP_BIN" ] || {
+    echo "[initramfs] ERROR: compositor build produced no executable" >&2
+    exit 1
+}
+if ldd "$COMP_BIN" 2>&1 | grep -q 'not found'; then
+    echo "[initramfs] ERROR: compositor has an unresolved runtime library" >&2
+    ldd "$COMP_BIN" >&2 || true
+    exit 1
 fi
+[ -d /usr/share/libinput ] || {
+    echo "[initramfs] ERROR: libinput quirks database is missing" >&2
+    exit 1
+}
+cp "$COMP_BIN" "$STAGE/bin/fifi-compositor"
+ldd "$COMP_BIN" 2>/dev/null | awk '/=>/{print $3}' | while read -r lib; do
+    [ -f "$lib" ] || continue
+    cp -L "$lib" "$STAGE/usr/lib/$(basename "$lib")"
+done
+mkdir -p "$STAGE/usr/share"
+cp -a /usr/share/libinput "$STAGE/usr/share/"
+echo "[initramfs] included fifi-compositor with libinput runtime"
 
 # ── Build and include standalone IPC apps ────────────────────────────────────
 echo "[initramfs] building fifi-filebrowser..."

@@ -126,6 +126,17 @@ export GTK_A11Y=none
 export GNOME_ACCESSIBILITY=0
 export DBUS_SESSION_BUS_ADDRESS=disabled:
 
+# Populate the standard input-device metadata consumed by libinput. This is a
+# focused udev service, not a replacement for FiFi's custom PID 1 supervision.
+mkdir -p /run/udev
+if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
+    /usr/lib/systemd/systemd-udevd --daemon --resolve-names=never \
+        >>/run/udev.log 2>&1
+    /usr/bin/udevadm trigger --subsystem-match=input --action=add \
+        >>/run/udev.log 2>&1 || true
+    /usr/bin/udevadm settle --timeout=10 >>/run/udev.log 2>&1 || true
+fi
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
 cat /etc/fifi-banner
@@ -694,6 +705,12 @@ fifi_boot_selftest() {
     _tries=0
     while [ "$_tries" -lt 120 ]; do
         if [ -S /tmp/fifi-compositor.sock ] && [ -S /tmp/wayland-0 ]; then
+            _input_backend="$(cat /tmp/fifi-input-backend 2>/dev/null)"
+            if [ "$_input_backend" != "libinput" ]; then
+                printf 'FIFI_SELFTEST FAIL input-backend=%s\n' \
+                    "${_input_backend:-missing}" >/dev/ttyS0
+                return
+            fi
             _ipc_mode="$(stat -c '%u:%g:%a' /tmp/fifi-compositor.sock 2>/dev/null)"
             _wayland_mode="$(stat -c '%u:%g:%a' /tmp/wayland-0 2>/dev/null)"
             _apps_mode="$(stat -c '%u:%g:%a' /fifi-data/apps 2>/dev/null)"
@@ -722,7 +739,7 @@ fifi_boot_selftest() {
             sleep 3
             _app_uid="$(awk '/^Uid:/{print $2}' "/proc/$_app_pid/status" 2>/dev/null)"
             if kill -0 "$_app_pid" 2>/dev/null && [ "$_app_uid" = 1000 ]; then
-                printf 'FIFI_SELFTEST PASS compositor-ready app-uid=1000\n' \
+                printf 'FIFI_SELFTEST PASS compositor-ready app-uid=1000 input=libinput\n' \
                     >/dev/ttyS0
                 return
             fi

@@ -61,6 +61,11 @@ grep -Fxq updated "$completion_root/apps.log"
 grep -Fq '[post-update] complete' "$completion_root/update-completion.log"
 
 echo "[test-security] non-root launcher enforces the desktop identity"
+
+grep -Fq 'O_NOFOLLOW' "$ROOT/kernel/src/gui.c"
+grep -Fq '!S_ISREG(st.st_mode) || st.st_nlink != 1' "$ROOT/kernel/src/gui.c"
+grep -Fq 'fchown(fd, 1000, 1000)' "$ROOT/kernel/src/gui.c"
+echo "[test-security] root settings writes reject user-controlled links"
 gcc -std=c11 -O2 -Wall -Wextra \
     "$ROOT/fifi/platform/linux/fifi-user-exec.c" \
     -o "$TMP/fifi-user-exec"

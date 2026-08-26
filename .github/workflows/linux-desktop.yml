@@ -27,7 +27,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
-            bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub \
+            bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub libinput \
             mtools openssl pahole parted perl python util-linux
 
       - name: Run fast security and update tests

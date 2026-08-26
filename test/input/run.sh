@@ -95,7 +95,7 @@ gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
 grep -Fq '#include "touchpad_motion.h"' "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'dev->x_max - dev->x_min + 1' "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'dev->x_fuzz, dev->y_fuzz' "$ROOT/fifi/platform/linux/input.c"
-grep -Fq 'input_remove_touchpad_companion(dev->phys)' \
+grep -Fq 'input_has_rel_companion(phys)' \
     "$ROOT/fifi/platform/linux/input.c"
 ! grep -Fq 'ema_x_q8' "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] touchpad motion is immediate and axis-correct"
@@ -177,13 +177,14 @@ grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"
 ! grep -Fq '_rescan_ticks' "$ROOT/fifi/compositor/main.c"
 echo "[input-test] device rescans happen only after hotplug notifications"
 
-grep -Fq 'input_is_touchpad_companion(phys)' \
+grep -Fq 'input_remove_touchpad_abs_fallback(phys)' \
     "$ROOT/fifi/platform/linux/input.c"
-grep -Fq '[input] rescan: touchpad companion still skipped' \
+grep -Fq '[input] rescan: raw touchpad still skipped' \
     "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'dev->is_touchpad = is_pointer && !is_direct;' \
     "$ROOT/fifi/platform/linux/input.c"
-echo "[input-test] rescans cannot restore a duplicate touchpad companion"
+grep -Fq 'using kernel REL companion' "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] kernel relative touchpad motion wins across rescans"
 
 SEND_LOGS="$ROOT/initramfs/root/bin/send-logs"
 grep -Fq "ip -4 addr show scope global" "$SEND_LOGS"
@@ -191,3 +192,50 @@ grep -Fq "tail -n 2000 /fifi-data/compositor.log" "$SEND_LOGS"
 grep -Fq "nc -w 15" "$SEND_LOGS"
 ! grep -Fq "udhcpc" "$SEND_LOGS"
 echo "[input-test] log transfer preserves the active Wi-Fi connection"
+
+grep -Fq '#include <libinput.h>' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'libinput_event_pointer_get_dx(pointer)' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'libinput primary backend active' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'input_record_backend("libinput")' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'FIFI_SELFTEST FAIL input-backend=' "$ROOT/initramfs/root/init"
+grep -Fq 'input=libinput' "$ROOT/initramfs/root/init"
+grep -Fq 'poll_pointer && !g_libinput' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'input_path_is_kernel_touchpad_companion(path)' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'pkg-config --libs libinput' "$ROOT/fifi/compositor/Makefile"
+! grep -Fq '$(CC) -static $(OBJS)' "$ROOT/fifi/compositor/Makefile"
+grep -Fq 'cp -a /usr/share/libinput' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'rm -f "$COMP_BIN"' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'ERROR: fifi-compositor build failed' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'ERROR: compositor has an unresolved runtime library' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'udev input discovery bundled' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq '60-input-id.rules' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'systemd-udevd --daemon --resolve-names=never' \
+    "$ROOT/initramfs/root/init"
+grep -Fq 'udevadm trigger --subsystem-match=input' "$ROOT/initramfs/root/init"
+grep -Fq 'grub libinput' "$ROOT/.github/workflows/linux-desktop.yml"
+echo "[input-test] mouse and touchpad use packaged libinput with raw fallback"
+
+grep -Fq 'FIFI_INPUT_KEY_MOUSE_SPEED "mouse_speed"' \
+    "$ROOT/fifi/shared/theme.h"
+grep -Fq 'FIFI_INPUT_KEY_TOUCHPAD_SPEED "touchpad_speed"' \
+    "$ROOT/fifi/shared/theme.h"
+grep -Fq 'tracked->is_touchpad ? g_touchpad_speed : g_mouse_speed' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'libinput_device_config_accel_set_speed' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'if (input_settings_reload) input_settings_reload();' \
+    "$ROOT/kernel/src/gui.c"
+grep -Fq 'st.st_mtim.tv_nsec == g_settings_mtime_nsec' \
+    "$ROOT/kernel/src/gui.c"
+grep -Fq 'draw_speed_slider(fb, "Mouse speed:"' \
+    "$ROOT/fifi/apps/settings/settings.c"
+grep -Fq 'draw_speed_slider(fb, "Touchpad speed:"' \
+    "$ROOT/fifi/apps/settings/settings.c"
+echo "[input-test] mouse and touchpad speeds persist and apply independently"

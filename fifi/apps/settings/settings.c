@@ -51,7 +51,7 @@
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W       760
-#define WIN_H       560
+#define WIN_H       680
 #define TITLE_H     24    /* reserved for compositor title bar */
 #define SIDEBAR_W   176
 #define CPAD        18    /* content padding */
@@ -502,6 +502,24 @@ static long  g_vmin   = 0, g_vmax = 100;
 static int   g_vcount = 2;
 static int   g_vol    = 50;
 static int   g_sl_x, g_sl_y, g_sl_w = 240, g_sl_h = 14;
+static int   g_mouse_sl_x, g_mouse_sl_y;
+static int   g_touchpad_sl_x, g_touchpad_sl_y;
+static int   g_pointer_sl_w = 240, g_pointer_sl_h = 14;
+
+static void draw_speed_slider(uint32_t *fb, const char *label, int x, int y,
+                              int value, int *slider_x, int *slider_y) {
+    *slider_x = x + 15*CW;
+    *slider_y = y + (ROW_H - g_pointer_sl_h)/2;
+    draw_str(fb, label, x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    fill(fb, *slider_x, *slider_y, g_pointer_sl_w, g_pointer_sl_h, C_BORDER);
+    int filled = g_pointer_sl_w * (value + 100) / 200;
+    fill(fb, *slider_x, *slider_y, filled, g_pointer_sl_h, g_accent);
+    fill(fb, *slider_x + filled - 4, *slider_y - 3, 8,
+         g_pointer_sl_h + 6, C_WHITE);
+    char pct[16]; snprintf(pct, sizeof pct, "%+d%%", value);
+    draw_str(fb, pct, *slider_x + g_pointer_sl_w + 10,
+             y + (ROW_H - g_glyph_h)/2, C_VAL);
+}
 
 static void alsa_init(void) {
     for (int card = 0; card < 4; card++) {
@@ -1126,6 +1144,22 @@ static void render_system(uint32_t *fb) {
     draw_str(fb, pct, g_sl_x + g_sl_w + 10, y + (ROW_H - g_glyph_h)/2, C_VAL);
     y += ROW_H + 14;
 
+    y = section_hdr(fb, "Pointer", x, y);
+    int mouse_speed = cfg_get_int(FIFI_INPUT_KEY_MOUSE_SPEED,
+                                  FIFI_INPUT_DEFAULT_MOUSE_SPEED);
+    int touchpad_speed = cfg_get_int(FIFI_INPUT_KEY_TOUCHPAD_SPEED,
+                                     FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED);
+    if (mouse_speed < -100) mouse_speed = -100;
+    if (mouse_speed > 100) mouse_speed = 100;
+    if (touchpad_speed < -100) touchpad_speed = -100;
+    if (touchpad_speed > 100) touchpad_speed = 100;
+    draw_speed_slider(fb, "Mouse speed:", x, y, mouse_speed,
+                      &g_mouse_sl_x, &g_mouse_sl_y);
+    y += ROW_H;
+    draw_speed_slider(fb, "Touchpad speed:", x, y, touchpad_speed,
+                      &g_touchpad_sl_x, &g_touchpad_sl_y);
+    y += ROW_H + 14;
+
     y = section_hdr(fb, "Devices", x, y);
     fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_A);
     draw_str(fb, "Gamepad:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
@@ -1578,11 +1612,29 @@ int main(int argc, char **argv) {
                                 if (lb && !prev_lb) { pers_click(mx, my); dirty = true; }
                             }
                             else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }
-                            else if (g_tab == TAB_SYS && lb &&
-                                     my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
-                                     mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
-                                int nv = (mx - g_sl_x) * 100 / g_sl_w;
-                                alsa_set_vol(nv < 0 ? 0 : nv > 100 ? 100 : nv); dirty = true;
+                            else if (g_tab == TAB_SYS && lb) {
+                                if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                    mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
+                                    int nv = (mx - g_sl_x) * 100 / g_sl_w;
+                                    alsa_set_vol(nv < 0 ? 0 : nv > 100 ? 100 : nv);
+                                    dirty = true;
+                                } else if (my >= g_mouse_sl_y - 6 &&
+                                           my <= g_mouse_sl_y + g_pointer_sl_h + 6 &&
+                                           mx >= g_mouse_sl_x &&
+                                           mx < g_mouse_sl_x + g_pointer_sl_w) {
+                                    int nv = (mx - g_mouse_sl_x) * 200 /
+                                             g_pointer_sl_w - 100;
+                                    cfg_set_int(FIFI_INPUT_KEY_MOUSE_SPEED, nv);
+                                    cfg_save(); dirty = true;
+                                } else if (my >= g_touchpad_sl_y - 6 &&
+                                           my <= g_touchpad_sl_y + g_pointer_sl_h + 6 &&
+                                           mx >= g_touchpad_sl_x &&
+                                           mx < g_touchpad_sl_x + g_pointer_sl_w) {
+                                    int nv = (mx - g_touchpad_sl_x) * 200 /
+                                             g_pointer_sl_w - 100;
+                                    cfg_set_int(FIFI_INPUT_KEY_TOUCHPAD_SPEED, nv);
+                                    cfg_save(); dirty = true;
+                                }
                             }
                             else if (g_tab == TAB_WIFI) {
                                 if (wheel != 0 && g_net_count > 0) {

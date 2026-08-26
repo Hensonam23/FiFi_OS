@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -10,12 +11,14 @@
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <libinput.h>
 
 /* Include mouse.h BEFORE linux/input.h — mouse.h has no KEY_* conflicts */
 #include "mouse.h"
 #include "console.h"
 #include "touchpad_axis.h"
 #include "touchpad_motion.h"
+#include "../../shared/theme.h"
 
 /* linux/input.h defines its own KEY_LEFT=105, KEY_F1=59, etc.
  * We keep this include isolated: after mouse.h, before keyboard.h.
@@ -80,6 +83,23 @@ typedef struct {
 static abs_dev_t g_abs_devs[MAX_EVDEV];
 static int g_abs_cnt = 0;
 static int g_hotplug_fd = -1;
+
+#define MAX_LIBINPUT_DEVICES 64
+typedef struct {
+    struct libinput_device *device;
+    char path[80];
+    dev_t devno;
+    ino_t inode;
+    bool is_touchpad;
+} libinput_path_t;
+static struct libinput *g_libinput = NULL;
+static libinput_path_t g_libinput_paths[MAX_LIBINPUT_DEVICES];
+static int g_libinput_path_count = 0;
+static int g_libinput_pointer_count = 0;
+static double g_libinput_residual_x = 0.0;
+static double g_libinput_residual_y = 0.0;
+static int g_mouse_speed = FIFI_INPUT_DEFAULT_MOUSE_SPEED;
+static int g_touchpad_speed = FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED;
 
 /* ── Gamepad state ──────────────────────────────────────────────────────────
  * Supports up to 2 gamepads. Each one tracks buttons + 4 axes + 2 triggers. */
@@ -487,6 +507,204 @@ static bool evdev_has_bit(int fd, int type, int bit) {
     return (bits[bit / 8] >> (bit % 8)) & 1;
 }
 
+static int libinput_open_restricted(const char *path, int flags,
+                                    void *user_data) {
+    (void)user_data;
+    int fd = open(path, flags | O_CLOEXEC);
+    return fd >= 0 ? fd : -errno;
+}
+
+static void libinput_close_restricted(int fd, void *user_data) {
+    (void)user_data;
+    close(fd);
+}
+
+static const struct libinput_interface g_libinput_interface = {
+    .open_restricted = libinput_open_restricted,
+    .close_restricted = libinput_close_restricted,
+};
+
+static bool input_phys_has_raw_touchpad(const char *wanted_phys) {
+    if (!wanted_phys || !wanted_phys[0]) return false;
+    DIR *dir = opendir("/dev/input");
+    if (!dir) return false;
+    bool found = false;
+    struct dirent *entry;
+    while (!found && (entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "event", 5) != 0) continue;
+        char path[80];
+        snprintf(path, sizeof(path), "/dev/input/%.60s", entry->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        char phys[64] = "";
+        uint8_t props[1] = {0};
+        ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+        ioctl(fd, EVIOCGPROP(sizeof(props)), props);
+        phys[sizeof(phys) - 1] = '\0';
+        bool pointer_prop = (props[0] >> INPUT_PROP_POINTER) & 1;
+        bool abs_xy = evdev_has_bit(fd, 0, EV_ABS) &&
+            ((evdev_has_bit(fd, EV_ABS, ABS_X) &&
+              evdev_has_bit(fd, EV_ABS, ABS_Y)) ||
+             (evdev_has_bit(fd, EV_ABS, ABS_MT_POSITION_X) &&
+              evdev_has_bit(fd, EV_ABS, ABS_MT_POSITION_Y)));
+        found = pointer_prop && abs_xy && strcmp(phys, wanted_phys) == 0;
+        close(fd);
+    }
+    closedir(dir);
+    return found;
+}
+
+static bool input_path_is_kernel_touchpad_companion(const char *path) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    char phys[64] = "";
+    ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+    phys[sizeof(phys) - 1] = '\0';
+    bool relative_xy = evdev_has_bit(fd, 0, EV_REL) &&
+                       evdev_has_bit(fd, EV_REL, REL_X) &&
+                       evdev_has_bit(fd, EV_REL, REL_Y);
+    close(fd);
+    return relative_xy && input_phys_has_raw_touchpad(phys);
+}
+
+static bool input_libinput_path_known(const struct stat *st) {
+    for (int i = 0; i < g_libinput_path_count; i++) {
+        if (g_libinput_paths[i].devno == st->st_dev &&
+                g_libinput_paths[i].inode == st->st_ino)
+            return true;
+    }
+    return false;
+}
+
+static int input_speed_clamp(int speed) {
+    if (speed < -100) return -100;
+    if (speed > 100) return 100;
+    return speed;
+}
+
+static void input_read_settings(void) {
+    int mouse_speed = FIFI_INPUT_DEFAULT_MOUSE_SPEED;
+    int touchpad_speed = FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED;
+    FILE *file = fopen(FIFI_THEME_CONFIG_PATH, "r");
+    if (file) {
+        char line[192];
+        while (fgets(line, sizeof(line), file)) {
+            int value;
+            if (sscanf(line, FIFI_INPUT_KEY_MOUSE_SPEED "=%d", &value) == 1)
+                mouse_speed = value;
+            else if (sscanf(line, FIFI_INPUT_KEY_TOUCHPAD_SPEED "=%d", &value) == 1)
+                touchpad_speed = value;
+        }
+        fclose(file);
+    }
+    g_mouse_speed = input_speed_clamp(mouse_speed);
+    g_touchpad_speed = input_speed_clamp(touchpad_speed);
+}
+
+static void input_apply_device_settings(libinput_path_t *tracked) {
+    if (!tracked || !tracked->device) return;
+    int speed = tracked->is_touchpad ? g_touchpad_speed : g_mouse_speed;
+    if (libinput_device_config_accel_is_available(tracked->device))
+        libinput_device_config_accel_set_speed(tracked->device,
+                                                (double)speed / 100.0);
+}
+
+void input_settings_reload(void) {
+    input_state_lock();
+    input_read_settings();
+    for (int i = 0; i < g_libinput_path_count; i++)
+        input_apply_device_settings(&g_libinput_paths[i]);
+    fprintf(stderr, "[input] settings: mouse-speed=%d touchpad-speed=%d\n",
+            g_mouse_speed, g_touchpad_speed);
+    input_state_unlock();
+}
+
+static void input_libinput_add_path(const char *path) {
+    if (!g_libinput || g_libinput_path_count >= MAX_LIBINPUT_DEVICES) return;
+    struct stat st;
+    if (stat(path, &st) < 0 || input_libinput_path_known(&st)) return;
+
+    /* hid-multitouch exposes a synthetic REL companion beside the real ABS
+     * touchpad. libinput wants the real touchpad; feeding both duplicates the
+     * gesture. External USB mice have no matching raw touchpad and stay here. */
+    if (input_path_is_kernel_touchpad_companion(path)) return;
+
+    struct libinput_device *device = libinput_path_add_device(g_libinput, path);
+    if (!device) return;
+    if (!libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_POINTER)) {
+        libinput_path_remove_device(device);
+        return;
+    }
+
+    int tap_fingers = libinput_device_config_tap_get_finger_count(device);
+    const char *profile_name = tap_fingers > 0 ? "adaptive-touchpad" : "flat-mouse";
+    if (libinput_device_config_accel_is_available(device)) {
+        uint32_t profiles = libinput_device_config_accel_get_profiles(device);
+        enum libinput_config_accel_profile requested = tap_fingers > 0
+            ? LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE
+            : LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT;
+        if (profiles & (uint32_t)requested)
+            libinput_device_config_accel_set_profile(device, requested);
+    }
+
+    libinput_path_t *tracked = &g_libinput_paths[g_libinput_path_count++];
+    tracked->device = device;
+    tracked->devno = st.st_dev;
+    tracked->inode = st.st_ino;
+    tracked->is_touchpad = tap_fingers > 0;
+    snprintf(tracked->path, sizeof(tracked->path), "%s", path);
+    input_apply_device_settings(tracked);
+    g_libinput_pointer_count++;
+    fprintf(stderr, "[input] libinput: %s \"%s\" profile=%s speed=%d\n", path,
+            libinput_device_get_name(device), profile_name,
+            tracked->is_touchpad ? g_touchpad_speed : g_mouse_speed);
+}
+
+static void input_libinput_rescan(void) {
+    if (!g_libinput) return;
+    for (int i = 0; i < g_libinput_path_count; ) {
+        struct stat st;
+        libinput_path_t *tracked = &g_libinput_paths[i];
+        if (stat(tracked->path, &st) < 0 || st.st_dev != tracked->devno ||
+                st.st_ino != tracked->inode) {
+            libinput_path_remove_device(tracked->device);
+            g_libinput_paths[i] = g_libinput_paths[--g_libinput_path_count];
+            g_libinput_pointer_count--;
+        } else {
+            i++;
+        }
+    }
+    DIR *dir = opendir("/dev/input");
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "event", 5) != 0) continue;
+        char path[80];
+        snprintf(path, sizeof(path), "/dev/input/%.60s", entry->d_name);
+        input_libinput_add_path(path);
+    }
+    closedir(dir);
+    libinput_dispatch(g_libinput);
+}
+
+static void input_libinput_shutdown(void) {
+    if (!g_libinput) return;
+    while (g_libinput_path_count > 0) {
+        libinput_path_remove_device(
+            g_libinput_paths[--g_libinput_path_count].device);
+    }
+    libinput_unref(g_libinput);
+    g_libinput = NULL;
+    g_libinput_pointer_count = 0;
+}
+
+static void input_record_backend(const char *backend) {
+    FILE *file = fopen("/tmp/fifi-input-backend", "w");
+    if (!file) return;
+    fprintf(file, "%s\n", backend);
+    fclose(file);
+}
+
 static void evdev_abs_axis_info(int fd, unsigned int code,
                                 int32_t *minimum, int32_t *maximum,
                                 int32_t *fuzz) {
@@ -502,37 +720,58 @@ static void evdev_abs_axis_info(int fd, unsigned int code,
     }
 }
 
-/* Device enumeration order is not stable.  If the kernel's relative mouse
- * companion was encountered before its absolute touchpad node, remove it now
- * so one physical gesture cannot enter FiFi through two conflicting paths. */
-static void input_remove_touchpad_companion(const char *touchpad_phys) {
-    if (!touchpad_phys || !touchpad_phys[0]) return;
-    for (int i = 0; i < g_ptr_cnt; ) {
-        char phys[64] = "";
-        ioctl(g_ptr_fds[i], EVIOCGPHYS(sizeof(phys)), phys);
-        phys[sizeof(phys) - 1] = '\0';
-        if (strcmp(phys, touchpad_phys) == 0) {
-            fprintf(stderr, "[input] removed duplicate touchpad companion fd=%d\n",
-                    g_ptr_fds[i]);
-            close(g_ptr_fds[i]);
-            g_ptr_fds[i] = g_ptr_fds[--g_ptr_cnt];
+static void input_remove_touchpad_abs_fallback(const char *phys) {
+    if (!phys || !phys[0]) return;
+    for (int i = 0; i < g_abs_cnt; ) {
+        if (g_abs_devs[i].is_touchpad &&
+                strcmp(g_abs_devs[i].phys, phys) == 0) {
+            fprintf(stderr,
+                    "[input] replaced raw touchpad fallback with kernel REL fd=%d\n",
+                    g_abs_devs[i].fd);
+            close(g_abs_devs[i].fd);
+            g_abs_devs[i] = g_abs_devs[--g_abs_cnt];
         } else {
             i++;
         }
     }
 }
 
-static bool input_is_touchpad_companion(const char *phys) {
-    if (!phys || !phys[0]) return false;
-    for (int i = 0; i < g_abs_cnt; i++) {
-        if (g_abs_devs[i].is_touchpad &&
-                strcmp(g_abs_devs[i].phys, phys) == 0)
-            return true;
+/* Modern HID touchpads expose both raw absolute contacts and a kernel-created
+ * relative mouse interface.  Prefer the latter: it already applies the
+ * device-specific coordinate conversion and avoids rebuilding pointer motion
+ * from noisy contact positions in the compositor. */
+static bool input_has_rel_companion(const char *touchpad_phys) {
+    if (!touchpad_phys || !touchpad_phys[0]) return false;
+    DIR *dir = opendir("/dev/input");
+    if (!dir) return false;
+    bool found = false;
+    struct dirent *entry;
+    while (!found && (entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "event", 5) != 0) continue;
+        char path[80];
+        snprintf(path, sizeof(path), "/dev/input/%.60s", entry->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        char phys[64] = "";
+        ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+        phys[sizeof(phys) - 1] = '\0';
+        found = strcmp(phys, touchpad_phys) == 0 &&
+                evdev_has_bit(fd, 0, EV_REL) &&
+                evdev_has_bit(fd, EV_REL, REL_X) &&
+                evdev_has_bit(fd, EV_REL, REL_Y) &&
+                evdev_has_bit(fd, EV_KEY, BTN_LEFT);
+        close(fd);
     }
-    return false;
+    closedir(dir);
+    return found;
 }
 
 void input_init(void) {
+    input_read_settings();
+    g_libinput = libinput_path_create_context(&g_libinput_interface, NULL);
+    if (!g_libinput)
+        fprintf(stderr, "[input] libinput unavailable; using raw evdev fallback\n");
+
     g_hotplug_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (g_hotplug_fd >= 0 &&
         inotify_add_watch(g_hotplug_fd, "/dev/input",
@@ -543,13 +782,19 @@ void input_init(void) {
     }
 
     DIR *d = opendir("/dev/input");
-    if (!d) { fprintf(stderr, "[input] /dev/input not found\n"); return; }
+    if (!d) {
+        fprintf(stderr, "[input] /dev/input not found\n");
+        input_libinput_shutdown();
+        input_record_backend("unavailable");
+        return;
+    }
 
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strncmp(de->d_name, "event", 5) != 0) continue;
         char path[80];
         snprintf(path, sizeof(path), "/dev/input/%.60s", de->d_name);
+        input_libinput_add_path(path);
         int fd = open(path, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
 
@@ -593,6 +838,12 @@ void input_init(void) {
 
         /* Check absolute BEFORE relative — virtio-tablet has both EV_ABS and EV_REL */
         if ((has_legacy_abs || has_mt_abs) && has_touch) {
+            if (is_pointer && !is_direct && input_has_rel_companion(phys)) {
+                fprintf(stderr,
+                        "[input] -> raw touchpad (skipped; using kernel REL companion)\n");
+                close(fd);
+                continue;
+            }
             if (g_abs_cnt < MAX_EVDEV) {
                 abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
                 memset(dev, 0, sizeof(*dev));
@@ -616,7 +867,6 @@ void input_init(void) {
                 touchpad_motion_reset(&dev->motion);
                 touchpad_axis_reset(&dev->axes);
                 snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
-                if (dev->is_touchpad) input_remove_touchpad_companion(dev->phys);
                 fprintf(stderr,
                         "[input] -> %s %s axes x=%d..%d fuzz=%d y=%d..%d fuzz=%d\n",
                         dev->is_touchpad ? "touchpad" : "touchscreen/tablet",
@@ -627,16 +877,12 @@ void input_init(void) {
             }
         }
         if (has_rel && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
-            /* Skip if this is the companion REL node of a registered touchpad
-             * (same Phys string). The touchpad abs node handles all input. */
-            if (input_is_touchpad_companion(phys)) {
-                fprintf(stderr, "[input] -> touchpad companion (skipped)\n");
-                close(fd);
-                continue;
-            }
+            /* If enumeration raced and installed the raw ABS fallback first,
+             * replace it as soon as the preferred kernel REL node appears. */
+            input_remove_touchpad_abs_fallback(phys);
             if (g_ptr_cnt < MAX_EVDEV) {
                 g_ptr_fds[g_ptr_cnt++] = fd;
-                fprintf(stderr, "[input] -> mouse\n");
+                fprintf(stderr, "[input] -> relative pointer\n");
                 continue;
             }
         }
@@ -657,6 +903,20 @@ void input_init(void) {
         close(fd);
     }
     closedir(d);
+
+    if (g_libinput && g_libinput_pointer_count > 0) {
+        libinput_dispatch(g_libinput);
+        fprintf(stderr, "[input] libinput primary backend active (%d pointer nodes)\n",
+                g_libinput_pointer_count);
+        input_record_backend("libinput");
+    } else if (g_libinput) {
+        fprintf(stderr,
+                "[input] libinput found no pointer devices; using raw evdev fallback\n");
+        input_libinput_shutdown();
+        input_record_backend("raw-evdev");
+    } else {
+        input_record_backend("raw-evdev");
+    }
 
     if (g_kbd_cnt == 0) fprintf(stderr, "[input] warning: no keyboard found\n");
     if (g_ptr_cnt == 0 && g_abs_cnt == 0) fprintf(stderr, "[input] warning: no mouse found\n");
@@ -709,6 +969,7 @@ static void input_prune_dead(void) {
  * Safe to call repeatedly; skips devices already in the fd lists. */
 void input_rescan(void) {
     input_state_lock();
+    input_libinput_rescan();
     input_prune_dead();
     DIR *d = opendir("/dev/input");
     if (!d) { input_state_unlock(); return; }
@@ -762,6 +1023,12 @@ void input_rescan(void) {
 
         if ((has_legacy_abs || has_mt_abs) && has_touch &&
                 g_abs_cnt < MAX_EVDEV) {
+            if (is_pointer && !is_direct && input_has_rel_companion(phys)) {
+                fprintf(stderr,
+                        "[input] rescan: raw touchpad still skipped %s\n", path);
+                close(fd);
+                continue;
+            }
             abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
             memset(dev, 0, sizeof(*dev));
             dev->fd = fd;
@@ -776,33 +1043,20 @@ void input_rescan(void) {
             touchpad_motion_reset(&dev->motion);
             touchpad_axis_reset(&dev->axes);
             snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
-            if (dev->is_touchpad) input_remove_touchpad_companion(dev->phys);
             fprintf(stderr, "[input] rescan: new %s %s \"%s\"\n",
                     dev->is_touchpad ? "touchpad" : "absolute pointer",
                     path, name);
             continue;
         }
         if (has_rel_xy && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
-            if (input_is_touchpad_companion(phys)) {
-                fprintf(stderr,
-                        "[input] rescan: touchpad companion still skipped %s\n",
-                        path);
-                close(fd);
-                continue;
-            }
+            input_remove_touchpad_abs_fallback(phys);
             if (g_ptr_cnt < MAX_EVDEV) {
                 g_ptr_fds[g_ptr_cnt++] = fd;
-                fprintf(stderr, "[input] rescan: new mouse %s \"%s\"\n",
+                fprintf(stderr,
+                        "[input] rescan: new relative pointer %s \"%s\"\n",
                         path, name);
                 continue;
             }
-        }
-        if (has_rel_xy && input_is_touchpad_companion(phys)) {
-            fprintf(stderr,
-                    "[input] rescan: touchpad companion still skipped %s\n",
-                    path);
-            close(fd);
-            continue;
         }
         close(fd);
     }
@@ -812,10 +1066,82 @@ void input_rescan(void) {
 
 /* ── Poll — call each frame ─────────────────────────────────────────────── */
 
+static void input_poll_libinput(void) {
+    if (!g_libinput || libinput_dispatch(g_libinput) < 0) return;
+    struct libinput_event *event;
+    while ((event = libinput_get_event(g_libinput)) != NULL) {
+        enum libinput_event_type type = libinput_event_get_type(event);
+        struct libinput_event_pointer *pointer =
+            libinput_event_get_pointer_event(event);
+        if (!pointer) {
+            libinput_event_destroy(event);
+            continue;
+        }
+
+        if (type == LIBINPUT_EVENT_POINTER_MOTION) {
+            g_libinput_residual_x += libinput_event_pointer_get_dx(pointer);
+            g_libinput_residual_y += libinput_event_pointer_get_dy(pointer);
+            int32_t dx = (int32_t)g_libinput_residual_x;
+            int32_t dy = (int32_t)g_libinput_residual_y;
+            g_libinput_residual_x -= dx;
+            g_libinput_residual_y -= dy;
+            if (dx || dy) mouse_push_rel(dx, dy, g_lbtn, g_rbtn);
+        } else if (type == LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE) {
+            g_mx = (int32_t)libinput_event_pointer_get_absolute_x_transformed(
+                pointer, (uint32_t)g_fb_w);
+            g_my = (int32_t)libinput_event_pointer_get_absolute_y_transformed(
+                pointer, (uint32_t)g_fb_h);
+            if (g_mx < 0) g_mx = 0;
+            if (g_my < 0) g_my = 0;
+            if (g_mx >= g_fb_w) g_mx = g_fb_w - 1;
+            if (g_my >= g_fb_h) g_my = g_fb_h - 1;
+        } else if (type == LIBINPUT_EVENT_POINTER_BUTTON) {
+            uint32_t button = libinput_event_pointer_get_button(pointer);
+            bool pressed = libinput_event_pointer_get_button_state(pointer) ==
+                           LIBINPUT_BUTTON_STATE_PRESSED;
+            if (button == BTN_LEFT) {
+                bool previous = g_lbtn;
+                g_lbtn = pressed;
+                mouse_push_rel(0, 0, g_lbtn, g_rbtn);
+                if (pressed && !previous)
+                    input_queue_click(false, g_mx, g_my);
+            } else if (button == BTN_RIGHT) {
+                bool previous = g_rbtn;
+                g_rbtn = pressed;
+                mouse_push_rel(0, 0, g_lbtn, g_rbtn);
+                if (pressed && !previous)
+                    input_queue_click(true, g_mx, g_my);
+            }
+        } else if (type == LIBINPUT_EVENT_POINTER_AXIS ||
+                   type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL ||
+                   type == LIBINPUT_EVENT_POINTER_SCROLL_FINGER ||
+                   type == LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS) {
+            if (libinput_event_pointer_has_axis(
+                    pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL)) {
+                double value;
+                if (type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL)
+                    value = libinput_event_pointer_get_scroll_value_v120(
+                        pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+                else
+                    value = libinput_event_pointer_get_scroll_value(
+                        pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+                /* libinput: positive is down; FiFi's existing wheel contract
+                 * uses positive for up. */
+                if (value > 0.0) g_scroll_pending = -1;
+                else if (value < 0.0) g_scroll_pending = 1;
+            }
+        }
+        libinput_event_destroy(event);
+    }
+}
+
 static void input_poll_mode(bool poll_pointer, bool poll_controls) {
     input_state_lock();
     g_motion_only = !poll_controls;
     struct input_event ev;
+
+    if (poll_pointer && g_libinput)
+        input_poll_libinput();
 
     for (int ki = 0; poll_controls && ki < g_kbd_cnt; ki++) {
         while (read(g_kbd_fds[ki], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
@@ -864,7 +1190,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         }
     }
 
-    for (int pi = 0; poll_pointer && pi < g_ptr_cnt; pi++) {
+    for (int pi = 0; poll_pointer && !g_libinput && pi < g_ptr_cnt; pi++) {
         int32_t dx = 0, dy = 0;
         bool lbtn = g_lbtn, rbtn = g_rbtn;
         bool had_event = false;
@@ -914,7 +1240,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
     }
 
     /* ── Absolute pointer devices (USB tablet / virtio-tablet / touchpad) ── */
-    for (int ai = 0; poll_pointer && ai < g_abs_cnt; ai++) {
+    for (int ai = 0; poll_pointer && !g_libinput && ai < g_abs_cnt; ai++) {
         abs_dev_t *dev = &g_abs_devs[ai];
         int32_t abs_x = dev->axes.x[0], abs_y = dev->axes.y[0];
         int32_t abs_x1 = dev->axes.x[1], abs_y1 = dev->axes.y[1];
@@ -1389,8 +1715,13 @@ int input_get_all_fds(int *buf, int maxn) {
 int input_get_pointer_fds(int *buf, int maxn) {
     input_state_lock();
     int n = 0;
-    for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
-    for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
+    if (g_libinput && maxn > 0) {
+        int fd = libinput_get_fd(g_libinput);
+        if (fd >= 0) buf[n++] = fd;
+    } else {
+        for (int i = 0; i < g_ptr_cnt && n < maxn; i++) buf[n++] = g_ptr_fds[i];
+        for (int i = 0; i < g_abs_cnt && n < maxn; i++) buf[n++] = g_abs_devs[i].fd;
+    }
     input_state_unlock();
     return n;
 }

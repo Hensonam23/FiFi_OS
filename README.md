@@ -207,13 +207,13 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 
 - [x] `/dev/fb0` framebuffer backend
 - [x] Port `gui.c` to compile as Linux userspace (platform stub headers)
-- [x] Input via evdev: keyboard, mouse (relative + buttons)
+- [x] Input via evdev keyboard plus libinput mouse/touchpad handling, with raw fallback
 - [x] Software cursor with save/restore
 - [x] Double-buffered rendering (backbuffer to dirty-row flip at 250 Hz)
 - [x] Full FiFi desktop: taskbar, window manager, launcher, theme system
 - [x] VFS mapped to `/fifi-data/` on real POSIX filesystem
 - [x] RTC via `localtime()`, uptime via `CLOCK_MONOTONIC`
-- [x] Static binary with no library dependencies in initramfs
+- [x] Reproducibly packaged compositor runtime dependencies and libinput quirks
 
 #### Phase 3: Shell and Terminal (done)
 
@@ -225,7 +225,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 - [x] IPC socket server: compositor listens on `/tmp/fifi-compositor.sock`
 - [x] App protocol: connect, register window, push pixel frames, receive input events
 - [x] File browser as standalone IPC process (PSF font, dir nav, mouse and keyboard)
-- [x] Settings panel as standalone IPC process (system info, ALSA volume slider)
+- [x] Settings panel as standalone IPC process (system info, volume and pointer controls)
 
 #### Phase 4: Display and Gaming (done)
 
@@ -338,6 +338,8 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [x] Prevent slow compositor frames from starving all pointer input
   - [x] Move the cursor independently of slow software-rendered frames
   - [x] Remove lagging touchpad averaging and scale each hardware axis correctly
+  - [x] Use standard libinput device handling with duplicate touchpad interfaces excluded
+  - [x] Add independent, live mouse and touchpad speed controls
   - [ ] Re-test the laptop and tune acceleration/smoothing from hardware feedback
 - [ ] App framework/SDK and a verifying package manager
 - [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
