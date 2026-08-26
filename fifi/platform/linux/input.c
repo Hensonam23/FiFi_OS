@@ -522,6 +522,16 @@ static void input_remove_touchpad_companion(const char *touchpad_phys) {
     }
 }
 
+static bool input_is_touchpad_companion(const char *phys) {
+    if (!phys || !phys[0]) return false;
+    for (int i = 0; i < g_abs_cnt; i++) {
+        if (g_abs_devs[i].is_touchpad &&
+                strcmp(g_abs_devs[i].phys, phys) == 0)
+            return true;
+    }
+    return false;
+}
+
 void input_init(void) {
     g_hotplug_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (g_hotplug_fd >= 0 &&
@@ -619,15 +629,7 @@ void input_init(void) {
         if (has_rel && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
             /* Skip if this is the companion REL node of a registered touchpad
              * (same Phys string). The touchpad abs node handles all input. */
-            bool is_touchpad_companion = false;
-            for (int ti = 0; ti < g_abs_cnt; ti++) {
-                if (g_abs_devs[ti].is_touchpad &&
-                        phys[0] && strcmp(g_abs_devs[ti].phys, phys) == 0) {
-                    is_touchpad_companion = true;
-                    break;
-                }
-            }
-            if (is_touchpad_companion) {
+            if (input_is_touchpad_companion(phys)) {
                 fprintf(stderr, "[input] -> touchpad companion (skipped)\n");
                 close(fd);
                 continue;
@@ -729,7 +731,15 @@ void input_rescan(void) {
                 if (fstat(g_abs_devs[i].fd, &sb) == 0 && sa.st_ino == sb.st_ino) known = true;
         }
         if (known) { close(fd); continue; }
-        /* New device — classify like input_init (simplified) */
+        /* New device — use the same pointer classification as startup.  A
+         * formerly simplified rescan added an intentionally-skipped touchpad
+         * companion back as a mouse on its first inotify notification. */
+        char name[64] = "?";
+        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        name[sizeof(name) - 1] = '\0';
+        char phys[64] = "";
+        ioctl(fd, EVIOCGPHYS(sizeof(phys)), phys);
+        phys[sizeof(phys) - 1] = '\0';
         bool has_key = evdev_has_bit(fd, 0, EV_KEY);
         bool has_rel = evdev_has_bit(fd, 0, EV_REL);
         bool has_abs = evdev_has_bit(fd, 0, EV_ABS);
@@ -739,22 +749,59 @@ void input_rescan(void) {
             continue;
         }
         bool has_legacy_abs = has_abs && evdev_has_bit(fd, EV_ABS, ABS_X) && evdev_has_bit(fd, EV_ABS, ABS_Y);
+        bool has_mt_abs = has_abs && evdev_has_bit(fd, EV_ABS, ABS_MT_POSITION_X) &&
+                          evdev_has_bit(fd, EV_ABS, ABS_MT_POSITION_Y);
         bool has_rel_xy = has_rel && evdev_has_bit(fd, EV_REL, REL_X) && evdev_has_bit(fd, EV_REL, REL_Y);
-        if (has_rel_xy && g_ptr_cnt < MAX_EVDEV) {
-            g_ptr_fds[g_ptr_cnt++] = fd;
-            fprintf(stderr, "[input] rescan: new mouse %s\n", path);
-            continue;
-        }
-        if (has_legacy_abs && g_abs_cnt < MAX_EVDEV) {
-            struct input_absinfo ai;
+        bool has_touch = evdev_has_bit(fd, EV_KEY, BTN_LEFT) ||
+                         evdev_has_bit(fd, EV_KEY, BTN_TOUCH) ||
+                         evdev_has_bit(fd, EV_KEY, BTN_TOOL_FINGER);
+        uint8_t prop_bits[1] = {0};
+        ioctl(fd, EVIOCGPROP(sizeof(prop_bits)), prop_bits);
+        bool is_direct  = (prop_bits[0] >> INPUT_PROP_DIRECT) & 1;
+        bool is_pointer = (prop_bits[0] >> INPUT_PROP_POINTER) & 1;
+
+        if ((has_legacy_abs || has_mt_abs) && has_touch &&
+                g_abs_cnt < MAX_EVDEV) {
             abs_dev_t *dev = &g_abs_devs[g_abs_cnt++];
             memset(dev, 0, sizeof(*dev));
-            dev->fd    = fd;
-            dev->x_max = (ioctl(fd, EVIOCGABS(ABS_X), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
-            dev->y_max = (ioctl(fd, EVIOCGABS(ABS_Y), &ai) == 0 && ai.maximum > 0) ? ai.maximum : 32767;
+            dev->fd = fd;
+            dev->is_mt = !has_legacy_abs && has_mt_abs;
+            dev->is_touchpad = is_pointer && !is_direct;
+            unsigned int x_code = has_legacy_abs ? ABS_X : ABS_MT_POSITION_X;
+            unsigned int y_code = has_legacy_abs ? ABS_Y : ABS_MT_POSITION_Y;
+            evdev_abs_axis_info(fd, x_code, &dev->x_min, &dev->x_max,
+                                &dev->x_fuzz);
+            evdev_abs_axis_info(fd, y_code, &dev->y_min, &dev->y_max,
+                                &dev->y_fuzz);
             touchpad_motion_reset(&dev->motion);
             touchpad_axis_reset(&dev->axes);
-            fprintf(stderr, "[input] rescan: new abs device %s\n", path);
+            snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
+            if (dev->is_touchpad) input_remove_touchpad_companion(dev->phys);
+            fprintf(stderr, "[input] rescan: new %s %s \"%s\"\n",
+                    dev->is_touchpad ? "touchpad" : "absolute pointer",
+                    path, name);
+            continue;
+        }
+        if (has_rel_xy && evdev_has_bit(fd, EV_KEY, BTN_LEFT)) {
+            if (input_is_touchpad_companion(phys)) {
+                fprintf(stderr,
+                        "[input] rescan: touchpad companion still skipped %s\n",
+                        path);
+                close(fd);
+                continue;
+            }
+            if (g_ptr_cnt < MAX_EVDEV) {
+                g_ptr_fds[g_ptr_cnt++] = fd;
+                fprintf(stderr, "[input] rescan: new mouse %s \"%s\"\n",
+                        path, name);
+                continue;
+            }
+        }
+        if (has_rel_xy && input_is_touchpad_companion(phys)) {
+            fprintf(stderr,
+                    "[input] rescan: touchpad companion still skipped %s\n",
+                    path);
+            close(fd);
             continue;
         }
         close(fd);

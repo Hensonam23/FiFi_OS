@@ -176,3 +176,11 @@ grep -Fq 'inotify_add_watch(g_hotplug_fd, "/dev/input"' \
 grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"
 ! grep -Fq '_rescan_ticks' "$ROOT/fifi/compositor/main.c"
 echo "[input-test] device rescans happen only after hotplug notifications"
+
+grep -Fq 'input_is_touchpad_companion(phys)' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq '[input] rescan: touchpad companion still skipped' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'dev->is_touchpad = is_pointer && !is_direct;' \
+    "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] rescans cannot restore a duplicate touchpad companion"
