@@ -330,10 +330,14 @@ static void send_msg(int fd, uint32_t type, const void *d, uint32_t len);
 #define MAX_INST 128
 typedef struct {
     char name[64];
-    char path[192];      /* .AppImage path */
+    char id[64];
+    char icon_key[64];
+    char path[192];
+    char process_needle[224];
     long size_mb;
     bool running;
     bool has_update;     /* <Name>.update marker present */
+    bool native_package;
 } Inst;
 static Inst g_inst[MAX_INST];
 static int  g_ninst = 0;
@@ -406,13 +410,64 @@ static void scan_installed(void) {
             if (l < 9 || strcmp(e->d_name + l - 9, ".AppImage")) continue;
             Inst *in = &g_inst[g_ninst];
             snprintf(in->name, sizeof in->name, "%.*s", (int)(l - 9), e->d_name);
+            snprintf(in->id, sizeof in->id, "%s", in->name);
+            snprintf(in->icon_key, sizeof in->icon_key, "%s", in->name);
             snprintf(in->path, sizeof in->path, "/fifi-data/apps/%s", e->d_name);
             struct stat st;
             in->size_mb = (stat(in->path, &st) == 0) ? (long)(st.st_size >> 20) : 0;
-            char needle[224]; snprintf(needle, sizeof needle, "/fifi-data/apps/%s.d/", in->name);
-            in->running = proc_scan(needle);
+            snprintf(in->process_needle, sizeof in->process_needle,
+                     "/fifi-data/apps/%s.d/", in->name);
+            in->running = proc_scan(in->process_needle);
             char up[224]; snprintf(up, sizeof up, "/fifi-data/apps/%s.update", in->name);
             struct stat ust; in->has_update = (stat(up, &ust) == 0);
+            in->native_package = false;
+            g_ninst++;
+        }
+        closedir(d);
+    }
+
+    /* Signed native packages use packages/<id>/<version>/manifest and payload.
+     * Show them beside AppImages without pretending the AppImage update checker
+     * can update them. A new signed .fifi package is installed explicitly. */
+    d = opendir("/fifi-data/apps/packages");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && g_ninst < MAX_INST) {
+            if (e->d_name[0] == '.') continue;
+            char current_path[256], version[72] = {0};
+            snprintf(current_path, sizeof current_path,
+                     "/fifi-data/apps/packages/%s/current", e->d_name);
+            FILE *current = fopen(current_path, "r");
+            if (!current) continue;
+            if (!fgets(version, sizeof version, current)) { fclose(current); continue; }
+            fclose(current); version[strcspn(version, "\r\n")] = '\0';
+            char manifest_path[320];
+            snprintf(manifest_path, sizeof manifest_path,
+                     "/fifi-data/apps/packages/%s/%s/manifest", e->d_name, version);
+            FILE *manifest = fopen(manifest_path, "r");
+            if (!manifest) continue;
+            char display_name[64] = {0}, line[160];
+            while (fgets(line, sizeof line, manifest)) {
+                if (!strncmp(line, "name=", 5)) {
+                    snprintf(display_name, sizeof display_name, "%s", line + 5);
+                    display_name[strcspn(display_name, "\r\n")] = '\0';
+                }
+            }
+            fclose(manifest);
+            if (!display_name[0]) continue;
+            Inst *in = &g_inst[g_ninst];
+            snprintf(in->name, sizeof in->name, "%s", display_name);
+            snprintf(in->id, sizeof in->id, "%s", e->d_name);
+            snprintf(in->icon_key, sizeof in->icon_key, "pkg-%s", e->d_name);
+            snprintf(in->path, sizeof in->path,
+                     "/fifi-data/apps/packages/%s/%s/payload", e->d_name, version);
+            snprintf(in->process_needle, sizeof in->process_needle,
+                     "/fifi-data/apps/packages/%s/", e->d_name);
+            struct stat st;
+            in->size_mb = stat(in->path, &st) == 0 ? (long)(st.st_size >> 20) : 0;
+            in->running = proc_scan(in->process_needle);
+            in->has_update = false;
+            in->native_package = true;
             g_ninst++;
         }
         closedir(d);
@@ -470,8 +525,12 @@ static void start_uninstall(int fd, int i) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul,0); dup2(nul,1); dup2(nul,2); }
-        execl("/bin/sh", "sh", APP_UNINSTALLER,
-              g_inst[i].name, (char*)NULL);
+        if (g_inst[i].native_package)
+            execl("/bin/fifi-pkg", "fifi-pkg", "remove",
+                  g_inst[i].id, (char*)NULL);
+        else
+            execl("/bin/sh", "sh", APP_UNINSTALLER,
+                  g_inst[i].name, (char*)NULL);
         _exit(127);
     }
     uint32_t nl = (uint32_t)snprintf(note, sizeof note, "Removing %s...", g_inst[i].name);
@@ -529,7 +588,11 @@ static void launch_app(int fd, int i) {
         setsid();
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); }
-        execl(APP_RUNNER, "fifi-run", g_inst[i].path, (char*)NULL);
+        if (g_inst[i].native_package)
+            execl("/bin/fifi-pkg", "fifi-pkg", "run",
+                  g_inst[i].id, (char*)NULL);
+        else
+            execl(APP_RUNNER, "fifi-run", g_inst[i].path, (char*)NULL);
         _exit(127);
     }
     char note[96];
@@ -739,7 +802,7 @@ static void render(uint32_t *fb) {
             } else if (ir->kind == 1) {
                 Inst *in = &g_inst[ir->idx];
                 if (r & 1) fill(fb, 0, ry, WIN_W, ITEM_H, 0x00161e28u);
-                AppIcon *ic = app_icon(in->name);
+                AppIcon *ic = app_icon(in->icon_key);
                 if (ic) draw_icon(fb, ic, PAD_X + 4, ry + 3, ITEM_H - 6);
                 draw_str(fb, in->name, PAD_X + 8 + ITEM_H, ry + (ITEM_H - g_glyph_h)/2, C_NAME);
                 char sz[24]; snprintf(sz, sizeof sz, "%ld MB", in->size_mb);
@@ -1043,9 +1106,7 @@ int main(void) {
                                                 }
                                                 dirty = true;
                                             } else if (in->running && mx >= rmx - 66 - 6 && mx < rmx - 6) {
-                                                char nk[224];              /* Close = force-quit */
-                                                snprintf(nk, sizeof nk, "/fifi-data/apps/%s.d/", in->name);
-                                                proc_kill_all(nk);
+                                                proc_kill_all(in->process_needle);
                                                 in->running = false;       /* optimistic */
                                                 dirty = true;
                                             } else if (mx >= rmx && mx < rmx + 76) {

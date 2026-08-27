@@ -1,0 +1,251 @@
+#!/bin/sh
+# fifi-pkg - signed, unprivileged FiFi native application packages.
+set -eu
+umask 077
+
+APPS="${FIFI_PKG_APPS_DIR:-/fifi-data/apps}"
+USER_TRUST="${FIFI_PKG_TRUST_DIR:-/fifi-data/app-trust}"
+SYSTEM_TRUST="${FIFI_PKG_SYSTEM_TRUST_DIR:-/usr/share/fifi/app-trust}"
+DESKTOP_CONF="${FIFI_DESKTOP_CONF:-/fifi-data/fifi-desktop.conf}"
+RUNNER="${FIFI_PKG_RUNNER:-/usr/share/fifi/fifi-run}"
+MAX_PACKAGE_BYTES=$((512 * 1024 * 1024))
+
+die() { echo "fifi-pkg: $*" >&2; exit 1; }
+valid_id() { printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'; }
+valid_version() { printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$'; }
+key_is_ed25519() {
+    [ "$(LC_ALL=C openssl pkey -pubin -in "$1" -text_pub -noout 2>/dev/null |
+        sed -n '1p')" = "ED25519 Public-Key:" ]
+}
+
+check_storage() {
+    [ ! -L "$APPS" ] || die "application directory may not be a symlink"
+    [ ! -e "$APPS" ] || [ -d "$APPS" ] || die "application path is not a directory"
+    [ ! -L "$APPS/packages" ] || die "package directory may not be a symlink"
+    [ ! -e "$APPS/packages" ] || [ -d "$APPS/packages" ] ||
+        die "package path is not a directory"
+}
+
+field() {
+    _key="$1"
+    _file="$2"
+    [ "$(grep -c "^${_key}=" "$_file" 2>/dev/null || true)" = 1 ] ||
+        die "manifest must contain exactly one ${_key} field"
+    sed -n "s/^${_key}=//p" "$_file"
+}
+
+check_manifest() {
+    _manifest="$1"
+    [ "$(wc -c < "$_manifest")" -le 16384 ] || die "manifest is too large"
+    if grep -Ev '^(format|id|name|version|arch|publisher|payload_sha256|icon_sha256)=[^[:cntrl:]]*$' \
+        "$_manifest" | grep -q .; then
+        die "manifest contains an unknown or malformed field"
+    fi
+    format="$(field format "$_manifest")"
+    id="$(field id "$_manifest")"
+    name="$(field name "$_manifest")"
+    version="$(field version "$_manifest")"
+    arch="$(field arch "$_manifest")"
+    publisher="$(field publisher "$_manifest")"
+    payload_sha="$(field payload_sha256 "$_manifest")"
+    icon_sha="$(field icon_sha256 "$_manifest")"
+    [ "$format" = 1 ] || die "unsupported package format: $format"
+    valid_id "$id" || die "invalid package id"
+    valid_id "$publisher" || die "invalid publisher id"
+    valid_version "$version" || die "invalid package version"
+    printf '%s\n' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$' ||
+        die "invalid package name"
+    case "$arch" in any|x86_64) ;; *) die "unsupported package architecture" ;; esac
+    [ "$arch" = any ] || [ "$arch" = "$(uname -m)" ] ||
+        die "package is for $arch, this system is $(uname -m)"
+    printf '%s\n' "$payload_sha" | grep -Eq '^[0-9a-fA-F]{64}$' ||
+        die "invalid payload digest"
+    if [ "$icon_sha" != none ]; then
+        printf '%s\n' "$icon_sha" | grep -Eq '^[0-9a-fA-F]{64}$' ||
+            die "invalid icon digest"
+    fi
+}
+
+verify_files() {
+    _manifest="$1"; _signature="$2"; _payload="$3"; _icon="${4:-}"
+    for _verified_file in "$_manifest" "$_signature" "$_payload"; do
+        [ -f "$_verified_file" ] && [ ! -L "$_verified_file" ] ||
+            die "verified package content must be regular files"
+    done
+    [ "$(wc -c < "$_signature")" -le 1024 ] || die "signature is too large"
+    [ "$(wc -c < "$_payload")" -le "$MAX_PACKAGE_BYTES" ] || die "payload is too large"
+    check_manifest "$_manifest"
+    key="$SYSTEM_TRUST/$publisher.pem"
+    [ -f "$key" ] && [ ! -L "$key" ] || key="$USER_TRUST/$publisher.pem"
+    [ -f "$key" ] && [ ! -L "$key" ] ||
+        die "publisher '$publisher' is not trusted; add its public key first"
+    key_is_ed25519 "$key" || die "publisher trust key is not Ed25519"
+    openssl pkeyutl -verify -pubin -inkey "$key" -rawin \
+        -in "$_manifest" -sigfile "$_signature" >/dev/null 2>&1 ||
+        die "package signature is invalid"
+    printf '%s  %s\n' "$payload_sha" "$_payload" | sha256sum -c - >/dev/null 2>&1 ||
+        die "payload digest does not match the signed manifest"
+    if [ "$icon_sha" != none ]; then
+        [ -n "$_icon" ] && [ -f "$_icon" ] && [ ! -L "$_icon" ] ||
+            die "signed icon is missing"
+        printf '%s  %s\n' "$icon_sha" "$_icon" | sha256sum -c - >/dev/null 2>&1 ||
+            die "icon digest does not match the signed manifest"
+    fi
+}
+
+prepare_package() {
+    package="$1"
+    [ -f "$package" ] && [ ! -L "$package" ] || die "package must be a regular file"
+    [ "$(wc -c < "$package")" -le "$MAX_PACKAGE_BYTES" ] || die "package is too large"
+    members="$(tar -tzf "$package" 2>/dev/null)" || die "package is not a valid gzip tar archive"
+    old_ifs="$IFS"; IFS='
+'
+    for member in $members; do
+        case "$member" in manifest|manifest.sig|payload|icon.png) ;;
+            *) die "unsafe or unexpected package member: $member" ;;
+        esac
+    done
+    IFS="$old_ifs"
+    for required in manifest manifest.sig payload; do
+        [ "$(printf '%s\n' "$members" | grep -Fxc "$required")" = 1 ] ||
+            die "package must contain exactly one $required"
+    done
+    icon_count="$(printf '%s\n' "$members" | grep -Fxc icon.png || true)"
+    [ "$icon_count" -le 1 ] || die "package contains duplicate icon.png"
+
+    work="$(mktemp -d "${TMPDIR:-/tmp}/fifi-pkg.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    (ulimit -f 32; tar -xOzf "$package" manifest) > "$work/manifest" 2>/dev/null ||
+        die "cannot read bounded manifest"
+    (ulimit -f 2; tar -xOzf "$package" manifest.sig) > "$work/manifest.sig" 2>/dev/null ||
+        die "cannot read bounded signature"
+    (ulimit -f 1048576; tar -xOzf "$package" payload) > "$work/payload" 2>/dev/null ||
+        die "cannot read bounded payload"
+    if [ "$icon_count" = 1 ]; then
+        (ulimit -f 32768; tar -xOzf "$package" icon.png) > "$work/icon.png" 2>/dev/null ||
+            die "cannot read bounded icon"
+    fi
+    verify_files "$work/manifest" "$work/manifest.sig" "$work/payload" \
+        "${work}/icon.png"
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+verify)
+    [ "$#" = 2 ] || die "usage: fifi-pkg verify <package.fifi>"
+    prepare_package "$2"
+    echo "verified $id $version from $publisher"
+    ;;
+install)
+    [ "$#" = 2 ] || die "usage: fifi-pkg install <package.fifi>"
+    prepare_package "$2"
+    check_storage
+    mkdir -p "$APPS/packages"
+    [ ! -L "$APPS/packages/$id" ] || die "package id directory may not be a symlink"
+    [ ! -e "$APPS/packages/$id" ] || [ -d "$APPS/packages/$id" ] ||
+        die "package id path is not a directory"
+    [ ! -L "$DESKTOP_CONF" ] || die "desktop configuration may not be a symlink"
+    stage="$APPS/packages/.install-$id-$$"
+    final="$APPS/packages/$id/$version"
+    rm -rf "$stage"
+    mkdir -p "$stage" "$APPS/packages/$id"
+    cp "$work/payload" "$stage/payload"
+    cp "$work/manifest" "$stage/manifest"
+    cp "$work/manifest.sig" "$stage/manifest.sig"
+    chmod 0700 "$stage/payload"
+    if [ -f "$work/icon.png" ]; then cp "$work/icon.png" "$stage/icon.png"; fi
+    rm -rf "$final"
+    mv "$stage" "$final"
+    rm -f "$APPS/packages/$id/current.tmp"
+    printf '%s\n' "$version" > "$APPS/packages/$id/current.tmp"
+    mv "$APPS/packages/$id/current.tmp" "$APPS/packages/$id/current"
+    launcher="$APPS/pkg-$id.sh"
+    rm -f "$launcher.tmp"
+    {
+        echo '#!/bin/sh'
+        printf 'exec /bin/fifi-pkg run "%s" "$@"\n' "$id"
+    } > "$launcher.tmp"
+    chmod 0700 "$launcher.tmp"
+    mv "$launcher.tmp" "$launcher"
+    if [ -f "$work/icon.png" ]; then cp "$work/icon.png" "$APPS/pkg-$id.png"; fi
+    touch "$DESKTOP_CONF"
+    if ! grep -Fq "icon=$launcher	" "$DESKTOP_CONF" 2>/dev/null; then
+        printf 'icon=%s\t%s\n' "$launcher" "$name" >> "$DESKTOP_CONF"
+    fi
+    echo "installed $name $version ($id)"
+    ;;
+remove)
+    [ "$#" = 2 ] || die "usage: fifi-pkg remove <package-id>"
+    id="$2"
+    valid_id "$id" || die "invalid package id"
+    check_storage
+    [ ! -L "$APPS/packages/$id" ] || die "package id directory may not be a symlink"
+    launcher="$APPS/pkg-$id.sh"
+    rm -rf "$APPS/packages/$id"
+    rm -f "$launcher" "$APPS/pkg-$id.png"
+    if [ -f "$DESKTOP_CONF" ]; then
+        [ ! -L "$DESKTOP_CONF" ] || die "desktop configuration may not be a symlink"
+        rm -f "$DESKTOP_CONF.tmp"
+        grep -Fv "icon=$launcher	" "$DESKTOP_CONF" > "$DESKTOP_CONF.tmp" || true
+        mv "$DESKTOP_CONF.tmp" "$DESKTOP_CONF"
+    fi
+    echo "removed $id"
+    ;;
+list)
+    check_storage
+    found=0
+    for current in "$APPS"/packages/*/current; do
+        [ -f "$current" ] && [ ! -L "$current" ] || continue
+        id="${current%/current}"; id="${id##*/}"
+        version="$(sed -n '1p' "$current")"
+        manifest="$APPS/packages/$id/$version/manifest"
+        [ -d "$APPS/packages/$id/$version" ] &&
+            [ ! -L "$APPS/packages/$id/$version" ] &&
+            [ -f "$manifest" ] && [ ! -L "$manifest" ] || continue
+        name="$(sed -n 's/^name=//p' "$manifest")"
+        publisher="$(sed -n 's/^publisher=//p' "$manifest")"
+        printf '%s\t%s\t%s\t%s\n' "$id" "$version" "$publisher" "$name"
+        found=1
+    done
+    [ "$found" = 1 ] || echo "no native packages installed"
+    ;;
+run)
+    [ "$#" -ge 2 ] || die "usage: fifi-pkg run <package-id> [arguments...]"
+    requested_id="$2"
+    valid_id "$requested_id" || die "invalid package id"
+    check_storage
+    [ ! -L "$APPS/packages/$requested_id" ] || die "package id directory may not be a symlink"
+    current="$APPS/packages/$requested_id/current"
+    [ -f "$current" ] && [ ! -L "$current" ] || die "package is not installed"
+    version="$(sed -n '1p' "$current")"
+    valid_version "$version" || die "installed package version is invalid"
+    installed="$APPS/packages/$requested_id/$version"
+    [ -d "$installed" ] && [ ! -L "$installed" ] ||
+        die "installed package directory is invalid"
+    verify_files "$installed/manifest" "$installed/manifest.sig" \
+        "$installed/payload" "$installed/icon.png"
+    [ "$id" = "$requested_id" ] || die "installed package id does not match its path"
+    shift 2
+    exec "$RUNNER" "$installed/payload" "$@"
+    ;;
+trust)
+    [ "$#" = 3 ] || die "usage: fifi-pkg trust <publisher-id> <public-key.pem>"
+    publisher="$2"; source_key="$3"
+    valid_id "$publisher" || die "invalid publisher id"
+    [ -f "$source_key" ] && [ ! -L "$source_key" ] || die "public key must be a regular file"
+    [ "$(wc -c < "$source_key")" -le 65536 ] || die "public key is too large"
+    key_is_ed25519 "$source_key" || die "public key must be Ed25519"
+    [ ! -L "$USER_TRUST" ] || die "trust directory may not be a symlink"
+    mkdir -p "$USER_TRUST"
+    rm -f "$USER_TRUST/$publisher.pem.tmp"
+    cp "$source_key" "$USER_TRUST/$publisher.pem.tmp"
+    chmod 0600 "$USER_TRUST/$publisher.pem.tmp"
+    mv "$USER_TRUST/$publisher.pem.tmp" "$USER_TRUST/$publisher.pem"
+    fingerprint="$(openssl pkey -pubin -in "$USER_TRUST/$publisher.pem" -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+    echo "trusted $publisher ($fingerprint)"
+    ;;
+help|-h|--help)
+    echo "usage: fifi-pkg {verify|install|remove|list|run|trust} ..."
+    ;;
+*) die "unknown command: $cmd" ;;
+esac

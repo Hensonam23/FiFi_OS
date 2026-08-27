@@ -6,6 +6,7 @@
 #   fifi upgrade -y        apply all updates without asking
 #   fifi channel [name]    show or select stable/test updates
 #   fifi rollback          restore the previous OS boot pair
+#   fifi pkg ...           verify/install/list/remove signed native apps
 #   fifi version           show the installed OS version
 #   fifi help              show this help
 #
@@ -29,6 +30,8 @@ case "$cmd" in
         esac ;;
     rollback)
         exec update rollback ;;
+    pkg)
+        exec fifi-pkg "$@" ;;
     version|--version|-v)
         cat /etc/fifi-version 2>/dev/null || echo "FiFi OS (version unknown)"
         printf 'Build ID:  '
@@ -52,7 +55,7 @@ case "$cmd" in
         fi
         ;;
     ""|help|-h|--help)
-        sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '3,/^#$/p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
         echo "fifi: unknown command '$cmd'" >&2
         echo "try: fifi help" >&2

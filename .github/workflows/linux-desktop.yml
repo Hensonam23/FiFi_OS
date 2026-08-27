@@ -37,6 +37,7 @@ jobs:
           make linux-download-test
           make linux-shared-api-test
           make linux-input-test
+          make linux-package-test
           make linux-release-test
 
       - name: Configure and build Linux

@@ -340,7 +340,11 @@ for _a in $(busybox --list); do
 done
 
 # ── App platform: writable library, immutable helpers, and keymap ─────────────
-mkdir -p /fifi-data/apps /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
+# Persistent user storage must not redirect boot-time root ownership changes.
+[ ! -L /fifi-data/apps ] || rm -f /fifi-data/apps
+[ ! -L /fifi-data/app-trust ] || rm -f /fifi-data/app-trust
+mkdir -p /fifi-data/apps /fifi-data/app-trust \
+         /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
 # The browser chooser and its verified downloader need no administrative
 # access. Migrate older root-owned browser files before launching it as fifi.
 /bin/sh /usr/share/fifi/migrate-browser-storage.sh
@@ -360,6 +364,8 @@ if [ ! -e /fifi-data/.apps-owned-by-fifi ]; then
 fi
 chown 1000:1000 /fifi-data/apps
 chmod 0700 /fifi-data/apps
+chown 1000:1000 /fifi-data/app-trust
+chmod 0700 /fifi-data/app-trust
 if [ ! -e /fifi-data/fifi-desktop.conf ] &&
    [ ! -L /fifi-data/fifi-desktop.conf ]; then
     : > /fifi-data/fifi-desktop.conf

@@ -1,0 +1,152 @@
+#!/bin/sh
+# FiFi native application SDK helper: scaffold and sign version-1 packages.
+set -eu
+umask 077
+SDK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -f "$SDK_DIR/../fifi/shared/app_ui.h" ]; then
+    HEADER_SOURCE="$SDK_DIR/../fifi/shared"
+else
+    HEADER_SOURCE=/usr/include/fifi
+fi
+
+die() { echo "fifi-sdk: $*" >&2; exit 1; }
+valid_id() { printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'; }
+valid_version() { printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$'; }
+
+case "${1:-help}" in
+new)
+    [ "$#" = 4 ] || die "usage: fifi-sdk new <directory> <app-id> <display-name>"
+    directory="$2"; id="$3"; name="$4"
+    valid_id "$id" || die "invalid app id"
+    printf '%s\n' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$' ||
+        die "invalid display name"
+    [ ! -e "$directory" ] || die "target already exists: $directory"
+    [ -f "$HEADER_SOURCE/app_ui.h" ] || die "FiFi SDK headers are unavailable"
+    mkdir -p "$directory/include/fifi"
+    cp "$HEADER_SOURCE/ipc.h" "$HEADER_SOURCE/app_ipc.h" \
+       "$HEADER_SOURCE/app_ui.h" "$HEADER_SOURCE/theme.h" \
+       "$directory/include/fifi/"
+    cat > "$directory/main.c" <<EOF
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fifi/app_ipc.h>
+#include <fifi/app_ui.h>
+
+enum { WIDTH = 640, HEIGHT = 400 };
+
+static int read_exact(int fd, void *buffer, size_t length) {
+    uint8_t *bytes = buffer;
+    while (length) {
+        ssize_t count = read(fd, bytes, length);
+        if (count <= 0) return 0;
+        bytes += count;
+        length -= (size_t)count;
+    }
+    return 1;
+}
+
+int main(void) {
+    uint32_t *pixels = calloc((size_t)WIDTH * HEIGHT, sizeof(*pixels));
+    if (!pixels) return 1;
+    fifi_ui_canvas_t canvas = { pixels, WIDTH, HEIGHT };
+    fifi_ui_fill(canvas, 0, 0, WIDTH, HEIGHT, 0x00121820u);
+    fifi_ui_fill(canvas, 24, 24, WIDTH - 48, HEIGHT - 48, 0x001a2432u);
+    fifi_ui_border(canvas, 24, 24, WIDTH - 48, HEIGHT - 48, 0x00409cffu);
+
+    int compositor = fifi_app_ipc_connect(WIDTH, HEIGHT, "$name");
+    if (compositor < 0) { free(pixels); return 2; }
+    if (!fifi_app_ipc_send_frame(compositor, WIDTH, HEIGHT, pixels)) {
+        close(compositor); free(pixels); return 3;
+    }
+    for (;;) {
+        uint32_t header[2];
+        if (!read_exact(compositor, header, sizeof(header))) break;
+        if (header[1] > 1024u * 1024u) break;
+        uint8_t *payload = header[1] ? malloc(header[1]) : NULL;
+        if (header[1] && (!payload || !read_exact(compositor, payload, header[1]))) {
+            free(payload); break;
+        }
+        int quit = header[0] == IPC_INPUT_KEY && header[1] &&
+                   (payload[0] == 0x11u || payload[0] == 0x1bu);
+        if (header[0] == IPC_INVALIDATE)
+            fifi_app_ipc_send_frame(compositor, WIDTH, HEIGHT, pixels);
+        free(payload);
+        if (quit) break;
+    }
+    fifi_app_ipc_send(compositor, IPC_APP_CLOSE, NULL, 0);
+    close(compositor);
+    free(pixels);
+    return 0;
+}
+EOF
+    cat > "$directory/Makefile" <<EOF
+CC ?= gcc
+FIFI_SDK_INCLUDE ?= include
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra
+
+$id: main.c
+	\$(CC) \$(CFLAGS) -I\$(FIFI_SDK_INCLUDE) -o \$@ main.c
+
+clean:
+	rm -f $id
+EOF
+    cat > "$directory/README.md" <<EOF
+# $name
+
+Build with \`make\`, then package with:
+
+\`fifi-sdk pack ./$id $id "$name" 0.1.0 <publisher> <private-key.pem> $id-0.1.0.fifi\`
+
+Only the public key is added to FiFi OS with \`fifi-pkg trust\`. Never distribute
+or install the private signing key.
+EOF
+    echo "created FiFi app project: $directory"
+    ;;
+pack)
+    [ "$#" = 8 ] || die "usage: fifi-sdk pack <binary> <app-id> <display-name> <version> <publisher> <private-key.pem> <output.fifi>"
+    binary="$2"; id="$3"; name="$4"; version="$5"; publisher="$6"; key="$7"; output="$8"
+    [ -f "$binary" ] && [ ! -L "$binary" ] || die "binary must be a regular file"
+    [ -f "$key" ] && [ ! -L "$key" ] || die "private key must be a regular file"
+    valid_id "$id" || die "invalid app id"
+    valid_id "$publisher" || die "invalid publisher id"
+    valid_version "$version" || die "invalid version"
+    printf '%s\n' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$' ||
+        die "invalid display name"
+    [ "$(LC_ALL=C openssl pkey -in "$key" -text -noout 2>/dev/null |
+        sed -n '1p')" = "ED25519 Private-Key:" ] ||
+        die "private key must be Ed25519"
+    work="$(mktemp -d "${TMPDIR:-/tmp}/fifi-sdk.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    cp "$binary" "$work/payload"
+    chmod 0700 "$work/payload"
+    payload_sha="$(sha256sum "$work/payload" | awk '{print $1}')"
+    icon_sha=none
+    if [ -n "${FIFI_SDK_ICON:-}" ]; then
+        [ -f "$FIFI_SDK_ICON" ] && [ ! -L "$FIFI_SDK_ICON" ] || die "icon must be a regular file"
+        cp "$FIFI_SDK_ICON" "$work/icon.png"
+        icon_sha="$(sha256sum "$work/icon.png" | awk '{print $1}')"
+    fi
+    {
+        echo 'format=1'
+        printf 'id=%s\nname=%s\nversion=%s\narch=x86_64\npublisher=%s\n' \
+            "$id" "$name" "$version" "$publisher"
+        printf 'payload_sha256=%s\nicon_sha256=%s\n' "$payload_sha" "$icon_sha"
+    } > "$work/manifest"
+    openssl pkeyutl -sign -rawin -inkey "$key" \
+        -in "$work/manifest" -out "$work/manifest.sig"
+    case "$output" in /*) output_path="$output" ;; *) output_path="$PWD/$output" ;; esac
+    [ ! -L "$output_path" ] || die "output package may not be a symlink"
+    if [ -f "$work/icon.png" ]; then
+        (cd "$work" && tar -czf "$output_path" manifest manifest.sig payload icon.png)
+    else
+        (cd "$work" && tar -czf "$output_path" manifest manifest.sig payload)
+    fi
+    echo "created signed FiFi package: $output_path"
+    ;;
+help|-h|--help)
+    echo "usage: fifi-sdk {new|pack} ..."
+    ;;
+*) die "unknown command: $1" ;;
+esac

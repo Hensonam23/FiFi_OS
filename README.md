@@ -117,11 +117,15 @@ update usb             # offline update from a plugged-in FiFi USB
 fifi update            # check app and OS updates without changing anything
 fifi upgrade           # apply app and OS updates together
 fifi version           # show the installed OS version
+fifi pkg list          # list signed native FiFi packages
 ```
 
 - **Apps** come from the catalog embedded in the signed OS image. GitHub and
   GitLab SHA-256 metadata is checked before an AppImage is installed; offline
   USB bundles carry matching hash sidecars.
+- **Native FiFi packages** use a strict signed manifest plus a verified payload
+  hash. Publisher keys are added explicitly with `fifi pkg trust`; installation
+  stays unprivileged and packages appear in the App Store's Installed view.
 - **AI models** are checked against their Hugging Face Git LFS SHA-256 object
   IDs before activation.
 - **The OS** downloads a matching kernel, initramfs, and Ed25519-signed manifest from GitHub Releases. The signature and both SHA-256 hashes must pass before the inactive A/B slot is written. Boot selection changes only after the complete pair is durable.
@@ -154,6 +158,7 @@ requirement for updating an existing installation.
 
 ```sh
 make linux-update-test    # simulated install, corruption, no-op, and rollback tests
+make linux-package-test   # native package signatures, hashes, trust, install, SDK
 make linux-release-test   # publisher integrity and no-mutation preflight tests
 make linux-test-update    # real kernel + test-channel initramfs + release package
 make linux-test-usb       # also produce the hardware-test ISO
@@ -343,7 +348,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [x] Use standard libinput device handling with duplicate touchpad interfaces excluded
   - [x] Add independent, live mouse and touchpad speed controls
   - [x] Re-test the laptop and tune acceleration/smoothing from hardware feedback
-- [ ] App framework/SDK and a verifying package manager
+- [x] App framework/SDK and a verifying package manager ([developer guide](docs/NATIVE_APP_SDK.md))
 - [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
 - [x] Pointer-constraints and relative-pointer protocols (required for FPS mouselook)
 - [ ] Ship Desktop/Laptop v1.0, the first real release (checklist below)

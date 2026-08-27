@@ -35,6 +35,18 @@ trap 'rm -rf "$STAGE"' EXIT
 
 cp -a "$ROOT_DIR/." "$STAGE/"
 
+# Native application SDK: the same versioned headers used by the built-in apps,
+# plus the scaffold/package helper. Private publisher keys are never bundled.
+mkdir -p "$STAGE/usr/include/fifi" "$STAGE/usr/bin"
+cp "$REPO_ROOT/fifi/shared/ipc.h" \
+   "$REPO_ROOT/fifi/shared/app_ipc.h" \
+   "$REPO_ROOT/fifi/shared/app_ui.h" \
+   "$REPO_ROOT/fifi/shared/theme.h" \
+   "$STAGE/usr/include/fifi/"
+cp "$REPO_ROOT/sdk/fifi-sdk" "$STAGE/usr/bin/fifi-sdk"
+chmod 0755 "$STAGE/usr/bin/fifi-sdk" "$STAGE/bin/fifi-pkg"
+echo "[initramfs] native app SDK and signed package manager bundled"
+
 # Identify the exact image and its update channel. Test-channel builds keep
 # following test releases after installation; stable builds follow normal
 # releases. CI may pass FIFI_BUILD_ID explicitly, otherwise use the Git commit.
