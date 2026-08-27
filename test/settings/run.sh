@@ -9,9 +9,12 @@ SETTINGS="$ROOT/fifi/apps/settings/settings.c"
 gcc -std=gnu11 -O2 -I"$ROOT/fifi/platform/linux/vendor" \
     "$ROOT/test/settings/scan_settings.c" -lm -o "$TMP/scan-settings"
 gcc -std=gnu11 -O2 "$ROOT/test/settings/scan_wifi.c" -o "$TMP/scan-wifi"
+gcc -std=c11 -O2 -Wall -Wextra -Werror \
+    "$ROOT/test/settings/wifi_scan_contract.c" -o "$TMP/wifi-scan-contract"
 "$TMP/scan-settings"
 "$TMP/scan-wifi"
-echo "[settings-test] both Wi-Fi views parse WPA2, WPA3, open, and duplicate networks"
+"$TMP/wifi-scan-contract"
+echo "[settings-test] both Wi-Fi views parse manager and direct-kernel scan formats"
 
 for action in ACCENT WALL WALLFIT PANEL GLASS SHADOW DOCK STATUS DESKINFO \
               AUTOHIDE ALIGN CLOCK TBSIZE RADIUS FONT_FAM FONT_SZ; do
@@ -27,11 +30,19 @@ grep -Fq 'FIFI_INPUT_KEY_MOUSE_SPEED' "$SETTINGS"
 grep -Fq 'FIFI_INPUT_KEY_TOUCHPAD_SPEED' "$SETTINGS"
 echo "[settings-test] every interactive Settings control has rendering and action handling"
 grep -Fq 'g_pers_scroll -= wheel * 48' "$SETTINGS"
+grep -Fq 'g_font_dd_scroll -= wheel * 5' "$SETTINGS"
+grep -Fq 'ttf_draw(fb, path, nm' "$SETTINGS"
 echo "[settings-test] overflowing Personalize controls scroll into a clickable view"
 
 grep -Fq 'wpa_command(interface, "scan"' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'wpa_command(interface, "scan_results"' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'capture_command("/usr/bin/iw", direct' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'wait_command("/usr/bin/rfkill", unblock)' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq '/fifi-data/wifi-scan.log' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'fifi-wifi-ctl saved-connect "$WIFI_IF"' "$ROOT/initramfs/root/init"
 ! grep -Fq '/usr/lib/iwd/iwd' "$ROOT/initramfs/root/init"

@@ -15,5 +15,13 @@ int main(void) {
         strcmp(g_nets[0].security, "WPA2")) return 2;
     if (strcmp(g_nets[1].security, "WPA3")) return 3;
     if (strcmp(g_nets[2].security, "Open")) return 4;
+    const char raw[] =
+        "BSS 00:11:22:33:44:55(on wlan0)\n"
+        "\tsignal: -38.00 dBm\n\tRSN:\n\tSSID: Kernel WPA\n"
+        "BSS 00:11:22:33:44:66(on wlan0)\n"
+        "\tsignal: -55.00 dBm\n\tSSID: Kernel Open\n";
+    parse_scan(raw);
+    if (g_net_count != 2 || strcmp(g_nets[0].security, "WPA2") ||
+        strcmp(g_nets[1].security, "Open")) return 5;
     return 0;
 }

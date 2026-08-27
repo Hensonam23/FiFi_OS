@@ -116,6 +116,13 @@ static FILE *open_public_status(const char *path) {
     return fdopen(fd, "w");
 }
 
+static void record_scan(const char *text) {
+    FILE *log = open_public_status("/fifi-data/wifi-scan.log");
+    if (!log) return;
+    fputs(text && text[0] ? text : "scan returned no output\n", log);
+    fclose(log);
+}
+
 static int wpa_command(const char *interface, const char *command,
                        char *output, size_t capacity) {
     char *const args[] = {"wpa_cli", "-i", (char *)interface,
@@ -127,6 +134,12 @@ static int supplicant_ready(const char *interface) {
     char output[64] = "";
     return wpa_command(interface, "ping", output, sizeof(output)) == 0 &&
            strstr(output, "PONG") != NULL;
+}
+
+static int supplicant_connected(const char *interface) {
+    char output[1024] = "";
+    return wpa_command(interface, "status", output, sizeof(output)) == 0 &&
+           strstr(output, "wpa_state=COMPLETED") != NULL;
 }
 
 static int stop_supplicant(const char *interface) {
@@ -165,6 +178,8 @@ static int ensure_scan_supplicant(const char *interface) {
 }
 
 static int scan_wifi(const char *interface) {
+    char *const unblock[] = {"rfkill", "unblock", "wifi", NULL};
+    (void)wait_command("/usr/bin/rfkill", unblock);
     char *const up[] = {"ip", "link", "set", (char *)interface, "up", NULL};
     if (wait_command("/bin/ip", up) != 0) return 1;
     if (ensure_scan_supplicant(interface) != 0) {
@@ -182,11 +197,38 @@ static int scan_wifi(const char *interface) {
         output[0] = '\0';
         if (wpa_command(interface, "scan_results", output, sizeof(output)) == 0 &&
             strchr(output, '\n') && strchr(strchr(output, '\n') + 1, '\n')) {
+            record_scan(output);
             fputs(output, stdout);
             return 0;
         }
     }
-    fprintf(stderr, "fifi-wifi-ctl: scan completed without visible networks\n");
+    if (!supplicant_connected(interface)) {
+        (void)stop_supplicant(interface);
+        usleep(300000);
+        char *const direct[] = {"iw", "dev", (char *)interface, "scan", NULL};
+        output[0] = '\0';
+        int result = capture_command("/usr/bin/iw", direct, output, sizeof(output));
+        if (result == 0 && output[0]) {
+            record_scan(output);
+            fputs(output, stdout);
+            return 0;
+        }
+        char rfkill[2048] = "";
+        char *const radio_state[] = {"rfkill", "list", "wifi", NULL};
+        (void)capture_command("/usr/bin/rfkill", radio_state,
+                              rfkill, sizeof(rfkill));
+        char diagnostic[256];
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "fifi-wifi-ctl: radio %s returned zero networks; soft-blocked=%s hard-blocked=%s\n",
+                 interface,
+                 strstr(rfkill, "Soft blocked: yes") ? "yes" : "no",
+                 strstr(rfkill, "Hard blocked: yes") ? "yes" : "no");
+        record_scan(diagnostic);
+        fputs(diagnostic, stderr);
+        return result == 0 ? 1 : result;
+    }
+    record_scan("fifi-wifi-ctl: connected radio returned no scan results\n");
+    fprintf(stderr, "fifi-wifi-ctl: connected radio returned no scan results\n");
     return 1;
 }
 

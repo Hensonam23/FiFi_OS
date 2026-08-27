@@ -41,6 +41,7 @@ mkdir -p "$STAGE/usr/include/fifi" "$STAGE/usr/bin"
 cp "$REPO_ROOT/fifi/shared/ipc.h" \
    "$REPO_ROOT/fifi/shared/app_ipc.h" \
    "$REPO_ROOT/fifi/shared/app_ui.h" \
+   "$REPO_ROOT/fifi/shared/wifi_scan.h" \
    "$REPO_ROOT/fifi/shared/theme.h" \
    "$STAGE/usr/include/fifi/"
 cp "$REPO_ROOT/sdk/fifi-sdk" "$STAGE/usr/bin/fifi-sdk"
@@ -993,6 +994,24 @@ if [ -x "$IW_BIN" ]; then
         link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
         [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
     done
+fi
+
+# Clear firmware/previous-OS soft blocks before bringing the radio up. Hardware
+# airplane-mode switches remain authoritative and cannot be overridden here.
+RFKILL_BIN="$(command -v rfkill 2>/dev/null || true)"
+if [ -x "$RFKILL_BIN" ]; then
+    cp "$RFKILL_BIN" "$STAGE/usr/bin/rfkill"
+    chmod +x "$STAGE/usr/bin/rfkill"
+    ldd "$RFKILL_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" |
+        sort -u | while read -r lib; do
+            real=$(realpath "$lib" 2>/dev/null) || continue
+            [ -f "$real" ] || continue
+            dest="$STAGE/usr/lib/$(basename "$real")"
+            [ -f "$dest" ] || cp "$real" "$dest"
+        done
+else
+    echo "[initramfs] ERROR: rfkill is required for reliable Wi-Fi startup" >&2
+    exit 1
 fi
 
 # Intel WiFi firmware (latest versions of AX200/AX201/AX210/AX211 families)

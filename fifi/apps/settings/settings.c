@@ -50,6 +50,7 @@
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
 #include "../../shared/app_ui.h"
+#include "../../shared/wifi_scan.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W       760
@@ -653,7 +654,7 @@ static void fmt_bytes(uint64_t bt, char *b, int n) {
 
 /* ── Wi-Fi (scan / connect logic, ported from fifi-wifi) ─────────────────── */
 #define MAX_NETS 32
-typedef struct { char ssid[64]; int signal; char security[16]; bool saved; } NetEntry;
+typedef fifi_wifi_network_t NetEntry;
 static NetEntry g_nets[MAX_NETS];
 static int  g_net_count = 0;
 static int  g_sel = 0, g_wscroll = 0, g_list_top = 0;
@@ -678,6 +679,7 @@ static void find_wifi_if(void) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
+        if (!strncmp(e->d_name, "p2p-", 4)) continue;
         if (strlen(e->d_name) >= sizeof(g_wif)) continue;
         char wp[320];
         snprintf(wp, sizeof wp, "/sys/class/net/%s/wireless", e->d_name);
@@ -686,12 +688,6 @@ static void find_wifi_if(void) {
         if (access(wp, F_OK) == 0) { snprintf(g_wif, sizeof g_wif, "%s", e->d_name); break; }
     }
     closedir(d);
-}
-
-static int find_net(const char *ssid) {
-    for (int i = 0; i < g_net_count; i++)
-        if (strcmp(g_nets[i].ssid, ssid) == 0) return i;
-    return -1;
 }
 
 static bool wifi_is_saved(const char *ssid) {
@@ -707,34 +703,9 @@ static bool wifi_is_saved(const char *ssid) {
 }
 
 static void parse_scan(const char *buf) {
-    g_net_count = 0;
-    char *copy = strdup(buf ? buf : "");
-    if (!copy) return;
-    char *save = NULL;
-    for (char *line = strtok_r(copy, "\r\n", &save); line;
-         line = strtok_r(NULL, "\r\n", &save)) {
-        char *fields[5] = { line, NULL, NULL, NULL, NULL };
-        char *cursor = line;
-        int field = 1;
-        while (field < 5 && (cursor = strchr(cursor, '\t')) != NULL) {
-            *cursor++ = '\0'; fields[field++] = cursor;
-        }
-        if (field != 5 || !fields[4][0]) continue;
-        int sig = atoi(fields[2]);
-        const char *flags = fields[3];
-        const char *sec = strstr(flags, "SAE") ? "WPA3" :
-                          (strstr(flags, "WPA") || strstr(flags, "RSN")) ? "WPA2" : "Open";
-        int ex = find_net(fields[4]);
-        if (ex >= 0) { if (sig > g_nets[ex].signal) g_nets[ex].signal = sig; }
-        else if (g_net_count < MAX_NETS) {
-            NetEntry *ne = &g_nets[g_net_count++];
-            snprintf(ne->ssid, sizeof ne->ssid, "%s", fields[4]);
-            ne->signal = sig;
-            snprintf(ne->security, sizeof ne->security, "%s", sec);
-            ne->saved = wifi_is_saved(ne->ssid);
-        }
-    }
-    free(copy);
+    g_net_count = fifi_wifi_parse_scan(buf, g_nets, MAX_NETS);
+    for (int i = 0; i < g_net_count; i++)
+        g_nets[i].saved = wifi_is_saved(g_nets[i].ssid);
 }
 
 static void wifi_scan_start(void) {
@@ -1643,7 +1614,10 @@ int main(int argc, char **argv) {
                         } else if (mx >= SIDEBAR_W) {
                             /* Content-area input, per active tab */
                             if (g_tab == TAB_PERS) {
-                                if (wheel != 0 && g_font_dd == 1) { g_font_dd_scroll -= wheel; dirty = true; }
+                                if (wheel != 0 && g_font_dd == 1) {
+                                    g_font_dd_scroll -= wheel * 5;
+                                    dirty = true;
+                                }
                                 else if (wheel != 0 && g_font_dd == 0) {
                                     g_pers_scroll -= wheel * 48;
                                     if (g_pers_scroll < 0) g_pers_scroll = 0;

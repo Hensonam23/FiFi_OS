@@ -24,7 +24,8 @@ new)
     [ -f "$HEADER_SOURCE/app_ui.h" ] || die "FiFi SDK headers are unavailable"
     mkdir -p "$directory/include/fifi"
     cp "$HEADER_SOURCE/ipc.h" "$HEADER_SOURCE/app_ipc.h" \
-       "$HEADER_SOURCE/app_ui.h" "$HEADER_SOURCE/theme.h" \
+       "$HEADER_SOURCE/app_ui.h" "$HEADER_SOURCE/wifi_scan.h" \
+       "$HEADER_SOURCE/theme.h" \
        "$directory/include/fifi/"
     cat > "$directory/main.c" <<EOF
 #include <stdint.h>
