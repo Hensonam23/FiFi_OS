@@ -85,14 +85,18 @@ int main(int argc, char **argv) {
     if (argc != 4) return 1;
     _Static_assert(FIFI_APP_UI_API_VERSION == 1u, "unexpected UI version");
 
-    uint8_t font_file[32 + 256 * 8] = {0};
+    uint8_t font_file[32 + 256 * 8 + 3] = {0};
     put_le32(font_file, 0x864ab572u);
     put_le32(font_file + 8, 32);
+    put_le32(font_file + 12, 1);
     put_le32(font_file + 16, 256);
     put_le32(font_file + 20, 8);
     put_le32(font_file + 24, 8);
     put_le32(font_file + 28, 8);
     memset(font_file + 32 + 'A' * 8, 0x81, 8);
+    font_file[32 + 256 * 8] = 0xc2;
+    font_file[33 + 256 * 8] = 0xa3;
+    font_file[34 + 256 * 8] = 0xff;
     FILE *file = fopen(argv[1], "wb");
     if (!file || fwrite(font_file, 1, sizeof(font_file), file) != sizeof(font_file) ||
         fclose(file) != 0) return 2;
@@ -100,6 +104,8 @@ int main(int argc, char **argv) {
     fifi_ui_font_t font = {0};
     if (!fifi_ui_font_load_psf2(&font, argv[1]) || font.advance != 9 ||
         font.height != 8 || font.glyph_count != 256) return 3;
+    if (font.mapping_count != 1 || fifi_ui_font_glyph(&font, 0x00a3) != 0 ||
+        fifi_ui_font_glyph(&font, '?') != UINT16_MAX) return 11;
 
     uint32_t pixels[6 * 4] = {0};
     fifi_ui_canvas_t canvas = { pixels, 6, 4 };
@@ -149,6 +155,10 @@ grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/wifi/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/security/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/imageviewer/Makefile"
 grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/filebrowser/Makefile"
+for app in aichat appstore editor gamepad settings terminal; do
+    grep -Fq '#include "../../shared/app_ui.h"' "$ROOT/fifi/apps/$app/$app.c"
+    grep -Fq '../../shared/app_ui.h' "$ROOT/fifi/apps/$app/Makefile"
+done
 if grep -Eq 'static (uint32_t psf2_u32|bool load_font.+open\()' \
     "$ROOT/fifi/apps/browser/browser.c" "$ROOT/fifi/apps/installer/installer.c" \
     "$ROOT/fifi/apps/calc/calc.c" "$ROOT/fifi/apps/sysmon/sysmon.c" \
@@ -157,6 +167,13 @@ if grep -Eq 'static (uint32_t psf2_u32|bool load_font.+open\()' \
     "$ROOT/fifi/apps/imageviewer/imageviewer.c" \
     "$ROOT/fifi/apps/filebrowser/filebrowser.c"; then
     echo "private bitmap-font loader remains in a migrated native app" >&2
+    exit 1
+fi
+if grep -Eq 'PSF1_MAGIC|Psf1Hdr|free\(g_font\.(data|cps|gis)\)' \
+    "$ROOT/fifi/apps/aichat/aichat.c" "$ROOT/fifi/apps/appstore/appstore.c" \
+    "$ROOT/fifi/apps/editor/editor.c" "$ROOT/fifi/apps/settings/settings.c" \
+    "$ROOT/fifi/apps/terminal/terminal.c"; then
+    echo "private bitmap-font implementation remains in a migrated native app" >&2
     exit 1
 fi
 if grep -Eq 'PSF1_MAGIC|Psf1Hdr' \

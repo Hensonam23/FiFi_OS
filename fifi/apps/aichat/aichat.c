@@ -31,6 +31,7 @@
 
 /* ── IPC protocol (subset shared with the other native apps) ─────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* ── Window geometry ─────────────────────────────────────────────────────── */
 #define DEF_WIN_W  780
@@ -62,108 +63,15 @@ static const char *FONT_PATHS[3] = {
 };
 static int g_font_idx = 1;
 
-typedef struct {
-    uint8_t  *data;
-    int       n, sz, w, h;
-    uint32_t *cps;
-    uint16_t *gis;
-    int       nc;
-} Font;
-
+typedef fifi_ui_font_t Font;
 static Font g_font;
 
-static bool font_load(Font *f, const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 4) { close(fd); return false; }
-    uint8_t *raw = malloc((size_t)st.st_size);
-    if (!raw) { close(fd); return false; }
-    if (read(fd, raw, (size_t)st.st_size) < st.st_size) { free(raw); close(fd); return false; }
-    close(fd);
-
-    free(f->data); free(f->cps); free(f->gis);
-    memset(f, 0, sizeof(*f));
-
-    if (st.st_size >= 32 && raw[0]==0x72 && raw[1]==0xb5 && raw[2]==0x4a && raw[3]==0x86) {
-        uint32_t hdr_size, flags, length, glyph_size, height, width;
-        memcpy(&hdr_size,   raw+8,  4);
-        memcpy(&flags,      raw+12, 4);
-        memcpy(&length,     raw+16, 4);
-        memcpy(&glyph_size, raw+20, 4);
-        memcpy(&height,     raw+24, 4);
-        memcpy(&width,      raw+28, 4);
-        /* Reject malformed headers whose glyph table exceeds the file */
-        if (length == 0 || glyph_size == 0 || hdr_size < 32 ||
-            (uint64_t)hdr_size + (uint64_t)length * glyph_size > (uint64_t)st.st_size) {
-            free(raw); return false;
-        }
-        f->n = (int)length; f->sz = (int)glyph_size; f->w = (int)width; f->h = (int)height;
-        f->data = malloc((size_t)length * glyph_size);
-        if (!f->data) { free(raw); return false; }
-        memcpy(f->data, raw + hdr_size, (size_t)length * glyph_size);
-
-        if ((flags & 1) && hdr_size + length * glyph_size < (uint32_t)st.st_size) {
-            size_t tpos = hdr_size + length * glyph_size;
-            int cap = 2048, cnt = 0;
-            uint32_t *tcps = malloc((size_t)cap * sizeof(uint32_t));
-            uint16_t *tgis = malloc((size_t)cap * sizeof(uint16_t));
-            if (!tcps || !tgis) { free(tcps); free(tgis); free(raw); return false; }
-            uint16_t gi = 0;
-            while (tpos < (size_t)st.st_size && gi < (uint16_t)length) {
-                uint8_t b = raw[tpos];
-                if (b == 0xFF) { gi++; tpos++; continue; }
-                if (b == 0xFE) { tpos++; continue; }
-                uint32_t cp = 0; size_t seq = 1;
-                if      (b < 0x80) { cp = b; seq = 1; }
-                else if (b < 0xE0) { cp = b & 0x1F; seq = 2; }
-                else if (b < 0xF0) { cp = b & 0x0F; seq = 3; }
-                else               { cp = b & 0x07; seq = 4; }
-                for (size_t k = 1; k < seq && tpos+k < (size_t)st.st_size; k++)
-                    cp = (cp << 6) | (raw[tpos+k] & 0x3F);
-                tpos += seq;
-                if (cnt >= cap) {
-                    cap *= 2;
-                    uint32_t *ncps = realloc(tcps, (size_t)cap * sizeof(uint32_t));
-                    uint16_t *ngis = realloc(tgis, (size_t)cap * sizeof(uint16_t));
-                    if (ncps) tcps = ncps;
-                    if (ngis) tgis = ngis;
-                    if (!ncps || !ngis) { free(tcps); free(tgis); tcps = NULL; tgis = NULL; cnt = 0; break; }
-                }
-                tcps[cnt] = cp; tgis[cnt] = gi; cnt++;
-            }
-            for (int i = 1; i < cnt; i++) {
-                uint32_t kcp = tcps[i]; uint16_t kgi = tgis[i]; int j = i - 1;
-                while (j >= 0 && tcps[j] > kcp) { tcps[j+1]=tcps[j]; tgis[j+1]=tgis[j]; j--; }
-                tcps[j+1] = kcp; tgis[j+1] = kgi;
-            }
-            f->cps = tcps; f->gis = tgis; f->nc = cnt;
-        }
-    } else if (st.st_size >= 4 && raw[0]==0x36 && raw[1]==0x04) {
-        uint8_t mode = raw[2], charsize = raw[3];
-        f->n = (mode & 1) ? 512 : 256; f->sz = charsize; f->w = 8; f->h = charsize;
-        if (f->sz == 0 || 4 + (size_t)f->n * f->sz > (size_t)st.st_size) { free(raw); return false; }
-        f->data = malloc((size_t)f->n * f->sz);
-        if (!f->data) { free(raw); return false; }
-        memcpy(f->data, raw + 4, (size_t)f->n * f->sz);
-    } else { free(raw); return false; }
-
-    free(raw);
-    return true;
+static bool font_load(Font *font, const char *path) {
+    return fifi_ui_font_load(font, path);
 }
 
-static uint16_t font_glyph(const Font *f, uint32_t cp) {
-    if (f->nc > 0) {
-        int lo = 0, hi = f->nc - 1;
-        while (lo <= hi) {
-            int mid = (lo + hi) >> 1;
-            if (f->cps[mid] == cp) return f->gis[mid];
-            if (f->cps[mid]  < cp) lo = mid + 1; else hi = mid - 1;
-        }
-        return 0xFFFF;
-    }
-    if (cp < (uint32_t)f->n) return (uint16_t)cp;
-    return 0xFFFF;
+static uint16_t font_glyph(const Font *font, uint32_t codepoint) {
+    return fifi_ui_font_glyph(font, codepoint);
 }
 
 /* ── Colors ──────────────────────────────────────────────────────────────── */
@@ -191,20 +99,14 @@ static uint32_t  g_tick   = 0;
 
 /* ── FB helpers ──────────────────────────────────────────────────────────── */
 static inline void fb_set(int x, int y, uint32_t c) {
-    if ((unsigned)x < (unsigned)g_win_w && (unsigned)y < (unsigned)g_win_h)
-        g_fb[y * g_win_w + x] = c;
+    fifi_ui_pixel((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, c);
 }
 static void fb_fill(int x, int y, int w, int h, uint32_t c) {
-    int x1 = x + w, y1 = y + h;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x1 > g_win_w) x1 = g_win_w;
-    if (y1 > g_win_h) y1 = g_win_h;
-    for (int r = y; r < y1; r++)
-        for (int cc = x; cc < x1; cc++)
-            g_fb[r * g_win_w + cc] = c;
+    fifi_ui_fill((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, w, h, c);
 }
-static void fb_hline(int x, int y, int w, uint32_t c) { fb_fill(x, y, w, 1, c); }
+static void fb_hline(int x, int y, int w, uint32_t c) {
+    fifi_ui_hline((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, w, c);
+}
 
 /* Rounded-corner filled rect (subtle 2px radius) for chat bubbles. */
 static void fb_round_rect(int x, int y, int w, int h, uint32_t c) {
@@ -218,11 +120,11 @@ static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg, bool
     const Font *f = &g_font;
     uint16_t gi = font_glyph(f, cp);
     if (gi == 0xFFFF) { gi = font_glyph(f, '?'); if (gi == 0xFFFF) gi = font_glyph(f, ' '); }
-    if (gi == 0xFFFF || gi >= (uint16_t)f->n) gi = 0;
-    const uint8_t *bits = f->data + (size_t)gi * f->sz;
-    int bpr = (f->w + 7) / 8;
-    for (int row = 0; row < f->h; row++) {
-        for (int col = 0; col < f->w; col++) {
+    if (gi == 0xFFFF || gi >= f->glyph_count) gi = 0;
+    const uint8_t *bits = f->glyphs + (size_t)gi * f->glyph_size;
+    int bpr = f->bytes_per_line;
+    for (int row = 0; row < f->height; row++) {
+        for (int col = 0; col < f->width; col++) {
             int on = bits[row * bpr + col / 8] & (0x80u >> (col & 7));
             if (on) fb_set(px + col, py + row, fg);
             else if (draw_bg) fb_set(px + col, py + row, bg);
@@ -234,7 +136,7 @@ static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg, bool
  * the bitmap font can show (dashes/quotes/… → ASCII) and drawn in one cell.
  * Zero-width codepoints are skipped without advancing. Returns x after last. */
 static int fb_text(int px, int py, const char *s, int len, uint32_t fg) {
-    int cw = g_font.w + 1;
+    int cw = g_font.advance;
     size_t i = 0;
     while ((int)i < len) {
         uint32_t cp = fifi_u8_next(s, &i);
@@ -329,11 +231,11 @@ static int wrap_text(const char *s, int maxc, Line *out, int maxl) {
 }
 
 /* ── Layout metrics ──────────────────────────────────────────────────────── */
-static int lh(void)      { return g_font.h + LINE_GAP; }
+static int lh(void)      { return g_font.height + LINE_GAP; }
 static int chat_top(void){ return HEADER_H + PAD; }
 static int chat_bot(void){ return g_win_h - INPUT_H - PAD; }
 static int bubble_maxc(void) {
-    int cw = g_font.w + 1;
+    int cw = g_font.advance;
     int content_w = g_win_w - 2 * PAD;
     int bw = content_w * 78 / 100 - 2 * BUB_PAD;
     int mc = bw / cw;
@@ -359,7 +261,7 @@ static int content_height(void) {
 
 /* ── Render ──────────────────────────────────────────────────────────────── */
 static void draw_bubble(int y, const Msg *m) {
-    int cw = g_font.w + 1;
+    int cw = g_font.advance;
     int content_w = g_win_w - 2 * PAD;
     int maxc = bubble_maxc();
     int nl = wrap_text(m->text, maxc, g_lines, 512);
@@ -409,7 +311,7 @@ static void render(void) {
     /* accent dot */
     fb_fill(PAD, HEADER_H/2 - 4, 8, 8, COL_ACCENT);
     int hx = PAD + 8 + 8;
-    int hy = (HEADER_H - g_font.h) / 2;
+    int hy = (HEADER_H - g_font.height) / 2;
     hx = fb_str(hx, hy, "FiFi AI", COL_TITLE);
     fb_str(hx + 12, hy, "offline assistant", COL_SUBTITLE);
 
@@ -458,9 +360,9 @@ static void render(void) {
     fb_round_rect(box_x, box_y, box_w, box_h, COL_INPUT_BOX);
     fb_hline(box_x, box_y, box_w, COL_BORDER);
 
-    int cw = g_font.w + 1;
+    int cw = g_font.advance;
     int txt_x = box_x + 8;
-    int txt_y = box_y + (box_h - g_font.h) / 2;
+    int txt_y = box_y + (box_h - g_font.height) / 2;
     int avail_chars = (box_w - 16 - cw) / cw;   /* leave room for cursor */
     if (avail_chars < 1) avail_chars = 1;
 
@@ -871,7 +773,7 @@ int main(void) {
     ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(g_fb);
-    free(g_font.data); free(g_font.cps); free(g_font.gis);
+    fifi_ui_font_destroy(&g_font);
     for (int i = 0; i < g_nmsgs; i++) free(g_msgs[i].text);
     return 0;
 }

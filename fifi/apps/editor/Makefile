@@ -3,7 +3,7 @@ CFLAGS  = -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS = -static -s
 TARGET  = fifi-editor
 
-$(TARGET): editor.c ../../shared/ipc.h ../../shared/app_ipc.h
+$(TARGET): editor.c ../../shared/ipc.h ../../shared/app_ipc.h ../../shared/app_ui.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 	@echo "[editor] built: $@"
 

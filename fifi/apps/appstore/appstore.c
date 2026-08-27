@@ -25,6 +25,7 @@
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 #define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"
 #define APP_UNINSTALLER "/usr/share/fifi/appstore-uninstall.sh"
 #define APP_UPDATE_CHECK "/usr/share/fifi/appstore-update-check.sh"
@@ -67,35 +68,17 @@ static int g_win_w = WIN_W0, g_win_h = WIN_H0;
 #define C_HDR     0x005890c8u   /* section header text */
 #define C_UPDATE  0x00c07820u   /* update-available button (orange) */
 
-/* ── PSF1 font (loaded from compositor fonts) ────────────────────────────── */
-#define PSF1_MAGIC 0x0436u
-typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
-static uint8_t *g_glyph = NULL;
-static int g_glyph_h = 16, g_n_glyphs = 256;
+/* ── Shared bitmap UI ────────────────────────────────────────────────────── */
+static fifi_ui_font_t g_font;
+#define g_glyph_h (g_font.height)
 
 static bool font_load(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    Psf1Hdr h;
-    if (read(fd, &h, sizeof h) != sizeof h || h.magic != PSF1_MAGIC) { close(fd); return false; }
-    g_glyph_h = h.charsize;
-    g_n_glyphs = (h.mode & 1) ? 512 : 256;
-    int total = g_n_glyphs * g_glyph_h;
-    g_glyph = malloc(total);
-    if (!g_glyph) { close(fd); return false; }
-    if (read(fd, g_glyph, total) < total) { free(g_glyph); g_glyph = NULL; close(fd); return false; }
-    close(fd);
-    return true;
+    return fifi_ui_font_load_psf1(&g_font, path);
 }
 static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
-    if (!g_glyph || c < 0 || c >= g_n_glyphs) return;
-    const uint8_t *b = g_glyph + c * g_glyph_h;
-    for (int row = 0; row < g_glyph_h; row++)
-        for (int col = 0; col < 8; col++)
-            if (b[row] & (0x80u >> col)) {
-                int x = px + col, y = py + row;
-                if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H) fb[y*WIN_W+x] = fg;
-            }
+    if (c < 0) return;
+    fifi_ui_glyph((fifi_ui_canvas_t){fb, WIN_W, WIN_H}, &g_font,
+                  px, py, (unsigned char)c, fg, 0);
 }
 static void draw_str(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
     for (; *s; s++, x += 9) { if (x > WIN_W) break; draw_char(fb, (unsigned char)*s, x, y, fg); }
@@ -105,15 +88,15 @@ static void draw_strn(uint32_t *fb, const char *s, int n, int x, int y, uint32_t
 }
 /* 2x-scale text (detail-view app name). */
 static void draw_char2(uint32_t *fb, int c, int px, int py, uint32_t fg) {
-    if (!g_glyph || c < 0 || c >= g_n_glyphs) return;
-    const uint8_t *b = g_glyph + c * g_glyph_h;
+    if (!g_font.glyphs || c < 0 || (uint32_t)c >= g_font.glyph_count) return;
+    const uint8_t *b = g_font.glyphs + (uint32_t)c * g_font.glyph_size;
     for (int row = 0; row < g_glyph_h; row++)
         for (int col = 0; col < 8; col++)
-            if (b[row] & (0x80u >> col))
+            if (b[row * g_font.bytes_per_line] & (0x80u >> col))
                 for (int dy = 0; dy < 2; dy++)
                     for (int dx = 0; dx < 2; dx++) {
-                        int x = px + col*2 + dx, y = py + row*2 + dy;
-                        if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H) fb[y*WIN_W+x] = fg;
+                        fifi_ui_pixel((fifi_ui_canvas_t){fb, WIN_W, WIN_H},
+                                      px + col*2 + dx, py + row*2 + dy, fg);
                     }
 }
 static void draw_str2(uint32_t *fb, const char *s, int x, int y, uint32_t fg) {
@@ -139,13 +122,10 @@ static int draw_wrapped(uint32_t *fb, const char *s, int x, int y,
     return y + line * (g_glyph_h + 3);
 }
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t c) {
-    for (int r = y; r < y+h; r++) { if (r < 0 || r >= WIN_H) continue;
-        int a = x < 0 ? 0 : x, b = x+w > WIN_W ? WIN_W : x+w;
-        for (int cc = a; cc < b; cc++) fb[r*WIN_W+cc] = c; }
+    fifi_ui_fill((fifi_ui_canvas_t){fb, WIN_W, WIN_H}, x, y, w, h, c);
 }
 static void hline(uint32_t *fb, int y, int x0, int x1, uint32_t c) {
-    if (y < 0 || y >= WIN_H) return;
-    for (int x = x0; x < x1 && x < WIN_W; x++) if (x >= 0) fb[y*WIN_W+x] = c;
+    fifi_ui_hline((fifi_ui_canvas_t){fb, WIN_W, WIN_H}, x0, y, x1 - x0, c);
 }
 /* Colored-initial placeholder for apps with no icon yet. */
 static void draw_icon_ph(uint32_t *fb, const char *name, int dx, int dy, int dsz) {
@@ -921,7 +901,7 @@ static bool poll_installs(int fd) {
 int main(void) {
     if (!font_load("/fifi-data/fonts/ter16b.psf")) {
         /* blank fallback; reset dims in case font_load died mid-parse */
-        g_glyph = calloc(256*16,1); g_glyph_h = 16; g_n_glyphs = 256;
+        fifi_ui_font_init_blank(&g_font, 256, 8, 16);
     }
     load_catalog();
     rebuild_view();
@@ -1132,6 +1112,6 @@ int main(void) {
     }
 
     send_msg(sock, IPC_APP_CLOSE, NULL, 0);
-    close(sock); free(fb); free(g_glyph);
+    close(sock); free(fb); fifi_ui_font_destroy(&g_font);
     return 0;
 }

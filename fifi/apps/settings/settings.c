@@ -48,6 +48,7 @@
 
 /* ── IPC ─────────────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 #define WIN_W       760
@@ -81,28 +82,13 @@ static int g_win_h = WIN_H;
 /* Accent colour — read from config so the hub matches the user's theme. */
 static uint32_t g_accent = FIFI_THEME_DEFAULT_ACCENT;
 
-/* ── PSF1 font (shared with the other native apps) ───────────────────────── */
-#define PSF1_MAGIC 0x0436u
-typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
-
-static uint8_t *g_glyph   = NULL;
-static int      g_glyph_h = 16;
-static int      g_nglyphs = 256;
+/* ── Shared bitmap UI ────────────────────────────────────────────────────── */
+static fifi_ui_font_t g_font;
+#define g_glyph_h (g_font.height)
 #define CW 9  /* character advance in pixels (8px glyph + 1px gap) */
 
 static bool font_load(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    Psf1Hdr h;
-    if (read(fd, &h, 4) != 4 || h.magic != PSF1_MAGIC) { close(fd); return false; }
-    g_glyph_h = h.charsize;
-    g_nglyphs = (h.mode & 1) ? 512 : 256;
-    int tot = g_nglyphs * g_glyph_h;
-    g_glyph = malloc(tot);
-    if (!g_glyph) { close(fd); return false; }
-    if (read(fd, g_glyph, tot) < tot) { free(g_glyph); g_glyph = NULL; close(fd); return false; }
-    close(fd);
-    return true;
+    return fifi_ui_font_load_psf1(&g_font, path);
 }
 
 /* Decode one UTF-8 sequence at s[*i]; return codepoint, advance *i. The PSF
@@ -142,18 +128,9 @@ static int fold_cp(uint32_t cp) {
 }
 
 static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
-    if (!g_glyph || c < 0 || c >= g_nglyphs) return;
-    const uint8_t *bits = g_glyph + c * g_glyph_h;
-    for (int r = 0; r < g_glyph_h; r++) {
-        uint8_t b = bits[r];
-        for (int col = 0; col < 8; col++) {
-            if (b & (0x80u >> col)) {
-                int x = px + col, y = py + r;
-                if (x >= 0 && x < g_win_w && y >= 0 && y < g_win_h)
-                    fb[y * g_win_w + x] = fg;
-            }
-        }
-    }
+    if (c < 0) return;
+    fifi_ui_glyph((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, &g_font,
+                  px, py, (unsigned char)c, fg, 0);
 }
 
 /* Draw an em/en/figure dash as a centred horizontal bar (the PSF font has no
@@ -191,24 +168,11 @@ static int str_w(const char *s) {
 }
 
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    for (int r = y; r < y + h; r++) {
-        if (r < 0 || r >= g_win_h) continue;
-        int x0 = x < 0 ? 0 : x, x1 = x + w > g_win_w ? g_win_w : x + w;
-        for (int c = x0; c < x1; c++) fb[r * g_win_w + c] = col;
-    }
+    fifi_ui_fill((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, x, y, w, h, col);
 }
 
 static void rect_border(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    for (int i = x; i < x + w; i++) {
-        if (i < 0 || i >= g_win_w) continue;
-        if (y >= 0 && y < g_win_h)             fb[y * g_win_w + i] = col;
-        if (y+h-1 >= 0 && y+h-1 < g_win_h)     fb[(y+h-1) * g_win_w + i] = col;
-    }
-    for (int j = y; j < y + h; j++) {
-        if (j < 0 || j >= g_win_h) continue;
-        if (x >= 0 && x < g_win_w)             fb[j * g_win_w + x] = col;
-        if (x+w-1 >= 0 && x+w-1 < g_win_w)     fb[j * g_win_w + x+w-1] = col;
-    }
+    fifi_ui_border((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, x, y, w, h, col);
 }
 
 /* Section header: title + accent-tinted underline. Returns the y for content. */
@@ -1497,8 +1461,8 @@ int main(int argc, char **argv) {
                  !strcmp(argv[1], "personalization")) g_tab = TAB_PERS;
     }
 
-    font_load("/fifi-data/fonts/ter16b.psf");
-    if (!g_glyph) { g_glyph = calloc(256*16, 1); g_glyph_h = 16; }
+    if (!font_load("/fifi-data/fonts/ter16b.psf"))
+        fifi_ui_font_init_blank(&g_font, 256, 8, 16);
     alsa_init();
     cfg_load();
     font_list_scan();
@@ -1693,6 +1657,6 @@ int main(int argc, char **argv) {
     (void)fifi_app_ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
-    free(g_glyph);
+    fifi_ui_font_destroy(&g_font);
     return 0;
 }

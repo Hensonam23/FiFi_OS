@@ -22,6 +22,7 @@
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* ── Grid limits ─────────────────────────────────────────────────────────── */
 #define MAX_COLS   220
@@ -49,152 +50,16 @@ static const char *FONT_PATHS[3] = {
 };
 static int g_font_idx = 1;  /* default: ter20b (PSF2 + unicode table) */
 
-/* ── Font ────────────────────────────────────────────────────────────────── */
-typedef struct {
-    uint8_t  *data;      /* raw glyph bitmaps */
-    int       n;         /* glyph count */
-    int       sz;        /* bytes per glyph */
-    int       w, h;      /* pixel dimensions */
-    /* Unicode table (PSF2 only) — sorted by codepoint for binary search */
-    uint32_t *cps;       /* codepoints array */
-    uint16_t *gis;       /* glyph indices array */
-    int       nc;        /* entry count */
-} Font;
-
+/* ── Shared Unicode bitmap font ──────────────────────────────────────────── */
+typedef fifi_ui_font_t Font;
 static Font g_font;
 
-static bool font_load(Font *f, const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    struct stat st;
-    fstat(fd, &st);
-    uint8_t *raw = malloc((size_t)st.st_size);
-    if (!raw) { close(fd); return false; }
-    if (read(fd, raw, (size_t)st.st_size) < st.st_size) {
-        free(raw); close(fd); return false;
-    }
-    close(fd);
-
-    free(f->data); free(f->cps); free(f->gis);
-    memset(f, 0, sizeof(*f));
-
-    /* PSF2: magic 0x864ab572 */
-    if (st.st_size >= 32 && raw[0]==0x72 && raw[1]==0xb5 && raw[2]==0x4a && raw[3]==0x86) {
-        uint32_t version, hdr_size, flags, length, glyph_size, height, width;
-        memcpy(&version,    raw+4,  4);
-        memcpy(&hdr_size,   raw+8,  4);
-        memcpy(&flags,      raw+12, 4);
-        memcpy(&length,     raw+16, 4);
-        memcpy(&glyph_size, raw+20, 4);
-        memcpy(&height,     raw+24, 4);
-        memcpy(&width,      raw+28, 4);
-        (void)version;
-
-        /* Validate header fields against the file size (64-bit math: the u32
-         * products can wrap) so a truncated/corrupt font can't OOB-read. */
-        uint64_t gtotal = (uint64_t)length * glyph_size;
-        if (!length || !glyph_size || !width || !height ||
-            hdr_size < 32 || (uint64_t)hdr_size + gtotal > (uint64_t)st.st_size ||
-            (uint64_t)height * ((width + 7) / 8) > glyph_size) {
-            free(raw); return false;
-        }
-
-        f->n  = (int)length;
-        f->sz = (int)glyph_size;
-        f->w  = (int)width;
-        f->h  = (int)height;
-        f->data = malloc((size_t)length * glyph_size);
-        if (!f->data) { free(raw); return false; }
-        memcpy(f->data, raw + hdr_size, (size_t)length * glyph_size);
-
-        /* Parse Unicode table if present */
-        if ((flags & 1) && hdr_size + gtotal < (uint64_t)st.st_size) {
-            size_t tpos = (size_t)(hdr_size + gtotal);
-            /* First pass: count entries */
-            int cap = 2048, cnt = 0;
-            uint32_t *tcps = malloc((size_t)cap * sizeof(uint32_t));
-            uint16_t *tgis = malloc((size_t)cap * sizeof(uint16_t));
-            if (!tcps || !tgis) {
-                free(tcps); free(tgis); free(raw);
-                free(f->data); memset(f, 0, sizeof(*f));
-                return false;
-            }
-
-            uint16_t gi = 0;
-            while (tpos < (size_t)st.st_size && gi < (uint16_t)length) {
-                uint8_t b = raw[tpos];
-                if (b == 0xFF) { gi++; tpos++; continue; }
-                if (b == 0xFE) { tpos++; continue; } /* seq marker — skip, treat next cp normally */
-                /* Decode UTF-8 codepoint */
-                uint32_t cp = 0; size_t seq = 1;
-                if      (b < 0x80) { cp = b; seq = 1; }
-                else if (b < 0xE0) { cp = b & 0x1F; seq = 2; }
-                else if (b < 0xF0) { cp = b & 0x0F; seq = 3; }
-                else               { cp = b & 0x07; seq = 4; }
-                for (size_t k = 1; k < seq && tpos+k < (size_t)st.st_size; k++)
-                    cp = (cp << 6) | (raw[tpos+k] & 0x3F);
-                tpos += seq;
-                if (cnt >= cap) {
-                    cap *= 2;
-                    uint32_t *ncps = realloc(tcps, (size_t)cap * sizeof(uint32_t));
-                    if (ncps) tcps = ncps;
-                    uint16_t *ngis = realloc(tgis, (size_t)cap * sizeof(uint16_t));
-                    if (ngis) tgis = ngis;
-                    /* on failure keep the entries parsed so far */
-                    if (!ncps || !ngis) break;
-                }
-                tcps[cnt] = cp;
-                tgis[cnt] = gi;
-                cnt++;
-            }
-
-            /* Sort by codepoint (insertion sort — small enough) */
-            for (int i = 1; i < cnt; i++) {
-                uint32_t kcp = tcps[i]; uint16_t kgi = tgis[i];
-                int j = i - 1;
-                while (j >= 0 && tcps[j] > kcp) {
-                    tcps[j+1] = tcps[j]; tgis[j+1] = tgis[j]; j--;
-                }
-                tcps[j+1] = kcp; tgis[j+1] = kgi;
-            }
-            f->cps = tcps; f->gis = tgis; f->nc = cnt;
-        }
-    }
-    /* PSF1: magic 0x0436 */
-    else if (st.st_size >= 4 && raw[0]==0x36 && raw[1]==0x04) {
-        uint8_t mode = raw[2], charsize = raw[3];
-        f->n  = (mode & 1) ? 512 : 256;
-        f->sz = charsize;
-        f->w  = 8;
-        f->h  = charsize;
-        if (4 + (int64_t)f->n * f->sz > (int64_t)st.st_size) { free(raw); return false; }
-        f->data = malloc((size_t)f->n * f->sz);
-        if (!f->data) { free(raw); return false; }
-        memcpy(f->data, raw + 4, (size_t)f->n * f->sz);
-        /* No unicode table in PSF1 — ASCII glyphs map directly by codepoint */
-    }
-    else { free(raw); return false; }
-
-    free(raw);
-    return true;
+static bool font_load(Font *font, const char *path) {
+    return fifi_ui_font_load(font, path);
 }
 
-/* Look up glyph index for a codepoint. Returns 0xFFFF if not found. */
-static uint16_t font_glyph(const Font *f, uint32_t cp) {
-    if (f->nc > 0) {
-        /* Binary search in unicode table */
-        int lo = 0, hi = f->nc - 1;
-        while (lo <= hi) {
-            int mid = (lo + hi) >> 1;
-            if (f->cps[mid] == cp) return f->gis[mid];
-            if (f->cps[mid]  < cp) lo = mid + 1;
-            else                    hi = mid - 1;
-        }
-        return 0xFFFF;
-    }
-    /* PSF1 — direct index for ASCII */
-    if (cp < (uint32_t)f->n) return (uint16_t)cp;
-    return 0xFFFF;
+static uint16_t font_glyph(const Font *font, uint32_t codepoint) {
+    return fifi_ui_font_glyph(font, codepoint);
 }
 
 /* ── Color helpers ───────────────────────────────────────────────────────── */
@@ -266,22 +131,16 @@ static bool      g_in_tabbar = false;  /* cursor was over the tab bar last event
 
 /* ── FB helpers ──────────────────────────────────────────────────────────── */
 static inline void fb_set(int x, int y, uint32_t c) {
-    if ((unsigned)x < (unsigned)g_win_w && (unsigned)y < (unsigned)g_win_h)
-        g_fb[y * g_win_w + x] = c;
+    fifi_ui_pixel((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, c);
 }
 
 static void fb_fill(int x, int y, int w, int h, uint32_t c) {
-    int x1 = x + w, y1 = y + h;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x1 > g_win_w) x1 = g_win_w;
-    if (y1 > g_win_h) y1 = g_win_h;
-    for (int r = y; r < y1; r++)
-        for (int cc = x; cc < x1; cc++)
-            g_fb[r * g_win_w + cc] = c;
+    fifi_ui_fill((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, w, h, c);
 }
 
-static void fb_vline(int x, int y, int h, uint32_t c) { fb_fill(x, y, 1, h, c); }
+static void fb_vline(int x, int y, int h, uint32_t c) {
+    fifi_ui_vline((fifi_ui_canvas_t){g_fb, g_win_w, g_win_h}, x, y, h, c);
+}
 
 /* Render one glyph at pixel position (px,py) using g_font */
 static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg) {
@@ -317,11 +176,11 @@ static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg) {
         if (gi == 0xFFFF) gi = font_glyph(f, ' ');
         if (gi == 0xFFFF) gi = 0;
     }
-    if (gi >= (uint16_t)f->n) gi = 0;
-    const uint8_t *bits = f->data + (size_t)gi * f->sz;
-    int bpr = (f->w + 7) / 8;
-    for (int row = 0; row < f->h; row++) {
-        for (int col = 0; col < f->w; col++) {
+    if (gi >= f->glyph_count) gi = 0;
+    const uint8_t *bits = f->glyphs + (size_t)gi * f->glyph_size;
+    int bpr = f->bytes_per_line;
+    for (int row = 0; row < f->height; row++) {
+        for (int col = 0; col < f->width; col++) {
             uint32_t px2 = (bits[row * bpr + col / 8] & (0x80u >> (col & 7))) ? fg : bg;
             fb_set(px + col, py + row, px2);
         }
@@ -331,13 +190,13 @@ static void fb_glyph(int px, int py, uint32_t cp, uint32_t fg, uint32_t bg) {
 /* Render a string, centered in a box of width bw at pixel (bx,by,bw,bh) */
 static void fb_str_center(int bx, int by, int bw, int bh, const char *s, uint32_t fg, uint32_t bg) {
     int len = (int)strlen(s);
-    int tw = len * (g_font.w + 1);
+    int tw = len * g_font.advance;
     int ox = bx + (bw - tw) / 2;
-    int oy = by + (bh - g_font.h) / 2;
+    int oy = by + (bh - g_font.height) / 2;
     if (ox < bx) ox = bx;
     fb_fill(bx, by, bw, bh, bg);
     /* Clip to box */
-    for (int i = 0; s[i] && ox < bx + bw; i++, ox += g_font.w + 1)
+    for (int i = 0; s[i] && ox < bx + bw; i++, ox += g_font.advance)
         fb_glyph(ox, oy, (uint8_t)s[i], fg, bg);
 }
 
@@ -730,14 +589,14 @@ static void render_tabbar(void) {
 
         /* Title text — truncated to the space left of the close button */
         const char *title = g_tabs[i].title[0] ? g_tabs[i].title : "Terminal";
-        int cw = g_font.w + 1;
+        int cw = g_font.advance;
         int text_w = tw - close_w - 4;
         int max_chars = text_w / cw;
         if (max_chars < 1) max_chars = 1;
         char label[65];
         strncpy(label, title, 64); label[64] = '\0';
         if ((int)strlen(label) > max_chars) { label[max_chars-1]='.'; label[max_chars]='\0'; }
-        int ty = TITLE_H + (TAB_BAR_H - g_font.h) / 2;
+        int ty = TITLE_H + (TAB_BAR_H - g_font.height) / 2;
         for (int ci = 0; label[ci] && x + 4 + ci * cw + cw <= close_x; ci++)
             fb_glyph(x + 4 + ci * cw, ty, (uint8_t)label[ci], tfg, tbg);
 
@@ -792,8 +651,8 @@ static void render_tabbar(void) {
 }
 
 static void render_content(Tab *t) {
-    int cw = g_font.w + 1;
-    int ch = g_font.h + 1;
+    int cw = g_font.advance;
+    int ch = g_font.height + 1;
     int ox = PAD;
     int oy = CONTENT_Y + PAD;
     int content_h = g_win_h - CONTENT_Y;
@@ -872,7 +731,7 @@ static void font_change(int delta);  /* forward decl */
 
 /* ── Tab grid recalculation ──────────────────────────────────────────────── */
 static void tab_recalc_grid(Tab *t) {
-    int cw = g_font.w + 1, ch = g_font.h + 1;
+    int cw = g_font.advance, ch = g_font.height + 1;
     int new_cols = (g_win_w - 14 - 2*PAD) / cw;
     int new_rows = (g_win_h - CONTENT_Y - 2*PAD) / ch;
     if (new_cols < 10) new_cols = 10;
@@ -953,7 +812,7 @@ static void tab_new(void) {
     snprintf(t->title, sizeof(t->title), "Terminal %d", g_n_tabs + 1);
 
     /* Calculate grid */
-    int cw = g_font.w + 1, ch = g_font.h + 1;
+    int cw = g_font.advance, ch = g_font.height + 1;
     t->cols = (g_win_w - 14 - 2*PAD) / cw;
     t->rows = (g_win_h - CONTENT_Y - 2*PAD) / ch;
     if (t->cols < 10) t->cols = 10;
@@ -1026,7 +885,7 @@ static void font_change(int delta) {
     if (new_idx == g_font_idx) return;
     Font nf = {0};
     if (!font_load(&nf, FONT_PATHS[new_idx])) return;
-    free(g_font.data); free(g_font.cps); free(g_font.gis);
+    fifi_ui_font_destroy(&g_font);
     g_font = nf;
     g_font_idx = new_idx;
     /* Recalculate all tabs (fb size is unchanged; render repaints it fully) */
@@ -1304,6 +1163,6 @@ int main(void) {
     ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(g_fb);
-    free(g_font.data); free(g_font.cps); free(g_font.gis);
+    fifi_ui_font_destroy(&g_font);
     return 0;
 }

@@ -317,18 +317,19 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 #### Phase 8: Consolidate the Linux desktop platform
 
-- [ ] Extract duplicated Linux desktop code (GUI toolkit, IPC protocol, config/theme formats, app framework) into versioned shared modules
+- [x] Extract duplicated Linux desktop code (GUI toolkit, IPC protocol, config/theme formats, app framework) into versioned shared modules
   - [x] Centralize and version the compositor/application IPC message contract
   - [x] Share theme identifiers, palettes, and font-size choices across the compositor and Settings
   - [x] Share the persisted theme configuration keys and defaults
   - [x] Move every native application onto the shared app-side IPC transport
     - [x] Centralize reliable writes, compositor registration, and frame uploads
     - [x] Migrate all sixteen native Linux applications
-  - [ ] Move native applications onto the shared bitmap UI foundation
+  - [x] Move native applications onto the shared bitmap UI foundation
     - [x] Extract the common PSF2 font, framebuffer, and text primitives
     - [x] Migrate Browser Setup and Installer from their forked drawing code
     - [x] Add shared PSF1 loading and migrate Calculator, System Monitor, Proton, and Network Monitor
     - [x] Migrate Wi-Fi, Security Center, Image Viewer, and Files drawing code
+    - [x] Migrate AI Chat, App Store, Editor, Gamepad, Settings, and Terminal
 - [x] Freeze and document the Linux desktop APIs so the compositor and applications stop drifting ([contract](docs/LINUX_DESKTOP_API.md))
 
 #### Phase 9: Desktop/Laptop v1.0

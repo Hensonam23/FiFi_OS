@@ -17,6 +17,9 @@ typedef struct {
     int height;
     int advance;
     int bytes_per_line;
+    uint32_t *codepoints;
+    uint16_t *glyph_indices;
+    uint32_t mapping_count;
 } fifi_ui_font_t;
 
 typedef struct {
@@ -33,6 +36,8 @@ static inline uint32_t fifi_ui_le32(const uint8_t *bytes) {
 static inline void fifi_ui_font_destroy(fifi_ui_font_t *font) {
     if (!font) return;
     free(font->glyphs);
+    free(font->codepoints);
+    free(font->glyph_indices);
     *font = (fifi_ui_font_t){0};
 }
 
@@ -111,6 +116,7 @@ static inline bool fifi_ui_font_load_psf2(fifi_ui_font_t *font,
     }
 
     uint32_t header_size = fifi_ui_le32(bytes + 8);
+    uint32_t flags = fifi_ui_le32(bytes + 12);
     uint32_t glyph_count = fifi_ui_le32(bytes + 16);
     uint32_t glyph_size = fifi_ui_le32(bytes + 20);
     uint32_t height = fifi_ui_le32(bytes + 24);
@@ -131,6 +137,81 @@ static inline bool fifi_ui_font_load_psf2(fifi_ui_font_t *font,
     if (!glyphs) { free(bytes); return false; }
     for (uint64_t i = 0; i < glyph_bytes; ++i)
         glyphs[i] = bytes[header_size + i];
+    uint32_t *codepoints = NULL;
+    uint16_t *glyph_indices = NULL;
+    uint32_t mapping_count = 0;
+    if ((flags & 1u) && glyph_count <= UINT16_MAX &&
+        (uint64_t)header_size + glyph_bytes < (uint64_t)file_size) {
+        size_t position = (size_t)((uint64_t)header_size + glyph_bytes);
+        uint32_t capacity = 2048;
+        codepoints = (uint32_t *)malloc((size_t)capacity * sizeof(*codepoints));
+        glyph_indices = (uint16_t *)malloc((size_t)capacity * sizeof(*glyph_indices));
+        if (!codepoints || !glyph_indices) {
+            free(codepoints); free(glyph_indices);
+            codepoints = NULL; glyph_indices = NULL;
+        } else {
+            uint32_t glyph = 0;
+            while (position < (size_t)file_size && glyph < glyph_count) {
+                uint8_t first = bytes[position];
+                if (first == 0xffu) { ++glyph; ++position; continue; }
+                if (first == 0xfeu) { ++position; continue; }
+                size_t sequence = first < 0x80u ? 1u :
+                    (first & 0xe0u) == 0xc0u ? 2u :
+                    (first & 0xf0u) == 0xe0u ? 3u :
+                    (first & 0xf8u) == 0xf0u ? 4u : 0u;
+                if (!sequence || position + sequence > (size_t)file_size) {
+                    ++position;
+                    continue;
+                }
+                uint32_t codepoint = sequence == 1u ? first :
+                    sequence == 2u ? (uint32_t)(first & 0x1fu) :
+                    sequence == 3u ? (uint32_t)(first & 0x0fu) :
+                                     (uint32_t)(first & 0x07u);
+                bool valid = true;
+                for (size_t i = 1; i < sequence; ++i) {
+                    uint8_t continuation = bytes[position + i];
+                    if ((continuation & 0xc0u) != 0x80u) { valid = false; break; }
+                    codepoint = (codepoint << 6) | (continuation & 0x3fu);
+                }
+                position += sequence;
+                if (!valid) continue;
+                if (mapping_count == capacity) {
+                    uint32_t new_capacity = capacity * 2u;
+                    uint32_t *new_codepoints = (uint32_t *)malloc(
+                        (size_t)new_capacity * sizeof(*new_codepoints));
+                    uint16_t *new_indices = (uint16_t *)malloc(
+                        (size_t)new_capacity * sizeof(*new_indices));
+                    if (!new_codepoints || !new_indices) {
+                        free(new_codepoints); free(new_indices);
+                        break;
+                    }
+                    for (uint32_t i = 0; i < mapping_count; ++i) {
+                        new_codepoints[i] = codepoints[i];
+                        new_indices[i] = glyph_indices[i];
+                    }
+                    free(codepoints); free(glyph_indices);
+                    codepoints = new_codepoints;
+                    glyph_indices = new_indices;
+                    capacity = new_capacity;
+                }
+                codepoints[mapping_count] = codepoint;
+                glyph_indices[mapping_count] = (uint16_t)glyph;
+                ++mapping_count;
+            }
+            for (uint32_t i = 1; i < mapping_count; ++i) {
+                uint32_t codepoint = codepoints[i];
+                uint16_t glyph = glyph_indices[i];
+                uint32_t j = i;
+                while (j > 0 && codepoints[j - 1] > codepoint) {
+                    codepoints[j] = codepoints[j - 1];
+                    glyph_indices[j] = glyph_indices[j - 1];
+                    --j;
+                }
+                codepoints[j] = codepoint;
+                glyph_indices[j] = glyph;
+            }
+        }
+    }
     free(bytes);
 
     fifi_ui_font_destroy(font);
@@ -141,7 +222,33 @@ static inline bool fifi_ui_font_load_psf2(fifi_ui_font_t *font,
     font->height = (int)height;
     font->advance = (int)width + 1;
     font->bytes_per_line = (int)bytes_per_line;
+    font->codepoints = codepoints;
+    font->glyph_indices = glyph_indices;
+    font->mapping_count = mapping_count;
     return true;
+}
+
+static inline bool fifi_ui_font_load(fifi_ui_font_t *font, const char *path) {
+    return fifi_ui_font_load_psf2(font, path) ||
+           fifi_ui_font_load_psf1(font, path);
+}
+
+static inline uint16_t fifi_ui_font_glyph(const fifi_ui_font_t *font,
+                                          uint32_t codepoint) {
+    if (!font) return UINT16_MAX;
+    if (font->mapping_count) {
+        uint32_t low = 0, high = font->mapping_count;
+        while (low < high) {
+            uint32_t middle = low + (high - low) / 2u;
+            if (font->codepoints[middle] == codepoint)
+                return font->glyph_indices[middle];
+            if (font->codepoints[middle] < codepoint) low = middle + 1u;
+            else high = middle;
+        }
+        return UINT16_MAX;
+    }
+    return codepoint < font->glyph_count && codepoint <= UINT16_MAX
+        ? (uint16_t)codepoint : UINT16_MAX;
 }
 
 static inline void fifi_ui_pixel(fifi_ui_canvas_t canvas, int x, int y,

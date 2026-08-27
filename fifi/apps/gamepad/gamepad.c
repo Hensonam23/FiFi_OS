@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* Gamepad button bit masks (must match compositor input.c) */
 #define GP_BTN_A      (1u<<0)
@@ -79,13 +80,7 @@ static int g_sock = -1;
 /* ── Drawing primitives ──────────────────────────────────────────────────── */
 
 static void fill_rect(int x, int y, int w, int h, uint32_t col) {
-    for (int ry = y; ry < y + h; ry++) {
-        if (ry < 0 || ry >= WIN_H) continue;
-        for (int rx = x; rx < x + w; rx++) {
-            if (rx < 0 || rx >= WIN_W) continue;
-            g_fb[ry * WIN_W + rx] = col;
-        }
-    }
+    fifi_ui_fill((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H}, x, y, w, h, col);
 }
 
 /* Filled rectangle with softened (rounded) corners — radius r. */
@@ -109,41 +104,25 @@ static void fill_round_rect(int x, int y, int w, int h, uint32_t col, int r) {
 }
 
 static void fill_circle(int cx, int cy, int r, uint32_t col) {
-    for (int y = cy - r; y <= cy + r; y++) {
-        for (int x = cx - r; x <= cx + r; x++) {
-            int dx = x - cx, dy = y - cy;
-            if (dx*dx + dy*dy <= r*r) {
-                if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H)
-                    g_fb[y * WIN_W + x] = col;
-            }
-        }
-    }
+    fifi_ui_disc((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H}, cx, cy, r, col);
 }
 
 static void draw_ring(int cx, int cy, int r, int thickness, uint32_t col) {
-    int r2 = r - thickness;
-    for (int y = cy - r; y <= cy + r; y++) {
-        for (int x = cx - r; x <= cx + r; x++) {
-            int dx = x - cx, dy = y - cy;
-            int d2 = dx*dx + dy*dy;
-            if (d2 <= r*r && d2 >= r2*r2) {
-                if (x >= 0 && x < WIN_W && y >= 0 && y < WIN_H)
-                    g_fb[y * WIN_W + x] = col;
-            }
-        }
-    }
+    for (int radius = r; radius > r - thickness && radius > 0; --radius)
+        fifi_ui_ring((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H},
+                     cx, cy, radius, col);
 }
 
 static void put_pixel(int x, int y, uint32_t c) {
-    if (x>=0 && x<WIN_W && y>=0 && y<WIN_H) g_fb[y*WIN_W+x]=c;
+    fifi_ui_pixel((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H}, x, y, c);
 }
 
 static void draw_hline(int x, int y, int w, uint32_t c) {
-    for (int i=0;i<w;i++) put_pixel(x+i,y,c);
+    fifi_ui_hline((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H}, x, y, w, c);
 }
 
 static void draw_vline(int x, int y, int h, uint32_t c) {
-    for (int i=0;i<h;i++) put_pixel(x,y+i,c);
+    fifi_ui_vline((fifi_ui_canvas_t){g_fb, WIN_W, WIN_H}, x, y, h, c);
 }
 
 /* 3×5 micro font — sufficient for labels */

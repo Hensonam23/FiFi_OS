@@ -23,6 +23,7 @@
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
+#include "../../shared/app_ui.h"
 
 /* ── Window layout ───────────────────────────────────────────────────────── */
 #define WIN_W   720
@@ -51,50 +52,21 @@
 #define C_GREY      0x006A8098u   /* muted / secondary */
 #define C_WARN      0x00E05050u
 
-/* ── PSF1 font ───────────────────────────────────────────────────────────── */
-#define PSF1_MAGIC 0x0436u
-typedef struct { uint16_t magic; uint8_t mode; uint8_t charsize; } Psf1Hdr;
-static uint8_t *g_glyph  = NULL;
-static int      g_glyph_h = 16;
-static int      g_n_glyph = 256;
+/* ── Shared bitmap UI ────────────────────────────────────────────────────── */
+static fifi_ui_font_t g_font;
+#define g_glyph_h (g_font.height)
 
 static bool font_load(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    Psf1Hdr hdr;
-    if (read(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr) || hdr.magic != PSF1_MAGIC) {
-        close(fd); return false;
-    }
-    g_glyph_h = hdr.charsize;
-    g_n_glyph = (hdr.mode & 1) ? 512 : 256;
-    int total  = g_n_glyph * g_glyph_h;
-    g_glyph    = malloc((size_t)total);
-    if (!g_glyph || read(fd, g_glyph, total) < total) {
-        free(g_glyph); g_glyph = NULL; close(fd); return false;
-    }
-    close(fd); return true;
+    return fifi_ui_font_load_psf1(&g_font, path);
 }
 
 static void fb_fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    for (int r = y; r < y + h && r < WIN_H; r++) {
-        if (r < 0) continue;
-        int x0 = x < 0 ? 0 : x;
-        int x1 = x + w > WIN_W ? WIN_W : x + w;
-        for (int c = x0; c < x1; c++) fb[r * WIN_W + c] = col;
-    }
+    fifi_ui_fill((fifi_ui_canvas_t){fb, WIN_W, WIN_H}, x, y, w, h, col);
 }
 
 static void fb_glyph(uint32_t *fb, int px, int py, unsigned char ch, uint32_t fg, uint32_t bg) {
-    if (!g_glyph || ch >= (unsigned)g_n_glyph) return;
-    const uint8_t *bits = g_glyph + ch * g_glyph_h;
-    for (int row = 0; row < g_glyph_h; row++) {
-        uint8_t b = bits[row];
-        for (int col = 0; col < 8; col++) {
-            int x = px + col, y = py + row;
-            if (x < 0 || x >= WIN_W || y < 0 || y >= WIN_H) continue;
-            fb[y * WIN_W + x] = (b & (0x80u >> col)) ? fg : bg;
-        }
-    }
+    fifi_ui_glyph((fifi_ui_canvas_t){fb, WIN_W, WIN_H}, &g_font,
+                  px, py, ch, fg, bg);
 }
 
 /* UTF-8 aware string draw for chrome (filename header, footer, status, line
@@ -645,7 +617,8 @@ static bool handle_key(uint8_t key, int sock, uint32_t *fb) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(int argc, char **argv) {
-    font_load("/fifi-data/fonts/ter16b.psf");
+    if (!font_load("/fifi-data/fonts/ter16b.psf"))
+        fifi_ui_font_init_blank(&g_font, 256, 8, 16);
 
     /* Init with empty document (must be full-capacity: insert_char grows in place) */
     g_lines[0] = line_dup(""); g_nlines = 1;
@@ -808,7 +781,7 @@ int main(int argc, char **argv) {
     ipc_send(sock, IPC_APP_CLOSE, NULL, 0);
     close(sock);
     free(fb);
-    free(g_glyph);
+    fifi_ui_font_destroy(&g_font);
     for (int i = 0; i < g_nlines; i++) free(g_lines[i]);
     for (int i = 0; i < g_undo_nlines; i++) free(g_undo_lines[i]);
     return 0;
