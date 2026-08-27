@@ -46,9 +46,19 @@ case "$FIFI_UPDATE_CHANNEL" in
         exit 1
         ;;
 esac
-FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}}"
+FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-}}"
+if [ -z "$FIFI_BUILD_ID" ]; then
+    FIFI_BUILD_ID="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+        FIFI_BUILD_ID="${FIFI_BUILD_ID}-dirty"
+    fi
+fi
 printf '%s\n' "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-update-channel"
 printf '%s\n' "$FIFI_BUILD_ID" > "$STAGE/etc/fifi-build-id"
+FIFI_BUILD_SHORT="${FIFI_BUILD_ID:0:12}"
+case "$FIFI_BUILD_ID" in *-dirty) FIFI_BUILD_SHORT="${FIFI_BUILD_SHORT}-dirty" ;; esac
+printf 'FiFi OS linux-desktop Beta 1.0 (build %s, %s channel)\n' \
+    "$FIFI_BUILD_SHORT" "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-version"
 echo "[initramfs] update channel: $FIFI_UPDATE_CHANNEL  build: $FIFI_BUILD_ID"
 
 # Embed the kernel in the initramfs so fifi-install.sh can always find it

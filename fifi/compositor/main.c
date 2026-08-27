@@ -45,6 +45,7 @@ struct limine_framebuffer *drm_open(void);
 void drm_flush(void);
 bool drm_cursor_enabled(void);
 void drm_cursor_move(int32_t x, int32_t y);
+void drm_cursor_set_visible(bool visible);
 void drm_close(void);
 void drm_blank_display(void);
 
@@ -61,7 +62,11 @@ void wayland_shutdown(void);
 int  wayland_server_fd(void);
 void wayland_set_display_size(int w, int h);
 void wayland_blit_surfaces(void);
-void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns);
+void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns,
+                        double dx, double dy,
+                        double dx_unaccel, double dy_unaccel);
+bool wayland_pointer_locked(void);
+void wayland_release_pointer_lock(void);
 void wayland_send_key(uint32_t evdev_key, uint32_t state);
 bool wayland_has_focus(void);
 bool ipc_hit_test(int32_t mx, int32_t my);
@@ -136,6 +141,9 @@ int   input_get_control_fds(int *buf, int maxn);
 int   keyboard_try_getchar(void);
 void  keyboard_clear_state(void);
 void  mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
+void  input_consume_relative_motion(double *dx, double *dy,
+                                    double *dx_unaccel, double *dy_unaccel);
+bool  input_consume_pointer_unlock_request(void);
 
 /* console internal: mark rows dirty so flip picks them up */
 void  console_mark_dirty_rows(uint32_t y0, uint32_t y1);
@@ -452,7 +460,12 @@ static void *render_thread_fn(void *arg)
             mouse_get_state(&cx, &cy, &lb, &rb);
             bool cursor_moved = (cx != s_last_cx || cy != s_last_cy);
             bool hw_cursor = drm_cursor_enabled();
-            if (!hw_cursor && cursor_moved && s_last_cy >= 0) {
+            bool pointer_locked = wayland_pointer_locked();
+            static bool s_pointer_locked = false;
+            bool lock_changed = pointer_locked != s_pointer_locked;
+            if (!hw_cursor &&
+                ((!pointer_locked && cursor_moved) ||
+                 (pointer_locked && lock_changed)) && s_last_cy >= 0) {
                 uint32_t ey0 = (uint32_t)s_last_cy;
                 console_mark_dirty_rows(ey0, ey0 + CUR_H);
             }
@@ -479,12 +492,16 @@ static void *render_thread_fn(void *arg)
                 s_wl_prev = wl_now;
             }
             bool flipped = console_flip_if_dirty();
-            if (!hw_cursor && (flipped || cursor_moved)) {
+            if (!hw_cursor && !pointer_locked &&
+                (flipped || cursor_moved || lock_changed)) {
                 mouse_cursor_update();
             }
             s_last_cx = cx; s_last_cy = cy;
+            s_pointer_locked = pointer_locked;
 
-            do_flush = (flipped || (!hw_cursor && cursor_moved)) && g_using_drm;
+            do_flush = (flipped || (!hw_cursor && !pointer_locked &&
+                                    (cursor_moved || lock_changed))) &&
+                       g_using_drm;
         } else {
             /* Keep state ticking even when blanked (clock, animations). */
             gui_on_tick();
@@ -692,6 +709,8 @@ int main(void) {
         fifi_event_handoff_acquired(&g_event_handoff);
         input_flush_deferred_clicks();
         input_poll_controls();
+        if (input_consume_pointer_unlock_request())
+            wayland_release_pointer_lock();
 
         /* App frame traffic and PTY output can be comparatively expensive;
          * physical pointer motion has already been consumed above. */
@@ -733,9 +752,13 @@ int main(void) {
         /* ── Mouse routing ──────────────────────────────────────────────── */
         {
             int32_t mcx, mcy; bool mlb, mrb;
+            double rel_dx, rel_dy, rel_dx_unaccel, rel_dy_unaccel;
             mouse_get_state(&mcx, &mcy, &mlb, &mrb);
+            input_consume_relative_motion(&rel_dx, &rel_dy,
+                                          &rel_dx_unaccel, &rel_dy_unaccel);
             had_input = mcx != routed_x || mcy != routed_y ||
-                        mlb != routed_l || mrb != routed_r;
+                        mlb != routed_l || mrb != routed_r ||
+                        rel_dx != 0.0 || rel_dy != 0.0;
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
             /* Cross-layer z-order: the Wayland browser participates in the same
@@ -810,8 +833,11 @@ int main(void) {
 
             /* Feed the browser input only when it is the topmost layer under the
              * cursor (so clicks on a raised built-in window over it don't leak). */
-            if (wayland_any_mapped() && (wl_top || (gui_z == 0 && ipc_z == 0)))
-                wayland_send_mouse(mcx, mcy, btns);
+            if (wayland_any_mapped() &&
+                (wayland_pointer_locked() || wl_top ||
+                 (gui_z == 0 && ipc_z == 0)))
+                wayland_send_mouse(mcx, mcy, btns, rel_dx, rel_dy,
+                                   rel_dx_unaccel, rel_dy_unaccel);
             /* Scroll wheel → focused Wayland surface (browser). Consume it here so the
              * desktop/terminal don't also scroll from the same wheel motion. */
             if (wayland_has_focus()) {

@@ -90,6 +90,16 @@ Version 1 fixes the public type and function names and their clipping and text
 layout behavior. Applications still own colors, components, screen layouts,
 input handling, and lifecycle policy.
 
+## Wayland gaming input
+
+The compositor advertises version 1 of
+`zwp_relative_pointer_manager_v1` and `zwp_pointer_constraints_v1`. Native
+Wayland games can request accelerated and unaccelerated relative motion, lock
+the pointer for unbounded camera movement, or confine it to a surface region.
+FiFi hides the cursor while locked and honors the client's cursor-position hint
+when releasing it. Super+Esc is reserved by the compositor as an emergency
+release and is not forwarded to the client.
+
 ## Change checklist
 
 Before merging a contract change:

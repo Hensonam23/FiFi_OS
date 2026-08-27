@@ -98,6 +98,8 @@ static int g_libinput_path_count = 0;
 static int g_libinput_pointer_count = 0;
 static double g_libinput_residual_x = 0.0;
 static double g_libinput_residual_y = 0.0;
+static double g_relative_dx = 0.0, g_relative_dy = 0.0;
+static double g_relative_dx_unaccel = 0.0, g_relative_dy_unaccel = 0.0;
 static int g_mouse_speed = FIFI_INPUT_DEFAULT_MOUSE_SPEED;
 static int g_touchpad_speed = FIFI_INPUT_DEFAULT_TOUCHPAD_SPEED;
 
@@ -150,6 +152,8 @@ static bool g_ctrl  = false;
 static bool g_alt   = false;
 static bool g_super = false;
 static bool g_super_used = false;  /* a combo key was pressed during the Super hold */
+static bool g_pointer_unlock_requested = false;
+static bool g_pointer_unlock_held = false;
 
 static void input_state_lock(void);
 static void input_state_unlock(void);
@@ -173,6 +177,14 @@ int keyboard_try_get_raw(uint16_t *code, uint8_t *state) {
     g_raw_head = (g_raw_head + 1) % RAW_KEY_RING;
     input_state_unlock();
     return 1;
+}
+
+bool input_consume_pointer_unlock_request(void) {
+    input_state_lock();
+    bool requested = g_pointer_unlock_requested;
+    g_pointer_unlock_requested = false;
+    input_state_unlock();
+    return requested;
 }
 
 /* ── Mouse state ─────────────────────────────────────────────────────────── */
@@ -1079,8 +1091,16 @@ static void input_poll_libinput(void) {
         }
 
         if (type == LIBINPUT_EVENT_POINTER_MOTION) {
-            g_libinput_residual_x += libinput_event_pointer_get_dx(pointer);
-            g_libinput_residual_y += libinput_event_pointer_get_dy(pointer);
+            double event_dx = libinput_event_pointer_get_dx(pointer);
+            double event_dy = libinput_event_pointer_get_dy(pointer);
+            g_relative_dx += event_dx;
+            g_relative_dy += event_dy;
+            g_relative_dx_unaccel +=
+                libinput_event_pointer_get_dx_unaccelerated(pointer);
+            g_relative_dy_unaccel +=
+                libinput_event_pointer_get_dy_unaccelerated(pointer);
+            g_libinput_residual_x += event_dx;
+            g_libinput_residual_y += event_dy;
             int32_t dx = (int32_t)g_libinput_residual_x;
             int32_t dy = (int32_t)g_libinput_residual_y;
             g_libinput_residual_x -= dx;
@@ -1147,6 +1167,20 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         while (read(g_kbd_fds[ki], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type != EV_KEY) continue;
             bool pressed = (ev.value == 1 || ev.value == 2);
+            /* Super+Esc is a compositor-owned safety escape. A game must not
+             * be able to keep the pointer hidden or locked if it wedges, and
+             * the client must not receive half of this shortcut. */
+            if (ev.code == KEY_ESC &&
+                ((pressed && g_super) || (!pressed && g_pointer_unlock_held))) {
+                if (pressed) {
+                    g_pointer_unlock_requested = true;
+                    g_pointer_unlock_held = true;
+                    g_super_used = true;
+                } else {
+                    g_pointer_unlock_held = false;
+                }
+                continue;
+            }
             /* Always enqueue raw evdev event for Wayland key forwarding */
             raw_key_push((uint16_t)ev.code, ev.value ? 1 : 0);
 
@@ -1232,6 +1266,8 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
             bool prev_l = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
             if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
+            g_relative_dx += dx; g_relative_dy += dy;
+            g_relative_dx_unaccel += dx; g_relative_dy_unaccel += dy;
             mouse_push_rel(dx, dy, lbtn, rbtn);
             if (lbtn && !prev_l) {
                 input_queue_click(false, g_mx, g_my);
@@ -1457,8 +1493,12 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
                                                    dev->y_max - dev->y_min + 1,
                                                    dev->x_fuzz, dev->y_fuzz,
                                                    g_fb_w, g_fb_h,
-                                                   &dxpx, &dypx))
+                                                   &dxpx, &dypx)) {
+                            g_relative_dx += dxpx; g_relative_dy += dypx;
+                            g_relative_dx_unaccel += dxpx;
+                            g_relative_dy_unaccel += dypx;
                             mouse_push_rel(dxpx, dypx, lbtn, rbtn);
+                        }
                     }
                 }
             } else {
@@ -1682,6 +1722,18 @@ int8_t mouse_consume_scroll(void) {
     int8_t v = g_scroll_pending; g_scroll_pending = 0;
     input_state_unlock();
     return v;
+}
+
+void input_consume_relative_motion(double *dx, double *dy,
+                                   double *dx_unaccel, double *dy_unaccel) {
+    input_state_lock();
+    if (dx) *dx = g_relative_dx;
+    if (dy) *dy = g_relative_dy;
+    if (dx_unaccel) *dx_unaccel = g_relative_dx_unaccel;
+    if (dy_unaccel) *dy_unaccel = g_relative_dy_unaccel;
+    g_relative_dx = g_relative_dy = 0.0;
+    g_relative_dx_unaccel = g_relative_dy_unaccel = 0.0;
+    input_state_unlock();
 }
 
 void mouse_warp(int32_t x, int32_t y)   { input_state_lock(); g_mx = x; g_my = y; input_state_unlock(); }

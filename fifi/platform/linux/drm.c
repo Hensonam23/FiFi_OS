@@ -29,6 +29,7 @@ static uint32_t g_cursor_handle = 0;
 static void    *g_cursor_map = NULL;
 static size_t   g_cursor_map_sz = 0;
 static atomic_bool g_cursor_enabled = ATOMIC_VAR_INIT(false);
+static atomic_bool g_cursor_visible = ATOMIC_VAR_INIT(false);
 
 static struct limine_framebuffer g_lmfb;
 
@@ -238,6 +239,7 @@ struct limine_framebuffer *drm_open(void) {
                         g_cursor_map = p;
                         g_cursor_map_sz = cur.size;
                         atomic_store_explicit(&g_cursor_enabled, true, memory_order_release);
+                        atomic_store_explicit(&g_cursor_visible, true, memory_order_release);
                         fprintf(stderr, "[drm] hardware cursor enabled\n");
                     } else {
                         munmap(p, cur.size);
@@ -314,6 +316,22 @@ void drm_cursor_move(int32_t x, int32_t y) {
     }
 }
 
+void drm_cursor_set_visible(bool visible) {
+    if (!drm_cursor_enabled() || g_fd < 0 || !g_cursor_handle) return;
+    bool was_visible = atomic_load_explicit(&g_cursor_visible,
+                                             memory_order_acquire);
+    if (was_visible == visible) return;
+    struct drm_mode_cursor cursor = {
+        .flags = DRM_MODE_CURSOR_BO,
+        .crtc_id = g_crtc_id,
+        .width = visible ? 64u : 0u,
+        .height = visible ? 64u : 0u,
+        .handle = visible ? g_cursor_handle : 0u,
+    };
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CURSOR, &cursor) == 0)
+        atomic_store_explicit(&g_cursor_visible, visible, memory_order_release);
+}
+
 int drm_fd(void) { return g_fd; }
 
 /* Fill the DRM frontbuffer with black and flush — used for screen blanking. */
@@ -338,6 +356,7 @@ void drm_close(void) {
         g_cursor_handle = 0;
     }
     atomic_store_explicit(&g_cursor_enabled, false, memory_order_release);
+    atomic_store_explicit(&g_cursor_visible, false, memory_order_release);
     if (g_map_ptr) { munmap(g_map_ptr, g_map_sz); g_map_ptr = NULL; }
     if (g_fb_id)   { ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &g_fb_id); g_fb_id = 0; }
     if (g_handle) {

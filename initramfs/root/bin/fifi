@@ -30,7 +30,27 @@ case "$cmd" in
     rollback)
         exec update rollback ;;
     version|--version|-v)
-        cat /etc/fifi-version 2>/dev/null || echo "FiFi OS (version unknown)" ;;
+        cat /etc/fifi-version 2>/dev/null || echo "FiFi OS (version unknown)"
+        printf 'Build ID:  '
+        cat /etc/fifi-build-id 2>/dev/null || echo unknown
+        printf 'Channel:   '
+        cat /etc/fifi-update-channel 2>/dev/null || echo unknown
+        slot=""
+        for word in $(cat /proc/cmdline 2>/dev/null); do
+            case "$word" in fifi_slot=A) slot=A ;; fifi_slot=B) slot=B ;; esac
+        done
+        [ -n "$slot" ] || slot="legacy/unknown"
+        printf 'Boot slot: %s\n' "$slot"
+        running_build="$(cat /etc/fifi-build-id 2>/dev/null || true)"
+        pending_build="$(cat /fifi-data/os-build-id.pending 2>/dev/null || true)"
+        if [ -n "$pending_build" ] && [ "$pending_build" = "$running_build" ]; then
+            printf 'State:     pending confirmation (%s)\n' "$pending_build"
+        elif [ -n "$pending_build" ]; then
+            printf 'State:     update staged in inactive slot (%s)\n' "$pending_build"
+        else
+            echo 'State:     confirmed'
+        fi
+        ;;
     ""|help|-h|--help)
         sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)

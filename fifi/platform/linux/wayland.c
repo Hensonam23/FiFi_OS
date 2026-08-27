@@ -14,6 +14,8 @@
  *                            the software compositor mmaps them directly
  *   wl_drm         v2   — legacy Mesa global; render-device discovery for
  *                         XWayland glamor (no dmabuf v4 feedback here)
+ *   zwp_relative_pointer_manager_v1 v1 — unbounded high-resolution motion
+ *   zwp_pointer_constraints_v1 v1 — locked/confined gaming pointers
  *
  * Each connected client gets a wl_client; surfaces are rendered by
  * calling ipc_blit_wayland() so they appear on top of the FiFi GUI.
@@ -24,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -37,6 +40,11 @@
 #include <linux/dma-buf.h>   /* DMA_BUF_IOCTL_SYNC around dmabuf CPU reads */
 
 #include "xwm.h"   /* rootless-XWayland window manager (X11-side; see xwm.c) */
+
+extern void mouse_warp(int32_t x, int32_t y);
+extern void mouse_get_state(int32_t *x, int32_t *y, bool *lbtn, bool *rbtn);
+extern void drm_cursor_move(int32_t x, int32_t y);
+extern void drm_cursor_set_visible(bool visible);
 
 /* ── Wire protocol constants ─────────────────────────────────────────────── */
 
@@ -113,6 +121,28 @@
 #define WL_PTR_BUTTON             3
 #define WL_PTR_AXIS               4
 #define WL_PTR_FRAME              5
+
+/* relative-pointer-unstable-v1 */
+#define ZWP_REL_MGR_DESTROY        0
+#define ZWP_REL_MGR_GET_POINTER    1
+#define ZWP_REL_POINTER_DESTROY    0
+#define ZWP_REL_POINTER_MOTION     0
+
+/* pointer-constraints-unstable-v1 */
+#define ZWP_CONSTRAINTS_DESTROY       0
+#define ZWP_CONSTRAINTS_LOCK          1
+#define ZWP_CONSTRAINTS_CONFINE       2
+#define ZWP_LOCKED_DESTROY            0
+#define ZWP_LOCKED_SET_HINT           1
+#define ZWP_LOCKED_SET_REGION         2
+#define ZWP_LOCKED_EVENT_LOCKED       0
+#define ZWP_LOCKED_EVENT_UNLOCKED     1
+#define ZWP_CONFINED_DESTROY          0
+#define ZWP_CONFINED_SET_REGION       1
+#define ZWP_CONFINED_EVENT_CONFINED   0
+#define ZWP_CONFINED_EVENT_UNCONFINED 1
+#define ZWP_CONSTRAINT_LIFETIME_ONESHOT    1u
+#define ZWP_CONSTRAINT_LIFETIME_PERSISTENT 2u
 
 /* wl_output opcodes */
 #define WL_OUTPUT_GEOMETRY        0   /* event */
@@ -298,6 +328,11 @@ typedef enum {
     OBJ_DMABUF,         /* zwp_linux_dmabuf_v1 global instance */
     OBJ_DMABUF_PARAMS,  /* zwp_linux_buffer_params_v1; data = dmabuf_params_t */
     OBJ_WL_DRM,         /* wl_drm global instance (legacy Mesa device discovery) */
+    OBJ_REL_POINTER_MGR,
+    OBJ_REL_POINTER,
+    OBJ_POINTER_CONSTRAINTS,
+    OBJ_LOCKED_POINTER,
+    OBJ_CONFINED_POINTER,
 } obj_type_t;
 
 /* ── Wayland object table ─────────────────────────────────────────────────── */
@@ -348,6 +383,23 @@ typedef struct {
     bool     has;
     int32_t  x0, y0, x1, y1;   /* inclusive-exclusive union bbox */
 } wl_region_t;
+
+typedef struct {
+    uint32_t pointer_id;
+} relative_pointer_t;
+
+typedef struct {
+    uint32_t surface_id;
+    uint32_t pointer_id;
+    uint32_t lifetime;
+    bool active;
+    bool exhausted;
+    bool has_region;
+    int32_t region_x, region_y, region_w, region_h;
+    bool has_hint;
+    int32_t hint_x_fixed, hint_y_fixed;
+    int32_t anchor_x, anchor_y;
+} pointer_constraint_t;
 
 /* ── Surface ──────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -655,6 +707,15 @@ static void free_obj_data(wl_obj_t *o) {
         /* fd ownership moves to the created wl_buffer; only close if unused */
         if (!p->used && p->fd >= 0) close(p->fd);
         free(p);
+    } else if (o->type == OBJ_LOCKED_POINTER ||
+               o->type == OBJ_CONFINED_POINTER) {
+        pointer_constraint_t *constraint = o->data;
+        if (o->type == OBJ_LOCKED_POINTER && constraint->active) {
+            mouse_warp(constraint->anchor_x, constraint->anchor_y);
+            drm_cursor_move(constraint->anchor_x, constraint->anchor_y);
+            drm_cursor_set_visible(true);
+        }
+        free(constraint);
     } else if (o->data) {
         free(o->data);
     }
@@ -841,6 +902,10 @@ static void advertise_globals(wl_client_t *c, uint32_t reg_id) {
         send_registry_global(c, reg_id, 11, "zwp_linux_dmabuf_v1", 3);
         send_registry_global(c, reg_id, 12, "wl_drm",              2);
     }
+    send_registry_global(c, reg_id, 13,
+                         "zwp_relative_pointer_manager_v1", 1);
+    send_registry_global(c, reg_id, 14,
+                         "zwp_pointer_constraints_v1", 1);
 }
 
 static void send_shm_formats(wl_client_t *c, uint32_t shm_id) {
@@ -1223,6 +1288,9 @@ static void wl_release_buffer_owned(wl_client_t *owner, uint32_t buffer_id) {
 /* ── Focus + interactive-op state (used by dispatch and the mouse handler) ──── */
 static int      g_focus_ci  = -1;  /* client index with POINTER focus */
 static uint32_t g_focus_sid = 0;   /* surface obj id with POINTER focus */
+static void pointer_constraints_refresh(void);
+static void pointer_constraint_release(wl_client_t *c,
+                                       pointer_constraint_t *constraint);
 /* Keyboard focus is tracked separately: it follows only real toplevels, never a
  * popup/menu. Moving the pointer onto a menu must NOT send the toplevel a
  * keyboard-leave — Firefox reads that as the window deactivating and instantly
@@ -1416,6 +1484,14 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 wl_push_u32(c, 1 /* prime */);
                 wl_end_msg(c, dh);
                 wl_client_flush(c);
+            } else if (name == 13 &&
+                       strncmp(iface, "zwp_relative_pointer_manager_v1",
+                               iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_REL_POINTER_MGR, NULL);
+            } else if (name == 14 &&
+                       strncmp(iface, "zwp_pointer_constraints_v1",
+                               iface_len) == 0) {
+                wl_new_obj(c, new_id, OBJ_POINTER_CONSTRAINTS, NULL);
             } else {
                 send_wl_display_error(c, 1, 0, "unknown global");
             }
@@ -1559,6 +1635,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
                 send_wl_callback_done(c, s->pending_frame_cb, g_global_serial++);
                 s->pending_frame_cb = 0;
             }
+            pointer_constraints_refresh();
         } else if (opcode == WL_SURFACE_FRAME && args_len >= 4) {
             uint32_t cb_id; memcpy(&cb_id, args, 4);
             wl_new_obj(c, cb_id, OBJ_CALLBACK, NULL);
@@ -1568,6 +1645,7 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         } else if (opcode == WL_SURFACE_DESTROY) {
             s->mapped = false;
             s->pending_destroy = true;
+            pointer_constraints_refresh();
             /* Defer delete until next commit so Firefox receives buffer_release first */
         }
         break;
@@ -2341,6 +2419,132 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
         /* set_cursor, motion, button etc silently accepted */
         break;
 
+    /* ── relative-pointer-unstable-v1 ───────────────────────────────── */
+    case OBJ_REL_POINTER_MGR:
+        if (opcode == ZWP_REL_MGR_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        } else if (opcode == ZWP_REL_MGR_GET_POINTER && args_len >= 8) {
+            uint32_t new_id, pointer_id;
+            memcpy(&new_id, args, 4);
+            memcpy(&pointer_id, args + 4, 4);
+            wl_obj_t *po = wl_find_obj(c, pointer_id);
+            if (po && po->type == OBJ_POINTER) {
+                relative_pointer_t *relative = calloc(1, sizeof(*relative));
+                if (!relative) break;
+                relative->pointer_id = pointer_id;
+                if (!wl_new_obj(c, new_id, OBJ_REL_POINTER, relative))
+                    free(relative);
+            }
+        }
+        break;
+
+    case OBJ_REL_POINTER:
+        if (opcode == ZWP_REL_POINTER_DESTROY)
+            wl_delete_obj(c, obj_id);
+        break;
+
+    /* ── pointer-constraints-unstable-v1 ────────────────────────────── */
+    case OBJ_POINTER_CONSTRAINTS:
+        if (opcode == ZWP_CONSTRAINTS_DESTROY) {
+            wl_delete_obj(c, obj_id);
+        } else if ((opcode == ZWP_CONSTRAINTS_LOCK ||
+                    opcode == ZWP_CONSTRAINTS_CONFINE) && args_len >= 20) {
+            uint32_t new_id, surface_id, pointer_id, region_id, lifetime;
+            memcpy(&new_id, args, 4);
+            memcpy(&surface_id, args + 4, 4);
+            memcpy(&pointer_id, args + 8, 4);
+            memcpy(&region_id, args + 12, 4);
+            memcpy(&lifetime, args + 16, 4);
+            wl_obj_t *so = wl_find_obj(c, surface_id);
+            wl_obj_t *po = wl_find_obj(c, pointer_id);
+            if (!so || so->type != OBJ_SURFACE ||
+                !po || po->type != OBJ_POINTER ||
+                (lifetime != ZWP_CONSTRAINT_LIFETIME_ONESHOT &&
+                 lifetime != ZWP_CONSTRAINT_LIFETIME_PERSISTENT))
+                break;
+            bool already_constrained = false;
+            for (int oi = 0; oi < c->n_objs; oi++) {
+                wl_obj_t *existing = &c->objs[oi];
+                if ((existing->type != OBJ_LOCKED_POINTER &&
+                     existing->type != OBJ_CONFINED_POINTER) ||
+                    !existing->data) continue;
+                pointer_constraint_t *old = existing->data;
+                if (old->surface_id == surface_id &&
+                    old->pointer_id == pointer_id) {
+                    already_constrained = true;
+                    break;
+                }
+            }
+            if (already_constrained) {
+                send_wl_display_error(c, obj_id, 1,
+                                      "pointer already constrained on surface");
+                break;
+            }
+            pointer_constraint_t *constraint = calloc(1, sizeof(*constraint));
+            if (!constraint) break;
+            constraint->surface_id = surface_id;
+            constraint->pointer_id = pointer_id;
+            constraint->lifetime = lifetime;
+            if (region_id) {
+                wl_obj_t *ro = wl_find_obj(c, region_id);
+                wl_region_t *region = ro && ro->type == OBJ_REGION ? ro->data : NULL;
+                if (region && region->has) {
+                    constraint->has_region = true;
+                    constraint->region_x = region->x0;
+                    constraint->region_y = region->y0;
+                    constraint->region_w = region->x1 - region->x0;
+                    constraint->region_h = region->y1 - region->y0;
+                }
+            }
+            obj_type_t constraint_type = opcode == ZWP_CONSTRAINTS_LOCK
+                ? OBJ_LOCKED_POINTER : OBJ_CONFINED_POINTER;
+            if (!wl_new_obj(c, new_id, constraint_type, constraint)) {
+                free(constraint);
+                break;
+            }
+            pointer_constraints_refresh();
+        }
+        break;
+
+    case OBJ_LOCKED_POINTER:
+    case OBJ_CONFINED_POINTER: {
+        pointer_constraint_t *constraint = obj ? obj->data : NULL;
+        bool locked = type == OBJ_LOCKED_POINTER;
+        uint16_t destroy_op = locked ? ZWP_LOCKED_DESTROY : ZWP_CONFINED_DESTROY;
+        uint16_t region_op = locked ? ZWP_LOCKED_SET_REGION : ZWP_CONFINED_SET_REGION;
+        if (opcode == destroy_op) {
+            bool was_active = constraint && constraint->active;
+            if (was_active && locked)
+                pointer_constraint_release(c, constraint);
+            if (constraint) constraint->active = false;
+            wl_delete_obj(c, obj_id);
+            if (was_active) {
+                drm_cursor_set_visible(true);
+                pointer_constraints_refresh();
+            }
+        } else if (locked && opcode == ZWP_LOCKED_SET_HINT && args_len >= 8) {
+            memcpy(&constraint->hint_x_fixed, args, 4);
+            memcpy(&constraint->hint_y_fixed, args + 4, 4);
+            constraint->has_hint = true;
+        } else if (opcode == region_op && args_len >= 4) {
+            uint32_t region_id;
+            memcpy(&region_id, args, 4);
+            constraint->has_region = false;
+            if (region_id) {
+                wl_obj_t *ro = wl_find_obj(c, region_id);
+                wl_region_t *region = ro && ro->type == OBJ_REGION ? ro->data : NULL;
+                if (region && region->has) {
+                    constraint->has_region = true;
+                    constraint->region_x = region->x0;
+                    constraint->region_y = region->y0;
+                    constraint->region_w = region->x1 - region->x0;
+                    constraint->region_h = region->y1 - region->y0;
+                }
+            }
+        }
+        break;
+    }
+
     /* ── wl_keyboard ─────────────────────────────────────────────────── */
     case OBJ_KEYBOARD:
         /* op=0: release/destroy — clear tracking ID */
@@ -2596,6 +2800,220 @@ static uint32_t wl_now_ms(void) {
     return (uint32_t)((uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull);
 }
 
+static uint32_t wl_fixed_double(double value) {
+    double scaled = value * 256.0;
+    if (scaled > (double)INT32_MAX) scaled = (double)INT32_MAX;
+    if (scaled < (double)INT32_MIN) scaled = (double)INT32_MIN;
+    return (uint32_t)(int32_t)scaled;
+}
+
+static pointer_constraint_t *active_locked_constraint(wl_client_t **owner) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            wl_obj_t *obj = &c->objs[oi];
+            if (obj->type != OBJ_LOCKED_POINTER || !obj->data) continue;
+            pointer_constraint_t *constraint = obj->data;
+            if (!constraint->active) continue;
+            if (owner) *owner = c;
+            return constraint;
+        }
+    }
+    if (owner) *owner = NULL;
+    return NULL;
+}
+
+bool wayland_pointer_locked(void) {
+    return active_locked_constraint(NULL) != NULL;
+}
+
+void wayland_release_pointer_lock(void) {
+    bool released = false;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            wl_obj_t *obj = &c->objs[oi];
+            if (obj->type != OBJ_LOCKED_POINTER || !obj->data) continue;
+            pointer_constraint_t *constraint = obj->data;
+            if (!constraint->active) continue;
+            pointer_constraint_release(c, constraint);
+            constraint->active = false;
+            /* A persistent client request would otherwise re-lock during the
+             * next refresh while its surface still has focus. */
+            constraint->exhausted = true;
+            int h = wl_begin_msg(c, obj->id, ZWP_LOCKED_EVENT_UNLOCKED);
+            wl_end_msg(c, h);
+            wl_client_flush(c);
+            released = true;
+        }
+    }
+    if (released) {
+        drm_cursor_set_visible(true);
+        fprintf(stderr, "[wayland] pointer lock released by Super+Esc\n");
+    }
+}
+
+static void pointer_constraint_release(wl_client_t *c,
+                                       pointer_constraint_t *constraint) {
+    int32_t x = constraint->anchor_x;
+    int32_t y = constraint->anchor_y;
+    if (constraint->has_hint) {
+        wl_obj_t *so = wl_find_obj(c, constraint->surface_id);
+        wl_surface_t *surface = so && so->type == OBJ_SURFACE ? so->data : NULL;
+        if (surface) {
+            int32_t ox, oy;
+            surface_screen_origin(surface, &ox, &oy);
+            int32_t hx = constraint->hint_x_fixed / 256;
+            int32_t hy = constraint->hint_y_fixed / 256;
+            if (hx < 0) hx = 0;
+            if (hy < 0) hy = 0;
+            if (surface->own_w > 0 && hx >= surface->own_w) hx = surface->own_w - 1;
+            if (surface->own_h > 0 && hy >= surface->own_h) hy = surface->own_h - 1;
+            x = ox + hx;
+            y = oy + hy;
+        }
+    }
+    mouse_warp(x, y);
+    drm_cursor_set_visible(true);
+    drm_cursor_move(x, y);
+}
+
+static void pointer_constraints_refresh(void) {
+    bool any_locked = false;
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            wl_obj_t *obj = &c->objs[oi];
+            bool locked = obj->type == OBJ_LOCKED_POINTER;
+            bool confined = obj->type == OBJ_CONFINED_POINTER;
+            if ((!locked && !confined) || !obj->data) continue;
+            pointer_constraint_t *constraint = obj->data;
+            wl_obj_t *surface_obj = wl_find_obj(c, constraint->surface_id);
+            wl_surface_t *surface = surface_obj &&
+                surface_obj->type == OBJ_SURFACE ? surface_obj->data : NULL;
+            bool should_activate = surface && surface->mapped &&
+                !surface->minimized && !surface->pending_destroy &&
+                !constraint->exhausted &&
+                ci == g_focus_ci && constraint->surface_id == g_focus_sid &&
+                constraint->pointer_id == c->pointer_id;
+            if (should_activate && !constraint->active) {
+                constraint->active = true;
+                mouse_get_state(&constraint->anchor_x, &constraint->anchor_y,
+                                NULL, NULL);
+                int h = wl_begin_msg(c, obj->id,
+                    locked ? ZWP_LOCKED_EVENT_LOCKED :
+                             ZWP_CONFINED_EVENT_CONFINED);
+                wl_end_msg(c, h);
+                wl_client_flush(c);
+            } else if (!should_activate && constraint->active) {
+                if (locked) pointer_constraint_release(c, constraint);
+                constraint->active = false;
+                if (constraint->lifetime == ZWP_CONSTRAINT_LIFETIME_ONESHOT)
+                    constraint->exhausted = true;
+                int h = wl_begin_msg(c, obj->id,
+                    locked ? ZWP_LOCKED_EVENT_UNLOCKED :
+                             ZWP_CONFINED_EVENT_UNCONFINED);
+                wl_end_msg(c, h);
+                wl_client_flush(c);
+            }
+            if (locked && constraint->active) any_locked = true;
+        }
+    }
+    drm_cursor_set_visible(!any_locked);
+}
+
+static void send_relative_motion(wl_client_t *c, double dx, double dy,
+                                 double dx_unaccel, double dy_unaccel) {
+    if (!c || (dx == 0.0 && dy == 0.0 &&
+               dx_unaccel == 0.0 && dy_unaccel == 0.0)) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t usec = (uint64_t)now.tv_sec * 1000000ull +
+                    (uint64_t)now.tv_nsec / 1000ull;
+    for (int oi = 0; oi < c->n_objs; oi++) {
+        wl_obj_t *obj = &c->objs[oi];
+        if (obj->type != OBJ_REL_POINTER || !obj->data) continue;
+        relative_pointer_t *relative = obj->data;
+        if (relative->pointer_id != c->pointer_id) continue;
+        int h = wl_begin_msg(c, obj->id, ZWP_REL_POINTER_MOTION);
+        wl_push_u32(c, (uint32_t)(usec >> 32));
+        wl_push_u32(c, (uint32_t)usec);
+        wl_push_u32(c, wl_fixed_double(dx));
+        wl_push_u32(c, wl_fixed_double(dy));
+        wl_push_u32(c, wl_fixed_double(dx_unaccel));
+        wl_push_u32(c, wl_fixed_double(dy_unaccel));
+        wl_end_msg(c, h);
+    }
+}
+
+static void send_locked_pointer_input(wl_client_t *c,
+                                      pointer_constraint_t *constraint,
+                                      uint8_t btns, double dx, double dy,
+                                      double dx_unaccel, double dy_unaccel) {
+    send_relative_motion(c, dx, dy, dx_unaccel, dy_unaccel);
+    uint8_t changed = btns ^ g_prev_btns;
+    if (changed && c->pointer_id) {
+        static const uint32_t btn_codes[3] = { 0x110, 0x111, 0x112 };
+        for (int b = 0; b < 3; b++) {
+            if (!(changed & (1u << b))) continue;
+            int h = wl_begin_msg(c, c->pointer_id, WL_PTR_BUTTON);
+            wl_push_u32(c, next_serial(c));
+            wl_push_u32(c, wl_now_ms());
+            wl_push_u32(c, btn_codes[b]);
+            wl_push_u32(c, (btns >> b) & 1u);
+            wl_end_msg(c, h);
+        }
+        int h = wl_begin_msg(c, c->pointer_id, WL_PTR_FRAME);
+        wl_end_msg(c, h);
+    }
+    wl_client_flush(c);
+    mouse_warp(constraint->anchor_x, constraint->anchor_y);
+    g_prev_mx = constraint->anchor_x;
+    g_prev_my = constraint->anchor_y;
+    g_prev_btns = btns;
+}
+
+static void apply_active_confinement(int32_t *mx, int32_t *my) {
+    for (int ci = 0; ci < MAX_WL_CLIENTS; ci++) {
+        wl_client_t *c = &g_wl_clients[ci];
+        if (!c->active) continue;
+        for (int oi = 0; oi < c->n_objs; oi++) {
+            wl_obj_t *obj = &c->objs[oi];
+            if (obj->type != OBJ_CONFINED_POINTER || !obj->data) continue;
+            pointer_constraint_t *constraint = obj->data;
+            if (!constraint->active) continue;
+            wl_obj_t *so = wl_find_obj(c, constraint->surface_id);
+            wl_surface_t *surface = so && so->type == OBJ_SURFACE ? so->data : NULL;
+            if (!surface) return;
+            int32_t ox, oy;
+            surface_screen_origin(surface, &ox, &oy);
+            int32_t x0 = ox, y0 = oy;
+            int32_t x1 = ox + surface->own_w;
+            int32_t y1 = oy + surface->own_h;
+            if (constraint->has_region) {
+                x0 = ox + constraint->region_x;
+                y0 = oy + constraint->region_y;
+                x1 = x0 + constraint->region_w;
+                y1 = y0 + constraint->region_h;
+            }
+            if (x1 <= x0 || y1 <= y0) return;
+            int32_t old_x = *mx, old_y = *my;
+            if (*mx < x0) *mx = x0;
+            if (*my < y0) *my = y0;
+            if (*mx >= x1) *mx = x1 - 1;
+            if (*my >= y1) *my = y1 - 1;
+            if (*mx != old_x || *my != old_y) {
+                mouse_warp(*mx, *my);
+                drm_cursor_move(*mx, *my);
+            }
+            return;
+        }
+    }
+}
+
 /* Send pointer enter/leave events when focus changes */
 static void wl_send_ptr_enter(wl_client_t *c, uint32_t surf_id,
                                int32_t mx, int32_t my) {
@@ -2644,7 +3062,17 @@ static void wl_send_kbd_leave(wl_client_t *c, uint32_t surf_id) {
 
 /* Deliver mouse events to Wayland surfaces.
  * Call from main.c after input_poll() with current mouse state. */
-void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
+void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns,
+                        double dx, double dy,
+                        double dx_unaccel, double dy_unaccel) {
+    wl_client_t *locked_owner = NULL;
+    pointer_constraint_t *locked = active_locked_constraint(&locked_owner);
+    if (locked && locked_owner) {
+        send_locked_pointer_input(locked_owner, locked, btns, dx, dy,
+                                  dx_unaccel, dy_unaccel);
+        return;
+    }
+    apply_active_confinement(&mx, &my);
     /* Interactive move/resize: while active, the drag drives window geometry and
      * pointer events are NOT forwarded to the client. Ends when the button is up. */
     if (g_iop) {
@@ -2961,6 +3389,13 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
         }
         g_focus_ci  = new_ci;
         g_focus_sid = new_sid;
+        pointer_constraints_refresh();
+        locked = active_locked_constraint(&locked_owner);
+        if (locked && locked_owner) {
+            send_locked_pointer_input(locked_owner, locked, btns, dx, dy,
+                                      dx_unaccel, dy_unaccel);
+            return;
+        }
     }
 
     /* ── Keyboard focus (follows ONLY real toplevels, never a popup/menu) ──
@@ -2985,6 +3420,8 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns) {
 
     wl_client_t *fc = &g_wl_clients[g_focus_ci];
     if (!fc->active || !fc->pointer_id) { g_prev_mx = mx; g_prev_my = my; g_prev_btns = btns; return; }
+
+    send_relative_motion(fc, dx, dy, dx_unaccel, dy_unaccel);
 
     /* Dismiss grabbed popup on click outside its bounds */
     if (btns && !g_prev_btns) {

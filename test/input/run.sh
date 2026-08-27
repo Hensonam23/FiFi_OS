@@ -239,3 +239,37 @@ grep -Fq 'draw_speed_slider(fb, "Mouse speed:"' \
 grep -Fq 'draw_speed_slider(fb, "Touchpad speed:"' \
     "$ROOT/fifi/apps/settings/settings.c"
 echo "[input-test] mouse and touchpad speeds persist and apply independently"
+
+grep -Fq 'libinput_event_pointer_get_dx_unaccelerated(pointer)' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'input_consume_relative_motion(&rel_dx, &rel_dy,' \
+    "$ROOT/fifi/compositor/main.c"
+grep -Fq '"zwp_relative_pointer_manager_v1", 1' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq '"zwp_pointer_constraints_v1", 1' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'ZWP_REL_POINTER_MOTION' "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'ZWP_LOCKED_EVENT_LOCKED' "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'ZWP_CONFINED_EVENT_CONFINED' "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'wayland_pointer_locked() || wl_top' \
+    "$ROOT/fifi/compositor/main.c"
+grep -Fq 'drm_cursor_set_visible(!any_locked);' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+echo "[input-test] Wayland games receive relative and constrained pointers"
+
+grep -Fq 'g_pointer_unlock_requested = true;' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'wayland_release_pointer_lock();' "$ROOT/fifi/compositor/main.c"
+grep -Fq 'constraint->exhausted = true;' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'pointer lock released by Super+Esc' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+echo "[input-test] Super+Esc safely releases a stuck pointer lock"
+
+! grep -Fq '2026-07-13' "$ROOT/initramfs/root/etc/fifi-version"
+grep -Fq 'FIFI_BUILD_SHORT' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq '${FIFI_BUILD_ID}-dirty' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'Boot slot: %s' "$ROOT/initramfs/root/bin/fifi"
+grep -Fq 'pending confirmation' "$ROOT/initramfs/root/bin/fifi"
+grep -Fq 'update staged in inactive slot' "$ROOT/initramfs/root/bin/fifi"
+echo "[input-test] installed version reports its exact build and A/B state"

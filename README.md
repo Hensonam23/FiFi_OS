@@ -252,6 +252,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 - [x] XWayland: run X11 apps (Steam, browsers) inside a FiFi window
 - [x] Steam installed in image, launches in a FiFi window
 - [x] Proton configured and tested (fifi-proton panel shows versions, Vulkan detected)
+- [x] FPS mouse capture: relative motion, pointer lock/confinement, and Super+Esc emergency release
 
 #### Phase 5: Security and Privacy (done)
 
@@ -333,17 +334,17 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 #### Phase 9: Desktop/Laptop v1.0
 
 - [ ] Desktop UX polish and settings parity
-- [ ] Smooth pointer and touchpad input on the real laptop
+- [x] Smooth pointer and touchpad input on the real laptop
   - [x] Preserve unchanged evdev axes and multitouch slots across poll batches
   - [x] Prevent slow compositor frames from starving all pointer input
   - [x] Move the cursor independently of slow software-rendered frames
   - [x] Remove lagging touchpad averaging and scale each hardware axis correctly
   - [x] Use standard libinput device handling with duplicate touchpad interfaces excluded
   - [x] Add independent, live mouse and touchpad speed controls
-  - [ ] Re-test the laptop and tune acceleration/smoothing from hardware feedback
+  - [x] Re-test the laptop and tune acceleration/smoothing from hardware feedback
 - [ ] App framework/SDK and a verifying package manager
 - [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
-- [ ] Pointer-constraints and relative-pointer protocols (required for FPS mouselook)
+- [x] Pointer-constraints and relative-pointer protocols (required for FPS mouselook)
 - [ ] Ship Desktop/Laptop v1.0, the first real release (checklist below)
 
 #### v1.0 release checklist
