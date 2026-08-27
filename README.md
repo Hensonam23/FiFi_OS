@@ -85,7 +85,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 
 ## Current state
 
-**Beta 1.0.** The build phases (Linux foundation, compositor, shell/terminal, display/gaming, security/privacy, full system) are all complete, followed by a full-codebase audit and optimization pass. The desktop runs on real hardware with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 apps (Steam, LibreOffice, browsers), WiFi via wpa_supplicant + iwd, and a full security suite.
+**Beta 1.0.** The build phases (Linux foundation, compositor, shell/terminal, display/gaming, security/privacy, full system) are all complete, followed by a full-codebase audit and optimization pass. The desktop runs on real hardware with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 apps (Steam, LibreOffice, browsers), WiFi through one wpa_supplicant control path, and a full security suite.
 
 Recent work:
 
@@ -159,6 +159,7 @@ requirement for updating an existing installation.
 ```sh
 make linux-update-test    # simulated install, corruption, no-op, and rollback tests
 make linux-package-test   # native package signatures, hashes, trust, install, SDK
+make linux-settings-test  # Wi-Fi paths, scan parsing, and every Settings control
 make linux-release-test   # publisher integrity and no-mutation preflight tests
 make linux-test-update    # real kernel + test-channel initramfs + release package
 make linux-test-usb       # also produce the hardware-test ISO

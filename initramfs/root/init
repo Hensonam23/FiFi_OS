@@ -332,6 +332,11 @@ for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
                /fifi-data/wg0.conf /fifi-data/torrc; do
     [ -f "$_secret" ] && chmod 0600 "$_secret"
 done
+for _wifi_public in /fifi-data/wifi-status /fifi-data/wifi-ssid \
+                    /fifi-data/wifi-saved-ssid; do
+    [ ! -L "$_wifi_public" ] || rm -f "$_wifi_public"
+    [ ! -f "$_wifi_public" ] || chmod 0644 "$_wifi_public"
+done
 
 # Apps expect standard tools in /usr/bin (#!/usr/bin/env shebangs, uname, etc.):
 # link every busybox applet there unless a real binary already exists.
@@ -571,25 +576,14 @@ if [ -x /usr/share/fifi/complete-pending-update.sh ]; then
     /usr/share/fifi/complete-pending-update.sh &
 fi
 
-# ── WiFi auto-connect via iwd ─────────────────────────────────────────────────
-# Runs in parallel with ethernet negotiation. Reads /fifi-data/wifi.conf:
-#   SSID=YourNetworkName
-#   PASSWORD=YourPassword
+# ── Wi-Fi auto-connect via the same manager used by Settings ─────────────────
+# Keeping boot, scan, connect, and disconnect on wpa_supplicant avoids two
+# daemons competing for the radio. The fixed helper reads the saved credentials
+# without exposing the password in argv.
 (
-    if [ ! -f /fifi-data/wifi.conf ] || [ ! -x /usr/lib/iwd/iwd ]; then
+    if [ ! -f /fifi-data/wifi.conf ] || [ ! -x /bin/fifi-wifi-ctl ]; then
         exit 0
     fi
-    # Parse wifi.conf
-    WIFI_SSID="" WIFI_PASS=""
-    while IFS='=' read -r k v; do
-        case "$k" in
-            SSID)     WIFI_SSID="$v" ;;
-            PASSWORD) WIFI_PASS="$v" ;;
-        esac
-    done < /fifi-data/wifi.conf
-    [ -z "$WIFI_SSID" ] && exit 0
-
-    # Wait for WiFi interface to appear (firmware load takes a moment)
     WIFI_IF=""
     for i in $(seq 1 10); do
         for iface in $(ls /sys/class/net/ 2>/dev/null); do
@@ -599,33 +593,22 @@ fi
     done
     [ -z "$WIFI_IF" ] && echo "wifi: no wireless interface found" >> /fifi-data/network.log && exit 0
     echo "wifi: found interface $WIFI_IF" >> /fifi-data/network.log
-
-    # Set up iwd network profile
-    mkdir -p /var/lib/iwd /etc/iwd
-    printf '[Security]\nPassphrase=%s\n' "$WIFI_PASS" > "/var/lib/iwd/${WIFI_SSID}.psk"
-    # iwd main.conf: use its built-in DHCP client
-    cat > /etc/iwd/main.conf << 'IWDCONF'
-[General]
-EnableNetworkConfiguration=true
-
-[Network]
-EnableIPv6=false
-NameResolvingService=none
-IWDCONF
-
-    # Start iwd (it will auto-connect to the saved profile)
-    /usr/lib/iwd/iwd > /fifi-data/wifi.log 2>&1 &
-    echo $! > /fifi-data/wifi.pid
-    echo "wifi: iwd started, connecting to $WIFI_SSID..." >> /fifi-data/network.log
+    if ! /bin/fifi-wifi-ctl saved-connect "$WIFI_IF" >>/fifi-data/wifi.log 2>&1; then
+        echo "wifi: saved connection could not start" >> /fifi-data/network.log
+        echo "disconnected" > /fifi-data/wifi-status
+        chmod 0644 /fifi-data/wifi-status
+        exit 0
+    fi
+    echo "wifi: saved connection started on $WIFI_IF" >> /fifi-data/network.log
 
     # Wait up to 30s for an IP on the WiFi interface
     for i in $(seq 1 30); do
         sleep 1
         WIFI_IP=$(ip -4 addr show "$WIFI_IF" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
         if [ -n "$WIFI_IP" ]; then
-            echo "wifi: connected to $WIFI_SSID ip=$WIFI_IP" >> /fifi-data/network.log
-            echo "$WIFI_SSID" > /fifi-data/wifi-ssid
+            echo "wifi: connected on $WIFI_IF ip=$WIFI_IP" >> /fifi-data/network.log
             echo "connected" > /fifi-data/wifi-status
+            chmod 0644 /fifi-data/wifi-status
             # Set DNS if not already set by ethernet or DoH
             if ! grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
                 echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -633,8 +616,9 @@ IWDCONF
             exit 0
         fi
     done
-    echo "wifi: timeout connecting to $WIFI_SSID" >> /fifi-data/network.log
+    echo "wifi: timeout connecting on $WIFI_IF" >> /fifi-data/network.log
     echo "disconnected" > /fifi-data/wifi-status
+    chmod 0644 /fifi-data/wifi-status
 ) &
 
 # ── AppArmor — load profiles in complain mode ────────────────────────────────

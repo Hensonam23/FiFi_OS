@@ -978,29 +978,8 @@ else
     echo "[initramfs] NOTE: dropbear not found — install dropbear for SSH access"
 fi
 
-# ── WiFi: iwd daemon + iw tool + Intel/Qualcomm firmware + regulatory DB ──────
+# ── WiFi tools + Intel/Qualcomm firmware + regulatory DB ─────────────────────
 echo "[initramfs] bundling WiFi support..."
-
-# iwd daemon (handles WPA2/WPA3 auth + built-in DHCP)
-IWD_BIN="/usr/lib/iwd/iwd"
-IWCTL_BIN="/usr/bin/iwctl"
-if [ -x "$IWD_BIN" ]; then
-    mkdir -p "$STAGE/usr/lib/iwd"
-    cp "$IWD_BIN" "$STAGE/usr/lib/iwd/iwd"; chmod +x "$STAGE/usr/lib/iwd/iwd"
-    [ -x "$IWCTL_BIN" ] && cp "$IWCTL_BIN" "$STAGE/usr/bin/iwctl" && chmod +x "$STAGE/usr/bin/iwctl"
-    # iwd only needs libell
-    IWD_LIBS=$(ldd "$IWD_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
-    for lib in $IWD_LIBS; do
-        real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
-        dest="$STAGE/usr/lib/$(basename "$real")"
-        [ -f "$dest" ] || cp "$real" "$dest"
-        link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
-        [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
-    done
-    echo "[initramfs] iwd bundled ($(du -sh "$IWD_BIN" | cut -f1))"
-else
-    echo "[initramfs] NOTE: iwd not found -- install iwd for WiFi support"
-fi
 
 # iw tool (WiFi interface control/scanning)
 IW_BIN="/usr/bin/iw"
@@ -1241,15 +1220,21 @@ for fw in /lib/firmware/intel/ibt-* /lib/firmware/rtl_bt/* /lib/firmware/qca/*; 
 done
 echo "[initramfs] Bluetooth stack bundled"
 
-# Create iwd runtime dirs
-mkdir -p "$STAGE/var/lib/iwd" "$STAGE/etc/iwd" "$STAGE/var/run/wpa_supplicant"
+# Create the wpa_supplicant control directory used by Settings and Wi-Fi.
+mkdir -p "$STAGE/var/run/wpa_supplicant"
 
 # ── wpa_supplicant (WiFi auth — WPA2/WPA3, no D-Bus needed) ──────────────────
 WPA_BIN="/usr/bin/wpa_supplicant"
+WPA_CLI_BIN="/usr/bin/wpa_cli"
 if [ -x "$WPA_BIN" ]; then
     cp "$WPA_BIN" "$STAGE/usr/bin/wpa_supplicant"
     chmod +x "$STAGE/usr/bin/wpa_supplicant"
-    WPA_LIBS=$(ldd "$WPA_BIN" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
+    if [ -x "$WPA_CLI_BIN" ]; then
+        cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"
+        chmod +x "$STAGE/usr/bin/wpa_cli"
+    fi
+    WPA_LIBS=$({ ldd "$WPA_BIN"; [ ! -x "$WPA_CLI_BIN" ] || ldd "$WPA_CLI_BIN"; } 2>/dev/null |
+        grep "=>" | awk '{print $3}' | grep "^/" | sort -u)
     for lib in $WPA_LIBS; do
         real=$(realpath "$lib" 2>/dev/null) || continue; [ -f "$real" ] || continue
         dest="$STAGE/usr/lib/$(basename "$real")"
@@ -1257,7 +1242,11 @@ if [ -x "$WPA_BIN" ]; then
         link_name=$(basename "$lib"); link_path="$STAGE/usr/lib/$link_name"
         [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
     done
-    echo "[initramfs] wpa_supplicant bundled ($(du -sh "$WPA_BIN" | cut -f1))"
+    [ -x "$WPA_CLI_BIN" ] || {
+        echo "[initramfs] ERROR: wpa_cli is required for Wi-Fi settings" >&2
+        exit 1
+    }
+    echo "[initramfs] wpa_supplicant and wpa_cli bundled"
 else
     echo "[initramfs] NOTE: wpa_supplicant not found -- WiFi connect may not work"
 fi

@@ -608,7 +608,7 @@ bool gui_wifi_connected(void) {
 
 void gui_wifi_ssid(char *out, int outlen) {
     out[0] = '\0';
-    /* iwd writes the connected SSID via /fifi-data/wifi-ssid */
+    /* The fixed Wi-Fi manager writes the connected SSID here after DHCP. */
     FILE *f = fopen("/fifi-data/wifi-ssid", "r");
     if (!f) {
         /* Fallback: read SSID from wifi.conf */

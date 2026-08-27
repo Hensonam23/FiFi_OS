@@ -202,7 +202,7 @@ clean:
 # These targets build and run the linux-desktop branch version.
 # The bare-metal targets above (run, rundbg, iso, etc.) are unchanged.
 
-.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-qemu-test linux-boot-fallback-test linux-usb linux-flash linux-test-update linux-test-usb linux-publish-test-check linux-publish-test linux-release-test linux-update-test linux-security-test linux-download-test linux-shared-api-test linux-input-test linux-package-test linux-clean
+.PHONY: linux-setup linux-menuconfig linux-kernel linux-initrd linux-run linux-rundbg linux-qemu-test linux-boot-fallback-test linux-usb linux-flash linux-test-update linux-test-usb linux-publish-test-check linux-publish-test linux-release-test linux-update-test linux-security-test linux-download-test linux-shared-api-test linux-input-test linux-package-test linux-settings-test linux-clean
 
 linux-setup:
 	bash scripts/setup-linux.sh
@@ -256,6 +256,9 @@ linux-input-test:
 
 linux-package-test:
 	bash test/package/run.sh
+
+linux-settings-test:
+	bash test/settings/run.sh
 
 linux-release-test:
 	bash test/release/run.sh

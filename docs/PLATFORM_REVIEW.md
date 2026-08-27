@@ -183,7 +183,7 @@ Ordered prerequisites (blocking → enabling). **Note the reorder from the earli
 4. **`wl_touch` + a platform-neutral touch/gesture event model** in `kernel/include` (down/up/motion/frame using the MT slots already parsed), keeping pointer emulation as fallback.
 5. **Coordinate-transform / rotation layer** in the compositor (software rotate + input remap), manual portrait toggle first, autorotate via IIO later; derive status-bar/taskbar reserves from orientation.
 6. **A DPI/scale factor + `px()/dp()` helper** through every fixed constant, 44px minimum touch target; make apps use the TTF path instead of the 9px PSF bitmap font.
-7. **Notification service** (promote the toast to history/actions/DND) and a **swipe-down quick-settings panel** (WiFi/BT/rfkill/brightness/rotation/gaming-mode) reusing the existing tray indicators and iwd/BlueZ backends.
+7. **Notification service** (promote the toast to history/actions/DND) and a **swipe-down quick-settings panel** (WiFi/BT/rfkill/brightness/rotation/gaming-mode) reusing the existing tray indicators and wpa_supplicant/BlueZ backends.
 8. **Bluetooth pairing UI** and **PipeWire audio routing** (sink/source switch, auto-route to BT/headset).
 9. **App lifecycle** (freeze/reclaim backgrounded apps) and a **responsive "mobile shell" mode** in shared `gui*.c` (single-fullscreen-app, bottom nav, gesture area).
 
@@ -308,7 +308,7 @@ Pick the **first form factor = docked/handheld-gaming or TABLET on existing ARM6
 - **Docked / split / scaling:** mobile-shell single-fullscreen-app mode, split-view via the existing half-snap, global scale factor.
 - **Accessibility:** screen reader, magnifier, high-contrast, large-text (only a magnifier glyph exists today).
 - **Suspend:** `/sys/power/state` + lid/power-button; **stop forcing `performance`**.
-- **BT/WiFi:** pairing UI over the bundled BlueZ; WiFi app already works via iwd.
+- **BT/WiFi:** pairing UI over the bundled BlueZ; WiFi uses the fixed wpa_supplicant broker path.
 - **Audio:** PipeWire sink/source routing behind a neutral API.
 - **box64/FEX + Proton:** **CUT.** Ship native-ARM catalog only; ARM64 = light/native, not Proton AAA.
 - **Camera/GPS/modem/NFC/fingerprint/phone+SMS:** absent in code *and* kernel config — **out of near-term scope**; add kernel classes (WWAN/NFC/IIO/GNSS/V4L2) + ModemManager/oFono only at the Phone stage.

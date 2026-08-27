@@ -103,7 +103,7 @@ typedef struct {
     char ssid[64];
     int  signal;   /* dBm, e.g. -65 */
     char security[16]; /* "WPA2", "WPA3", "Open" */
-    bool saved;    /* profile exists in /var/lib/iwd/ */
+    bool saved;    /* SSID matches the persistent FiFi connection profile */
 } NetEntry;
 
 static NetEntry g_nets[MAX_NETS];
@@ -134,7 +134,8 @@ static void find_wifi_if(void) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        char wpath[128];
+        if (strlen(e->d_name) >= sizeof(g_wif)) continue;
+        char wpath[320];
         snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/wireless", e->d_name);
         if (access(wpath, F_OK) == 0) {
             snprintf(g_wif, sizeof(g_wif), "%s", e->d_name);
@@ -158,61 +159,49 @@ static int find_net(const char *ssid) {
     return -1;
 }
 
+static bool wifi_is_saved(const char *ssid) {
+    FILE *saved = fopen("/fifi-data/wifi-saved-ssid", "r");
+    if (!saved) return false;
+    char line[160]; bool match = false;
+    while (fgets(line, sizeof line, saved)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, ssid)) { match = true; break; }
+    }
+    fclose(saved);
+    return match;
+}
+
 static void parse_scan(const char *buf) {
     g_net_count = 0;
-    const char *p = buf;
-    while (*p) {
-        /* Look for SSID line */
-        const char *ssid_tag = strstr(p, "\tSSID: ");
-        if (!ssid_tag) break;
-        /* Find the BSS block that contains this SSID: search backward for signal */
-        const char *bss_start = ssid_tag;
-        while (bss_start > buf && !(bss_start[0] == 'B' && bss_start[1] == 'S' && bss_start[2] == 'S' && bss_start[3] == ' '))
-            bss_start--;
-
-        ssid_tag += 7; /* skip "\tSSID: " */
-        const char *nl = strchr(ssid_tag, '\n');
-        int ssid_len = nl ? (int)(nl - ssid_tag) : (int)strlen(ssid_tag);
-        if (ssid_len == 0) { p = ssid_tag + 1; continue; }  /* hidden network */
-        if (ssid_len > 63) ssid_len = 63;
-
-        /* Parse this BSS entry into a temporary struct */
-        char tmp_ssid[64] = {0};
-        memcpy(tmp_ssid, ssid_tag, ssid_len);
-        tmp_ssid[ssid_len] = '\0';
-
-        int signal = -100;
-        const char *sig_p = strstr(bss_start, "\tsignal: ");
-        if (sig_p && sig_p < ssid_tag + 200)
-            signal = (int)strtof(sig_p + 9, NULL);
-
-        char security[16] = "WPA2";
-        const char *auth_p = strstr(bss_start, "Authentication suites:");
-        if (auth_p && auth_p < ssid_tag + 300) {
-            if (strstr(auth_p, "SAE")) snprintf(security, sizeof(security), "WPA3");
+    char *copy = strdup(buf ? buf : "");
+    if (!copy) return;
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\r\n", &save); line;
+         line = strtok_r(NULL, "\r\n", &save)) {
+        char *fields[5] = { line, NULL, NULL, NULL, NULL };
+        char *cursor = line;
+        int field = 1;
+        while (field < 5 && (cursor = strchr(cursor, '\t')) != NULL) {
+            *cursor++ = '\0'; fields[field++] = cursor;
         }
-        const char *cap_p = strstr(bss_start, "\tcapability:");
-        if (cap_p && cap_p < ssid_tag + 100) {
-            if (!strstr(bss_start, "RSN:") && !strstr(bss_start, "WPA:"))
-                snprintf(security, sizeof(security), "Open");
-        }
-
-        /* Deduplicate: if this SSID already exists, keep whichever has stronger signal */
-        int existing = find_net(tmp_ssid);
+        if (field != 5 || !fields[4][0]) continue;
+        int signal = atoi(fields[2]);
+        const char *flags = fields[3];
+        const char *security = strstr(flags, "SAE") ? "WPA3" :
+                               (strstr(flags, "WPA") || strstr(flags, "RSN")) ? "WPA2" : "Open";
+        int existing = find_net(fields[4]);
         if (existing >= 0) {
             if (signal > g_nets[existing].signal)
                 g_nets[existing].signal = signal;
         } else if (g_net_count < MAX_NETS) {
             NetEntry *e = &g_nets[g_net_count++];
-            snprintf(e->ssid, sizeof(e->ssid), "%s", tmp_ssid);
+            snprintf(e->ssid, sizeof(e->ssid), "%s", fields[4]);
             e->signal = signal;
             snprintf(e->security, sizeof(e->security), "%s", security);
-            char prof[128]; snprintf(prof, sizeof(prof), "/var/lib/iwd/%s.psk", e->ssid);
-            e->saved = (access(prof, F_OK) == 0);
+            e->saved = wifi_is_saved(e->ssid);
         }
-
-        p = (nl ? nl + 1 : ssid_tag + ssid_len);
     }
+    free(copy);
 }
 
 static pid_t g_scan_pid  = -1;
@@ -260,7 +249,8 @@ static void poll_scan(void) {
     }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         close(g_scan_pipe); g_scan_pipe = -1;
-        int st; waitpid(g_scan_pid, &st, WNOHANG); g_scan_pid = -1;
+        int st = 0; while (waitpid(g_scan_pid, &st, 0) < 0 && errno == EINTR) {}
+        g_scan_pid = -1;
         parse_scan(g_scan_buf);
         if (g_net_count == 0) {
             /* Show first line of iw output so errors (e.g. "Device busy") are visible */

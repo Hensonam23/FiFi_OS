@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+SETTINGS="$ROOT/fifi/apps/settings/settings.c"
+
+gcc -std=gnu11 -O2 -I"$ROOT/fifi/platform/linux/vendor" \
+    "$ROOT/test/settings/scan_settings.c" -lm -o "$TMP/scan-settings"
+gcc -std=gnu11 -O2 "$ROOT/test/settings/scan_wifi.c" -o "$TMP/scan-wifi"
+"$TMP/scan-settings"
+"$TMP/scan-wifi"
+echo "[settings-test] both Wi-Fi views parse WPA2, WPA3, open, and duplicate networks"
+
+for action in ACCENT WALL WALLFIT PANEL GLASS SHADOW DOCK STATUS DESKINFO \
+              AUTOHIDE ALIGN CLOCK TBSIZE RADIUS FONT_FAM FONT_SZ; do
+    grep -Eq "add_hot\([^;]*ACT_${action}" "$SETTINGS"
+    grep -Fq "case ACT_${action}:" "$SETTINGS"
+done
+for action in FW DOH VPN TOR; do
+    grep -Fq "ACT_${action}" "$SETTINGS"
+    grep -Fq "case ACT_${action}:" "$SETTINGS"
+done
+grep -Fq 'alsa_set_vol(' "$SETTINGS"
+grep -Fq 'FIFI_INPUT_KEY_MOUSE_SPEED' "$SETTINGS"
+grep -Fq 'FIFI_INPUT_KEY_TOUCHPAD_SPEED' "$SETTINGS"
+echo "[settings-test] every interactive Settings control has rendering and action handling"
+grep -Fq 'g_pers_scroll -= wheel * 48' "$SETTINGS"
+echo "[settings-test] overflowing Personalize controls scroll into a clickable view"
+
+grep -Fq 'wpa_command(interface, "scan"' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'wpa_command(interface, "scan_results"' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'fifi-wifi-ctl saved-connect "$WIFI_IF"' "$ROOT/initramfs/root/init"
+! grep -Fq '/usr/lib/iwd/iwd' "$ROOT/initramfs/root/init"
+grep -Fq 'open_public_status("/fifi-data/wifi-ssid")' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq '/fifi-data/wifi-saved-ssid' "$SETTINGS"
+grep -Fq 'cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'Updates: run fifi upgrade' "$SETTINGS"
+echo "[settings-test] boot, scan, connect, disconnect, and help use current system paths"
+
+gcc -std=c11 -O2 -Wall -Wextra \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c" -o "$TMP/fifi-wifi-ctl"
+invalid="$($TMP/fifi-wifi-ctl scan 'wlan0;id' 2>&1 || true)"
+grep -Fq 'usage: fifi-wifi-ctl' <<<"$invalid"
+
+echo "[settings-test] PASS"

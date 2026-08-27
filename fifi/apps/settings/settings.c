@@ -10,7 +10,8 @@
  *                 using the same boundary as the standalone fifi-wifi app.
  *   Network     : live interface / IP / RX-TX throughput (netmon logic).
  *   System      : live CPU freq / memory / uptime / load / processes + volume.
- *   Security    : read-only status of firewall / DoH / VPN / Tor / privacy.
+ *   Security    : live status and fixed-broker toggles for firewall / DoH /
+ *                 VPN / Tor, plus read-only privacy-blocking status.
  *   About       : OS version + kernel (uname).
  *
  * Deep-linking: `fifi-settings <section>` opens straight on a tab, where
@@ -60,6 +61,9 @@
 
 static int g_win_w = WIN_W;
 static int g_win_h = WIN_H;
+static int g_draw_y_offset = 0;
+static int g_draw_clip_top = 0;
+static int g_draw_clip_bottom = WIN_H;
 
 /* ── Colours (0x00RRGGBB) ────────────────────────────────────────────────── */
 #define C_BG        0x00141b26u  /* content background */
@@ -129,6 +133,8 @@ static int fold_cp(uint32_t cp) {
 
 static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
     if (c < 0) return;
+    py += g_draw_y_offset;
+    if (py < g_draw_clip_top || py + g_glyph_h > g_draw_clip_bottom) return;
     fifi_ui_glyph((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, &g_font,
                   px, py, (unsigned char)c, fg, 0);
 }
@@ -136,12 +142,14 @@ static void draw_char(uint32_t *fb, int c, int px, int py, uint32_t fg) {
 /* Draw an em/en/figure dash as a centred horizontal bar (the PSF font has no
  * such glyph). em spans the full cell, en/minus a shorter middle run. */
 static void draw_dash(uint32_t *fb, uint32_t cp, int px, int py, uint32_t fg) {
+    py += g_draw_y_offset;
     int x0 = px, x1 = px + 7;                            /* em-dash: 0x2014 */
     if (cp != 0x2014) { x0 = px + 1; x1 = px + 6; }      /* en/minus: 0x2013/0x2212 */
     int y0 = py + g_glyph_h / 2;
     for (int x = x0; x <= x1; x++)
         for (int yy = y0; yy < y0 + 1; yy++)
-            if (x >= 0 && x < g_win_w && yy >= 0 && yy < g_win_h)
+            if (x >= 0 && x < g_win_w && yy >= g_draw_clip_top &&
+                yy < g_draw_clip_bottom && yy < g_win_h)
                 fb[yy * g_win_w + x] = fg;
 }
 
@@ -168,18 +176,25 @@ static int str_w(const char *s) {
 }
 
 static void fill(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
+    y += g_draw_y_offset;
+    if (y < g_draw_clip_top) { h -= g_draw_clip_top - y; y = g_draw_clip_top; }
+    if (y + h > g_draw_clip_bottom) h = g_draw_clip_bottom - y;
+    if (h <= 0) return;
     fifi_ui_fill((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, x, y, w, h, col);
 }
 
 static void rect_border(uint32_t *fb, int x, int y, int w, int h, uint32_t col) {
-    fifi_ui_border((fifi_ui_canvas_t){fb, g_win_w, g_win_h}, x, y, w, h, col);
+    fill(fb, x, y, w, 1, col);
+    fill(fb, x, y + h - 1, w, 1, col);
+    fill(fb, x, y, 1, h, col);
+    fill(fb, x + w - 1, y, 1, h, col);
 }
 
 /* Section header: title + accent-tinted underline. Returns the y for content. */
 static int section_hdr(uint32_t *fb, const char *title, int x, int y) {
     draw_str(fb, title, x, y, C_HDR);
-    int uy = y + g_glyph_h + 3;
-    if (uy >= 0 && uy < g_win_h)
+    int uy = y + g_glyph_h + 3 + g_draw_y_offset;
+    if (uy >= g_draw_clip_top && uy < g_draw_clip_bottom && uy < g_win_h)
         for (int i = x; i < g_win_w - CPAD; i++) fb[uy * g_win_w + i] = C_BORDER;
     return y + g_glyph_h + 12;
 }
@@ -215,6 +230,10 @@ static Hot g_hots[MAX_HOTS];
 static int g_nhots = 0;
 static void hot_reset(void) { g_nhots = 0; }
 static void add_hot(int x, int y, int w, int h, int act, int arg) {
+    y += g_draw_y_offset;
+    if (y < g_draw_clip_top) { h -= g_draw_clip_top - y; y = g_draw_clip_top; }
+    if (y + h > g_draw_clip_bottom) h = g_draw_clip_bottom - y;
+    if (h <= 0) return;
     if (g_nhots < MAX_HOTS) g_hots[g_nhots++] = (Hot){x, y, w, h, act, arg};
 }
 
@@ -363,6 +382,7 @@ static void ttf_draw(uint32_t *fb, const char *path, const char *text,
                      int x, int y, int px, uint32_t fg, int maxw) {
     stbtt_fontinfo *fi = ttf_get(path);
     if (!fi) { draw_str_clip(fb, text, x, y, fg, maxw / 9); return; }
+    y += g_draw_y_offset;
     float scale = stbtt_ScaleForPixelHeight(fi, (float)px);
     int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
     int baseline = y + (int)(asc * scale);
@@ -381,7 +401,9 @@ static void ttf_draw(uint32_t *fb, const char *path, const char *text,
                 stbtt_MakeCodepointBitmap(fi, bmp, gw, gh, gw, scale, scale, c);
                 int gx0 = penx + (int)(lsb * scale) + x0, gy0 = baseline + y0;
                 for (int gy = 0; gy < gh; gy++) {
-                    int fyv = gy0 + gy; if (fyv < 0 || fyv >= g_win_h) continue;
+                    int fyv = gy0 + gy;
+                    if (fyv < g_draw_clip_top || fyv >= g_draw_clip_bottom ||
+                        fyv >= g_win_h) continue;
                     for (int gx = 0; gx < gw; gx++) {
                         int fxv = gx0 + gx;
                         if (fxv < x || fxv >= x + maxw || fxv < 0 || fxv >= g_win_w) continue;
@@ -407,6 +429,7 @@ static void ttf_draw(uint32_t *fb, const char *path, const char *text,
 static const int g_font_sizes[] = FIFI_FONT_SIZES;
 #define N_FONT_SIZES ((int)(sizeof(g_font_sizes) / sizeof(g_font_sizes[0])))
 static int g_font_dd = 0, g_font_dd_scroll = 0;
+static int g_pers_scroll = 0, g_pers_max_scroll = 0;
 static int g_ff_bx, g_ff_by, g_ff_bw, g_ff_bh;   /* family combo box */
 static int g_fs_bx, g_fs_by, g_fs_bw, g_fs_bh;   /* size combo box */
 static int g_dd_x, g_dd_y, g_dd_w, g_dd_rowh, g_dd_vis;  /* open list */
@@ -655,7 +678,8 @@ static void find_wifi_if(void) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        char wp[128];
+        if (strlen(e->d_name) >= sizeof(g_wif)) continue;
+        char wp[320];
         snprintf(wp, sizeof wp, "/sys/class/net/%s/wireless", e->d_name);
         if (access(wp, F_OK) == 0) { snprintf(g_wif, sizeof g_wif, "%s", e->d_name); break; }
         snprintf(wp, sizeof wp, "/sys/class/net/%s/phy80211", e->d_name);
@@ -670,43 +694,47 @@ static int find_net(const char *ssid) {
     return -1;
 }
 
+static bool wifi_is_saved(const char *ssid) {
+    FILE *saved = fopen("/fifi-data/wifi-saved-ssid", "r");
+    if (!saved) return false;
+    char line[160]; bool match = false;
+    while (fgets(line, sizeof line, saved)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, ssid)) { match = true; break; }
+    }
+    fclose(saved);
+    return match;
+}
+
 static void parse_scan(const char *buf) {
     g_net_count = 0;
-    const char *p = buf;
-    while (*p) {
-        const char *tag = strstr(p, "\tSSID: ");
-        if (!tag) break;
-        const char *bss = tag;
-        while (bss > buf && !(bss[0]=='B'&&bss[1]=='S'&&bss[2]=='S'&&bss[3]==' ')) bss--;
-        tag += 7;
-        const char *nl = strchr(tag, '\n');
-        int len = nl ? (int)(nl - tag) : (int)strlen(tag);
-        if (len == 0) { p = tag + 1; continue; }
-        if (len > 63) len = 63;
-        char ssid[64] = {0}; memcpy(ssid, tag, len); ssid[len] = '\0';
-
-        int sig = -100;
-        const char *sp = strstr(bss, "\tsignal: ");
-        if (sp && sp < tag + 200) sig = (int)strtof(sp + 9, NULL);
-        char sec[16] = "WPA2";
-        const char *ap = strstr(bss, "Authentication suites:");
-        if (ap && ap < tag + 300 && strstr(ap, "SAE")) snprintf(sec, sizeof sec, "WPA3");
-        const char *cp = strstr(bss, "\tcapability:");
-        if (cp && cp < tag + 100 && !strstr(bss, "RSN:") && !strstr(bss, "WPA:"))
-            snprintf(sec, sizeof sec, "Open");
-
-        int ex = find_net(ssid);
+    char *copy = strdup(buf ? buf : "");
+    if (!copy) return;
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\r\n", &save); line;
+         line = strtok_r(NULL, "\r\n", &save)) {
+        char *fields[5] = { line, NULL, NULL, NULL, NULL };
+        char *cursor = line;
+        int field = 1;
+        while (field < 5 && (cursor = strchr(cursor, '\t')) != NULL) {
+            *cursor++ = '\0'; fields[field++] = cursor;
+        }
+        if (field != 5 || !fields[4][0]) continue;
+        int sig = atoi(fields[2]);
+        const char *flags = fields[3];
+        const char *sec = strstr(flags, "SAE") ? "WPA3" :
+                          (strstr(flags, "WPA") || strstr(flags, "RSN")) ? "WPA2" : "Open";
+        int ex = find_net(fields[4]);
         if (ex >= 0) { if (sig > g_nets[ex].signal) g_nets[ex].signal = sig; }
         else if (g_net_count < MAX_NETS) {
             NetEntry *ne = &g_nets[g_net_count++];
-            snprintf(ne->ssid, sizeof ne->ssid, "%s", ssid);
+            snprintf(ne->ssid, sizeof ne->ssid, "%s", fields[4]);
             ne->signal = sig;
             snprintf(ne->security, sizeof ne->security, "%s", sec);
-            char prof[160]; snprintf(prof, sizeof prof, "/var/lib/iwd/%s.psk", ne->ssid);
-            ne->saved = (access(prof, F_OK) == 0);
+            ne->saved = wifi_is_saved(ne->ssid);
         }
-        p = (nl ? nl + 1 : tag + len);
     }
+    free(copy);
 }
 
 static void wifi_scan_start(void) {
@@ -740,10 +768,22 @@ static void wifi_scan_poll(void) {
     }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         close(g_scan_pipe); g_scan_pipe = -1;
-        int st; waitpid(g_scan_pid, &st, WNOHANG); g_scan_pid = -1;
+        int st = 0; while (waitpid(g_scan_pid, &st, 0) < 0 && errno == EINTR) {}
+        g_scan_pid = -1;
         parse_scan(g_scan_buf);
-        if (g_net_count == 0)
-            snprintf(g_wstatus, sizeof g_wstatus, "No networks found -- press R to rescan");
+        if (g_net_count == 0) {
+            char first_line[64] = "";
+            if (g_scan_buf[0]) {
+                const char *nl = strchr(g_scan_buf, '\n');
+                size_t length = nl ? (size_t)(nl - g_scan_buf) : strlen(g_scan_buf);
+                if (length > sizeof(first_line) - 1) length = sizeof(first_line) - 1;
+                memcpy(first_line, g_scan_buf, length);
+            }
+            if (first_line[0])
+                snprintf(g_wstatus, sizeof g_wstatus, "Scan failed: %.63s", first_line);
+            else
+                snprintf(g_wstatus, sizeof g_wstatus, "No networks found -- press R to rescan");
+        }
         else
             snprintf(g_wstatus, sizeof g_wstatus, "%d network%s -- click to select, again to connect",
                      g_net_count, g_net_count == 1 ? "" : "s");
@@ -869,6 +909,11 @@ static void sec_update(void) {
 
 static void render_personalize(uint32_t *fb) {
     hot_reset();
+    if (g_pers_scroll < 0) g_pers_scroll = 0;
+    if (g_pers_scroll > g_pers_max_scroll) g_pers_scroll = g_pers_max_scroll;
+    g_draw_y_offset = -g_pers_scroll;
+    g_draw_clip_top = CTOP;
+    g_draw_clip_bottom = g_win_h;
     int x = CX, y = CTOP;
     unsigned cur_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
     int cur_wall  = cfg_get_int(FIFI_THEME_KEY_WALLPAPER, FIFI_THEME_DEFAULT_WALLPAPER);
@@ -1043,7 +1088,10 @@ static void render_personalize(uint32_t *fb) {
         int rowh = 28, vis = 11;
         if (vis > g_font_n) vis = g_font_n;
         int dw = g_ff_bw, dx = g_ff_bx, dy = g_ff_by + g_ff_bh;
-        g_dd_x = dx; g_dd_y = dy; g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
+        if (dy - g_pers_scroll + rowh * vis > g_win_h)
+            dy = g_ff_by - rowh * vis;
+        g_dd_x = dx; g_dd_y = dy - g_pers_scroll;
+        g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
         if (g_font_dd_scroll > g_font_n - vis) g_font_dd_scroll = g_font_n - vis;
         if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
         fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
@@ -1069,7 +1117,10 @@ static void render_personalize(uint32_t *fb) {
     } else if (g_font_dd == 2) {
         int rowh = 28, vis = N_FONT_SIZES;
         int dw = g_fs_bw, dx = g_fs_bx, dy = g_fs_by + g_fs_bh;
-        g_dd_x = dx; g_dd_y = dy; g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
+        if (dy - g_pers_scroll + rowh * vis > g_win_h)
+            dy = g_fs_by - rowh * vis;
+        g_dd_x = dx; g_dd_y = dy - g_pers_scroll;
+        g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
         fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
         rect_border(fb, dx, dy, dw, rowh * vis, C_WHITE);
         int fpx = cfg_get_int(FIFI_THEME_KEY_FONT_PX, FIFI_THEME_DEFAULT_FONT_PX);
@@ -1079,6 +1130,23 @@ static void render_personalize(uint32_t *fb) {
             char sv[16]; snprintf(sv, sizeof sv, "%d px", g_font_sizes[r]);
             draw_str(fb, sv, dx + 8, ry + (rowh - g_glyph_h)/2, C_WHITE);
         }
+    }
+
+    int content_bottom = y + ROW_H;
+    g_pers_max_scroll = content_bottom > g_win_h - 8 ?
+                        content_bottom - (g_win_h - 8) : 0;
+    if (g_pers_scroll > g_pers_max_scroll) g_pers_scroll = g_pers_max_scroll;
+    g_draw_y_offset = 0;
+    g_draw_clip_top = 0;
+    g_draw_clip_bottom = g_win_h;
+    if (g_pers_max_scroll > 0) {
+        int track_y = CTOP, track_h = g_win_h - CTOP - 4;
+        int thumb_h = track_h * track_h / (track_h + g_pers_max_scroll);
+        if (thumb_h < 28) thumb_h = 28;
+        int thumb_y = track_y + (track_h - thumb_h) * g_pers_scroll /
+                      g_pers_max_scroll;
+        fill(fb, g_win_w - 5, track_y, 3, track_h, C_BORDER);
+        fill(fb, g_win_w - 5, thumb_y, 3, thumb_h, C_KEY);
     }
 }
 
@@ -1286,12 +1354,15 @@ static void render_about(uint32_t *fb) {
     y += 16;
     draw_str_clip(fb, "A hand-built Linux distro with a native C Wayland compositor.",
                   x, y, C_GREY, g_win_w - x - CPAD); y += g_glyph_h + 4;
-    draw_str_clip(fb, "Update: flash a new USB from github.com/Hensonam23/FiFi_OS",
+    draw_str_clip(fb, "Updates: run fifi upgrade, then reboot when it finishes.",
                   x, y, C_GREY, g_win_w - x - CPAD);
 }
 
 /* ── Sidebar + top-level render ──────────────────────────────────────────── */
 static void render(uint32_t *fb) {
+    g_draw_y_offset = 0;
+    g_draw_clip_top = 0;
+    g_draw_clip_bottom = g_win_h;
     fill(fb, 0, 0, g_win_w, g_win_h, C_BG);
     /* Sidebar */
     fill(fb, 0, 0, SIDEBAR_W, g_win_h, C_SIDE);
@@ -1573,6 +1644,13 @@ int main(int argc, char **argv) {
                             /* Content-area input, per active tab */
                             if (g_tab == TAB_PERS) {
                                 if (wheel != 0 && g_font_dd == 1) { g_font_dd_scroll -= wheel; dirty = true; }
+                                else if (wheel != 0 && g_font_dd == 0) {
+                                    g_pers_scroll -= wheel * 48;
+                                    if (g_pers_scroll < 0) g_pers_scroll = 0;
+                                    if (g_pers_scroll > g_pers_max_scroll)
+                                        g_pers_scroll = g_pers_max_scroll;
+                                    dirty = true;
+                                }
                                 if (lb && !prev_lb) { pers_click(mx, my); dirty = true; }
                             }
                             else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }

@@ -28,7 +28,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub libinput \
-            mtools openssl pahole parted perl python util-linux
+            iw mtools openssl pahole parted perl python util-linux wpa_supplicant
 
       - name: Run fast security and update tests
         run: |
@@ -38,6 +38,7 @@ jobs:
           make linux-shared-api-test
           make linux-input-test
           make linux-package-test
+          make linux-settings-test
           make linux-release-test
 
       - name: Configure and build Linux
