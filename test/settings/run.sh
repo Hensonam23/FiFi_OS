@@ -34,6 +34,7 @@ grep -Fq 'g_font_dd_scroll -= wheel * 5' "$SETTINGS"
 grep -Fq 'font_previews_build();' "$SETTINGS"
 grep -Fq 'font_preview_draw(fb, idx' "$SETTINGS"
 ! grep -Fq 'ttf_draw(fb, path, nm' "$SETTINGS"
+grep -Fq 'send_font_dropdown(sock, fb);' "$SETTINGS"
 echo "[settings-test] font names keep their own face without rasterizing while scrolling"
 
 grep -Fq 'wpa_command(interface, "scan"' \

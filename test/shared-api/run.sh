@@ -59,6 +59,16 @@ int main(void) {
     uint32_t copied[6];
     if (read_exact(sockets[1], copied, sizeof(copied)) ||
         memcmp(copied, pixels, sizeof(pixels)) != 0) return 8;
+
+    if (!fifi_app_ipc_send_region(sockets[0], 3, 2, pixels, 1, 0, 2, 2)) return 9;
+    if (read_exact(sockets[1], header, sizeof(header)) ||
+        read_exact(sockets[1], frame, sizeof(frame))) return 10;
+    uint32_t region[4];
+    if (header[0] != IPC_APP_FRAME || header[1] != sizeof(frame) + sizeof(region) ||
+        frame[0] != 1 || frame[1] != 0 || frame[2] != 2 || frame[3] != 2) return 11;
+    if (read_exact(sockets[1], region, sizeof(region)) ||
+        region[0] != 2 || region[1] != 3 || region[2] != 5 || region[3] != 6) return 12;
+    if (fifi_app_ipc_send_region(sockets[0], 3, 2, pixels, 2, 0, 2, 2)) return 13;
     close(sockets[0]);
     close(sockets[1]);
     return 0;

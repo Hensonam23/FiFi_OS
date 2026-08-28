@@ -44,22 +44,38 @@ static inline bool fifi_app_ipc_send(int fd, uint32_t type,
     return length == 0 || fifi_app_ipc_write_all(fd, payload, length);
 }
 
-static inline bool fifi_app_ipc_send_frame(int fd, uint16_t width,
-                                           uint16_t height,
-                                           const uint32_t *pixels) {
-    if (!pixels || width == 0 || height == 0) return false;
+static inline bool fifi_app_ipc_send_region(int fd, uint16_t frame_width,
+                                            uint16_t frame_height,
+                                            const uint32_t *pixels,
+                                            uint16_t x, uint16_t y,
+                                            uint16_t width, uint16_t height) {
+    if (!pixels || frame_width == 0 || frame_height == 0 ||
+        width == 0 || height == 0 ||
+        (uint32_t)x + width > frame_width ||
+        (uint32_t)y + height > frame_height) return false;
     uint64_t pixel_bytes = (uint64_t)width * height * sizeof(*pixels);
     uint64_t total = sizeof(uint32_t) * 4u + pixel_bytes;
     if (total > UINT32_MAX) return false;
 
     uint8_t *payload = (uint8_t *)malloc((size_t)total);
     if (!payload) return false;
-    uint32_t frame[4] = { 0, 0, width, height };
+    uint32_t frame[4] = { x, y, width, height };
     memcpy(payload, frame, sizeof(frame));
-    memcpy(payload + sizeof(frame), pixels, (size_t)pixel_bytes);
+    uint32_t *destination = (uint32_t *)(payload + sizeof(frame));
+    for (uint32_t row = 0; row < height; row++)
+        memcpy(destination + row * width,
+               pixels + ((uint32_t)y + row) * frame_width + x,
+               (size_t)width * sizeof(*pixels));
     bool sent = fifi_app_ipc_send(fd, IPC_APP_FRAME, payload, (uint32_t)total);
     free(payload);
     return sent;
+}
+
+static inline bool fifi_app_ipc_send_frame(int fd, uint16_t width,
+                                           uint16_t height,
+                                           const uint32_t *pixels) {
+    return fifi_app_ipc_send_region(fd, width, height, pixels,
+                                    0, 0, width, height);
 }
 
 static inline int fifi_app_ipc_connect_retry(uint16_t width, uint16_t height,

@@ -1404,6 +1404,18 @@ static void send_frame(int fd, uint32_t *px) {
     (void)fifi_app_ipc_send_frame(fd, (uint16_t)g_win_w, (uint16_t)g_win_h, px);
 }
 
+static void send_font_dropdown(int fd, uint32_t *px) {
+    int height = g_dd_rowh * g_dd_vis;
+    if (g_dd_x < 0 || g_dd_y < 0 || g_dd_w <= 0 || height <= 0 ||
+        g_dd_x + g_dd_w > g_win_w || g_dd_y + height > g_win_h) {
+        send_frame(fd, px);
+        return;
+    }
+    (void)fifi_app_ipc_send_region(fd, (uint16_t)g_win_w, (uint16_t)g_win_h, px,
+                                   (uint16_t)g_dd_x, (uint16_t)g_dd_y,
+                                   (uint16_t)g_dd_w, (uint16_t)height);
+}
+
 /* ── Message parser state ────────────────────────────────────────────────── */
 typedef struct { uint8_t hdr[8]; int hgot; uint32_t type, plen, pgot; uint8_t *pld; } MsgState;
 static bool msg_feed(MsgState *m, const uint8_t *buf, int n, int *pos) {
@@ -1577,7 +1589,7 @@ int main(int argc, char **argv) {
         pfds[1].fd = g_scan_pipe >= 0 ? g_scan_pipe : -1;     pfds[1].events = POLLIN;
         poll(pfds, 2, 150);
 
-        bool dirty = false;
+        bool dirty = false, font_dropdown_scrolled = false;
 
         /* Wi-Fi scan pipe */
         if (g_scan_pipe >= 0 && (pfds[1].revents & (POLLIN|POLLHUP|POLLERR))) {
@@ -1655,6 +1667,7 @@ int main(int argc, char **argv) {
                             if (g_tab == TAB_PERS) {
                                 if (wheel != 0 && g_font_dd == 1) {
                                     g_font_dd_scroll -= wheel * 5;
+                                    font_dropdown_scrolled = true;
                                     dirty = true;
                                 }
                                 else if (wheel != 0 && g_font_dd == 0) {
@@ -1741,7 +1754,13 @@ int main(int argc, char **argv) {
                 dirty = true;
         }
 
-        if (dirty && running) { render(fb); send_frame(sock, fb); }
+        if (dirty && running) {
+            render(fb);
+            if (font_dropdown_scrolled && g_font_dd == 1)
+                send_font_dropdown(sock, fb);
+            else
+                send_frame(sock, fb);
+        }
     }
 
     if (g_scan_pid > 0) kill(g_scan_pid, SIGTERM);
