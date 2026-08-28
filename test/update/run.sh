@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+grep -Fq 'Download and install this OS update now? [Y/N]' \
+    "$ROOT/initramfs/root/bin/system-update"
+! grep -Fq 'Download and install this OS update now? [y/N]' \
+    "$ROOT/initramfs/root/bin/system-update"
 TMP="$(mktemp -d)"
 broker_pid=""
 cleanup() {

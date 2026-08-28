@@ -221,7 +221,7 @@ echo "OS update available: $installed_build -> $build_id"
 }
 
 if [ "$MODE" = ask ]; then
-    printf "Download and install this OS update now? [y/N] "
+    printf "Download and install this OS update now? [Y/N] "
     read -r answer
     case "$answer" in
         y|Y|yes|YES) ;;
