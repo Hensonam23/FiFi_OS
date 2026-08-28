@@ -41,7 +41,11 @@ grep -Fq 'wpa_command(interface, "scan"' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'wpa_command(interface, "scan_results"' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
-grep -Fq 'capture_command("/usr/bin/iw", direct' \
+grep -Fq 'direct_scan(interface, output, sizeof(output))' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'capture_command_with_errors("/usr/bin/iw"' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'return report_scan_failure(diagnostic' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'wait_command("/usr/bin/rfkill", unblock)' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"

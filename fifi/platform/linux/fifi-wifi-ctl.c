@@ -36,8 +36,9 @@ static int wait_command(const char *path, char *const argv[]) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
-static int capture_command(const char *path, char *const argv[],
-                           char *output, size_t capacity) {
+static int capture_command_impl(const char *path, char *const argv[],
+                                char *output, size_t capacity,
+                                int include_stderr) {
     int pipes[2];
     if (!output || capacity < 2 || pipe(pipes) != 0) return -1;
     pid_t pid = fork();
@@ -45,6 +46,7 @@ static int capture_command(const char *path, char *const argv[],
     if (pid == 0) {
         close(pipes[0]);
         if (dup2(pipes[1], STDOUT_FILENO) < 0) _exit(126);
+        if (include_stderr && dup2(pipes[1], STDERR_FILENO) < 0) _exit(126);
         close(pipes[1]);
         execv(path, argv);
         _exit(errno == ENOENT ? 127 : 126);
@@ -69,6 +71,16 @@ static int capture_command(const char *path, char *const argv[],
     while (waitpid(pid, &status, 0) < 0)
         if (errno != EINTR) return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+static int capture_command(const char *path, char *const argv[],
+                           char *output, size_t capacity) {
+    return capture_command_impl(path, argv, output, capacity, 0);
+}
+
+static int capture_command_with_errors(const char *path, char *const argv[],
+                                       char *output, size_t capacity) {
+    return capture_command_impl(path, argv, output, capacity, 1);
 }
 
 static int read_exact(void *buffer, size_t length) {
@@ -121,6 +133,19 @@ static void record_scan(const char *text) {
     if (!log) return;
     fputs(text && text[0] ? text : "scan returned no output\n", log);
     fclose(log);
+}
+
+static int report_scan_failure(const char *text, int result) {
+    const char *message = text && text[0] ? text : "Wi-Fi scan failed without an error message\n";
+    record_scan(message);
+    fputs(message, stdout); /* the broker relays stdout to the unprivileged UI */
+    return result ? result : 1;
+}
+
+static int direct_scan(const char *interface, char *output, size_t capacity) {
+    char *const direct[] = {"iw", "dev", (char *)interface, "scan", NULL};
+    output[0] = '\0';
+    return capture_command_with_errors("/usr/bin/iw", direct, output, capacity);
 }
 
 static int wpa_command(const char *interface, const char *command,
@@ -179,18 +204,51 @@ static int ensure_scan_supplicant(const char *interface) {
 
 static int scan_wifi(const char *interface) {
     char *const unblock[] = {"rfkill", "unblock", "wifi", NULL};
-    (void)wait_command("/usr/bin/rfkill", unblock);
+    int unblock_result = wait_command("/usr/bin/rfkill", unblock);
     char *const up[] = {"ip", "link", "set", (char *)interface, "up", NULL};
-    if (wait_command("/bin/ip", up) != 0) return 1;
-    if (ensure_scan_supplicant(interface) != 0) {
-        fprintf(stderr, "fifi-wifi-ctl: cannot start Wi-Fi manager\n");
-        return 1;
-    }
+    if (wait_command("/bin/ip", up) != 0)
+        return report_scan_failure("fifi-wifi-ctl: could not bring the Wi-Fi interface up\n", 1);
+
     char output[OUTPUT_MAX] = "";
+    char direct_error[512] = "";
+    if (!supplicant_ready(interface)) {
+        int direct_result = direct_scan(interface, output, sizeof(output));
+        if (direct_result == 0 && strstr(output, "BSS ") != NULL) {
+            record_scan(output);
+            fputs(output, stdout);
+            return 0;
+        }
+        if (output[0]) snprintf(direct_error, sizeof(direct_error), "%.511s", output);
+    }
+
+    if (ensure_scan_supplicant(interface) != 0) {
+        char diagnostic[768];
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "fifi-wifi-ctl: cannot start Wi-Fi manager%s%s",
+                 direct_error[0] ? "; direct scan: " : "\n",
+                 direct_error[0] ? direct_error : "");
+        return report_scan_failure(diagnostic, 1);
+    }
     if (wpa_command(interface, "scan", output, sizeof(output)) != 0 ||
         strstr(output, "OK") == NULL) {
-        fprintf(stderr, "fifi-wifi-ctl: scan request failed\n");
-        return 1;
+        char manager_error[512];
+        snprintf(manager_error, sizeof(manager_error), "%.511s", output);
+        if (!supplicant_connected(interface)) {
+            (void)stop_supplicant(interface);
+            usleep(300000);
+            int direct_result = direct_scan(interface, output, sizeof(output));
+            if (direct_result == 0 && strstr(output, "BSS ") != NULL) {
+                record_scan(output);
+                fputs(output, stdout);
+                return 0;
+            }
+        }
+        char diagnostic[768];
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "fifi-wifi-ctl: manager scan request failed: %.500s; iw: %.180s\n",
+                 manager_error[0] ? manager_error : "no output",
+                 output[0] ? output : "no output");
+        return report_scan_failure(diagnostic, 1);
     }
     for (int attempt = 0; attempt < 40; attempt++) {
         usleep(200000);
@@ -205,10 +263,8 @@ static int scan_wifi(const char *interface) {
     if (!supplicant_connected(interface)) {
         (void)stop_supplicant(interface);
         usleep(300000);
-        char *const direct[] = {"iw", "dev", (char *)interface, "scan", NULL};
-        output[0] = '\0';
-        int result = capture_command("/usr/bin/iw", direct, output, sizeof(output));
-        if (result == 0 && output[0]) {
+        int result = direct_scan(interface, output, sizeof(output));
+        if (result == 0 && strstr(output, "BSS ") != NULL) {
             record_scan(output);
             fputs(output, stdout);
             return 0;
@@ -219,17 +275,16 @@ static int scan_wifi(const char *interface) {
                               rfkill, sizeof(rfkill));
         char diagnostic[256];
         snprintf(diagnostic, sizeof(diagnostic),
-                 "fifi-wifi-ctl: radio %s returned zero networks; soft-blocked=%s hard-blocked=%s\n",
+                 "fifi-wifi-ctl: radio %s returned zero networks; unblock=%s soft-blocked=%s hard-blocked=%s; iw=%.96s\n",
                  interface,
+                 unblock_result == 0 ? "ok" : "failed",
                  strstr(rfkill, "Soft blocked: yes") ? "yes" : "no",
-                 strstr(rfkill, "Hard blocked: yes") ? "yes" : "no");
-        record_scan(diagnostic);
-        fputs(diagnostic, stderr);
-        return result == 0 ? 1 : result;
+                 strstr(rfkill, "Hard blocked: yes") ? "yes" : "no",
+                 output[0] ? output : "no output");
+        return report_scan_failure(diagnostic, result);
     }
-    record_scan("fifi-wifi-ctl: connected radio returned no scan results\n");
-    fprintf(stderr, "fifi-wifi-ctl: connected radio returned no scan results\n");
-    return 1;
+    return report_scan_failure(
+        "fifi-wifi-ctl: connected radio returned no scan results\n", 1);
 }
 
 static int connect_credentials(const char *interface, const char *ssid,
