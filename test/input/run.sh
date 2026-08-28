@@ -171,6 +171,11 @@ grep -Fq 'touchpad_motion_reset(&dev->motion);' \
     "$ROOT/fifi/platform/linux/input.c"
 echo "[input-test] every evdev motion report reaches the hardware cursor"
 
+grep -Fq 'mouse_scroll_pending() ||' "$ROOT/fifi/compositor/main.c"
+grep -Fq 'input_add_scroll(scroll);' "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'bool mouse_scroll_pending(void)' "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] stationary wheel input is accumulated and delivered immediately"
+
 grep -Fq 'inotify_add_watch(g_hotplug_fd, "/dev/input"' \
     "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"

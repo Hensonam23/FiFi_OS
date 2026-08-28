@@ -1045,6 +1045,37 @@ else
     echo "[initramfs] NOTE: Intel WiFi firmware not found -- install linux-firmware-intel"
 fi
 
+# Qualcomm laptop firmware for the ath11k PCI driver already built into FiFi.
+# Preserve the upstream chip/hardware directory layout expected by the kernel.
+ATH11KDIR=""
+for candidate in /usr/lib/firmware/ath11k /lib/firmware/ath11k; do
+    [ -d "$candidate" ] && ATH11KDIR="$candidate" && break
+done
+if [ -n "$ATH11KDIR" ]; then
+    ATH11KSTAGE="$STAGE/lib/firmware/ath11k"
+    for chipset in QCA6390 WCN6855; do
+        [ -d "$ATH11KDIR/$chipset" ] || continue
+        find "$ATH11KDIR/$chipset" -type f \( -name '*.zst' -o -name '*.bin' \) | \
+            sort | while read -r firmware; do
+                relative=${firmware#"$ATH11KDIR"/}
+                case "$relative" in *.zst) relative=${relative%.zst} ;; esac
+                mkdir -p "$ATH11KSTAGE/$(dirname "$relative")"
+                case "$firmware" in
+                    *.zst) zstd -d -q "$firmware" -o "$ATH11KSTAGE/$relative" ;;
+                    *)     cp "$firmware" "$ATH11KSTAGE/$relative" ;;
+                esac
+            done
+    done
+    if ! find "$ATH11KSTAGE" -name amss.bin -print -quit 2>/dev/null | grep -q .; then
+        echo "[initramfs] ERROR: Qualcomm ath11k laptop firmware is incomplete" >&2
+        exit 1
+    fi
+    echo "[initramfs] Qualcomm ath11k firmware bundled ($(du -sh "$ATH11KSTAGE" | cut -f1))"
+else
+    echo "[initramfs] ERROR: Qualcomm ath11k firmware not found -- install linux-firmware-atheros" >&2
+    exit 1
+fi
+
 # Realtek rtw89 firmware, including the RTL8922AE used by the target laptop.
 # Arch packages these blobs with zstd compression, while the FiFi kernel loads
 # uncompressed firmware from the initramfs.

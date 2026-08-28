@@ -205,6 +205,13 @@ static uint32_t g_deferred_clk_used = 0, g_deferred_rclk_used = 0;
 static bool     g_motion_only = false;
 static int8_t   g_scroll_pending = 0;
 
+static void input_add_scroll(int steps) {
+    int total = (int)g_scroll_pending + steps;
+    if (total > 127) total = 127;
+    if (total < -127) total = -127;
+    g_scroll_pending = (int8_t)total;
+}
+
 /* Input can be drained while a slow render owns the compositor lock. */
 static pthread_mutex_t g_input_mx;
 static pthread_once_t g_input_mx_once = PTHREAD_ONCE_INIT;
@@ -1147,8 +1154,8 @@ static void input_poll_libinput(void) {
                         pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
                 /* libinput: positive is down; FiFi's existing wheel contract
                  * uses positive for up. */
-                if (value > 0.0) g_scroll_pending = -1;
-                else if (value < 0.0) g_scroll_pending = 1;
+                if (value > 0.0) input_add_scroll(-1);
+                else if (value < 0.0) input_add_scroll(1);
             }
         }
         libinput_event_destroy(event);
@@ -1265,7 +1272,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         if (had_event) {
             bool prev_l = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
-            if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
+            if (scroll) input_add_scroll(scroll);
             g_relative_dx += dx; g_relative_dy += dy;
             g_relative_dx_unaccel += dx; g_relative_dy_unaccel += dy;
             mouse_push_rel(dx, dy, lbtn, rbtn);
@@ -1454,7 +1461,7 @@ static void input_poll_mode(bool poll_pointer, bool poll_controls) {
         if (had_event) {
             bool prev = g_lbtn;
             g_lbtn = lbtn; g_rbtn = rbtn;
-            if (scroll) g_scroll_pending = scroll > 0 ? 1 : -1;
+            if (scroll) input_add_scroll(scroll);
             if (dev->is_touchpad) {
                 /* 2-finger mode (doubletap): slot 0 = click/anchor finger, slot 1 = drag finger.
                  * On transition 0→1 reset EMA so the new finger position is an anchor, not a delta.
@@ -1722,6 +1729,13 @@ int8_t mouse_consume_scroll(void) {
     int8_t v = g_scroll_pending; g_scroll_pending = 0;
     input_state_unlock();
     return v;
+}
+
+bool mouse_scroll_pending(void) {
+    input_state_lock();
+    bool pending = g_scroll_pending != 0;
+    input_state_unlock();
+    return pending;
 }
 
 void input_consume_relative_motion(double *dx, double *dy,

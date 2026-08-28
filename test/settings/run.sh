@@ -55,6 +55,8 @@ grep -Fq 'cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"' \
     "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'CONFIG_RTW89_8922AE=y' "$ROOT/linux/fifi.config"
 grep -Fq 'rtw8922a_fw.bin' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'Qualcomm ath11k firmware bundled' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq '/fifi-data/wifi-hardware' "$SETTINGS"
 grep -Fq 'linux-firmware-realtek' "$ROOT/.github/workflows/linux-desktop.yml"
 grep -Fq 'Updates: run fifi upgrade' "$SETTINGS"
 echo "[settings-test] boot, scan, connect, disconnect, and help use current system paths"

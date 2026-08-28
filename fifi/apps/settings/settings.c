@@ -747,7 +747,17 @@ static void parse_scan(const char *buf) {
 static void wifi_scan_start(void) {
     if (g_scan_pid > 0) return;
     find_wifi_if();
-    if (!g_wif[0]) { snprintf(g_wstatus, sizeof g_wstatus, "No Wi-Fi interface found"); return; }
+    if (!g_wif[0]) {
+        char hardware[80] = "No Wi-Fi interface found";
+        FILE *diagnostic = fopen("/fifi-data/wifi-hardware", "r");
+        if (diagnostic) {
+            if (fgets(hardware, sizeof hardware, diagnostic))
+                hardware[strcspn(hardware, "\r\n")] = '\0';
+            fclose(diagnostic);
+        }
+        snprintf(g_wstatus, sizeof g_wstatus, "No interface: %.79s", hardware);
+        return;
+    }
 
     int pfd[2];
     if (pipe(pfd) < 0) return;

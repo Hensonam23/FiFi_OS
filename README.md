@@ -66,7 +66,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 | Audio: ALSA + PipeWire volume and routing | **Working** |
 | Gamepad: evdev HID input routed to focused IPC app | **Working** |
 | Gaming mode: CPU governor switch, uncapped frame rate | **Working** |
-| WiFi: auto-connect, Intel AX-series and Realtek RTL8922AE firmware bundled | **Working** |
+| WiFi: auto-connect, Intel, Qualcomm ath11k, and Realtek RTL8922AE firmware bundled | **Working** |
 | Security Center: firewall, privacy mode, active connections | **Working** |
 | DNS over HTTPS: system-wide encrypted DNS, toggle in Security Center | **Working** |
 | VPN: WireGuard built in, one-click connect from Settings | **Working** |

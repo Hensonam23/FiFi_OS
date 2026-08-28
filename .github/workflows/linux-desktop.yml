@@ -28,7 +28,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             bc busybox cpio dosfstools e2fsprogs efibootmgr elfutils git grub libinput \
-            iw linux-firmware-intel linux-firmware-realtek mtools openssl pahole \
+            iw linux-firmware-atheros linux-firmware-intel linux-firmware-realtek mtools openssl pahole \
             parted perl python util-linux wpa_supplicant
 
       - name: Run fast security and update tests

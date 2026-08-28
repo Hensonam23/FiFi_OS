@@ -333,10 +333,30 @@ for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
     [ -f "$_secret" ] && chmod 0600 "$_secret"
 done
 for _wifi_public in /fifi-data/wifi-status /fifi-data/wifi-ssid \
-                    /fifi-data/wifi-saved-ssid; do
+                    /fifi-data/wifi-saved-ssid /fifi-data/wifi-hardware; do
     [ ! -L "$_wifi_public" ] || rm -f "$_wifi_public"
     [ ! -f "$_wifi_public" ] || chmod 0644 "$_wifi_public"
 done
+
+# Record what the kernel can actually see and bind before any manager attempts
+# a scan. Settings displays this when no wireless interface exists, avoiding a
+# misleading generic "no networks" result when the failure is driver-level.
+rm -f /fifi-data/wifi-hardware
+for _wifi_dev in /sys/bus/pci/devices/*; do
+    [ -r "$_wifi_dev/class" ] || continue
+    _wifi_class=$(cat "$_wifi_dev/class" 2>/dev/null)
+    case "$_wifi_class" in 0x0280*) ;; *) continue ;; esac
+    _wifi_vendor=$(cat "$_wifi_dev/vendor" 2>/dev/null)
+    _wifi_device=$(cat "$_wifi_dev/device" 2>/dev/null)
+    _wifi_driver=unbound
+    [ ! -L "$_wifi_dev/driver" ] || _wifi_driver=$(basename "$(readlink "$_wifi_dev/driver")")
+    printf 'PCI Wi-Fi %s:%s driver=%s\n' \
+        "${_wifi_vendor#0x}" "${_wifi_device#0x}" "$_wifi_driver" \
+        >> /fifi-data/wifi-hardware
+done
+[ -s /fifi-data/wifi-hardware ] || \
+    echo "No PCI Wi-Fi controller detected" > /fifi-data/wifi-hardware
+chmod 0644 /fifi-data/wifi-hardware
 
 # Apps expect standard tools in /usr/bin (#!/usr/bin/env shebangs, uname, etc.):
 # link every busybox applet there unless a real binary already exists.

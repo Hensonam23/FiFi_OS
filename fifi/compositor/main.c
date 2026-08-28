@@ -88,6 +88,7 @@ bool ipc_notify_draw(void);
 bool ipc_keyboard_active(void);
 void ipc_send_focused_key(uint8_t key);
 void ipc_send_focused_mouse(int32_t mx, int32_t my, uint8_t btns);
+bool mouse_scroll_pending(void);
 void ipc_send_gamepad(uint16_t btns, int16_t lx, int16_t ly,
                       int16_t rx, int16_t ry, int16_t lt, int16_t rt);
 void ipc_clear_focus(void);
@@ -758,6 +759,7 @@ int main(void) {
                                           &rel_dx_unaccel, &rel_dy_unaccel);
             had_input = mcx != routed_x || mcy != routed_y ||
                         mlb != routed_l || mrb != routed_r ||
+                        mouse_scroll_pending() ||
                         rel_dx != 0.0 || rel_dy != 0.0;
             uint8_t btns = (mlb ? 1 : 0) | (mrb ? 2 : 0);
 
