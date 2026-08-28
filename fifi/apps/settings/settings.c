@@ -349,79 +349,115 @@ static int font_cur_index(void) {
 
 /* ── TTF preview rendering (stb_truetype) ─────────────────────────────────────
  * Renders each font's name in its OWN typeface, like the old compositor picker.
- * Font files are cached (read+parsed once) so scrolling the list is cheap. */
-#define TTF_CACHE_MAX 24
-static struct { char path[96]; unsigned char *buf; stbtt_fontinfo info; int ok; } g_ttf[TTF_CACHE_MAX];
-static int g_ttf_n = 0;
-static stbtt_fontinfo *ttf_get(const char *path) {
-    for (int i = 0; i < g_ttf_n; i++)
-        if (!strcmp(g_ttf[i].path, path)) return g_ttf[i].ok ? &g_ttf[i].info : NULL;
-    if (g_ttf_n >= TTF_CACHE_MAX) {           /* evict oldest */
-        free(g_ttf[0].buf);
-        memmove(&g_ttf[0], &g_ttf[1], sizeof(g_ttf[0]) * (TTF_CACHE_MAX - 1));
-        g_ttf_n--;
-    }
-    int i = g_ttf_n++;
-    snprintf(g_ttf[i].path, sizeof g_ttf[i].path, "%s", path);
-    g_ttf[i].buf = NULL; g_ttf[i].ok = 0;
+ * Compact pre-rendered alpha strips mean wheel events never reopen or
+ * rasterize full font files. */
+
+#define FONT_PREVIEW_W 280
+#define FONT_PREVIEW_H 20
+typedef struct {
+    unsigned char *alpha;
+    int width;
+    bool ready;
+} FontPreview;
+static FontPreview g_font_preview[FONT_MAX];
+
+static void font_preview_build(int index) {
+    if (index < 0 || index >= g_font_n || g_font_preview[index].ready) return;
+    g_font_preview[index].ready = true;
+    char path[160], name[64];
+    snprintf(path, sizeof path, "%s/%s", FONT_DIR, g_font_files[index]);
+    snprintf(name, sizeof name, "%s", g_font_files[index]);
+    char *dot = strrchr(name, '.'); if (dot) *dot = '\0';
+
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 40 * 1024 * 1024) { fclose(f); return NULL; }
-    unsigned char *b = malloc(sz);
-    if (!b) { fclose(f); return NULL; }
-    if (fread(b, 1, sz, f) != (size_t)sz) { fclose(f); free(b); return NULL; }
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    long size = ftell(f);
+    if (size <= 0 || size > 40 * 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f); return;
+    }
+    unsigned char *font_data = malloc((size_t)size);
+    if (!font_data) { fclose(f); return; }
+    if (fread(font_data, 1, (size_t)size, f) != (size_t)size) {
+        fclose(f); free(font_data); return;
+    }
     fclose(f);
-    int off = stbtt_GetFontOffsetForIndex(b, 0);
-    if (off < 0 || !stbtt_InitFont(&g_ttf[i].info, b, off)) { free(b); return NULL; }
-    g_ttf[i].buf = b; g_ttf[i].ok = 1;
-    return &g_ttf[i].info;
-}
-/* Draw ASCII text in the given TTF face at pixel height px, top-left (x,y), clipped to maxw.
- * Falls back to the PSF font if the TTF can't load. */
-static void ttf_draw(uint32_t *fb, const char *path, const char *text,
-                     int x, int y, int px, uint32_t fg, int maxw) {
-    stbtt_fontinfo *fi = ttf_get(path);
-    if (!fi) { draw_str_clip(fb, text, x, y, fg, maxw / 9); return; }
-    y += g_draw_y_offset;
-    float scale = stbtt_ScaleForPixelHeight(fi, (float)px);
-    int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
-    int baseline = y + (int)(asc * scale);
-    int penx = x;
-    int fr = (fg >> 16) & 0xff, fgc = (fg >> 8) & 0xff, fbc = fg & 0xff;
-    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
-        int c = *p;
-        if (penx - x >= maxw) break;
-        int aw, lsb; stbtt_GetCodepointHMetrics(fi, c, &aw, &lsb);
-        int x0, y0, x1, y1;
-        stbtt_GetCodepointBitmapBox(fi, c, scale, scale, &x0, &y0, &x1, &y1);
+
+    stbtt_fontinfo face;
+    int offset = stbtt_GetFontOffsetForIndex(font_data, 0);
+    if (offset < 0 || !stbtt_InitFont(&face, font_data, offset)) {
+        free(font_data); return;
+    }
+    unsigned char *strip = calloc(FONT_PREVIEW_W, FONT_PREVIEW_H);
+    if (!strip) { free(font_data); return; }
+    float scale = stbtt_ScaleForPixelHeight(&face, 18.0f);
+    int asc, desc, gap;
+    stbtt_GetFontVMetrics(&face, &asc, &desc, &gap);
+    (void)desc; (void)gap;
+    int baseline = (int)(asc * scale);
+    int pen_x = 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        int advance, bearing, x0, y0, x1, y1;
+        stbtt_GetCodepointHMetrics(&face, *p, &advance, &bearing);
+        (void)bearing;
+        stbtt_GetCodepointBitmapBox(&face, *p, scale, scale, &x0, &y0, &x1, &y1);
         int gw = x1 - x0, gh = y1 - y0;
-        if (gw > 0 && gh > 0 && gw < 512 && gh < 512) {
-            unsigned char *bmp = malloc((size_t)gw * gh);
-            if (bmp) {
-                stbtt_MakeCodepointBitmap(fi, bmp, gw, gh, gw, scale, scale, c);
-                int gx0 = penx + (int)(lsb * scale) + x0, gy0 = baseline + y0;
-                for (int gy = 0; gy < gh; gy++) {
-                    int fyv = gy0 + gy;
-                    if (fyv < g_draw_clip_top || fyv >= g_draw_clip_bottom ||
-                        fyv >= g_win_h) continue;
-                    for (int gx = 0; gx < gw; gx++) {
-                        int fxv = gx0 + gx;
-                        if (fxv < x || fxv >= x + maxw || fxv < 0 || fxv >= g_win_w) continue;
-                        unsigned char a = bmp[gy * gw + gx];
-                        if (!a) continue;
-                        uint32_t *dp = &fb[(size_t)fyv * g_win_w + fxv], d = *dp;
-                        int dr = (d >> 16) & 0xff, dg = (d >> 8) & 0xff, db = d & 0xff;
-                        *dp = 0xff000000u
-                            | (((fr * a + dr * (255 - a)) / 255) << 16)
-                            | (((fgc * a + dg * (255 - a)) / 255) << 8)
-                            |  ((fbc * a + db * (255 - a)) / 255);
-                    }
+        if (gw > 0 && gh > 0 && gw < 256 && gh < 256) {
+            unsigned char *glyph = malloc((size_t)gw * gh);
+            if (glyph) {
+                stbtt_MakeCodepointBitmap(&face, glyph, gw, gh, gw, scale, scale, *p);
+                int gx0 = pen_x + x0, gy0 = baseline + y0;
+                for (int gy = 0; gy < gh; gy++) for (int gx = 0; gx < gw; gx++) {
+                    int dx = gx0 + gx, dy = gy0 + gy;
+                    if (dx < 0 || dx >= FONT_PREVIEW_W || dy < 0 || dy >= FONT_PREVIEW_H) continue;
+                    unsigned a = glyph[gy * gw + gx];
+                    unsigned old = strip[dy * FONT_PREVIEW_W + dx];
+                    strip[dy * FONT_PREVIEW_W + dx] = (unsigned char)(a + old * (255 - a) / 255);
                 }
-                free(bmp);
+                free(glyph);
             }
         }
-        penx += (int)(aw * scale);
+        pen_x += (int)(advance * scale);
+        if (pen_x >= FONT_PREVIEW_W) break;
+    }
+    free(font_data);
+    g_font_preview[index].alpha = strip;
+    g_font_preview[index].width = pen_x < FONT_PREVIEW_W ? pen_x : FONT_PREVIEW_W;
+}
+
+static void font_previews_build(void) {
+    for (int i = 0; i < g_font_n; i++) font_preview_build(i);
+}
+
+static void font_preview_draw(uint32_t *fb, int index, int x, int y,
+                              uint32_t fg, int maxw) {
+    if (index < 0 || index >= g_font_n) return;
+    font_preview_build(index);
+    FontPreview *preview = &g_font_preview[index];
+    if (!preview->alpha) {
+        char name[64]; snprintf(name, sizeof name, "%s", g_font_files[index]);
+        char *dot = strrchr(name, '.'); if (dot) *dot = '\0';
+        draw_str_clip(fb, name, x, y, fg, maxw / 9);
+        return;
+    }
+    y += g_draw_y_offset;
+    int width = preview->width < maxw ? preview->width : maxw;
+    int fr = (fg >> 16) & 0xff, fgc = (fg >> 8) & 0xff, fbc = fg & 0xff;
+    for (int py = 0; py < FONT_PREVIEW_H; py++) {
+        int fy = y + py;
+        if (fy < g_draw_clip_top || fy >= g_draw_clip_bottom || fy < 0 || fy >= g_win_h) continue;
+        for (int px = 0; px < width; px++) {
+            int fx = x + px;
+            if (fx < 0 || fx >= g_win_w) continue;
+            unsigned a = preview->alpha[py * FONT_PREVIEW_W + px];
+            if (!a) continue;
+            uint32_t *dp = &fb[(size_t)fy * g_win_w + fx], d = *dp;
+            int dr = (d >> 16) & 0xff, dg = (d >> 8) & 0xff, db = d & 0xff;
+            *dp = 0xff000000u
+                | (((fr * a + dr * (255 - a)) / 255) << 16)
+                | (((fgc * a + dg * (255 - a)) / 255) << 8)
+                |  ((fbc * a + db * (255 - a)) / 255);
+        }
     }
 }
 
@@ -1028,11 +1064,7 @@ static void render_personalize(uint32_t *fb) {
       fill(fb, x, y, fw, bh, C_BTN_BG);
       rect_border(fb, x, y, fw, bh, g_font_dd == 1 ? C_WHITE : C_BORDER);
       if (cur >= 0) {
-          char path[128], nm[64];
-          snprintf(path, sizeof path, "%s/%s", FONT_DIR, g_font_files[cur]);
-          snprintf(nm, sizeof nm, "%s", g_font_files[cur]);
-          char *dot = strrchr(nm, '.'); if (dot) *dot = '\0';
-          ttf_draw(fb, path, nm, x + 8, y + 5, bh - 12, C_VAL, fw - 30);
+          font_preview_draw(fb, cur, x + 8, y + 6, C_VAL, fw - 30);
       } else {
           draw_str_clip(fb, "(default)", x + 8, y + (bh - g_glyph_h)/2, C_VAL, (fw - 30)/9);
       }
@@ -1073,11 +1105,7 @@ static void render_personalize(uint32_t *fb) {
             if (idx >= g_font_n) break;
             int ry = dy + r * rowh;
             if (idx == cur) fill(fb, dx + 1, ry, dw - 2, rowh, g_accent);
-            char path[128], nm[64];
-            snprintf(path, sizeof path, "%s/%s", FONT_DIR, g_font_files[idx]);
-            snprintf(nm, sizeof nm, "%s", g_font_files[idx]);
-            char *dot = strrchr(nm, '.'); if (dot) *dot = '\0';
-            ttf_draw(fb, path, nm, dx + 8, ry + 4, rowh - 10, C_WHITE, dw - 20);
+            font_preview_draw(fb, idx, dx + 8, ry + 4, C_WHITE, dw - 20);
         }
         if (g_font_n > vis) {                       /* scrollbar */
             int trk = rowh * vis, th = trk * vis / g_font_n; if (th < 14) th = 14;
@@ -1508,6 +1536,7 @@ int main(int argc, char **argv) {
     alsa_init();
     cfg_load();
     font_list_scan();
+    font_previews_build();
     g_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
     net_update();
     sec_update();

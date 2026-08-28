@@ -1045,6 +1045,33 @@ else
     echo "[initramfs] NOTE: Intel WiFi firmware not found -- install linux-firmware-intel"
 fi
 
+# Realtek rtw89 firmware, including the RTL8922AE used by the target laptop.
+# Arch packages these blobs with zstd compression, while the FiFi kernel loads
+# uncompressed firmware from the initramfs.
+RTW89DIR=""
+for candidate in /usr/lib/firmware/rtw89 /lib/firmware/rtw89; do
+    [ -d "$candidate" ] && RTW89DIR="$candidate" && break
+done
+if [ -n "$RTW89DIR" ]; then
+    RTW89STAGE="$STAGE/lib/firmware/rtw89"
+    mkdir -p "$RTW89STAGE"
+    find "$RTW89DIR" -maxdepth 1 -type f \( -name '*.bin.zst' -o -name '*.bin' \) | \
+        sort | while read -r firmware; do
+            case "$firmware" in
+                *.zst) zstd -d -q "$firmware" -o "$RTW89STAGE/$(basename "$firmware" .zst)" ;;
+                *)     cp "$firmware" "$RTW89STAGE/$(basename "$firmware")" ;;
+            esac
+        done
+    if [ ! -s "$RTW89STAGE/rtw8922a_fw.bin" ]; then
+        echo "[initramfs] ERROR: RTL8922AE firmware is missing" >&2
+        exit 1
+    fi
+    echo "[initramfs] Realtek rtw89 firmware bundled ($(du -sh "$RTW89STAGE" | cut -f1))"
+else
+    echo "[initramfs] ERROR: Realtek rtw89 firmware not found -- install linux-firmware-realtek" >&2
+    exit 1
+fi
+
 # Realtek PCIe Ethernet firmware. rtl8169 requests this raw path on the target
 # laptop; Arch stores it compressed, while this kernel expects it decompressed.
 RTL_NIC_SRC=""

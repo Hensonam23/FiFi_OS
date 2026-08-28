@@ -31,8 +31,10 @@ grep -Fq 'FIFI_INPUT_KEY_TOUCHPAD_SPEED' "$SETTINGS"
 echo "[settings-test] every interactive Settings control has rendering and action handling"
 grep -Fq 'g_pers_scroll -= wheel * 48' "$SETTINGS"
 grep -Fq 'g_font_dd_scroll -= wheel * 5' "$SETTINGS"
-grep -Fq 'ttf_draw(fb, path, nm' "$SETTINGS"
-echo "[settings-test] overflowing Personalize controls scroll into a clickable view"
+grep -Fq 'font_previews_build();' "$SETTINGS"
+grep -Fq 'font_preview_draw(fb, idx' "$SETTINGS"
+! grep -Fq 'ttf_draw(fb, path, nm' "$SETTINGS"
+echo "[settings-test] font names keep their own face without rasterizing while scrolling"
 
 grep -Fq 'wpa_command(interface, "scan"' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
@@ -51,6 +53,9 @@ grep -Fq 'open_public_status("/fifi-data/wifi-ssid")' \
 grep -Fq '/fifi-data/wifi-saved-ssid' "$SETTINGS"
 grep -Fq 'cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"' \
     "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'CONFIG_RTW89_8922AE=y' "$ROOT/linux/fifi.config"
+grep -Fq 'rtw8922a_fw.bin' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'linux-firmware-realtek' "$ROOT/.github/workflows/linux-desktop.yml"
 grep -Fq 'Updates: run fifi upgrade' "$SETTINGS"
 echo "[settings-test] boot, scan, connect, disconnect, and help use current system paths"
 
