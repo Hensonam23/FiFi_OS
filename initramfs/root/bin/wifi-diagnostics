@@ -1,0 +1,41 @@
+#!/bin/sh
+# Print a complete local Wi-Fi report even when the laptop has no network path.
+
+echo "=== FiFi version ==="
+fifi version 2>&1
+echo
+echo "=== broker socket ==="
+ls -l /run/fifi-admin.sock /bin/fifi-admin /bin/fifi-wifi-ctl \
+    /usr/bin/iw /usr/bin/rfkill 2>&1
+echo
+echo "=== kernel Wi-Fi interfaces ==="
+iw dev 2>&1
+for interface_path in /sys/class/net/*; do
+    [ -d "$interface_path/wireless" ] || continue
+    interface=${interface_path##*/}
+    ip link show "$interface" 2>&1
+done
+echo
+echo "=== radio switches ==="
+rfkill list wifi 2>&1
+echo
+echo "=== detected hardware ==="
+cat /fifi-data/wifi-hardware 2>&1
+echo
+echo "=== direct broker scan ==="
+found_interface=0
+for interface_path in /sys/class/net/*; do
+    [ -d "$interface_path/wireless" ] || continue
+    found_interface=1
+    interface=${interface_path##*/}
+    echo "Scanning on $interface"
+    fifi-admin wifi scan "$interface" 2>&1
+    echo "Scan exit code: $?"
+done
+[ "$found_interface" = 1 ] || echo "No kernel Wi-Fi interface found"
+echo
+echo "=== saved scan diagnostic ==="
+cat /fifi-data/wifi-scan.log 2>&1
+echo
+echo "=== admin broker log ==="
+cat /fifi-data/admin-broker.log 2>&1

@@ -173,9 +173,15 @@ static void run_fixed_command(char *request) {
                valid_interface(args[2])) {
         const char *tool = getenv("FIFI_WIFI_CTL");
         if (!tool || !*tool) tool = "/bin/fifi-wifi-ctl";
-        if (is_wifi_connect(argc, args))
+        if (is_wifi_connect(argc, args)) {
             dprintf(STDOUT_FILENO, "READY\n");
-        execl(tool, "fifi-wifi-ctl", args[1], args[2], (char *)NULL);
+            execl(tool, "fifi-wifi-ctl", args[1], args[2], (char *)NULL);
+        } else {
+            char *const wifi_argv[] = {
+                (char *)tool, args[1], args[2], NULL
+            };
+            run_status_command(tool, wifi_argv);
+        }
     } else if (argc == 3 && strcmp(args[0], "update") == 0 &&
                strcmp(args[1], "apply") == 0 && valid_channel(args[2])) {
         const char *tool = getenv("FIFI_UPDATE_APPLY");
@@ -408,7 +414,10 @@ static int client_main(int argc, char **argv) {
     }
     shutdown(sock, SHUT_WR);
 
-    if ((argc >= 3 && strcmp(argv[1], "update") == 0) ||
+    if ((argc == 4 && strcmp(argv[1], "wifi") == 0 &&
+         (strcmp(argv[2], "scan") == 0 ||
+          strcmp(argv[2], "disconnect") == 0)) ||
+        (argc >= 3 && strcmp(argv[1], "update") == 0) ||
         (argc >= 3 && strcmp(argv[1], "install") == 0 &&
          strcmp(argv[2], "apply") == 0))
         return copy_update_response(sock);

@@ -194,9 +194,17 @@ echo "[input-test] kernel relative touchpad motion wins across rescans"
 SEND_LOGS="$ROOT/initramfs/root/bin/send-logs"
 grep -Fq "ip -4 addr show scope global" "$SEND_LOGS"
 grep -Fq "tail -n 2000 /fifi-data/compositor.log" "$SEND_LOGS"
+grep -Fq "cat /fifi-data/wifi-scan.log" "$SEND_LOGS"
+grep -Fq "tail -n 500 /fifi-data/admin-broker.log" "$SEND_LOGS"
 grep -Fq "nc -w 15" "$SEND_LOGS"
 ! grep -Fq "udhcpc" "$SEND_LOGS"
 echo "[input-test] log transfer preserves the active Wi-Fi connection"
+
+WIFI_DIAGNOSTICS="$ROOT/initramfs/root/bin/wifi-diagnostics"
+test -x "$WIFI_DIAGNOSTICS"
+grep -Fq 'fifi-admin wifi scan "$interface"' "$WIFI_DIAGNOSTICS"
+grep -Fq 'cat /fifi-data/admin-broker.log' "$WIFI_DIAGNOSTICS"
+echo "[input-test] offline Wi-Fi diagnostics expose broker and scan failures"
 
 grep -Fq '#include <libinput.h>' "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'libinput_event_pointer_get_dx(pointer)' \

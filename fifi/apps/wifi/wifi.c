@@ -190,12 +190,15 @@ static void start_scan(void) {
         dup2(pfd[1], STDERR_FILENO);
         close(pfd[1]);
         execl("/bin/fifi-admin", "fifi-admin", "wifi", "scan", g_wif, NULL);
-        _exit(1);
+        dprintf(STDERR_FILENO, "Wi-Fi: could not start scan: %s\n",
+                strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
     }
     close(pfd[1]);
     g_scan_pipe = pfd[0];
     fcntl(g_scan_pipe, F_SETFL, O_NONBLOCK);
     g_scan_buf_len = 0;
+    g_scan_buf[0] = '\0';
     g_state = ST_SCANNING;
     snprintf(g_status, sizeof(g_status), "Scanning on %s...", g_wif);
 }
@@ -213,7 +216,11 @@ static void poll_scan(void) {
     }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         close(g_scan_pipe); g_scan_pipe = -1;
-        int st = 0; while (waitpid(g_scan_pid, &st, 0) < 0 && errno == EINTR) {}
+        int st = 0;
+        pid_t waited;
+        do { waited = waitpid(g_scan_pid, &st, 0); } while (waited < 0 && errno == EINTR);
+        int scan_result = waited > 0 && WIFEXITED(st) ? WEXITSTATUS(st) :
+                          waited > 0 && WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 1;
         g_scan_pid = -1;
         parse_scan(g_scan_buf);
         if (g_net_count == 0) {
@@ -227,8 +234,12 @@ static void poll_scan(void) {
             }
             if (first_line[0])
                 snprintf(g_status, sizeof(g_status), "No networks: %s", first_line);
+            else if (scan_result != 0)
+                snprintf(g_status, sizeof(g_status),
+                         "Wi-Fi scan failed (code %d) -- press R", scan_result);
             else
-                snprintf(g_status, sizeof(g_status), "No networks found -- press R to scan again");
+                snprintf(g_status, sizeof(g_status),
+                         "Wi-Fi scan returned no data -- press R");
         } else
             snprintf(g_status, sizeof(g_status), "%d network%s found  (arrows=select  Enter=connect)",
                      g_net_count, g_net_count == 1 ? "" : "s");
@@ -429,6 +440,9 @@ static void send_frame(int fd, uint32_t *fb) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(void) {
+    /* The compositor ignores SIGCHLD for its own launch supervision. Restore
+     * normal child status handling for Wi-Fi scan and connection helpers. */
+    signal(SIGCHLD, SIG_DFL);
     font_load("/fifi-data/fonts/ter16b.psf");
     if (!g_font.glyphs) fifi_ui_font_init_blank(&g_font, 256, 8, 16);
 

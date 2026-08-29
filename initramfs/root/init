@@ -284,12 +284,6 @@ if [ -x /usr/share/fifi/migrate-legacy-grub.sh ]; then
     /usr/share/fifi/migrate-legacy-grub.sh
 fi
 
-# Keep GUI applications at the desktop UID. Administrative actions cross this
-# root-owned socket and are limited to the fixed verbs in fifi-admin.c.
-if [ -x /bin/fifi-admin ]; then
-    /bin/fifi-admin --daemon >>/fifi-data/admin-broker.log 2>&1 &
-fi
-
 # ── Loopback interface ────────────────────────────────────────────────────────
 # Must be up before anything binds to 127.0.0.1 (IPC socket, DoH, Tor, etc.)
 ip link set lo up 2>/dev/null
@@ -333,10 +327,33 @@ for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
     [ -f "$_secret" ] && chmod 0600 "$_secret"
 done
 for _wifi_public in /fifi-data/wifi-status /fifi-data/wifi-ssid \
-                    /fifi-data/wifi-saved-ssid /fifi-data/wifi-hardware; do
+                    /fifi-data/wifi-saved-ssid /fifi-data/wifi-hardware \
+                    /fifi-data/wifi-scan.log /fifi-data/admin-broker.log; do
     [ ! -L "$_wifi_public" ] || rm -f "$_wifi_public"
     [ ! -f "$_wifi_public" ] || chmod 0644 "$_wifi_public"
 done
+
+# Create these before the broker starts so a scan that never launches remains
+# distinguishable from one that ran and found no networks. Persistent symlinks
+# were removed above before either root-owned file is opened.
+printf '%s\n' 'No Wi-Fi scan has run since this boot' > /fifi-data/wifi-scan.log
+: > /fifi-data/admin-broker.log
+chmod 0644 /fifi-data/wifi-scan.log /fifi-data/admin-broker.log
+
+# Keep GUI applications at the desktop UID. Administrative actions cross this
+# root-owned socket and are limited to the fixed verbs in fifi-admin.c. Start it
+# only after its persistent diagnostic file has been secured.
+if [ -x /bin/fifi-admin ]; then
+    /bin/fifi-admin --daemon >>/fifi-data/admin-broker.log 2>&1 &
+    _admin_ready=0
+    for _admin_try in 1 2 3 4 5 6 7 8 9 10; do
+        if [ -S /run/fifi-admin.sock ]; then _admin_ready=1; break; fi
+        sleep 0.1
+    done
+    [ "$_admin_ready" = 1 ] || \
+        echo 'fifi-admin: broker socket was not created during boot' \
+            >> /fifi-data/admin-broker.log
+fi
 
 # Record what the kernel can actually see and bind before any manager attempts
 # a scan. Settings displays this when no wireless interface exists, avoiding a

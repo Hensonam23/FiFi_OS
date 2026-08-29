@@ -764,12 +764,16 @@ static void wifi_scan_start(void) {
     g_scan_pid = fork();
     if (g_scan_pid == 0) {
         close(pfd[0]); dup2(pfd[1], STDOUT_FILENO); dup2(pfd[1], STDERR_FILENO); close(pfd[1]);
-        execl("/bin/fifi-admin","fifi-admin","wifi","scan",g_wif,NULL); _exit(1);
+        execl("/bin/fifi-admin","fifi-admin","wifi","scan",g_wif,NULL);
+        dprintf(STDERR_FILENO, "Settings: could not start Wi-Fi scan: %s\n",
+                strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
     }
     close(pfd[1]);
     g_scan_pipe = pfd[0];
     fcntl(g_scan_pipe, F_SETFL, O_NONBLOCK);
     g_scan_buf_len = 0;
+    g_scan_buf[0] = '\0';
     g_wstate = ST_SCANNING;
     snprintf(g_wstatus, sizeof g_wstatus, "Scanning on %s...", g_wif);
 }
@@ -785,7 +789,11 @@ static void wifi_scan_poll(void) {
     }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         close(g_scan_pipe); g_scan_pipe = -1;
-        int st = 0; while (waitpid(g_scan_pid, &st, 0) < 0 && errno == EINTR) {}
+        int st = 0;
+        pid_t waited;
+        do { waited = waitpid(g_scan_pid, &st, 0); } while (waited < 0 && errno == EINTR);
+        int scan_result = waited > 0 && WIFEXITED(st) ? WEXITSTATUS(st) :
+                          waited > 0 && WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 1;
         g_scan_pid = -1;
         parse_scan(g_scan_buf);
         if (g_net_count == 0) {
@@ -798,8 +806,12 @@ static void wifi_scan_poll(void) {
             }
             if (first_line[0])
                 snprintf(g_wstatus, sizeof g_wstatus, "Scan failed: %.63s", first_line);
+            else if (scan_result != 0)
+                snprintf(g_wstatus, sizeof g_wstatus,
+                         "Scan process failed (code %d) -- press R", scan_result);
             else
-                snprintf(g_wstatus, sizeof g_wstatus, "No networks found -- press R to rescan");
+                snprintf(g_wstatus, sizeof g_wstatus,
+                         "Scan returned no data -- press R to rescan");
         }
         else
             snprintf(g_wstatus, sizeof g_wstatus, "%d network%s -- click to select, again to connect",
@@ -1364,6 +1376,8 @@ static void render_about(uint32_t *fb) {
     draw_str_clip(fb, "A hand-built Linux distro with a native C Wayland compositor.",
                   x, y, C_GREY, g_win_w - x - CPAD); y += g_glyph_h + 4;
     draw_str_clip(fb, "Updates: run fifi upgrade, then reboot when it finishes.",
+                  x, y, C_GREY, g_win_w - x - CPAD); y += g_glyph_h + 4;
+    draw_str_clip(fb, "Wi-Fi help: run wifi-diagnostics in Terminal.",
                   x, y, C_GREY, g_win_w - x - CPAD);
 }
 
@@ -1543,6 +1557,10 @@ static void sec_click(int mx, int my) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(int argc, char **argv) {
+    /* The compositor auto-reaps its own children. That ignored disposition is
+     * inherited across exec, but Settings needs reliable statuses from its
+     * Wi-Fi and administrative child processes. */
+    signal(SIGCHLD, SIG_DFL);
     if (argc > 1) {
         if      (!strcmp(argv[1], "wifi"))        g_tab = TAB_WIFI;
         else if (!strcmp(argv[1], "network"))     g_tab = TAB_NET;

@@ -110,6 +110,10 @@ EOF
 cat > "$broker_bin/fifi-wifi-ctl" <<'EOF'
 #!/bin/sh
 printf 'wifi %s %s\n' "$1" "$2" >> "$FIFI_TEST_ADMIN_LOG"
+if [ "$1" = scan ] && [ "$2" = fail0 ]; then
+    echo 'mock Wi-Fi scan failure'
+    exit 9
+fi
 if [ "$1" = connect ]; then
     od -An -v -tx1 >> "$FIFI_TEST_ADMIN_LOG"
     printf 'FIFI_WIFI_OK\n'
@@ -164,6 +168,15 @@ grep -Fxq 'security firewall on' "$broker_log"
 capture_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" capture)"
 grep -Fq 'capture args: -c 20 -nn -i any -q' <<<"$capture_out"
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan wlan0
+if FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" wifi scan fail0 >"$TMP/wifi-scan-failure.out" 2>&1; then
+    echo "failed privileged Wi-Fi scan reported success" >&2
+    exit 1
+else
+    test "$?" -eq 9
+fi
+grep -Fxq 'mock Wi-Fi scan failure' "$TMP/wifi-scan-failure.out"
+! grep -Fq 'FIFI_ADMIN_STATUS' "$TMP/wifi-scan-failure.out"
 printf '\000\010Cafe Net\000\013secret pass' |
     FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" wifi connect wlan0
@@ -195,7 +208,8 @@ grep -Fq 'mock USB failure' "$TMP/update-usb.out"
 ! grep -Fq 'FIFI_ADMIN_STATUS' "$TMP/update-usb.out"
 denied_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" shell root 2>&1)"
 grep -Fq 'operation is not allowed' <<<"$denied_out"
-bad_iface="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan 'wlan0;id' 2>&1)"
+bad_iface="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" wifi scan 'wlan0;id' 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_iface"
 bad_channel="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update apply edge 2>&1 || true)"

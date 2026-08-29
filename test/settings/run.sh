@@ -51,6 +51,10 @@ grep -Fq 'wait_command("/usr/bin/rfkill", unblock)' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq '/fifi-data/wifi-scan.log' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'signal(SIGCHLD, SIG_DFL);' "$SETTINGS"
+grep -Fq 'Scan process failed (code %d)' "$SETTINGS"
+grep -Fq 'Wi-Fi scan failed (code %d)' \
+    "$ROOT/fifi/apps/wifi/wifi.c"
 grep -Fq 'fifi-wifi-ctl saved-connect "$WIFI_IF"' "$ROOT/initramfs/root/init"
 ! grep -Fq '/usr/lib/iwd/iwd' "$ROOT/initramfs/root/init"
 grep -Fq 'open_public_status("/fifi-data/wifi-ssid")' \

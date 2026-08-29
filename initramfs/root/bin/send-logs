@@ -30,6 +30,21 @@ if {
     ip -4 addr show scope global 2>/dev/null
     ip -4 route 2>/dev/null
     echo ""
+    echo "=== Wi-Fi devices ==="
+    iw dev 2>&1
+    rfkill list wifi 2>&1
+    echo ""
+    echo "=== Wi-Fi hardware ==="
+    cat /fifi-data/wifi-hardware 2>/dev/null
+    echo ""
+    echo "=== latest Wi-Fi scan ==="
+    cat /fifi-data/wifi-scan.log 2>/dev/null
+    echo ""
+    echo "=== Wi-Fi and network services ==="
+    tail -n 500 /fifi-data/admin-broker.log 2>/dev/null
+    tail -n 500 /fifi-data/wifi.log 2>/dev/null
+    tail -n 500 /fifi-data/network.log 2>/dev/null
+    echo ""
     echo "=== recent compositor.log ==="
     tail -n 2000 /fifi-data/compositor.log 2>/dev/null
     echo ""
