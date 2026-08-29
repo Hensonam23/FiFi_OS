@@ -204,6 +204,7 @@ WIFI_DIAGNOSTICS="$ROOT/initramfs/root/bin/wifi-diagnostics"
 test -x "$WIFI_DIAGNOSTICS"
 grep -Fq 'fifi-admin wifi scan "$interface"' "$WIFI_DIAGNOSTICS"
 grep -Fq 'cat /fifi-data/admin-broker.log' "$WIFI_DIAGNOSTICS"
+grep -Fq "rtw89|iwlwifi|ath11k|brcm" "$WIFI_DIAGNOSTICS"
 echo "[input-test] offline Wi-Fi diagnostics expose broker and scan failures"
 
 grep -Fq '#include <libinput.h>' "$ROOT/fifi/platform/linux/input.c"

@@ -22,6 +22,11 @@ echo
 echo "=== detected hardware ==="
 cat /fifi-data/wifi-hardware 2>&1
 echo
+echo "=== kernel Wi-Fi and firmware messages ==="
+dmesg 2>&1 | grep -Ei \
+    'wifi|wlan|80211|cfg80211|rfkill|firmware|rtw89|iwlwifi|ath11k|brcm' | \
+    tail -n 300
+echo
 echo "=== direct broker scan ==="
 found_interface=0
 for interface_path in /sys/class/net/*; do

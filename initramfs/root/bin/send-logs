@@ -37,6 +37,11 @@ if {
     echo "=== Wi-Fi hardware ==="
     cat /fifi-data/wifi-hardware 2>/dev/null
     echo ""
+    echo "=== kernel Wi-Fi and firmware messages ==="
+    dmesg 2>&1 | grep -Ei \
+        'wifi|wlan|80211|cfg80211|rfkill|firmware|rtw89|iwlwifi|ath11k|brcm' | \
+        tail -n 300
+    echo ""
     echo "=== latest Wi-Fi scan ==="
     cat /fifi-data/wifi-scan.log 2>/dev/null
     echo ""
