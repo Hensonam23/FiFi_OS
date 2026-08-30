@@ -477,6 +477,14 @@ grep -Fq 'compositor exited status=%s; restarting in 2s' \
 echo "[test-security] USB update boot cannot terminate PID 1"
 grep -Fq '"$(cat "$sys_part/removable" 2>/dev/null)" = 1' \
     "$ROOT/initramfs/root/bin/update-usb"
+grep -Fq 'CANDIDATES="$CANDIDATE_PARTITIONS $CANDIDATE_DISKS"' \
+    "$ROOT/initramfs/root/bin/update-usb"
+grep -Fq 'cat "$parent_path/removable"' \
+    "$ROOT/initramfs/root/bin/update-usb"
+grep -Fq 'Skipping invalid FiFi payload on $dev' \
+    "$ROOT/initramfs/root/bin/update-usb"
+grep -Fq 'wipefs --all --force "$DEV"' \
+    "$ROOT/scripts/flash-linux-usb.sh"
 update_boot_block="$TMP/update-boot-block"
 sed -n '/if \[ "$FIFI_UPDATE_BOOT" = 1 \]/,/# Track the running image/p' \
     "$ROOT/initramfs/root/init" > "$update_boot_block"

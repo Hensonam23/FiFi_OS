@@ -39,6 +39,15 @@ for p in "${DEV}"?*; do
     umount "$p" 2>/dev/null || true
 done
 
+# Remove every old filesystem signature before creating the new GPT/FAT image.
+# In particular, an ISO9660 signature lives before the first partition and can
+# otherwise survive repartitioning; FiFi may then mount that stale whole-disk
+# image instead of the newly written partition.
+for p in "${DEV}"?*; do
+    [ -b "$p" ] && wipefs --all --force "$p" >/dev/null
+done
+wipefs --all --force "$DEV" >/dev/null
+
 echo "[flash] Partitioning (single GPT EFI partition)..."
 parted -s "$DEV" mklabel gpt
 parted -s "$DEV" mkpart "FiFiOS" fat32 1MiB 100%

@@ -27,17 +27,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-CANDIDATES=""
+CANDIDATE_PARTITIONS=""
+CANDIDATE_DISKS=""
 for sys_part in /sys/class/block/*; do
     # Hybrid GRUB ISOs expose their ISO9660 filesystem on the whole removable
     # disk, not necessarily on a mountable partition. Include partitions plus
     # whole removable devices; otherwise a correctly flashed FiFi USB is skipped.
-    if [ ! -f "$sys_part/partition" ]; then
+    if [ -f "$sys_part/partition" ]; then
+        block_path=$(readlink -f "$sys_part" 2>/dev/null) || continue
+        parent_path=$(dirname "$block_path")
+        [ "$(cat "$parent_path/removable" 2>/dev/null)" = 1 ] || continue
+        part="/dev/${sys_part##*/}"
+        [ -b "$part" ] && CANDIDATE_PARTITIONS="$CANDIDATE_PARTITIONS $part"
+    else
         [ "$(cat "$sys_part/removable" 2>/dev/null)" = 1 ] || continue
+        part="/dev/${sys_part##*/}"
+        [ -b "$part" ] && CANDIDATE_DISKS="$CANDIDATE_DISKS $part"
     fi
-    part="/dev/${sys_part##*/}"
-    [ -b "$part" ] && CANDIDATES="$CANDIDATES $part"
 done
+# A directly flashed FiFi USB has one authoritative FAT partition. Check
+# partitions before whole-disk ISO fallbacks so stale ISO9660 signatures left by
+# older flashers can never shadow the current payload.
+CANDIDATES="$CANDIDATE_PARTITIONS $CANDIDATE_DISKS"
 
 USB_DEV=""
 for dev in $CANDIDATES; do
@@ -46,6 +57,11 @@ for dev in $CANDIDATES; do
          [ -f "$USB_MNT/fifi-usb-boot.id" ]; } &&
        [ -s "$USB_MNT/boot/bzImage" ] &&
        [ -s "$USB_MNT/boot/initramfs.cpio.gz" ]; then
+        if ! gzip -t "$USB_MNT/boot/initramfs.cpio.gz"; then
+            log "Skipping invalid FiFi payload on $dev"
+            umount "$USB_MNT" 2>/dev/null
+            continue
+        fi
         USB_DEV="$dev"
         log "Source USB: $dev"
         break
@@ -86,6 +102,8 @@ fi
 
 BOOT="$TGT_MNT/boot"
 log "Validating source images..."
+# Repeat the validation immediately before installation so media errors between
+# discovery and use still leave both boot slots untouched.
 gzip -t "$USB_MNT/boot/initramfs.cpio.gz" ||
     fail "source initramfs failed gzip validation"
 
