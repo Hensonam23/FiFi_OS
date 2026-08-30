@@ -119,6 +119,11 @@ if [ "$1" = connect ]; then
     printf 'FIFI_WIFI_OK\n'
 fi
 EOF
+cat > "$broker_bin/fifi-export-diagnostics" <<'EOF'
+#!/bin/sh
+echo 'diagnostics export complete'
+printf 'diagnostics export\n' >> "$FIFI_TEST_ADMIN_LOG"
+EOF
 cat > "$broker_bin/fifi-apply-update" <<'EOF'
 #!/bin/sh
 printf 'update apply %s\n' "$1" >> "$FIFI_TEST_ADMIN_LOG"
@@ -144,11 +149,13 @@ EOF
 chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
     "$broker_bin/fifi-wifi-ctl" "$broker_bin/fifi-apply-update" \
     "$broker_bin/update-usb" "$broker_bin/update-rollback" \
-    "$broker_bin/fifi-install.sh" "$broker_bin/fifi-powerctl"
+    "$broker_bin/fifi-install.sh" "$broker_bin/fifi-powerctl" \
+    "$broker_bin/fifi-export-diagnostics"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
 FIFI_WIFI_CTL="$broker_bin/fifi-wifi-ctl" \
+FIFI_DIAGNOSTICS_EXPORT="$broker_bin/fifi-export-diagnostics" \
 FIFI_UPDATE_APPLY="$broker_bin/fifi-apply-update" \
 FIFI_UPDATE_USB="$broker_bin/update-usb" \
 FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
@@ -181,11 +188,15 @@ printf '\000\010Cafe Net\000\013secret pass' |
     FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" wifi connect wlan0
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi disconnect wlan0
+diagnostics_out="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" diagnostics export)"
+grep -Fxq 'diagnostics export complete' <<<"$diagnostics_out"
 grep -Fxq 'wifi scan wlan0' "$broker_log"
 grep -Fxq 'wifi connect wlan0' "$broker_log"
 grep -Fq '00 08 43 61 66 65 20 4e 65 74 00 0b 73 65 63 72' "$broker_log"
 grep -Fq '65 74 20 70 61 73 73' "$broker_log"
 grep -Fxq 'wifi disconnect wlan0' "$broker_log"
+grep -Fxq 'diagnostics export' "$broker_log"
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update apply stable
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" update rollback
 grep -Fxq 'update apply stable' "$broker_log"
@@ -211,6 +222,9 @@ grep -Fq 'operation is not allowed' <<<"$denied_out"
 bad_iface="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" wifi scan 'wlan0;id' 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_iface"
+bad_diagnostics="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" diagnostics '../../etc' 2>&1 || true)"
+grep -Fq 'operation is not allowed' <<<"$bad_diagnostics"
 bad_channel="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update apply edge 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_channel"
@@ -471,5 +485,20 @@ test "$(grep -Fc 'while :; do sleep 3600; done' "$update_boot_block")" -eq 2
 grep -Fq 'menuentry "Update Installed FiFi OS"' \
     "$ROOT/scripts/flash-linux-usb.sh"
 grep -Fq 'fifi_live fifi_update' "$ROOT/scripts/flash-linux-usb.sh"
+
+echo "[test-security] diagnostics export uses only removable verified FiFi media"
+grep -Fxq 'exec /bin/fifi-admin diagnostics export' \
+    "$ROOT/initramfs/root/bin/save-logs"
+DIAGNOSTICS_EXPORT="$ROOT/initramfs/root/bin/fifi-export-diagnostics"
+diagnostics_denied="$("$DIAGNOSTICS_EXPORT" 2>&1 || true)"
+grep -Fq 'root broker required' <<<"$diagnostics_denied"
+grep -Fq '[ "$(id -u)" = 0 ] || fail "root broker required"' \
+    "$DIAGNOSTICS_EXPORT"
+grep -Fq 'cat "$parent_path/removable"' "$DIAGNOSTICS_EXPORT"
+grep -Fq '[ -f "$USB_MNT/.fifi-live-usb" ]' "$DIAGNOSTICS_EXPORT"
+grep -Fq '[ -s "$USB_MNT/boot/initramfs.cpio.gz" ]' "$DIAGNOSTICS_EXPORT"
+grep -Fq '/bin/fifi-wifi-ctl scan "$interface"' "$DIAGNOSTICS_EXPORT"
+! grep -Fq '/fifi-data/wpa.conf' "$DIAGNOSTICS_EXPORT"
+! grep -Fq '/fifi-data/wifi.conf' "$DIAGNOSTICS_EXPORT"
 
 echo "[test-security] PASS"

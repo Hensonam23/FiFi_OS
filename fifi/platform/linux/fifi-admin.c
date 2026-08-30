@@ -182,6 +182,12 @@ static void run_fixed_command(char *request) {
             };
             run_status_command(tool, wifi_argv);
         }
+    } else if (argc == 2 && strcmp(args[0], "diagnostics") == 0 &&
+               strcmp(args[1], "export") == 0) {
+        const char *tool = getenv("FIFI_DIAGNOSTICS_EXPORT");
+        if (!tool || !*tool) tool = "/bin/fifi-export-diagnostics";
+        char *const diagnostics_argv[] = { (char *)tool, NULL };
+        run_status_command(tool, diagnostics_argv);
     } else if (argc == 3 && strcmp(args[0], "update") == 0 &&
                strcmp(args[1], "apply") == 0 && valid_channel(args[2])) {
         const char *tool = getenv("FIFI_UPDATE_APPLY");
@@ -414,7 +420,9 @@ static int client_main(int argc, char **argv) {
     }
     shutdown(sock, SHUT_WR);
 
-    if ((argc == 4 && strcmp(argv[1], "wifi") == 0 &&
+    if ((argc == 3 && strcmp(argv[1], "diagnostics") == 0 &&
+         strcmp(argv[2], "export") == 0) ||
+        (argc == 4 && strcmp(argv[1], "wifi") == 0 &&
          (strcmp(argv[2], "scan") == 0 ||
           strcmp(argv[2], "disconnect") == 0)) ||
         (argc >= 3 && strcmp(argv[1], "update") == 0) ||

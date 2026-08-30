@@ -1,0 +1,130 @@
+#!/bin/sh
+# Root-only diagnostic exporter. It writes only to a removable FiFi USB whose
+# image markers and boot payload are present; no arbitrary mount target or
+# output path crosses the broker boundary.
+
+fail() {
+    echo "save-logs: $*" >&2
+    exit 1
+}
+
+[ "$(id -u)" = 0 ] || fail "root broker required"
+
+USB_MNT=/mnt/fifi-diagnostics-usb
+mkdir -p "$USB_MNT" || fail "could not create USB mount point"
+USB_MOUNTED=0
+cleanup() {
+    [ "$USB_MOUNTED" = 1 ] && umount "$USB_MNT" 2>/dev/null || true
+    rmdir "$USB_MNT" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+is_removable_partition() {
+    block_path=$(readlink -f "$1" 2>/dev/null) || return 1
+    if [ -f "$block_path/partition" ]; then
+        parent_path=$(dirname "$block_path")
+        [ "$(cat "$parent_path/removable" 2>/dev/null)" = 1 ]
+    else
+        [ "$(cat "$block_path/removable" 2>/dev/null)" = 1 ]
+    fi
+}
+
+USB_DEV=""
+for sys_part in /sys/class/block/*; do
+    is_removable_partition "$sys_part" || continue
+    dev="/dev/${sys_part##*/}"
+    [ -b "$dev" ] || continue
+    mount -t vfat -o rw,nosuid,nodev,noexec "$dev" "$USB_MNT" 2>/dev/null ||
+        continue
+    USB_MOUNTED=1
+    if { [ -f "$USB_MNT/.fifi-live-usb" ] ||
+         [ -f "$USB_MNT/fifi-usb-boot.id" ]; } &&
+       [ -s "$USB_MNT/boot/bzImage" ] &&
+       [ -s "$USB_MNT/boot/initramfs.cpio.gz" ]; then
+        USB_DEV="$dev"
+        break
+    fi
+    umount "$USB_MNT" 2>/dev/null || true
+    USB_MOUNTED=0
+done
+[ -n "$USB_DEV" ] || fail "FiFi USB not found; plug it in and try again"
+
+build=$(cat /etc/fifi-build-id 2>/dev/null)
+case "$build" in *[!0-9A-Fa-f-]*|"") build=unknown ;; esac
+stamp=$(date -u +%Y%m%d-%H%M%S 2>/dev/null)
+case "$stamp" in *[!0-9-]*|"") stamp=boot ;; esac
+OUT="$USB_MNT/fifi-diagnostics/$build-$stamp"
+umask 022
+mkdir -p "$OUT" || fail "could not create diagnostics directory"
+
+# Trigger the same privileged scan used by Settings so the exported evidence
+# covers the current failure rather than only earlier boot logs.
+scan_output="$OUT/direct-scan.txt"
+found_wifi=0
+for interface_path in /sys/class/net/*; do
+    if [ ! -d "$interface_path/wireless" ] &&
+       [ ! -e "$interface_path/phy80211" ]; then
+        continue
+    fi
+    found_wifi=1
+    interface=${interface_path##*/}
+    echo "=== scan on $interface ===" >> "$scan_output"
+    timeout 25 /bin/fifi-wifi-ctl scan "$interface" \
+        >> "$scan_output" 2>&1
+    result=$?
+    echo "scan exit code: $result" >> "$scan_output"
+done
+[ "$found_wifi" = 1 ] || echo "No kernel Wi-Fi interface found" > "$scan_output"
+
+REPORT="$OUT/report.txt"
+{
+    echo "=== FiFi version ==="
+    fifi version 2>&1
+    echo
+    echo "=== build and boot ==="
+    cat /etc/fifi-build-id 2>&1
+    cat /fifi-data/boot-slot 2>/dev/null
+    cat /fifi-data/boot-state 2>/dev/null
+    echo
+    echo "=== network interfaces and routes ==="
+    ip address 2>&1
+    ip route 2>&1
+    echo
+    echo "=== Wi-Fi interfaces ==="
+    iw dev 2>&1
+    echo
+    echo "=== radio switches ==="
+    rfkill list wifi 2>&1
+    echo
+    echo "=== detected Wi-Fi hardware ==="
+    cat /fifi-data/wifi-hardware 2>&1
+    echo
+    echo "=== direct privileged scan ==="
+    cat "$scan_output" 2>&1
+    echo
+    echo "=== saved scan diagnostic ==="
+    cat /fifi-data/wifi-scan.log 2>&1
+    echo
+    echo "=== admin broker ==="
+    cat /fifi-data/admin-broker.log 2>&1
+    echo
+    echo "=== network services ==="
+    cat /fifi-data/network.log 2>&1
+    cat /fifi-data/wifi.log 2>&1
+    echo
+    echo "=== input devices ==="
+    cat /fifi-data/input-devices.txt 2>&1
+    echo
+    echo "=== kernel log ==="
+    dmesg 2>&1
+} > "$REPORT"
+
+for log in compositor.log wifi-scan.log wifi-hardware admin-broker.log \
+           network.log wifi.log input-devices.txt; do
+    [ -f "/fifi-data/$log" ] && cp "/fifi-data/$log" "$OUT/$log"
+done
+dmesg > "$OUT/dmesg.txt" 2>&1
+sync
+
+echo "Diagnostics saved to $USB_DEV:/fifi-diagnostics/$build-$stamp"
+echo "Shut down FiFi, return this USB to the development computer, and I can read it."
