@@ -267,7 +267,15 @@ grep -Fq 'load_env -f \$fifi_grubenv fifi_attempted' \
     "$ROOT/initramfs/root/bin/fifi-write-grub-config"
 grep -Fq 'save_env -f \$fifi_grubenv fifi_attempted' \
     "$ROOT/initramfs/root/bin/fifi-write-grub-config"
-grep -Fq 'fifi_boot_fallback=\$fifi_entry_fallback' \
+grep -Fq 'menuentry "FiFi OS"' \
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
+! grep -Fq 'menuentry "FiFi OS (slot A)"' \
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
+! grep -Fq 'menuentry "FiFi OS (slot B)"' \
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
+grep -Fq 'submenu "Advanced options for FiFi OS"' \
+    "$ROOT/initramfs/root/bin/fifi-write-grub-config"
+grep -Fq 'fifi_boot_fallback=\$fifi_boot_fallback' \
     "$ROOT/initramfs/root/bin/fifi-write-grub-config"
 grep -Fq 'fifi_boot_fallback=1 apparmor=1' \
     "$ROOT/initramfs/root/bin/fifi-write-grub-config"
@@ -301,17 +309,20 @@ other_sha="$(sha256sum "$OTHER_EFI/boot/grub/grub.cfg" | awk '{print $1}')"
 FIFI_EFI_ROOT="$OTHER_EFI" FIFI_DATA_UUID=1234-ABCD \
     sh "$ROOT/initramfs/root/usr/share/fifi/migrate-legacy-grub.sh"
 [[ "$other_sha" == "$(sha256sum "$OTHER_EFI/boot/grub/grub.cfg" | awk '{print $1}')" ]]
-test ! -e "$DATA/.grub-ab-migrated"
+: > "$DATA/.grub-ab-migrated"
+test ! -e "$DATA/.grub-single-menu-migrated"
 FIFI_EFI_ROOT="$EFI" FIFI_DATA_UUID=1234-ABCD \
 FIFI_GRUB_EDITENV="$MOCK_BIN/grub-editenv" \
 FIFI_GRUB_CONFIG_WRITER="$ROOT/initramfs/root/bin/fifi-write-grub-config" \
     sh "$ROOT/initramfs/root/usr/share/fifi/migrate-legacy-grub.sh"
-test -e "$DATA/.grub-ab-migrated"
+test -e "$DATA/.grub-single-menu-migrated"
 test -e "$EFI/boot/grub/grubenv"
 grep -Fq 'linux /boot/bzImage fifi_data_uuid=1234-ABCD' \
-    "$EFI/boot/grub/grub.cfg.before-ab-migration"
+    "$EFI/boot/grub/grub.cfg.before-single-menu"
 grep -Fq 'source /boot/fifi-slot.cfg' "$EFI/boot/grub/grub.cfg"
 grep -Fq 'save_env -f $fifi_grubenv fifi_attempted' "$EFI/boot/grub/grub.cfg"
+grep -Fq 'menuentry "FiFi OS"' "$EFI/boot/grub/grub.cfg"
+! grep -Fq 'menuentry "FiFi OS (slot A)"' "$EFI/boot/grub/grub.cfg"
 grep -Fq 'chainloader /EFI/Microsoft/Boot/bootmgfw_backup.efi' \
     "$EFI/boot/grub/grub.cfg"
 before_migration_sha="$(sha256sum "$EFI/boot/grub/grub.cfg" | awk '{print $1}')"

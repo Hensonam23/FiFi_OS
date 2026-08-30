@@ -1090,12 +1090,19 @@ static void input_poll_libinput(void) {
     struct libinput_event *event;
     while ((event = libinput_get_event(g_libinput)) != NULL) {
         enum libinput_event_type type = libinput_event_get_type(event);
-        struct libinput_event_pointer *pointer =
-            libinput_event_get_pointer_event(event);
-        if (!pointer) {
+        bool is_pointer = type == LIBINPUT_EVENT_POINTER_MOTION ||
+                          type == LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE ||
+                          type == LIBINPUT_EVENT_POINTER_BUTTON ||
+                          type == LIBINPUT_EVENT_POINTER_AXIS ||
+                          type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL ||
+                          type == LIBINPUT_EVENT_POINTER_SCROLL_FINGER ||
+                          type == LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS;
+        if (!is_pointer) {
             libinput_event_destroy(event);
             continue;
         }
+        struct libinput_event_pointer *pointer =
+            libinput_event_get_pointer_event(event);
 
         if (type == LIBINPUT_EVENT_POINTER_MOTION) {
             double event_dx = libinput_event_pointer_get_dx(pointer);
@@ -1148,6 +1155,9 @@ static void input_poll_libinput(void) {
                 double value;
                 if (type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL)
                     value = libinput_event_pointer_get_scroll_value_v120(
+                        pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+                else if (type == LIBINPUT_EVENT_POINTER_AXIS)
+                    value = libinput_event_pointer_get_axis_value(
                         pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
                 else
                     value = libinput_event_pointer_get_scroll_value(

@@ -2,6 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+echo "[test-input] libinput APIs are called only for compatible event types"
+grep -Fq 'bool is_pointer = type == LIBINPUT_EVENT_POINTER_MOTION' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'libinput_event_pointer_get_axis_value(' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'if (pointer_ci >= 0 && !g_wl_clients[pointer_ci].pointer_id)' \
+    "$ROOT/fifi/platform/linux/wayland.c"
+grep -Fq 'replacement pointer receives a fresh' \
+    "$ROOT/fifi/platform/linux/wayland.c"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

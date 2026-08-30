@@ -23,6 +23,37 @@ grep -Fq '[ -s /fifi-data/ssh/authorized_keys ]' "$ROOT/initramfs/root/init"
     "$ROOT/initramfs/root/etc/nftables.conf"
 grep -Fq 'fifi-remotectl start-if-enabled' "$ROOT/initramfs/root/init"
 grep -Fq 'ACT_REMOTE' "$ROOT/fifi/apps/settings/settings.c"
+grep -Fq 'SECTION("Remote Access")' "$ROOT/fifi/apps/security/security.c"
+grep -Fq 'admin_security("remote", !g_remote_active)' \
+    "$ROOT/fifi/apps/security/security.c"
+
+echo "[test-security] boot firewall and AppArmor are kernel-backed"
+for option in NF_CONNTRACK NF_TABLES NF_TABLES_INET NFT_CT SECURITY \
+              SECURITYFS SECURITY_APPARMOR DEFAULT_SECURITY_APPARMOR; do
+    grep -Fxq "CONFIG_${option}=y" "$ROOT/linux/fifi.config"
+done
+grep -Fxq 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux,smack,tomoyo,ipe,bpf"' \
+    "$ROOT/linux/fifi.config"
+grep -Fq '/usr/sbin/nft list table inet fifi_filter' "$ROOT/initramfs/root/init"
+grep -Fq '/sys/module/apparmor/parameters/enabled' "$ROOT/initramfs/root/init"
+grep -Fq '/sys/kernel/security/apparmor/profiles' "$ROOT/initramfs/root/init"
+
+echo "[test-security] Wi-Fi diagnostics describe only the current boot"
+grep -Fq "'=== current boot ===' > /fifi-data/wifi.log" \
+    "$ROOT/initramfs/root/init"
+
+echo "[test-security] network services run quietly with least privilege"
+grep -Fq '/bin/fifi-user-exec /usr/bin/tor' \
+    "$ROOT/initramfs/root/bin/fifi-secctl"
+grep -Fq 'chown -R 1000:1000 "$D/tor"' \
+    "$ROOT/initramfs/root/bin/fifi-secctl"
+grep -Fq 'cp "$ROOT_DIR/etc/dbus-1/system.conf"' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'for aa_tree in abi abstractions tunables' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'for _boot_log in compositor.log' "$ROOT/initramfs/root/init"
+grep -Fq 'nft add rule inet fifi_filter input tcp dport 22 accept' \
+    "$ROOT/initramfs/root/bin/fifi-secctl"
 
 echo "[test-security] Wi-Fi authentication crypto is built in"
 for option in CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER KEY_DH_OPERATIONS \

@@ -1,9 +1,10 @@
 #!/bin/sh
-# Upgrade an older installed FiFi GRUB menu to automatic A/B boot fallback.
+# Upgrade an installed FiFi GRUB menu to automatic A/B fallback with one normal
+# user-facing boot choice.
 set -u
 
 DATA_ROOT="${FIFI_DATA_ROOT:-/fifi-data}"
-MARKER="$DATA_ROOT/.grub-ab-migrated"
+MARKER="$DATA_ROOT/.grub-single-menu-migrated"
 MOUNT_POINT="${FIFI_EFI_MOUNT_POINT:-/mnt/fifi-grub-migrate}"
 GRUB_EDITENV="${FIFI_GRUB_EDITENV:-grub-editenv}"
 WRITER="${FIFI_GRUB_CONFIG_WRITER:-fifi-write-grub-config}"
@@ -38,11 +39,13 @@ migrate_root() {
     root="$1"
     config="$root/boot/grub/grub.cfg"
     grubenv="$root/boot/grub/grubenv"
-    backup="$root/boot/grub/grub.cfg.before-ab-migration"
+    backup="$root/boot/grub/grub.cfg.before-single-menu"
 
     config_matches_install "$root" || return 1
     if grep -Fq 'source /boot/fifi-slot.cfg' "$config" &&
-       grep -Fq 'save_env -f $fifi_grubenv fifi_attempted' "$config"; then
+       grep -Fq 'save_env -f $fifi_grubenv fifi_attempted' "$config" &&
+       grep -Fq 'menuentry "FiFi OS"' "$config" &&
+       ! grep -Fq 'menuentry "FiFi OS (slot A)"' "$config"; then
         : > "$MARKER"
         return 0
     fi
@@ -74,7 +77,7 @@ migrate_root() {
     }
     sync
     : > "$MARKER"
-    log "installed automatic A/B fallback menu; old config retained at $backup"
+    log "installed single-choice automatic fallback menu; old config retained at $backup"
     return 0
 }
 

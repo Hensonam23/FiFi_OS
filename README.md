@@ -132,7 +132,11 @@ fifi pkg list          # list signed native FiFi packages
 - Update checks, downloads, and prompts run as the normal desktop user. A fixed
   root-broker action copies the staged files into root-owned snapshots and
   repeats the signature, checksum, and gzip checks before writing a boot slot.
-- A pending slot is confirmed only after the desktop compositor is ready. New installations record each GRUB boot attempt and automatically select the previous slot if the pending image does not reach that confirmation point. `update rollback` switches slots manually.
+- A pending slot is confirmed only after the desktop compositor is ready. The
+  normal boot menu shows one **FiFi OS** choice; its internal A/B slots are
+  selected automatically so a failed update returns to the previous working
+  system. Safe graphics and manual recovery live under **Advanced options**,
+  and `update rollback` remains available from the terminal.
 - Existing installations migrate their matching EFI GRUB menu automatically on the first hardened boot. The old menu is retained as `grub.cfg.before-ab-migration`; unrelated EFI partitions are never rewritten.
 - `app-update` updates apps only.
 - A bootable USB includes **Update Installed FiFi OS**: select it once and FiFi

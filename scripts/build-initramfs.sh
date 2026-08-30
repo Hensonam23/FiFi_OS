@@ -1242,13 +1242,12 @@ for b in bluetoothctl dbus-daemon dbus-uuidgen; do
     [ -x "$src" ] && cp "$src" "$STAGE/usr/bin/" || true
 done
 cp /usr/lib/spa-0.2/bluez5/*.so "$STAGE/usr/lib/spa-0.2/bluez5/" 2>/dev/null || true
-# D-Bus system bus config: the MAIN system.conf is REQUIRED or `dbus-daemon --system`
-# refuses to start (no socket -> bluetoothd can't run). Copy it plus every system.d
-# policy (the BlueZ policy is `bluetooth.conf` on current BlueZ, NOT `org.bluez.conf`)
-# and the bluez activation service file.
+# D-Bus system bus config: use FiFi's minimal single-user policy. Copying the
+# host's complete service policy emits errors for accounts FiFi intentionally
+# does not ship and makes a healthy Bluetooth service look broken.
 mkdir -p "$STAGE/usr/share/dbus-1/system-services"
-cp /usr/share/dbus-1/system.conf "$STAGE/usr/share/dbus-1/system.conf" 2>/dev/null || true
-cp /usr/share/dbus-1/system.d/*.conf "$STAGE/usr/share/dbus-1/system.d/" 2>/dev/null || true
+cp "$ROOT_DIR/etc/dbus-1/system.conf" "$STAGE/usr/share/dbus-1/system.conf"
+rm -f "$STAGE/usr/share/dbus-1/system.d/"*.conf
 cp /usr/share/dbus-1/system-services/org.bluez.service "$STAGE/usr/share/dbus-1/system-services/" 2>/dev/null || true
 [ -f /etc/bluetooth/main.conf ] && cp /etc/bluetooth/main.conf "$STAGE/etc/bluetooth/" 2>/dev/null || true
 # dbus-daemon --system drops privileges to the `dbus` user; the minimal rootfs has
@@ -1343,6 +1342,19 @@ if [ -x "$AA_PARSER" ]; then
     done
     # Include aa-status for checking profile load state
     [ -x /usr/bin/aa-status ] && cp /usr/bin/aa-status "$STAGE/usr/bin/aa-status" || true
+    # FiFi profiles include the standard base abstraction and global tunables.
+    # Bundle the complete include trees so policy compilation on the target does
+    # not depend on files that happen to exist only on the build workstation.
+    for aa_tree in abi abstractions tunables; do
+        if [ -d "/etc/apparmor.d/$aa_tree" ]; then
+            mkdir -p "$STAGE/etc/apparmor.d/$aa_tree"
+            cp -a "/etc/apparmor.d/$aa_tree/." "$STAGE/etc/apparmor.d/$aa_tree/"
+        fi
+    done
+    if [ -f /etc/apparmor/parser.conf ]; then
+        mkdir -p "$STAGE/etc/apparmor"
+        cp /etc/apparmor/parser.conf "$STAGE/etc/apparmor/parser.conf"
+    fi
     echo "[initramfs] apparmor_parser bundled"
 fi
 # AppArmor profiles are in initramfs/root/etc/apparmor.d/ (already staged via rootfs copy)

@@ -277,9 +277,9 @@ if [ -x /usr/share/fifi/migrate-legacy-ssh-keys.sh ]; then
     /usr/share/fifi/migrate-legacy-ssh-keys.sh
 fi
 
-# Older installed EFI menus load the A/B compatibility symlinks but cannot
-# automatically reject an unconfirmed slot. Refresh only the GRUB config whose
-# embedded data UUID matches this installation, keeping a one-time backup.
+# Refresh older installed EFI menus to the single normal FiFi OS choice with
+# automatic fallback. Only the GRUB config whose embedded data UUID matches this
+# installation is changed, and a one-time recovery backup is retained.
 if [ -x /usr/share/fifi/migrate-legacy-grub.sh ]; then
     /usr/share/fifi/migrate-legacy-grub.sh
 fi
@@ -328,7 +328,9 @@ for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
 done
 for _wifi_public in /fifi-data/wifi-status /fifi-data/wifi-ssid \
                     /fifi-data/wifi-saved-ssid /fifi-data/wifi-hardware \
-                    /fifi-data/wifi-scan.log /fifi-data/admin-broker.log; do
+                    /fifi-data/wifi-scan.log /fifi-data/wifi.log \
+                    /fifi-data/admin-broker.log /fifi-data/apparmor.log \
+                    /fifi-data/apparmor-status /fifi-data/firewall.log; do
     [ ! -L "$_wifi_public" ] || rm -f "$_wifi_public"
     [ ! -f "$_wifi_public" ] || chmod 0644 "$_wifi_public"
 done
@@ -337,8 +339,25 @@ done
 # distinguishable from one that ran and found no networks. Persistent symlinks
 # were removed above before either root-owned file is opened.
 printf '%s\n' 'No Wi-Fi scan has run since this boot' > /fifi-data/wifi-scan.log
+printf '%s\n' '=== current boot ===' > /fifi-data/wifi.log
 : > /fifi-data/admin-broker.log
-chmod 0644 /fifi-data/wifi-scan.log /fifi-data/admin-broker.log
+chmod 0644 /fifi-data/wifi-scan.log /fifi-data/wifi.log \
+    /fifi-data/admin-broker.log
+
+# Keep diagnostics scoped to one boot while retaining exactly one prior boot
+# for post-crash comparison. Root-owned fixed paths cannot be redirected through
+# persistent symlinks left by an older or compromised installation.
+for _boot_log in compositor.log compositor-supervisor.log xwayland.log \
+                 bluetooth.log pipewire.log pipewire-pulse.log network.log \
+                 doh.log tor.log; do
+    _current="/fifi-data/$_boot_log"
+    _previous="$_current.previous"
+    [ ! -L "$_current" ] || rm -f "$_current"
+    [ ! -L "$_previous" ] || rm -f "$_previous"
+    [ ! -f "$_current" ] || mv -f "$_current" "$_previous"
+    : > "$_current"
+    chmod 0644 "$_current"
+done
 
 # Keep GUI applications at the desktop UID. Administrative actions cross this
 # root-owned socket and are limited to the fixed verbs in fifi-admin.c. Start it
@@ -551,25 +570,11 @@ fi
                 fi
                 # Restart Tor if it was previously enabled
                 if [ -f /fifi-data/tor-enabled ] && [ -x /usr/bin/tor ]; then
-                    mkdir -p /fifi-data/tor
-                    # Rewrite torrc with current settings (includes FascistFirewall for port 443)
-                    cat > /fifi-data/torrc << 'TORRC'
-SocksPort 9050
-DNSPort 5353
-DataDirectory /fifi-data/tor
-Log notice file /fifi-data/tor.log
-FascistFirewall 1
-ReachableAddresses *:80,*:443
-CircuitBuildTimeout 120
-LearnCircuitBuildTimeout 0
-FetchUselessDescriptors 0
-DirReqStatistics 0
-StrictNodes 0
-NumEntryGuards 6
-TORRC
-                    /usr/bin/tor -f /fifi-data/torrc >>/fifi-data/tor.log 2>&1 &
-                    echo $! > /fifi-data/tor.pid
-                    echo "tor: started pid=$(cat /fifi-data/tor.pid)" >> /fifi-data/network.log
+                    if /bin/fifi-secctl tor on; then
+                        echo "tor: started pid=$(cat /fifi-data/tor.pid)" >> /fifi-data/network.log
+                    else
+                        echo "tor: failed to start" >> /fifi-data/network.log
+                    fi
                 fi
                 exit 0
             fi
@@ -632,17 +637,33 @@ fi
 ) &
 
 # ── AppArmor — load profiles in complain mode ────────────────────────────────
-if [ -x /usr/bin/apparmor_parser ] && [ -d /etc/apparmor.d ]; then
-    # Mount securityfs so AppArmor can load profiles
-    mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
-    # Load all profiles in complain mode (logs violations, doesn't block)
+# Never report protection merely because the parser returned.  Confirm that the
+# kernel LSM is enabled and that its policy filesystem exposes a loaded profile.
+: > /fifi-data/apparmor.log
+mount -t securityfs securityfs /sys/kernel/security 2>>/fifi-data/apparmor.log || true
+_aa_enabled=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)
+_aa_count=0
+_aa_failed=0
+if [ "$_aa_enabled" = Y ] && [ -x /usr/bin/apparmor_parser ] &&
+   [ -d /etc/apparmor.d ]; then
     for profile in /etc/apparmor.d/fifi-*; do
-        [ -f "$profile" ] && /usr/bin/apparmor_parser -C "$profile" 2>>/fifi-data/apparmor.log || true
+        [ -f "$profile" ] || continue
+        if /usr/bin/apparmor_parser -C "$profile" 2>>/fifi-data/apparmor.log; then
+            _aa_count=$((_aa_count + 1))
+        else
+            _aa_failed=1
+        fi
     done
-    echo "apparmor: profiles loaded (complain mode)" > /fifi-data/apparmor-status
+    if [ "$_aa_failed" = 0 ] && [ "$_aa_count" -gt 0 ] &&
+       grep -q 'fifi-' /sys/kernel/security/apparmor/profiles 2>/dev/null; then
+        echo "apparmor: $_aa_count profiles loaded (complain mode)" > /fifi-data/apparmor-status
+    else
+        echo "apparmor: profile load failed (see apparmor.log)" > /fifi-data/apparmor-status
+    fi
 else
     echo "apparmor: not available (kernel support required)" > /fifi-data/apparmor-status
 fi
+chmod 0644 /fifi-data/apparmor.log /fifi-data/apparmor-status
 
 # ── Phase 5: Firewall — apply nftables default-deny inbound rules ─────────────
 if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
@@ -730,6 +751,16 @@ fifi_boot_selftest() {
                 printf 'FIFI_SELFTEST FAIL user-storage apps=%s update=%s desktop-conf=%s settings=%s\n' \
                     "$_apps_mode" "$_update_mode" "$_desktop_conf_mode" \
                     "$_settings_mode" >/dev/ttyS0
+                return
+            fi
+            if ! /usr/sbin/nft list table inet fifi_filter >/dev/null 2>&1; then
+                printf 'FIFI_SELFTEST FAIL firewall-inactive\n' >/dev/ttyS0
+                return
+            fi
+            if ! grep -q 'profiles loaded (complain mode)' \
+                    /fifi-data/apparmor-status 2>/dev/null; then
+                printf 'FIFI_SELFTEST FAIL apparmor-inactive status=%s\n' \
+                    "$(cat /fifi-data/apparmor-status 2>/dev/null)" >/dev/ttyS0
                 return
             fi
 

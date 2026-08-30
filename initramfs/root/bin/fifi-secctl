@@ -16,8 +16,18 @@ case "$what" in
       if [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
         if /usr/sbin/nft -f /etc/nftables.conf 2>>"$D/firewall.err"; then
           echo "firewall: active" > "$D/firewall.log"
+          if [ -s "$D/ssh/authorized_keys" ] &&
+             [ -s /run/fifi-dropbear.pid ] &&
+             kill -0 "$(cat /run/fifi-dropbear.pid)" 2>/dev/null; then
+            /usr/sbin/nft add rule inet fifi_filter input tcp dport 22 accept \
+              2>>"$D/firewall.err" || {
+                echo "firewall: failed to allow opted-in SSH" > "$D/firewall.log"
+                exit 1
+              }
+          fi
         else
           echo "firewall: failed (kernel nftables support required)" > "$D/firewall.log"
+          exit 1
         fi
       else
         echo "firewall: nft or rules not found" > "$D/firewall.log"
@@ -61,7 +71,11 @@ case "$what" in
         echo "tor: executable is unavailable" > "$D/tor.log"
         exit 1
       }
+      [ ! -L "$D/tor" ] || rm -f "$D/tor"
+      [ ! -L "$D/torrc" ] || rm -f "$D/torrc"
+      [ ! -L "$D/tor.log" ] || rm -f "$D/tor.log"
       mkdir -p "$D/tor"
+      chown -R 1000:1000 "$D/tor"
       chmod 0700 "$D/tor"
       cat > "$D/torrc" <<'EOF'
 SocksPort 9050
@@ -77,11 +91,20 @@ DirReqStatistics 0
 StrictNodes 0
 NumEntryGuards 6
 EOF
+      chown 1000:1000 "$D/torrc"
       chmod 0600 "$D/torrc"
       : > "$D/tor.log"
+      chown 1000:1000 "$D/tor.log"
+      chmod 0600 "$D/tor.log"
       : > "$D/tor-enabled"
-      /usr/bin/tor -f "$D/torrc" >/dev/null 2>&1 &
+      /bin/fifi-user-exec /usr/bin/tor -f "$D/torrc" >/dev/null 2>&1 &
       echo $! > "$D/tor.pid"
+      sleep 1
+      if ! kill -0 "$(cat "$D/tor.pid")" 2>/dev/null; then
+        printf '%s\n' 'tor: failed to remain running' > "$D/tor.log"
+        rm -f "$D/tor-enabled" "$D/tor.pid"
+        exit 1
+      fi
     else
       [ -f "$D/tor.pid" ] && kill "$(cat "$D/tor.pid")" 2>/dev/null || true
       rm -f "$D/tor-enabled" "$D/tor.pid"

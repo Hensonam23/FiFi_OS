@@ -135,6 +135,66 @@ static void admin_security(const char *what, bool enable) {
     }
 }
 
+static void toggle_firewall(void) {
+    admin_security("firewall", !g_fw_active);
+    update_firewall();
+}
+
+/* ── Section: owner-authorized remote access ─────────────────────────────── */
+static bool g_remote_active = false;
+static char g_remote_status[128] = "Disabled";
+
+static bool pid_file_alive(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    char buf[16] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return false;
+    pid_t pid = (pid_t)atoi(buf);
+    return pid > 0 && kill(pid, 0) == 0;
+}
+
+static bool owner_key_installed(void) {
+    struct stat st;
+    return stat("/fifi-data/ssh/authorized_keys", &st) == 0 &&
+           S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+static void update_remote(void) {
+    if (!owner_key_installed()) {
+        g_remote_active = false;
+        snprintf(g_remote_status, sizeof(g_remote_status),
+                 "Disabled (owner-key FiFi USB required)");
+        int fd = open("/fifi-data/remote-access.log", O_RDONLY);
+        if (fd >= 0) {
+            char buf[192] = {0};
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0 && strstr(buf, "owner-key FiFi USB not found"))
+                snprintf(g_remote_status, sizeof(g_remote_status),
+                         "Owner-key FiFi USB not found");
+            else if (n > 0 && strstr(buf, "owner key"))
+                snprintf(g_remote_status, sizeof(g_remote_status),
+                         "Owner public key is invalid");
+        }
+    } else if (pid_file_alive("/run/fifi-dropbear.pid")) {
+        g_remote_active = true;
+        snprintf(g_remote_status, sizeof(g_remote_status),
+                 "Active (key-only SSH, port 22)");
+    } else {
+        g_remote_active = false;
+        snprintf(g_remote_status, sizeof(g_remote_status),
+                 "Key installed but service stopped");
+    }
+}
+
+static void toggle_remote(void) {
+    admin_security("remote", !g_remote_active);
+    update_remote();
+    update_firewall();
+}
+
 /* ── Section: DNS over HTTPS ─────────────────────────────────────────────── */
 static bool g_doh_active = false;
 static char g_doh_status[128] = "Disabled";
@@ -253,6 +313,11 @@ static void update_tor(void) {
         int lfd = open("/fifi-data/tor.log", O_RDONLY);
         if (lfd >= 0) {
             char lbuf[2048] = {0};
+            off_t end = lseek(lfd, 0, SEEK_END);
+            if (end > (off_t)(sizeof(lbuf) - 1))
+                lseek(lfd, end - (off_t)(sizeof(lbuf) - 1), SEEK_SET);
+            else
+                lseek(lfd, 0, SEEK_SET);
             read(lfd, lbuf, sizeof(lbuf)-1);
             close(lfd);
             if (strstr(lbuf, "Bootstrapped 100%") || strstr(lbuf, "100%: Done")) {
@@ -722,6 +787,12 @@ static void render(uint32_t *fb) {
                g_fw_active ? C_GREEN : C_RED,
                g_fw_status, C_VAL);
 
+    /* ── Owner-authorized remote access ── */
+    SECTION("Remote Access");
+    STATUS_ROW(g_remote_active ? "[ON] " : "[OFF]",
+               g_remote_active ? C_GREEN : C_GREY,
+               g_remote_status, C_VAL);
+
     /* ── DNS over HTTPS ── */
     SECTION("DNS over HTTPS");
     STATUS_ROW(g_doh_active ? "[ON] " : "[OFF]",
@@ -1014,7 +1085,7 @@ static void render(uint32_t *fb) {
     if (max_footer_ch > 0) {
         char footer[128];
         snprintf(footer, sizeof(footer),
-                 "D=DoH  V=VPN  O=Tor  B=vuln  A=scan  N=nmap  T=dump  S=ports  P=pw  R  Q");
+                 "F=Firewall E=Remote D=DoH V=VPN O=Tor B=vuln A=scan N=nmap T=dump S=ports P=pw R Q");
         footer[max_footer_ch < 127 ? max_footer_ch : 127] = '\0';
         draw_str(fb, footer, PAD, foot_y, C_GREY);
     }
@@ -1056,6 +1127,7 @@ static void send_frame(int fd, uint32_t *px) {
 
 static void do_refresh(void) {
     update_firewall();
+    update_remote();
     update_doh();
     update_vpn();
     update_tor();
@@ -1201,6 +1273,10 @@ int main(void) {
                                 do_refresh();
                             } else if (key == 'd' || key == 'D') {
                                 toggle_doh();
+                            } else if (key == 'f' || key == 'F') {
+                                toggle_firewall();
+                            } else if (key == 'e' || key == 'E') {
+                                toggle_remote();
                             } else if (key == 'v' || key == 'V') {
                                 toggle_vpn();
                             } else if (key == 'i' || key == 'I') {

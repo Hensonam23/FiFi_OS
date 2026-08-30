@@ -2413,7 +2413,17 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     case OBJ_POINTER:
         /* op=0: set_cursor, op=1: release/destroy — clear tracking ID */
         if (opcode == 1) {
-            if (c->pointer_id == obj_id) c->pointer_id = 0;
+            if (c->pointer_id == obj_id) {
+                int ci = (int)(c - g_wl_clients);
+                c->pointer_id = 0;
+                /* No leave can be sent after the pointer object is destroyed.
+                 * Forget its focus so a replacement pointer receives a fresh
+                 * enter before any motion or leave event. */
+                if (g_focus_ci == ci) {
+                    g_focus_ci = -1;
+                    g_focus_sid = 0;
+                }
+            }
             wl_delete_obj(c, obj_id);
         }
         /* set_cursor, motion, button etc silently accepted */
@@ -3374,21 +3384,32 @@ void wayland_send_mouse(int32_t mx, int32_t my, uint8_t btns,
         if (new_s->is_x11) xwm_activate(new_s->x11_window);  /* X raise + focus */
     }
 
-    /* ── Pointer focus (follows whatever surface is under the cursor) ── */
-    if (new_ci != g_focus_ci || new_sid != g_focus_sid) {
+    /* ── Pointer focus (follows whatever surface is under the cursor) ──
+     * A surface may map before its client creates wl_pointer. Do not remember
+     * pointer focus until an enter can actually be sent; otherwise the first
+     * later focus change sends an unmatched leave and crashes XWayland. */
+    int pointer_ci = new_ci;
+    uint32_t pointer_sid = new_sid;
+    wl_surface_t *pointer_s = new_s;
+    if (pointer_ci >= 0 && !g_wl_clients[pointer_ci].pointer_id) {
+        pointer_ci = -1;
+        pointer_sid = 0;
+        pointer_s = NULL;
+    }
+    if (pointer_ci != g_focus_ci || pointer_sid != g_focus_sid) {
         if (g_focus_ci >= 0 && g_focus_sid) {
             wl_client_t *oc = &g_wl_clients[g_focus_ci];
             if (oc->active) { wl_send_ptr_leave(oc, g_focus_sid); wl_client_flush(oc); }
         }
-        if (new_ci >= 0 && new_sid) {
-            wl_client_t *nc = &g_wl_clients[new_ci];
+        if (pointer_ci >= 0 && pointer_sid) {
+            wl_client_t *nc = &g_wl_clients[pointer_ci];
             int32_t sox, soy;
-            surface_screen_origin(new_s, &sox, &soy);
-            wl_send_ptr_enter(nc, new_sid, mx - sox, my - soy);
+            surface_screen_origin(pointer_s, &sox, &soy);
+            wl_send_ptr_enter(nc, pointer_sid, mx - sox, my - soy);
             wl_client_flush(nc);
         }
-        g_focus_ci  = new_ci;
-        g_focus_sid = new_sid;
+        g_focus_ci  = pointer_ci;
+        g_focus_sid = pointer_sid;
         pointer_constraints_refresh();
         locked = active_locked_constraint(&locked_owner);
         if (locked && locked_owner) {
