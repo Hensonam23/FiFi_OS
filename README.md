@@ -179,10 +179,13 @@ an older ISO is ignored rather than being mislabeled as the current build.
 ### Remote access
 
 SSH is disabled by default and no authorization key is included in FiFi OS.
-To opt in on a specific installation, create
-`/fifi-data/ssh/authorized_keys` with your public key, set it to mode `600`,
-and reboot. Dropbear then starts with password authentication and port
-forwarding disabled. Removing that file and rebooting disables SSH again.
+To opt in on a specific installation, put one Ed25519 public key in
+`fifi-owner-authorized-key.pub` at the root of a FiFi USB, insert it, then use
+Settings > Security > Remote > Enable. FiFi validates and copies that public
+key into protected persistent storage and starts Dropbear immediately with
+password authentication and port forwarding disabled. Disable removes the
+authorization and stops Dropbear immediately. The private key never leaves the
+owner's computer.
 When an older installation first boots a hardened image, FiFi automatically
 removes its historical development key while preserving different owner-added
 keys. The pre-migration file is retained as

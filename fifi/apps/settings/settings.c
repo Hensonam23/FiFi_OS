@@ -224,7 +224,7 @@ static int g_tab = TAB_PERS;
 enum { ACT_ACCENT = 1, ACT_WALL, ACT_PANEL, ACT_GLASS, ACT_SHADOW, ACT_RADIUS, ACT_DOCK, ACT_STATUS,
        ACT_FONT_FAM, ACT_FONT_SZ, ACT_DESKINFO, ACT_ALIGN, ACT_AUTOHIDE,
        ACT_TBSIZE, ACT_CLOCK, ACT_WALLFIT,
-       ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR };
+       ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR, ACT_REMOTE };
 typedef struct { int x, y, w, h, act, arg; } Hot;
 #define MAX_HOTS 64
 static Hot g_hots[MAX_HOTS];
@@ -887,8 +887,8 @@ static const char *signal_bars(int dbm) {
 }
 
 /* ── Security status (read-only; reuses security-app checks) ─────────────── */
-static bool g_sec_fw_on, g_sec_doh_on, g_sec_vpn_on, g_sec_tor_on;
-static char g_sec_fw[96], g_sec_doh[96], g_sec_vpn[96], g_sec_tor[96];
+static bool g_sec_fw_on, g_sec_doh_on, g_sec_vpn_on, g_sec_tor_on, g_sec_remote_on;
+static char g_sec_fw[96], g_sec_doh[96], g_sec_vpn[96], g_sec_tor[96], g_sec_remote[96];
 static int  g_sec_priv;
 
 static bool pid_alive(const char *pidfile) {
@@ -920,6 +920,22 @@ static void sec_update(void) {
     if (access("/fifi-data/tor-enabled", F_OK) != 0) { g_sec_tor_on=false; snprintf(g_sec_tor,sizeof g_sec_tor,"Disabled"); }
     else if (pid_alive("/fifi-data/tor.pid")) { g_sec_tor_on=true; snprintf(g_sec_tor,sizeof g_sec_tor,"Running (SOCKS5 127.0.0.1:9050)"); }
     else { g_sec_tor_on=false; snprintf(g_sec_tor,sizeof g_sec_tor,"Enabled but not running"); }
+    /* Owner-authorized SSH. The public key is imported from a physical FiFi USB. */
+    if (access("/fifi-data/ssh/authorized_keys", F_OK) != 0) {
+        g_sec_remote_on=false; snprintf(g_sec_remote,sizeof g_sec_remote,"Disabled (owner-key USB required)");
+        int fd = open("/fifi-data/remote-access.log", O_RDONLY);
+        if (fd >= 0) {
+            char b[160] = {0}; ssize_t n = read(fd, b, sizeof(b)-1); close(fd);
+            if (n > 0 && strstr(b, "owner-key FiFi USB not found"))
+                snprintf(g_sec_remote, sizeof g_sec_remote, "Owner-key FiFi USB not found");
+            else if (n > 0 && strstr(b, "owner key"))
+                snprintf(g_sec_remote, sizeof g_sec_remote, "Owner public key is invalid");
+        }
+    } else if (pid_alive("/run/fifi-dropbear.pid")) {
+        g_sec_remote_on=true; snprintf(g_sec_remote,sizeof g_sec_remote,"Active (key-only SSH, port 22)");
+    } else {
+        g_sec_remote_on=false; snprintf(g_sec_remote,sizeof g_sec_remote,"Key installed but service stopped");
+    }
     /* Privacy: count telemetry blocks in /etc/hosts */
     g_sec_priv = 0;
     { int fd = open("/etc/hosts", O_RDONLY);
@@ -1332,6 +1348,7 @@ static void render_security(uint32_t *fb) {
     SEC_ROW("DoH", g_sec_doh_on, g_sec_doh, ACT_DOH);
     SEC_ROW("VPN", g_sec_vpn_on, g_sec_vpn, ACT_VPN);
     SEC_ROW("Tor", g_sec_tor_on, g_sec_tor, ACT_TOR);
+    SEC_ROW("Remote", g_sec_remote_on, g_sec_remote, ACT_REMOTE);
 #undef SEC_ROW
     /* Privacy row is status-only (managed via the hosts blocklist). */
     { char pv[64];
@@ -1549,6 +1566,7 @@ static void sec_click(int mx, int my) {
             case ACT_DOH: secctl("doh",      h->arg); break;
             case ACT_VPN: secctl("vpn",      h->arg); break;
             case ACT_TOR: secctl("tor",      h->arg); break;
+            case ACT_REMOTE: secctl("remote", h->arg); break;
             default: continue;
         }
         return;

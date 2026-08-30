@@ -21,6 +21,15 @@ echo "[test-security] SSH is owner opt-in"
 grep -Fq '[ -s /fifi-data/ssh/authorized_keys ]' "$ROOT/initramfs/root/init"
 ! grep -Eq '^[[:space:]]*tcp dport 22 accept' \
     "$ROOT/initramfs/root/etc/nftables.conf"
+grep -Fq 'fifi-remotectl start-if-enabled' "$ROOT/initramfs/root/init"
+grep -Fq 'ACT_REMOTE' "$ROOT/fifi/apps/settings/settings.c"
+
+echo "[test-security] Wi-Fi authentication crypto is built in"
+for option in CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER KEY_DH_OPERATIONS \
+              CRYPTO_ECB CRYPTO_MD5 CRYPTO_CBC CRYPTO_SHA256 CRYPTO_AES \
+              CRYPTO_DES CRYPTO_CMAC CRYPTO_HMAC CRYPTO_SHA512 CRYPTO_SHA1; do
+    grep -Fxq "CONFIG_${option}=y" "$ROOT/linux/fifi.config"
+done
 
 echo "[test-security] legacy auto-installed key is migrated automatically"
 migration_root="$TMP/migration"
@@ -124,6 +133,10 @@ cat > "$broker_bin/fifi-export-diagnostics" <<'EOF'
 echo 'diagnostics export complete'
 printf 'diagnostics export\n' >> "$FIFI_TEST_ADMIN_LOG"
 EOF
+cat > "$broker_bin/fifi-remotectl" <<'EOF'
+#!/bin/sh
+printf 'remote %s\n' "$1" >> "$FIFI_TEST_ADMIN_LOG"
+EOF
 cat > "$broker_bin/fifi-apply-update" <<'EOF'
 #!/bin/sh
 printf 'update apply %s\n' "$1" >> "$FIFI_TEST_ADMIN_LOG"
@@ -150,12 +163,13 @@ chmod +x "$broker_bin/fifi-secctl" "$broker_bin/tcpdump" \
     "$broker_bin/fifi-wifi-ctl" "$broker_bin/fifi-apply-update" \
     "$broker_bin/update-usb" "$broker_bin/update-rollback" \
     "$broker_bin/fifi-install.sh" "$broker_bin/fifi-powerctl" \
-    "$broker_bin/fifi-export-diagnostics"
+    "$broker_bin/fifi-export-diagnostics" "$broker_bin/fifi-remotectl"
 FIFI_ADMIN_SOCKET="$broker_socket" \
 FIFI_ADMIN_ALLOWED_UID="$(id -u)" FIFI_ADMIN_GID="$(id -g)" \
 FIFI_SECCTL="$broker_bin/fifi-secctl" FIFI_TCPDUMP="$broker_bin/tcpdump" \
 FIFI_WIFI_CTL="$broker_bin/fifi-wifi-ctl" \
 FIFI_DIAGNOSTICS_EXPORT="$broker_bin/fifi-export-diagnostics" \
+FIFI_REMOTE_CTL="$broker_bin/fifi-remotectl" \
 FIFI_UPDATE_APPLY="$broker_bin/fifi-apply-update" \
 FIFI_UPDATE_USB="$broker_bin/update-usb" \
 FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
@@ -172,6 +186,10 @@ done
 [[ -S "$broker_socket" ]]
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security firewall on
 grep -Fxq 'security firewall on' "$broker_log"
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security remote on
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security remote off
+grep -Fxq 'remote enable' "$broker_log"
+grep -Fxq 'remote disable' "$broker_log"
 capture_out="$(FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" capture)"
 grep -Fq 'capture args: -c 20 -nn -i any -q' <<<"$capture_out"
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" wifi scan wlan0
@@ -228,6 +246,62 @@ grep -Fq 'operation is not allowed' <<<"$bad_diagnostics"
 bad_channel="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update apply edge 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_channel"
+
+echo "[test-security] remote access imports only an explicit Ed25519 owner key"
+remote_root="$TMP/remote-data"
+remote_home="$TMP/remote-root-home"
+remote_bin="$TMP/remote-bin"
+remote_pid="$TMP/remote.pid"
+mkdir -p "$remote_root" "$remote_home" "$remote_bin"
+cat > "$remote_bin/id" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -u ] && { echo 0; exit 0; }
+exec /usr/bin/id "$@"
+EOF
+cat > "$remote_bin/dropbearkey" <<'EOF'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -f ]; then shift; : > "$1"; exit 0; fi
+    shift
+done
+exit 2
+EOF
+cat > "$remote_bin/dropbear" <<'EOF'
+#!/bin/sh
+pidfile=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -P ]; then shift; pidfile=$1; fi
+    shift
+done
+sleep 60 &
+printf '%s\n' "$!" > "$pidfile"
+EOF
+chmod +x "$remote_bin/id" "$remote_bin/dropbearkey" "$remote_bin/dropbear"
+owner_key="$TMP/fifi-owner-authorized-key.pub"
+printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA owner@test' > "$owner_key"
+PATH="$remote_bin:$PATH" FIFI_DATA_ROOT="$remote_root" \
+FIFI_ROOT_SSH_DIR="$remote_home" FIFI_REMOTE_KEY_SOURCE="$owner_key" \
+FIFI_REMOTE_PID_FILE="$remote_pid" FIFI_DROPBEAR_BIN="$remote_bin/dropbear" \
+FIFI_DROPBEARKEY_BIN="$remote_bin/dropbearkey" \
+    "$ROOT/initramfs/root/bin/fifi-remotectl" enable
+cmp "$owner_key" "$remote_root/ssh/authorized_keys"
+cmp "$owner_key" "$remote_home/authorized_keys"
+grep -Fxq 'remote access: active (owner key, port 22)' "$remote_root/remote-access.log"
+PATH="$remote_bin:$PATH" FIFI_DATA_ROOT="$remote_root" \
+FIFI_ROOT_SSH_DIR="$remote_home" FIFI_REMOTE_PID_FILE="$remote_pid" \
+    "$ROOT/initramfs/root/bin/fifi-remotectl" disable
+test ! -e "$remote_root/ssh/authorized_keys"
+test ! -e "$remote_home/authorized_keys"
+grep -Fxq 'remote access: disabled' "$remote_root/remote-access.log"
+printf '%s\n' 'ssh-rsa not-accepted' > "$owner_key"
+if PATH="$remote_bin:$PATH" FIFI_DATA_ROOT="$remote_root" \
+   FIFI_ROOT_SSH_DIR="$remote_home" FIFI_REMOTE_KEY_SOURCE="$owner_key" \
+   FIFI_REMOTE_PID_FILE="$remote_pid" FIFI_DROPBEAR_BIN="$remote_bin/dropbear" \
+   FIFI_DROPBEARKEY_BIN="$remote_bin/dropbearkey" \
+       "$ROOT/initramfs/root/bin/fifi-remotectl" enable 2>/dev/null; then
+    echo "remote access accepted a non-Ed25519 key" >&2
+    exit 1
+fi
 bad_target="$(FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" install apply /dev/null librewolf none none 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_target"

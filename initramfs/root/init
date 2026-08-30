@@ -483,43 +483,16 @@ cat /proc/bus/input/devices > /fifi-data/input-devices.txt 2>/dev/null || true
 ls -la /dev/input/ >> /fifi-data/input-devices.txt 2>/dev/null || true
 
 # ── SSH server (Dropbear) — disabled until the owner installs a key ──────────
-# To opt in, place a public key in /fifi-data/ssh/authorized_keys and reboot.
-# Password auth is disabled; no authorization key is baked into the OS image.
-if [ -x /usr/sbin/dropbear ] && [ -x /usr/bin/dropbearkey ] &&
-   [ -s /fifi-data/ssh/authorized_keys ]; then
-    mkdir -p /fifi-data/ssh
-    chmod 700 /fifi-data/ssh
-    chmod 600 /fifi-data/ssh/authorized_keys
-
-    # Generate host keys on first boot (stored in /fifi-data/ssh — survives updates)
-    [ -f /fifi-data/ssh/dropbear_ed25519_host_key ] || \
-        /usr/bin/dropbearkey -t ed25519 -f /fifi-data/ssh/dropbear_ed25519_host_key \
-            >>/fifi-data/sshd.log 2>&1
-    [ -f /fifi-data/ssh/dropbear_rsa_host_key ] || \
-        /usr/bin/dropbearkey -t rsa -s 3072 -f /fifi-data/ssh/dropbear_rsa_host_key \
-            >>/fifi-data/sshd.log 2>&1
-
-    # Ensure /etc/passwd + /etc/group exist (dropbear needs them to resolve root's home)
-    [ -f /etc/passwd ] || echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
-    [ -f /etc/group ]  || echo 'root:x:0:' > /etc/group
-
-    # Dropbear can reject a symlinked ~/.ssh, so copy the owner-managed,
-    # persistent key file into a real root-owned directory on every boot.
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    cp /fifi-data/ssh/authorized_keys /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
-
-    # Start dropbear: key-only auth (-s), disable port forwarding (-j -k)
-    /usr/sbin/dropbear \
-        -r /fifi-data/ssh/dropbear_ed25519_host_key \
-        -r /fifi-data/ssh/dropbear_rsa_host_key \
-        -p 22 -s -j -k -I 3600 \
-        >>/fifi-data/sshd.log 2>&1 && \
-        echo "ssh: dropbear started on port 22" >> /fifi-data/network.log || \
-        echo "ssh: dropbear failed to start — check /fifi-data/sshd.log" >> /fifi-data/network.log
+# Settings can import the owner's public key from a physical FiFi USB. Password
+# authentication and forwarding stay disabled, and no key is baked in.
+if /bin/fifi-remotectl start-if-enabled; then
+    if [ -s /fifi-data/ssh/authorized_keys ]; then
+        echo "ssh: dropbear started on port 22" >> /fifi-data/network.log
+    else
+        echo "ssh: disabled (enable Remote access in Settings > Security)" >> /fifi-data/network.log
+    fi
 else
-    echo "ssh: disabled (install /fifi-data/ssh/authorized_keys to enable)" >> /fifi-data/network.log
+    echo "ssh: failed to start — check /fifi-data/remote-access.log" >> /fifi-data/network.log
 fi
 
 # ── Bluetooth: root-mode system D-Bus + bluetoothd (no-op if not bundled) ─────

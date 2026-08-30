@@ -156,11 +156,23 @@ static void run_fixed_command(char *request) {
         (strcmp(args[1], "firewall") == 0 ||
          strcmp(args[1], "doh") == 0 ||
          strcmp(args[1], "vpn") == 0 ||
-         strcmp(args[1], "tor") == 0) &&
+         strcmp(args[1], "tor") == 0 ||
+         strcmp(args[1], "remote") == 0) &&
         (strcmp(args[2], "on") == 0 || strcmp(args[2], "off") == 0)) {
-        const char *tool = getenv("FIFI_SECCTL");
-        if (!tool || !*tool) tool = "/bin/fifi-secctl";
-        execl(tool, "fifi-secctl", args[1], args[2], (char *)NULL);
+        if (strcmp(args[1], "remote") == 0) {
+            const char *tool = getenv("FIFI_REMOTE_CTL");
+            if (!tool || !*tool) tool = "/bin/fifi-remotectl";
+            char *const remote_argv[] = {
+                (char *)tool,
+                strcmp(args[2], "on") == 0 ? "enable" : "disable",
+                NULL
+            };
+            run_status_command(tool, remote_argv);
+        } else {
+            const char *tool = getenv("FIFI_SECCTL");
+            if (!tool || !*tool) tool = "/bin/fifi-secctl";
+            execl(tool, "fifi-secctl", args[1], args[2], (char *)NULL);
+        }
     } else if (argc == 1 && strcmp(args[0], "capture") == 0) {
         const char *tool = getenv("FIFI_TCPDUMP");
         if (!tool || !*tool) tool = "/usr/bin/tcpdump";
@@ -422,6 +434,8 @@ static int client_main(int argc, char **argv) {
 
     if ((argc == 3 && strcmp(argv[1], "diagnostics") == 0 &&
          strcmp(argv[2], "export") == 0) ||
+        (argc == 4 && strcmp(argv[1], "security") == 0 &&
+         strcmp(argv[2], "remote") == 0) ||
         (argc == 4 && strcmp(argv[1], "wifi") == 0 &&
          (strcmp(argv[2], "scan") == 0 ||
           strcmp(argv[2], "disconnect") == 0)) ||

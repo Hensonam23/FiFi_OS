@@ -1,0 +1,172 @@
+#!/bin/sh
+# Enable owner-authorized, key-only SSH without embedding a development key.
+# The enable action imports one Ed25519 public key from a physical FiFi USB.
+set -eu
+
+fail() {
+    message="remote access: $*"
+    echo "$message" >&2
+    printf '%s\n' "$message" > "$DATA_ROOT/remote-access.log" 2>/dev/null || true
+    exit 1
+}
+
+[ "$(id -u)" = 0 ] || { echo "fifi-remotectl: root broker required" >&2; exit 126; }
+[ "$#" = 1 ] || { echo "usage: fifi-remotectl <enable|disable|start-if-enabled>" >&2; exit 2; }
+
+DATA_ROOT=${FIFI_DATA_ROOT:-/fifi-data}
+SSH_DIR="$DATA_ROOT/ssh"
+AUTHORIZED="$SSH_DIR/authorized_keys"
+PID_FILE=${FIFI_REMOTE_PID_FILE:-/run/fifi-dropbear.pid}
+DROPBEAR=${FIFI_DROPBEAR_BIN:-/usr/sbin/dropbear}
+DROPBEARKEY=${FIFI_DROPBEARKEY_BIN:-/usr/bin/dropbearkey}
+ROOT_SSH_DIR=${FIFI_ROOT_SSH_DIR:-/root/.ssh}
+KEY_TYPE=ssh-ed25519
+
+pid_is_running() {
+    [ -s "$PID_FILE" ] || return 1
+    pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+    case "$pid" in *[!0-9]*|'') return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+validate_owner_key() {
+    source=$1
+    [ -f "$source" ] && [ ! -L "$source" ] || fail "owner key is not a regular file"
+    size=$(wc -c < "$source" 2>/dev/null) || fail "could not read owner key"
+    [ "$size" -gt 40 ] && [ "$size" -le 1024 ] || fail "owner key has an invalid size"
+    [ "$(awk 'END { print NR }' "$source")" = 1 ] || fail "owner key must contain exactly one line"
+    IFS= read -r line < "$source" || [ -n "${line:-}" ] || fail "owner key is empty"
+    case "$line" in *"$(printf '\r')"*) fail "owner key contains invalid characters" ;; esac
+    set -- $line
+    [ "$#" -ge 2 ] || fail "owner key is incomplete"
+    [ "$1" = "$KEY_TYPE" ] || fail "only Ed25519 owner keys are accepted"
+    key=$2
+    case "$key" in
+        AAAAC3NzaC1lZDI1NTE5AAAAI*) ;;
+        *) fail "owner key is not a valid Ed25519 public key" ;;
+    esac
+    [ "${#key}" = 68 ] || fail "owner key has an invalid Ed25519 length"
+    case "$key" in *[!A-Za-z0-9+/=]*) fail "owner key contains invalid base64" ;; esac
+}
+
+find_usb_key() {
+    USB_MNT=${FIFI_REMOTE_USB_MOUNT:-/mnt/fifi-owner-key}
+    mkdir -p "$USB_MNT" || fail "could not create USB mount point"
+    USB_MOUNTED=0
+    cleanup_usb() {
+        [ "$USB_MOUNTED" = 1 ] && umount "$USB_MNT" 2>/dev/null || true
+        rmdir "$USB_MNT" 2>/dev/null || true
+    }
+    trap cleanup_usb EXIT
+
+    for sys_part in /sys/class/block/*; do
+        block_path=$(readlink -f "$sys_part" 2>/dev/null) || continue
+        if [ -f "$block_path/partition" ]; then
+            parent_path=$(dirname "$block_path")
+            [ "$(cat "$parent_path/removable" 2>/dev/null)" = 1 ] || continue
+        else
+            [ "$(cat "$block_path/removable" 2>/dev/null)" = 1 ] || continue
+        fi
+        dev="/dev/${sys_part##*/}"
+        [ -b "$dev" ] || continue
+        mount -t vfat -o ro,nosuid,nodev,noexec "$dev" "$USB_MNT" 2>/dev/null || continue
+        USB_MOUNTED=1
+        if { [ -f "$USB_MNT/.fifi-live-usb" ] ||
+             [ -f "$USB_MNT/fifi-usb-boot.id" ]; } &&
+           [ -s "$USB_MNT/boot/bzImage" ] &&
+           [ -s "$USB_MNT/boot/initramfs.cpio.gz" ] &&
+           [ -s "$USB_MNT/fifi-owner-authorized-key.pub" ]; then
+            FOUND_USB_KEY="$USB_MNT/fifi-owner-authorized-key.pub"
+            return 0
+        fi
+        umount "$USB_MNT" 2>/dev/null || true
+        USB_MOUNTED=0
+    done
+    fail "owner-key FiFi USB not found"
+}
+
+start_remote() {
+    [ -s "$AUTHORIZED" ] && [ ! -L "$AUTHORIZED" ] || return 1
+    validate_owner_key "$AUTHORIZED"
+    [ -x "$DROPBEAR" ] && [ -x "$DROPBEARKEY" ] || fail "Dropbear is unavailable"
+    pid_is_running && return 0
+
+    [ ! -L "$SSH_DIR" ] || fail "persistent SSH directory is a symbolic link"
+    mkdir -p "$SSH_DIR" "$ROOT_SSH_DIR"
+    chmod 0700 "$SSH_DIR" "$ROOT_SSH_DIR"
+    [ -f "$SSH_DIR/dropbear_ed25519_host_key" ] ||
+        "$DROPBEARKEY" -t ed25519 -f "$SSH_DIR/dropbear_ed25519_host_key" \
+            >>"$DATA_ROOT/sshd.log" 2>&1
+    [ -f "$SSH_DIR/dropbear_rsa_host_key" ] ||
+        "$DROPBEARKEY" -t rsa -s 3072 -f "$SSH_DIR/dropbear_rsa_host_key" \
+            >>"$DATA_ROOT/sshd.log" 2>&1
+    [ -f /etc/passwd ] || echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
+    [ -f /etc/group ] || echo 'root:x:0:' > /etc/group
+    cp "$AUTHORIZED" "$ROOT_SSH_DIR/authorized_keys"
+    chmod 0600 "$ROOT_SSH_DIR/authorized_keys"
+
+    "$DROPBEAR" -r "$SSH_DIR/dropbear_ed25519_host_key" \
+        -r "$SSH_DIR/dropbear_rsa_host_key" -p 22 -s -j -k -I 3600 \
+        -P "$PID_FILE" >>"$DATA_ROOT/sshd.log" 2>&1 || fail "Dropbear failed to start"
+    for wait_try in 1 2 3 4 5 6 7 8 9 10; do
+        pid_is_running && break
+        sleep 0.1
+    done
+    pid_is_running || fail "Dropbear did not create a live service"
+
+    if grep -Fq 'firewall: active' "$DATA_ROOT/firewall.log" 2>/dev/null &&
+       [ -x /usr/sbin/nft ] &&
+       /usr/sbin/nft list chain inet fifi_filter input >/dev/null 2>&1; then
+        if ! /usr/sbin/nft list chain inet fifi_filter input 2>/dev/null |
+             grep -Fq 'tcp dport 22 accept'; then
+            /usr/sbin/nft add rule inet fifi_filter input tcp dport 22 accept \
+                2>>"$DATA_ROOT/firewall.log" || fail "could not open SSH in the firewall"
+        fi
+    fi
+    printf '%s\n' 'remote access: active (owner key, port 22)' > "$DATA_ROOT/remote-access.log"
+}
+
+case "$1" in
+    enable)
+        key_source=${FIFI_REMOTE_KEY_SOURCE:-}
+        if [ -z "$key_source" ]; then
+            find_usb_key
+            key_source=$FOUND_USB_KEY
+        fi
+        validate_owner_key "$key_source"
+        [ ! -L "$SSH_DIR" ] || fail "persistent SSH directory is a symbolic link"
+        mkdir -p "$SSH_DIR"
+        chmod 0700 "$SSH_DIR"
+        umask 077
+        tmp="$SSH_DIR/.authorized_keys.$$"
+        trap 'rm -f "$tmp"' INT TERM HUP
+        cp "$key_source" "$tmp" || fail "could not stage owner key"
+        chmod 0600 "$tmp"
+        mv -f "$tmp" "$AUTHORIZED"
+        start_remote
+        echo "Remote access enabled with the owner key from the FiFi USB."
+        ;;
+    disable)
+        if pid_is_running; then
+            kill "$(cat "$PID_FILE")" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE" "$AUTHORIZED" "$ROOT_SSH_DIR/authorized_keys"
+        if grep -Fq 'firewall: active' "$DATA_ROOT/firewall.log" 2>/dev/null &&
+           [ -x /usr/sbin/nft ] && [ -f /etc/nftables.conf ]; then
+            /usr/sbin/nft -f /etc/nftables.conf 2>>"$DATA_ROOT/firewall.log" || true
+        fi
+        printf '%s\n' 'remote access: disabled' > "$DATA_ROOT/remote-access.log"
+        echo "Remote access disabled and the owner authorization was removed."
+        ;;
+    start-if-enabled)
+        if [ -s "$AUTHORIZED" ] && [ ! -L "$AUTHORIZED" ]; then
+            start_remote
+        else
+            printf '%s\n' 'remote access: disabled' > "$DATA_ROOT/remote-access.log"
+        fi
+        ;;
+    *)
+        echo "usage: fifi-remotectl <enable|disable|start-if-enabled>" >&2
+        exit 2
+        ;;
+esac
