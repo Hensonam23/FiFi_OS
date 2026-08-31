@@ -644,7 +644,6 @@ grep -Fq '"-nolisten", "tcp", "-ac"' \
     "$ROOT/fifi/platform/linux/xwm.c"
 grep -Fq 'X11 cursor theme bundled' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'gdk-pixbuf-query-loaders' "$ROOT/scripts/build-initramfs.sh"
-grep -Fq 'cp -a /usr/share/mime/.' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq ':/usr/share"' "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'GDK_PIXBUF_MODULE_FILE=' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"

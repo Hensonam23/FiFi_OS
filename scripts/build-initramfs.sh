@@ -414,17 +414,13 @@ for lib in libgtk-3.so.0 libgdk-3.so.0 libcairo.so.2 libcairo-gobject.so.2 \
     done
 done
 
-# GTK/GdkPixbuf needs its loader registry and MIME database even when PNG/JPEG
-# decoders are compiled into the main library. Without these, browser window
-# controls and other resource icons log pixbuf failures and may render blank.
+# GTK/GdkPixbuf needs its loader registry even when PNG/JPEG decoders are
+# compiled into the main library. Generate it from the exact host runtime that
+# supplies the staged library.
 if [ -x /usr/bin/gdk-pixbuf-query-loaders ]; then
     mkdir -p "$STAGE/usr/lib/gdk-pixbuf-2.0/2.10.0"
     /usr/bin/gdk-pixbuf-query-loaders \
         > "$STAGE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
-fi
-if [ -d /usr/share/mime ]; then
-    mkdir -p "$STAGE/usr/share/mime"
-    cp -a /usr/share/mime/. "$STAGE/usr/share/mime/"
 fi
 echo "[initramfs] GUI runtime libraries bundled"
 
