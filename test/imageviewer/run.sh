@@ -25,4 +25,8 @@ if "$APP" --decode-test "$TMP/broken.png" >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "[imageviewer-test] release builder requires every dynamic dependency"
+grep -Fq 'mkdir -p "$STAGE/usr/lib"' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'image viewer library is missing' "$ROOT/scripts/build-initramfs.sh"
+
 echo "[imageviewer-test] PASS"

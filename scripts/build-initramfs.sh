@@ -295,11 +295,21 @@ echo "[initramfs] building fifi-calc..."
 echo "[initramfs] building fifi-imageviewer..."
 (cd "$REPO_ROOT/fifi/apps/imageviewer" && make -s) && {
     cp "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" "$STAGE/bin/"
-    ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" 2>/dev/null |
-        awk '/=>/{print $3}' | while read -r lib; do
-            [ -f "$lib" ] || continue
-            cp -nL "$lib" "$STAGE/usr/lib/$(basename "$lib")" 2>/dev/null || true
-        done
+    mkdir -p "$STAGE/usr/lib"
+    _image_libs="$(ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" 2>/dev/null |
+        awk '/=>/{print $3}' | grep '^/' || true)"
+    [ -n "$_image_libs" ] || {
+        echo "[initramfs] ERROR: image viewer dependencies are unresolved" >&2
+        exit 1
+    }
+    for lib in $_image_libs; do
+        [ -f "$lib" ] || {
+            echo "[initramfs] ERROR: image viewer library is missing: $lib" >&2
+            exit 1
+        }
+        cp -L "$lib" "$STAGE/usr/lib/$(basename "$lib")"
+        [ -s "$STAGE/usr/lib/$(basename "$lib")" ] || exit 1
+    done
     echo "[initramfs] included fifi-imageviewer"
 } || {
     echo "[initramfs] ERROR: fifi-imageviewer build failed" >&2
