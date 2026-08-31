@@ -293,9 +293,15 @@ echo "[initramfs] building fifi-calc..."
 } || echo "[initramfs] WARNING: fifi-calc build failed"
 
 echo "[initramfs] building fifi-imageviewer..."
-(cd "$REPO_ROOT/fifi/apps/imageviewer" && make -s) && {
+(cd "$REPO_ROOT/fifi/apps/imageviewer" && make -s clean all) && {
     cp "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" "$STAGE/bin/"
     mkdir -p "$STAGE/usr/lib"
+    if ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" 2>&1 |
+       grep -q 'not found'; then
+        echo "[initramfs] ERROR: image viewer has an unresolved library" >&2
+        ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" >&2 || true
+        exit 1
+    fi
     _image_libs="$(ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" 2>/dev/null |
         awk '/=>/{print $3}' | grep '^/' || true)"
     [ -n "$_image_libs" ] || {

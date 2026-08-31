@@ -28,5 +28,7 @@ fi
 echo "[imageviewer-test] release builder requires every dynamic dependency"
 grep -Fq 'mkdir -p "$STAGE/usr/lib"' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'image viewer library is missing' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'make -s clean all' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'image viewer has an unresolved library' "$ROOT/scripts/build-initramfs.sh"
 
 echo "[imageviewer-test] PASS"
