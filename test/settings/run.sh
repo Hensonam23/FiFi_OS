@@ -16,6 +16,12 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror \
 "$TMP/wifi-scan-contract"
 echo "[settings-test] both Wi-Fi views parse manager and direct-kernel scan formats"
 
+! grep -Fq 'snprintf(ov, sizeof ov, "/fifi-data/%s", path + 5)' \
+    "$ROOT/fifi/platform/linux/platform.c"
+grep -Fq 'persistent /fifi-data/<name> copy can outlive many A/B updates' \
+    "$ROOT/fifi/platform/linux/platform.c"
+echo "[settings-test] persistent files cannot override updated system apps"
+
 for action in ACCENT WALL WALLFIT PANEL GLASS SHADOW DOCK STATUS DESKINFO \
               AUTOHIDE ALIGN CLOCK TBSIZE RADIUS FONT_FAM FONT_SZ; do
     grep -Eq "add_hot\([^;]*ACT_${action}" "$SETTINGS"

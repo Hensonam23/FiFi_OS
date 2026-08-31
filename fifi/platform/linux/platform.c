@@ -486,16 +486,10 @@ static bool gui_app_runs_unprivileged(const char *path) {
 
 void gui_spawn_app(const char *path) {
     signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
-    /* Dev override: a newer build of an in-house app dropped at
-     * /fifi-data/<name> wins over the image's /bin/<name>, so apps can iterate
-     * with scp + relaunch instead of a full image rebuild (mirrors the
-     * /fifi-data/fifi-compositor override). Only for /bin/ paths. */
-    static char ov[256];
+    /* System applications always come from the immutable system image.  A
+     * persistent /fifi-data/<name> copy can outlive many A/B updates and must
+     * never silently replace the application shipped by the confirmed slot. */
     const char *use = path;
-    if (path && !strncmp(path, "/bin/", 5)) {
-        snprintf(ov, sizeof ov, "/fifi-data/%s", path + 5);
-        if (access(ov, X_OK) == 0) use = ov;
-    }
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { (char *)use, NULL };
