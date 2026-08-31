@@ -434,7 +434,8 @@ done
 [ ! -L /fifi-data/apps ] || rm -f /fifi-data/apps
 [ ! -L /fifi-data/app-trust ] || rm -f /fifi-data/app-trust
 mkdir -p /fifi-data/apps /fifi-data/app-trust \
-         /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig
+         /fifi-data/runtime/etc/fonts /fifi-data/runtime/cache/fontconfig \
+         /fifi-data/runtime/share/icons
 # The browser chooser and its verified downloader need no administrative
 # access. Migrate older root-owned browser files before launching it as fifi.
 /bin/sh /usr/share/fifi/migrate-browser-storage.sh
@@ -500,6 +501,18 @@ fi
 # by a stale copy on an existing data partition.
 cp /usr/share/fifi/fifi-keymap.txt /fifi-data/fifi-keymap.txt 2>/dev/null || true
 cp /usr/share/fifi/fifi-fonts.conf /fifi-data/runtime/etc/fonts/fonts.conf 2>/dev/null || true
+# Some AppImages replace /usr with their own filesystem, so standard cursor
+# themes from the immutable image disappear inside their sandbox. Seed the
+# exact OS-managed Adwaita theme into the shared runtime once per image build.
+_cursor_build="$(cat /etc/fifi-build-id 2>/dev/null || echo unknown)"
+_cursor_marker="/fifi-data/runtime/share/icons/.fifi-adwaita-build"
+if [ -d /usr/share/icons/Adwaita ] &&
+   [ "$(cat "$_cursor_marker" 2>/dev/null || true)" != "$_cursor_build" ]; then
+    rm -rf /fifi-data/runtime/share/icons/Adwaita
+    cp -a /usr/share/icons/Adwaita /fifi-data/runtime/share/icons/Adwaita
+    printf '%s\n' "$_cursor_build" > "$_cursor_marker"
+    chown -RhP 1000:1000 /fifi-data/runtime/share/icons
+fi
 
 # Bundled app icons (built-in + standalone apps) — copy any missing into /fifi-data/icons.
 mkdir -p /fifi-data/icons

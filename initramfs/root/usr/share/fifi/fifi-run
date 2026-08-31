@@ -31,6 +31,8 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # via CSD; close with Ctrl+Q / its menu / Alt+F4.
 export XKB_CONFIG_ROOT="$RT/share/X11/xkb"
 export FONTCONFIG_PATH="$RT/etc/fonts"
+export XCURSOR_PATH="$RT/share/icons:/usr/share/icons"
+export XCURSOR_THEME="${XCURSOR_THEME:-Adwaita}"
 export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share:/usr/share"
 export GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_MODULE_FILE:-/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache}"
 export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -101,9 +103,9 @@ sandbox_exec() {
     if [ "${FIFI_SANDBOX:-1}" = "1" ] && [ "$_sandbox_root" = 1 ]; then
         # A PID namespace is the strongest isolation but kills the whole namespace
         # the instant its pid 1 exits — fine for apps whose main process stays
-        # alive (Electron, Firefox: _sb_pid=1) but fatal for launchers that fork a
-        # child and exit (LibreOffice's soffice/oosplash), which would take the
-        # real process down with them. Those use the lighter mount/ipc/uts sandbox.
+        # alive (Electron: _sb_pid=1) but fatal for launchers that fork a child
+        # and exit (LibreOffice and current LibreWolf), which would take the real
+        # process down with them. Those use the lighter mount/ipc/uts sandbox.
         # If unshare is unavailable/fails, exec returns and we fall through to the
         # plain exec below rather than failing the launch.
         if [ "${_sb_pid:-0}" = "1" ]; then
@@ -271,6 +273,17 @@ launch_dir() {
         chmod 0700 /fifi-data/home /home/fifi 2>/dev/null || true
         mountpoint -q /home/fifi 2>/dev/null || \
             mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
+        # JuNest replaces /usr, so the host cursor theme is otherwise invisible
+        # and resize/drag pointers fall back with a warning. Seed the immutable
+        # theme into this extracted, user-owned app root once.
+        _junest_icons="$dir/.junest/usr/share/icons"
+        if [ -d /usr/share/icons/Adwaita ] &&
+           [ ! -e "$_junest_icons/Adwaita/cursors/fleur" ]; then
+            [ ! -L "$_junest_icons/Adwaita" ] || rm -f "$_junest_icons/Adwaita"
+            mkdir -p "$_junest_icons"
+            cp -a /usr/share/icons/Adwaita "$_junest_icons/Adwaita"
+            chown -RhP 1000:1000 "$_junest_icons/Adwaita" 2>/dev/null || true
+        fi
         unset XDG_DATA_DIRS FONTCONFIG_PATH XKB_CONFIG_ROOT LD_LIBRARY_PATH
         export HOME=/home/fifi USER=fifi LOGNAME=fifi
         exec /bin/fifi-user-exec busybox unshare -r -- "$dir/AppRun" "$@"
@@ -305,7 +318,7 @@ launch_dir() {
         done
         cp /etc/resolv.conf "$dir/rootfs/etc/resolv.conf" 2>/dev/null || true
         # Inner launch script (kept in the rootfs; avoids deep nested quoting):
-        # bring up a per-session dbus, then exec native steam with the flags.
+        # bring up a per-session bus, run native Steam, and reap both on exit.
         cat > "$dir/rootfs/fifi-steam-launch.sh" <<'STEOF'
 #!/bin/sh
 rm -f /tmp/steam-session-bus 2>/dev/null
@@ -319,12 +332,26 @@ if [ -r /root/.steam/steam.pid ]; then
     fi
 fi
 dbus-daemon --session --address=unix:path=/tmp/steam-session-bus --nofork --nopidfile &
+_steam_dbus_pid=$!
+_steam_client_pid=
+cleanup_steam_session() {
+    [ -z "$_steam_client_pid" ] || kill "$_steam_client_pid" 2>/dev/null || true
+    kill "$_steam_dbus_pid" 2>/dev/null || true
+    wait "$_steam_dbus_pid" 2>/dev/null || true
+    rm -f /tmp/steam-session-bus 2>/dev/null || true
+}
+trap cleanup_steam_session EXIT HUP INT TERM
 sleep 1
 if [ -x /root/.local/share/Steam/steam.sh ]; then
-    exec /root/.local/share/Steam/steam.sh \
-        -no-cef-sandbox -cef-disable-gpu-sandbox
+    /root/.local/share/Steam/steam.sh \
+        -no-cef-sandbox -cef-disable-gpu-sandbox &
+else
+    /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox &
 fi
-exec /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox
+_steam_client_pid=$!
+wait "$_steam_client_pid"
+_steam_rc=$?
+exit "$_steam_rc"
 STEOF
         chmod +x "$dir/rootfs/fifi-steam-launch.sh"
         # Drop to the desktop identity before creating the container. The user
@@ -398,6 +425,13 @@ STEOF
         mkdir -p "$prof" 2>/dev/null || true
         chown -R 1000:1000 "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0" \
             "$prof" 2>/dev/null || true
+        # Abrupt power loss or a launcher killed during diagnostics can leave
+        # Firefox's zero-byte lock/startup marker behind. With no browser
+        # process alive these cannot represent a live profile owner, and keeping
+        # them forces an unnecessary troubleshoot-mode prompt on every launch.
+        if ! proc_running librewolf && ! proc_running firefox; then
+            rm -f "$prof/.parentlock" "$prof/lock" "$prof/.startup-incomplete"
+        fi
         # FiFi-managed prefs, rewritten from scratch EVERY launch (not guarded on
         # a marker) so EXISTING profiles created before a fix also get it — an
         # earlier guard on browser.tabs.inTitlebar skipped the whole block for old
@@ -475,7 +509,11 @@ STEOF
 }
 CSSEOF
         export APPDIR="$dir"; cd "$dir"
-        _sb_pid=1   # Firefox keeps its main process alive → safe for a PID namespace
+        # Current LibreWolf daemonizes after AppRun. A private PID namespace
+        # would be destroyed with the short-lived launcher, so retain mount,
+        # IPC, and UTS isolation here and let Firefox's content sandbox provide
+        # per-process isolation inside the browser.
+        _sb_pid=0
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
     fi
     if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then

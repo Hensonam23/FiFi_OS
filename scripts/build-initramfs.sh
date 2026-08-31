@@ -295,8 +295,16 @@ echo "[initramfs] building fifi-calc..."
 echo "[initramfs] building fifi-imageviewer..."
 (cd "$REPO_ROOT/fifi/apps/imageviewer" && make -s) && {
     cp "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" "$STAGE/bin/"
+    ldd "$REPO_ROOT/fifi/apps/imageviewer/fifi-imageviewer" 2>/dev/null |
+        awk '/=>/{print $3}' | while read -r lib; do
+            [ -f "$lib" ] || continue
+            cp -nL "$lib" "$STAGE/usr/lib/$(basename "$lib")" 2>/dev/null || true
+        done
     echo "[initramfs] included fifi-imageviewer"
-} || echo "[initramfs] WARNING: fifi-imageviewer build failed"
+} || {
+    echo "[initramfs] ERROR: fifi-imageviewer build failed" >&2
+    exit 1
+}
 
 echo "[initramfs] building fifi-proton..."
 (cd "$REPO_ROOT/fifi/apps/proton" && make -s) && {
@@ -711,7 +719,7 @@ fi
 
 if [ -x /usr/bin/pipewire ] && [ -x /usr/bin/pipewire-pulse ]; then
 # Copy the daemon plus small on-device diagnostics used by the acceptance pass.
-for bin in pipewire pipewire-pulse pw-play pw-cli; do
+for bin in pipewire pipewire-pulse pw-play pw-cli paplay; do
     [ -x "/usr/bin/$bin" ] && cp "/usr/bin/$bin" "$STAGE/usr/bin/$bin"
 done
 
@@ -759,6 +767,7 @@ PW_LIBS=$(
         ldd /usr/bin/pipewire-pulse
         [ ! -x /usr/bin/pw-play ] || ldd /usr/bin/pw-play
         [ ! -x /usr/bin/pw-cli ] || ldd /usr/bin/pw-cli
+        [ ! -x /usr/bin/paplay ] || ldd /usr/bin/paplay
         for f in \
             /usr/lib/spa-0.2/alsa/libspa-alsa.so \
             /usr/lib/spa-0.2/audioconvert/libspa-audioconvert.so \

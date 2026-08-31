@@ -1,5 +1,5 @@
 /* fifi-imageviewer — Image preview IPC app for FiFi OS linux-desktop.
- * Supports BMP (24-bit / 32-bit BI_RGB) and PPM P6 formats.
+ * Supports PNG, JPEG, BMP (24-bit / 32-bit BI_RGB), and PPM P6 formats.
  * Zoom: scroll or +/-, F=fit, 0=100%, W=set as wallpaper, Esc/Q=close. */
 
 #define _GNU_SOURCE
@@ -12,9 +12,12 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <png.h>
+#include <jpeglib.h>
 
 /* ── IPC protocol ────────────────────────────────────────────────────────── */
 #include "../../shared/app_ipc.h"
@@ -55,6 +58,9 @@ static int  g_zoom_pct = 100;
 static int  g_pan_x    = 0;
 static int  g_pan_y    = 0;
 static bool g_fit_mode = true;
+
+#define IMAGE_MAX_DIMENSION 16384
+#define IMAGE_MAX_PIXELS (64u * 1024u * 1024u)
 
 /* Mouse drag state */
 static bool g_drag    = false;
@@ -121,9 +127,10 @@ static uint32_t *decode_bmp(const uint8_t *d, size_t sz, int *ow, int *oh) {
     uint16_t bpp;      memcpy(&bpp,      d + 28, 2);
     uint32_t compr;    memcpy(&compr,    d + 30, 4);
 
-    if (width <= 0 || width > 16384) return NULL;
+    if (width <= 0 || width > IMAGE_MAX_DIMENSION) return NULL;
     int h = height < 0 ? -height : height;
-    if (h <= 0 || h > 16384) return NULL;
+    if (h <= 0 || h > IMAGE_MAX_DIMENSION) return NULL;
+    if ((size_t)width * (size_t)h > IMAGE_MAX_PIXELS) return NULL;
     if (bpp != 24 && bpp != 32) return NULL;
     if (compr != 0 && compr != 3) return NULL;
 
@@ -172,7 +179,8 @@ static uint32_t *decode_ppm(const uint8_t *d, size_t sz, int *ow, int *oh) {
     int h = ppm_read_int(d, sz, &pos);
     int mv = ppm_read_int(d, sz, &pos);
     if (w <= 0 || h <= 0 || mv != 255) return NULL;
-    if (w > 16384 || h > 16384) return NULL;
+    if (w > IMAGE_MAX_DIMENSION || h > IMAGE_MAX_DIMENSION) return NULL;
+    if ((size_t)w * (size_t)h > IMAGE_MAX_PIXELS) return NULL;
     if (pos < sz) pos++; /* single whitespace after maxval */
     if (pos + (size_t)w * h * 3 > sz) return NULL;
 
@@ -185,6 +193,116 @@ static uint32_t *decode_ppm(const uint8_t *d, size_t sz, int *ow, int *oh) {
     }
     *ow = w; *oh = h;
     return px;
+}
+
+/* libpng's simplified memory API keeps the native viewer independent from
+ * toolkit plugins and handles the colour/alpha variants used by screenshots,
+ * wallpapers, icons, and downloaded images. */
+static uint32_t *decode_png(const uint8_t *d, size_t sz, int *ow, int *oh) {
+    png_image image;
+    memset(&image, 0, sizeof(image));
+    image.version = PNG_IMAGE_VERSION;
+    if (!png_image_begin_read_from_memory(&image, d, sz)) return NULL;
+    if (image.width == 0 || image.height == 0 ||
+        image.width > IMAGE_MAX_DIMENSION ||
+        image.height > IMAGE_MAX_DIMENSION ||
+        (size_t)image.width * (size_t)image.height > IMAGE_MAX_PIXELS) {
+        png_image_free(&image);
+        return NULL;
+    }
+
+    image.format = PNG_FORMAT_RGBA;
+    size_t rgba_size = PNG_IMAGE_SIZE(image);
+    uint8_t *rgba = malloc(rgba_size);
+    if (!rgba) { png_image_free(&image); return NULL; }
+    if (!png_image_finish_read(&image, NULL, rgba, 0, NULL)) {
+        free(rgba);
+        png_image_free(&image);
+        return NULL;
+    }
+
+    size_t pixels = (size_t)image.width * (size_t)image.height;
+    uint32_t *px = malloc(pixels * sizeof(*px));
+    if (!px) { free(rgba); png_image_free(&image); return NULL; }
+    for (size_t i = 0; i < pixels; i++) {
+        uint8_t r = rgba[i * 4], g2 = rgba[i * 4 + 1];
+        uint8_t b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
+        px[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+                ((uint32_t)g2 << 8) | b;
+    }
+    free(rgba);
+    *ow = (int)image.width;
+    *oh = (int)image.height;
+    png_image_free(&image);
+    return px;
+}
+
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf jump;
+    uint32_t *pixels;
+    uint8_t *row;
+    bool created;
+} JpegError;
+
+static void jpeg_fail(j_common_ptr common) {
+    JpegError *err = (JpegError *)common->err;
+    longjmp(err->jump, 1);
+}
+
+static uint32_t *decode_jpeg(const uint8_t *d, size_t sz, int *ow, int *oh) {
+    struct jpeg_decompress_struct cinfo;
+    JpegError err;
+    memset(&cinfo, 0, sizeof(cinfo));
+    memset(&err, 0, sizeof(err));
+    cinfo.err = jpeg_std_error(&err.pub);
+    err.pub.error_exit = jpeg_fail;
+    if (setjmp(err.jump)) {
+        if (err.created) jpeg_destroy_decompress(&cinfo);
+        free(err.row);
+        free(err.pixels);
+        return NULL;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    err.created = true;
+    jpeg_mem_src(&cinfo, d, (unsigned long)sz);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) jpeg_fail((j_common_ptr)&cinfo);
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+    if (cinfo.output_width == 0 || cinfo.output_height == 0 ||
+        cinfo.output_width > IMAGE_MAX_DIMENSION ||
+        cinfo.output_height > IMAGE_MAX_DIMENSION ||
+        (size_t)cinfo.output_width * (size_t)cinfo.output_height > IMAGE_MAX_PIXELS ||
+        cinfo.output_components != 3) {
+        jpeg_fail((j_common_ptr)&cinfo);
+    }
+
+    size_t pixels = (size_t)cinfo.output_width * (size_t)cinfo.output_height;
+    err.pixels = malloc(pixels * sizeof(*err.pixels));
+    err.row = malloc((size_t)cinfo.output_width * 3);
+    if (!err.pixels || !err.row) jpeg_fail((j_common_ptr)&cinfo);
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned int y = cinfo.output_scanline;
+        JSAMPROW rowp = err.row;
+        if (jpeg_read_scanlines(&cinfo, &rowp, 1) != 1)
+            jpeg_fail((j_common_ptr)&cinfo);
+        uint32_t *dst = err.pixels + (size_t)y * cinfo.output_width;
+        for (unsigned int x = 0; x < cinfo.output_width; x++) {
+            uint8_t r = err.row[x * 3], g2 = err.row[x * 3 + 1];
+            uint8_t b = err.row[x * 3 + 2];
+            dst[x] = 0xFF000000u | ((uint32_t)r << 16) |
+                     ((uint32_t)g2 << 8) | b;
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    *ow = (int)cinfo.output_width;
+    *oh = (int)cinfo.output_height;
+    jpeg_destroy_decompress(&cinfo);
+    free(err.row);
+    uint32_t *result = err.pixels;
+    err.pixels = NULL;
+    return result;
 }
 
 /* ── Image file loader ───────────────────────────────────────────────────── */
@@ -204,13 +322,7 @@ static void load_image(const char *path) {
     bool is_png = ext && (strcasecmp(ext, ".png") == 0);
     bool is_jpg = ext && (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0);
 
-    if (is_png || is_jpg) {
-        snprintf(g_img_err, sizeof(g_img_err),
-                 "%s: no PNG/JPEG decoder. Convert to BMP or PPM.",
-                 is_png ? "PNG" : "JPEG");
-        return;
-    }
-    if (!is_bmp && !is_ppm) {
+    if (!is_bmp && !is_ppm && !is_png && !is_jpg) {
         snprintf(g_img_err, sizeof(g_img_err), "Unsupported format: %s",
                  ext ? ext : "(unknown)");
         return;
@@ -240,7 +352,13 @@ static void load_image(const char *path) {
     }
     close(fd);
 
-    if (is_bmp) {
+    if (is_png) {
+        g_img = decode_png(buf, got, &g_img_w, &g_img_h);
+        strncpy(g_img_fmt, "PNG", sizeof(g_img_fmt) - 1);
+    } else if (is_jpg) {
+        g_img = decode_jpeg(buf, got, &g_img_w, &g_img_h);
+        strncpy(g_img_fmt, "JPEG", sizeof(g_img_fmt) - 1);
+    } else if (is_bmp) {
         g_img = decode_bmp(buf, got, &g_img_w, &g_img_h);
         strncpy(g_img_fmt, "BMP", sizeof(g_img_fmt) - 1);
     } else {
@@ -274,7 +392,7 @@ static void render(uint32_t *fb) {
         int ty = content_y + (content_h - g_glyph_h) / 2;
         draw_str(fb, tx, ty, g_img_err, C_ERR_FG, C_ERR_BG);
 
-        const char *hint = "BMP and PPM P6 formats supported";
+        const char *hint = "PNG, JPEG, BMP, and PPM P6 supported";
         int hx = (g_win_w - str_px(hint)) / 2;
         draw_str(fb, hx, ty + g_glyph_h + 4, hint, C_HINT_FG, C_ERR_BG);
 
@@ -341,7 +459,23 @@ static void render(uint32_t *fb) {
         uint32_t *dst = fb + py * g_win_w + clip_x0;
         for (int px2 = clip_x0; px2 < clip_x1; px2++) {
             int sx = (px2 - img_x) * g_img_w / disp_w;
-            if (sx >= 0 && sx < g_img_w) *dst = src_row[sx];
+            if (sx >= 0 && sx < g_img_w) {
+                uint32_t src = src_row[sx];
+                unsigned int a = src >> 24;
+                if (a == 255) {
+                    *dst = src;
+                } else if (a != 0) {
+                    uint32_t bg = *dst;
+                    unsigned int inv = 255 - a;
+                    unsigned int r = (((src >> 16) & 255) * a +
+                                      ((bg >> 16) & 255) * inv + 127) / 255;
+                    unsigned int g2 = (((src >> 8) & 255) * a +
+                                       ((bg >> 8) & 255) * inv + 127) / 255;
+                    unsigned int b = ((src & 255) * a +
+                                      (bg & 255) * inv + 127) / 255;
+                    *dst = 0xFF000000u | (r << 16) | (g2 << 8) | b;
+                }
+            }
             dst++;
         }
     }
@@ -443,6 +577,16 @@ static void msg_reset(MsgState *m) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--decode-test") == 0) {
+        load_image(argv[2]);
+        if (!g_img) {
+            fprintf(stderr, "%s\n", g_img_err[0] ? g_img_err : "decode failed");
+            return 1;
+        }
+        printf("%s %dx%d\n", g_img_fmt, g_img_w, g_img_h);
+        free(g_img);
+        return 0;
+    }
     if (!font_load("/fifi-data/fonts/ter16b.psf"))
         font_load("/fifi-data/fonts/default.psf");
 

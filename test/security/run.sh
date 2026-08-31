@@ -63,11 +63,14 @@ grep -Fq 'libpipewire-module-client-device.so' \
 grep -Fq 'libspa-dbus.so' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse/native}"' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'pw-play pw-cli paplay' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq '/usr/share/spa-0.2/bluez5/.' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'for _audio_dev in /dev/snd/*' "$ROOT/initramfs/root/init"
 grep -Fq 'api.alsa.pcm.sink' \
     "$ROOT/initramfs/root/usr/share/pipewire/fifi.conf"
 grep -Fq 'api.alsa.pcm.source' \
+    "$ROOT/initramfs/root/usr/share/pipewire/fifi.conf"
+! grep -Fq 'libpipewire-module-protocol-pulse' \
     "$ROOT/initramfs/root/usr/share/pipewire/fifi.conf"
 grep -Fq 'libpipewire-module-protocol-native' \
     "$ROOT/initramfs/root/usr/share/pipewire/client.conf"
@@ -433,11 +436,18 @@ grep -Fq '$dir/usr/bin/librewolf-bin' \
 grep -Fq 'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'runtime/cache/fontconfig' "$ROOT/initramfs/root/init"
+grep -Fq 'runtime/share/icons/.fifi-adwaita-build' "$ROOT/initramfs/root/init"
+grep -Fq 'XCURSOR_PATH="$RT/share/icons:/usr/share/icons"' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq '_junest_icons="$dir/.junest/usr/share/icons"' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'busybox mount --rbind "/$d" "$R/$d"' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'XDG_RUNTIME_DIR=/run/user/0 SDL_VIDEODRIVER=x11' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq '/root/.steam/steam.pid /root/.steam/starting' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'trap cleanup_steam_session EXIT HUP INT TERM' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'TAR_OPTIONS=--no-same-owner LD_LIBRARY_PATH=' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
