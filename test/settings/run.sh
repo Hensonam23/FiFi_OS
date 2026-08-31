@@ -55,6 +55,10 @@ grep -Fq 'capture_command_with_errors("/usr/bin/iw"' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'return report_scan_failure(diagnostic' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'strstr(output, "FAIL-BUSY")' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq 'Join that in-flight scan' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'wait_command("/usr/bin/rfkill", unblock)' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq '/fifi-data/wifi-scan.log' \
@@ -68,6 +72,7 @@ grep -Fq 'fifi-wifi-ctl saved-connect "$WIFI_IF"' "$ROOT/initramfs/root/init"
 grep -Fq 'open_public_status("/fifi-data/wifi-ssid")' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq '/fifi-data/wifi-saved-ssid' "$SETTINGS"
+grep -Fq 'Refresh delayed -- showing %d previous network%s' "$SETTINGS"
 grep -Fq 'cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"' \
     "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'CONFIG_RTW89_8922AE=y' "$ROOT/linux/fifi.config"

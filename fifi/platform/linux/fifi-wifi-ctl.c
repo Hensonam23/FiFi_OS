@@ -243,8 +243,14 @@ static int scan_wifi(const char *interface) {
                  direct_error[0] ? direct_error : "");
         return report_scan_failure(diagnostic, 1);
     }
-    if (wpa_command(interface, "scan", output, sizeof(output)) != 0 ||
-        strstr(output, "OK") == NULL) {
+    int scan_request = wpa_command(interface, "scan", output, sizeof(output));
+    int scan_in_progress = strstr(output, "FAIL-BUSY") != NULL;
+    /* A rapid refresh, or a second Wi-Fi window, can arrive while the manager
+     * is still completing the previous scan.  Join that in-flight scan and
+     * return its results instead of turning the temporary busy response into
+     * a user-visible failure. */
+    if (!scan_in_progress &&
+        (scan_request != 0 || strstr(output, "OK") == NULL)) {
         char manager_error[512];
         snprintf(manager_error, sizeof(manager_error), "%.511s", output);
         if (!supplicant_connected(interface)) {

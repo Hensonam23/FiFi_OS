@@ -781,10 +781,15 @@ static bool wifi_is_saved(const char *ssid) {
     return match;
 }
 
-static void parse_scan(const char *buf) {
-    g_net_count = fifi_wifi_parse_scan(buf, g_nets, MAX_NETS);
+static int parse_scan(const char *buf) {
+    NetEntry parsed[MAX_NETS];
+    int parsed_count = fifi_wifi_parse_scan(buf, parsed, MAX_NETS);
+    if (parsed_count <= 0) return 0;
+    memcpy(g_nets, parsed, (size_t)parsed_count * sizeof(*g_nets));
+    g_net_count = parsed_count;
     for (int i = 0; i < g_net_count; i++)
         g_nets[i].saved = wifi_is_saved(g_nets[i].ssid);
+    return parsed_count;
 }
 
 static void wifi_scan_start(void) {
@@ -838,8 +843,8 @@ static void wifi_scan_poll(void) {
         int scan_result = waited > 0 && WIFEXITED(st) ? WEXITSTATUS(st) :
                           waited > 0 && WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 1;
         g_scan_pid = -1;
-        parse_scan(g_scan_buf);
-        if (g_net_count == 0) {
+        int parsed_count = parse_scan(g_scan_buf);
+        if (parsed_count == 0) {
             char first_line[64] = "";
             if (g_scan_buf[0]) {
                 const char *nl = strchr(g_scan_buf, '\n');
@@ -847,7 +852,11 @@ static void wifi_scan_poll(void) {
                 if (length > sizeof(first_line) - 1) length = sizeof(first_line) - 1;
                 memcpy(first_line, g_scan_buf, length);
             }
-            if (first_line[0])
+            if (g_net_count > 0)
+                snprintf(g_wstatus, sizeof g_wstatus,
+                         "Refresh delayed -- showing %d previous network%s",
+                         g_net_count, g_net_count == 1 ? "" : "s");
+            else if (first_line[0])
                 snprintf(g_wstatus, sizeof g_wstatus, "Scan failed: %.63s", first_line);
             else if (scan_result != 0)
                 snprintf(g_wstatus, sizeof g_wstatus,
