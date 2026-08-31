@@ -9,6 +9,11 @@
 # Usage: fifi-run <path-to-.AppImage | path-to-executable> [args...]
 set -e
 
+# glibc provides C.UTF-8 without a generated locale archive. The minimal FiFi
+# image intentionally omits that multi-megabyte archive, so do not advertise an
+# unavailable en_US locale to browsers and office applications.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 RT=/fifi-data/runtime
 BROWSER=/fifi-data/browser
 target="$1"
@@ -17,6 +22,8 @@ shift 2>/dev/null || true
 
 # --- shared runtime environment (identical for every app) ---------------------
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-/tmp}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse/native}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # NOTE: do NOT set XDG_CURRENT_DESKTOP=GNOME to try to get Firefox's window
 # buttons — it makes LibreWolf hang waiting on GNOME/portal services that don't
@@ -24,11 +31,12 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # via CSD; close with Ctrl+Q / its menu / Alt+F4.
 export XKB_CONFIG_ROOT="$RT/share/X11/xkb"
 export FONTCONFIG_PATH="$RT/etc/fonts"
-export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share"
+export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share:/usr/share"
+export GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_MODULE_FILE:-/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache}"
 export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-# no D-Bus / a11y on the box -> disable so toolkits don't hang or crash
+# Keep accessibility bridges optional while sharing FiFi's local user bus.
 export NO_AT_BRIDGE=1 GTK_A11Y=none GNOME_ACCESSIBILITY=0 QT_ACCESSIBILITY=0
-export DBUS_SESSION_BUS_ADDRESS=disabled:
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/tmp/fifi-session-bus}"
 # software rendering (no GPU stack on the box yet)
 export LIBGL_ALWAYS_SOFTWARE=1
 # steer every toolkit to Wayland
@@ -115,7 +123,11 @@ sandbox_exec() {
 diag_libs() {
     _b="$1"
     [ -x "$_b" ] || return 0
-    _miss=$(LD_TRACE_LOADED_OBJECTS=1 timeout 5 "$_b" 2>/dev/null | grep "not found")
+    # grep returning 1 means the executable is healthy (nothing was missing).
+    # fifi-run uses set -e, so make that normal result explicit instead of
+    # aborting every healthy AppImage immediately before its real launch.
+    _miss=$(LD_TRACE_LOADED_OBJECTS=1 timeout 5 "$_b" 2>/dev/null |
+        grep "not found" || true)
     {
         echo "[${APP_NAME:-app}] launch: $_b"
         if [ -n "$_miss" ]; then
@@ -297,8 +309,21 @@ launch_dir() {
         cat > "$dir/rootfs/fifi-steam-launch.sh" <<'STEOF'
 #!/bin/sh
 rm -f /tmp/steam-session-bus 2>/dev/null
+# A killed updater can leave its pid/FIFO markers behind. Steam otherwise exits
+# silently forever on every later launch even though that recorded pid is gone.
+if [ -r /root/.steam/steam.pid ]; then
+    _steam_pid="$(cat /root/.steam/steam.pid 2>/dev/null)"
+    if [ -z "$_steam_pid" ] || ! kill -0 "$_steam_pid" 2>/dev/null; then
+        rm -f /root/.steam/steam.pid /root/.steam/starting \
+              /root/.steam/steam.pipe /root/.steam/steam.token 2>/dev/null
+    fi
+fi
 dbus-daemon --session --address=unix:path=/tmp/steam-session-bus --nofork --nopidfile &
 sleep 1
+if [ -x /root/.local/share/Steam/steam.sh ]; then
+    exec /root/.local/share/Steam/steam.sh \
+        -no-cef-sandbox -cef-disable-gpu-sandbox
+fi
 exec /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox
 STEOF
         chmod +x "$dir/rootfs/fifi-steam-launch.sh"
@@ -311,12 +336,26 @@ STEOF
             busybox mount --make-rprivate /
             busybox mount --bind "$R" "$R"
             busybox mount --make-rprivate "$R"
-            for d in dev proc sys tmp run; do busybox mkdir -p "$R/$d"; busybox mount --bind "/$d" "$R/$d"; done
+            # /dev and /sys contain submounts. A plain bind of either is rejected
+            # inside an unprivileged user namespace; recursive binds are valid
+            # and keep urandom, input, GPU, sound, and proc-backed /dev/fd alive.
+            for d in dev sys tmp; do
+                busybox mkdir -p "$R/$d"
+                busybox mount --rbind "/$d" "$R/$d" || exit 1
+                busybox mount --make-rslave "$R/$d" || exit 1
+            done
+            busybox mkdir -p "$R/proc" "$R/run"
+            busybox mount --rbind /proc "$R/proc" || exit 1
+            busybox mount --make-rslave "$R/proc" || exit 1
+            busybox mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$R/run" || exit 1
+            busybox mkdir -p "$R/run/user/0"
+            busybox chmod 0700 "$R/run/user/0"
             busybox mkdir -p /fifi-data/home "$R/root"
             busybox mount --bind /fifi-data/home "$R/root"
             exec chroot "$R" /usr/bin/env -i \
                 HOME=/root USER=root LOGNAME=root \
-                DISPLAY=:0 XDG_RUNTIME_DIR=/tmp SDL_VIDEODRIVER=x11 \
+                DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/0 SDL_VIDEODRIVER=x11 \
+                TAR_OPTIONS=--no-same-owner LD_LIBRARY_PATH= \
                 PATH=/usr/bin:/usr/local/bin:/bin TERM=xterm \
                 DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/steam-session-bus \
                 /bin/sh /fifi-steam-launch.sh
@@ -336,7 +375,9 @@ STEOF
     # Firefox/LibreWolf run as the desktop uid. Their own content sandbox remains
     # enabled and uses the user-namespace support required by the FiFi kernel.
     if [ -e "$dir/librewolf-bin" ] || [ -e "$dir/librewolf" ] || \
-       [ -e "$dir/firefox-bin" ]  || [ -e "$dir/firefox" ]; then
+       [ -e "$dir/firefox-bin" ]  || [ -e "$dir/firefox" ] || \
+       [ -e "$dir/usr/bin/librewolf-bin" ] || [ -e "$dir/usr/bin/librewolf" ] || \
+       [ -e "$dir/usr/bin/firefox-bin" ]  || [ -e "$dir/usr/bin/firefox" ]; then
         mkdir -p /fifi-data/home 2>/dev/null || true
         export HOME=/fifi-data/home
         # Give Firefox's integrated (CSD) titlebar the min/max/close buttons. It

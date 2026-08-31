@@ -13,6 +13,10 @@
 # Usage:  fifi-agent            (interactive)
 #         fifi-agent "goal"     (start with a goal)
 
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 AI_DIR=/fifi-data/ai
 CONF="$AI_DIR/model.conf"
 MAX_STEPS=12                  # stop runaway loops

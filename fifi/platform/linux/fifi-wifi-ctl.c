@@ -46,7 +46,15 @@ static int capture_command_impl(const char *path, char *const argv[],
     if (pid == 0) {
         close(pipes[0]);
         if (dup2(pipes[1], STDOUT_FILENO) < 0) _exit(126);
-        if (include_stderr && dup2(pipes[1], STDERR_FILENO) < 0) _exit(126);
+        if (include_stderr) {
+            if (dup2(pipes[1], STDERR_FILENO) < 0) _exit(126);
+        } else {
+            int nullfd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (nullfd >= 0) {
+                if (dup2(nullfd, STDERR_FILENO) < 0) _exit(126);
+                if (nullfd > STDERR_FILENO) close(nullfd);
+            }
+        }
         close(pipes[1]);
         execv(path, argv);
         _exit(errno == ENOENT ? 127 : 126);
@@ -150,7 +158,13 @@ static int direct_scan(const char *interface, char *output, size_t capacity) {
 
 static int wpa_command(const char *interface, const char *command,
                        char *output, size_t capacity) {
-    char *const args[] = {"wpa_cli", "-i", (char *)interface,
+    /* FiFi's compact /var/run is not a symlink to /run. The supplicant is
+     * explicitly configured to create its control socket in /var/run, while
+     * wpa_cli's compiled default is /run/wpa_supplicant. Without -p every
+     * status and scan request missed the live manager and Settings showed an
+     * empty network list even while Wi-Fi was connected. */
+    char *const args[] = {"wpa_cli", "-p", "/var/run/wpa_supplicant",
+                          "-i", (char *)interface,
                           (char *)command, NULL};
     return capture_command("/usr/bin/wpa_cli", args, output, capacity);
 }

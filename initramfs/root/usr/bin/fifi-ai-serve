@@ -7,6 +7,10 @@
 #
 # Prints the base URL on success (http://127.0.0.1:PORT); non-zero on failure.
 
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 AI_DIR=/fifi-data/ai
 HOST=127.0.0.1
 PORT=8080
@@ -38,7 +42,8 @@ MMF=$(sed -n 's/^mmproj=//p' "$CONF")
 mkdir -p "$AI_DIR" 2>/dev/null || true
 # Detached so it outlives the caller; loopback bind keeps it private.
 setsid "$SRV" -m "$MODEL" $MMPROJ --host "$HOST" --port "$PORT" \
-    -t "$THREADS" -c 4096 --no-warmup >"$AI_DIR/server.log" 2>&1 &
+    -t "$THREADS" -c 4096 --no-warmup --cors-origins localhost --no-webui \
+    >"$AI_DIR/server.log" 2>&1 &
 
 # Wait for readiness (model load can take a while on CPU).
 i=0

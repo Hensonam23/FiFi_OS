@@ -273,7 +273,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 - [x] Numpad keys: all numpad digits and operators work in terminal and apps
 - [x] Screen lock: Win+L locks the screen, password required to unlock
 - [x] Firewall toggle: nftables on/off switch in Settings
-- [x] Security Center app: firewall status, privacy mode (73 telemetry domains blocked), port scanner, active connections
+- [x] Security Center app: firewall status, privacy mode (71 telemetry domains blocked), port scanner, active connections
 - [x] Context menus: right-click desktop and file browser, scale with font size
 - [x] Toast notifications: volume, lock, snap, show desktop, and other system actions
 - [x] Window layering: overlapping windows stack cleanly, no bleed from windows behind

@@ -45,14 +45,59 @@ grep -Fq "'=== current boot ===' > /fifi-data/wifi.log" \
 echo "[test-security] network services run quietly with least privilege"
 grep -Fq '/bin/fifi-user-exec /usr/bin/tor' \
     "$ROOT/initramfs/root/bin/fifi-secctl"
+grep -Fq '/bin/fifi-user-exec /usr/bin/pipewire' "$ROOT/initramfs/root/init"
+grep -Fq '/bin/fifi-user-exec /usr/bin/dbus-daemon --session' \
+    "$ROOT/initramfs/root/init"
+grep -Fq '<listen>unix:path=/tmp/fifi-session-bus</listen>' \
+    "$ROOT/initramfs/root/usr/share/dbus-1/session.conf"
+grep -Fq 'unix:path=/tmp/fifi-session-bus' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq '/bin/fifi-user-exec /usr/bin/pipewire-pulse' \
+    "$ROOT/initramfs/root/init"
+grep -Fq '/bin/fifi-user-exec /usr/bin/wireplumber -p fifi' \
+    "$ROOT/initramfs/root/init"
+grep -Fq 'hardware.bluetooth = required' \
+    "$ROOT/initramfs/root/usr/share/wireplumber/wireplumber.conf.d/90-fifi.conf"
+grep -Fq 'libpipewire-module-client-device.so' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'libspa-dbus.so' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse/native}"' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq '/usr/share/spa-0.2/bluez5/.' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'for _audio_dev in /dev/snd/*' "$ROOT/initramfs/root/init"
+grep -Fq 'api.alsa.pcm.sink' \
+    "$ROOT/initramfs/root/usr/share/pipewire/fifi.conf"
+grep -Fq 'api.alsa.pcm.source' \
+    "$ROOT/initramfs/root/usr/share/pipewire/fifi.conf"
+grep -Fq 'libpipewire-module-protocol-native' \
+    "$ROOT/initramfs/root/usr/share/pipewire/client.conf"
+grep -Fq 'unix:/tmp/pulse/native' \
+    "$ROOT/initramfs/root/usr/share/pipewire/pipewire-pulse.conf"
+! grep -Fq 'pulse.cmd' \
+    "$ROOT/initramfs/root/usr/share/pipewire/pipewire-pulse.conf"
+grep -Fq 'cp -a /usr/share/alsa/.' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'WirePlumber audio routing policy bundled' \
+    "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'chown -R 1000:1000 "$D/tor"' \
     "$ROOT/initramfs/root/bin/fifi-secctl"
 grep -Fq 'cp "$ROOT_DIR/etc/dbus-1/system.conf"' \
     "$ROOT/scripts/build-initramfs.sh"
+grep -Fq '<allow user="fifi"/>' \
+    "$ROOT/initramfs/root/etc/dbus-1/system.conf"
 grep -Fq 'for aa_tree in abi abstractions tunables' \
     "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'for _boot_log in compositor.log' "$ROOT/initramfs/root/init"
 grep -Fq 'nft add rule inet fifi_filter input tcp dport 22 accept' \
+    "$ROOT/initramfs/root/bin/fifi-secctl"
+grep -Fq "server_names        = ['cloudflare', 'quad9-doh-ip4-port443-filter-pri']" \
+    "$ROOT/initramfs/root/etc/dnscrypt-proxy.toml"
+grep -Fq "cache_file   = '/fifi-data/dnscrypt/public-resolvers.md'" \
+    "$ROOT/initramfs/root/etc/dnscrypt-proxy.toml"
+grep -Fq 'chown -R 1000:1000 "$D/dnscrypt"' \
+    "$ROOT/initramfs/root/bin/fifi-secctl"
+grep -Fq "user_name           = 'fifi'" \
+    "$ROOT/initramfs/root/etc/dnscrypt-proxy.toml"
+grep -Fq '/bin/nslookup example.com 127.0.0.1' \
     "$ROOT/initramfs/root/bin/fifi-secctl"
 
 echo "[test-security] Wi-Fi authentication crypto is built in"
@@ -120,6 +165,13 @@ grep -Fq 'chown(g_sock_path, 1000, 1000)' \
 grep -Fq 'CONFIG_USER_NS=y' "$ROOT/linux/fifi.config"
 grep -Fq 'PR_SET_NO_NEW_PRIVS' \
     "$ROOT/fifi/platform/linux/fifi-user-exec.c"
+grep -Fq 'chown -R 1000:1000 /fifi-data/ai' "$ROOT/initramfs/root/init"
+for ai_tool in fifi-ai fifi-ai-install fifi-ai-serve fifi-agent; do
+    grep -Fq 'exec /bin/fifi-user-exec "$0" "$@"' \
+        "$ROOT/initramfs/root/usr/bin/$ai_tool"
+done
+grep -Fq -- '--cors-origins localhost --no-webui' \
+    "$ROOT/initramfs/root/usr/bin/fifi-ai-serve"
 grep -Fq 'strcmp(name, "fifi-terminal") == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq '/bin/fifi-user-exec "$target" --appimage-extract' \
@@ -363,7 +415,7 @@ grep -Fq 'strncmp(path, app_library, sizeof(app_library) - 1) == 0' \
     "$ROOT/fifi/platform/linux/platform.c"
 grep -Fq 'chown 1000:1000 /fifi-data/fifi-settings.conf' \
     "$ROOT/initramfs/root/init"
-grep -Fq 'chown 0:1000 "$_audio_ctl"' "$ROOT/initramfs/root/init"
+grep -Fq 'chown 0:1000 "$_audio_dev"' "$ROOT/initramfs/root/init"
 ! grep -Fq 'fopen("/fifi-data/wifi-ssid", "w")' \
     "$ROOT/fifi/apps/settings/settings.c"
 grep -Fq '#define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"' \
@@ -374,6 +426,21 @@ grep -Fq '#define APP_INSTALLER   "/usr/share/fifi/appstore-install.sh"' \
     "$ROOT/fifi/apps/appstore/appstore.c"
 grep -Fq 'exec /bin/fifi-user-exec "$0" "$@"' \
     "$ROOT/initramfs/root/bin/app-update"
+grep -Fq 'grep "not found" || true' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq '$dir/usr/bin/librewolf-bin' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'runtime/cache/fontconfig' "$ROOT/initramfs/root/init"
+grep -Fq 'busybox mount --rbind "/$d" "$R/$d"' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'XDG_RUNTIME_DIR=/run/user/0 SDL_VIDEODRIVER=x11' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq '/root/.steam/steam.pid /root/.steam/starting' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'TAR_OPTIONS=--no-same-owner LD_LIBRARY_PATH=' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'FIFI_APP_HELPERS:-/usr/share/fifi' \
     "$ROOT/initramfs/root/bin/app-update"
 grep -Fq 'chown -RhP 1000:1000 /fifi-data/apps' "$ROOT/initramfs/root/init"
@@ -573,6 +640,14 @@ cp "$ROOT/security/release-signing-public.pem" \
 bash "$ROOT/scripts/sanitize-initramfs-stage.sh" "$stage"
 
 echo "[test-security] compositor crashes are supervised"
+grep -Fq '"-nolisten", "tcp", "-ac"' \
+    "$ROOT/fifi/platform/linux/xwm.c"
+grep -Fq 'X11 cursor theme bundled' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'gdk-pixbuf-query-loaders' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'cp -a /usr/share/mime/.' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq ':/usr/share"' "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'GDK_PIXBUF_MODULE_FILE=' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq '# ── Supervise FiFi compositor' "$ROOT/initramfs/root/init"
 grep -Fq '"$FIFI_COMPOSITOR" 2>>/fifi-data/compositor.log' \
     "$ROOT/initramfs/root/init"

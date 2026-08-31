@@ -117,14 +117,13 @@ export DISPLAY=:0
 export LD_LIBRARY_PATH=/usr/lib:/usr/lib64
 export PIPEWIRE_RUNTIME_DIR=/tmp
 export PULSE_RUNTIME_PATH=/tmp/pulse
-# Disable the GTK/at-spi accessibility bridge and D-Bus session autolaunch. There
-# is no D-Bus/X11 session here; GTK apps (e.g. Firefox/LibreWolf) otherwise try to
-# autolaunch a session bus for a11y, and that failing path crashes them when a
-# menu/popup is shown. These make the attempt a graceful no-op instead.
+# Disable the GTK/at-spi accessibility bridge. A small local session bus is
+# started below for normal desktop integration; preventing a11y autoload keeps
+# heavyweight accessibility services optional.
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export GNOME_ACCESSIBILITY=0
-export DBUS_SESSION_BUS_ADDRESS=disabled:
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/fifi-session-bus
 
 # Populate the standard input-device metadata consumed by libinput. This is a
 # focused udev service, not a replacement for FiFi's custom PID 1 supervision.
@@ -300,6 +299,18 @@ chown 1000:1000 /fifi-data/home /home/fifi
 chmod 0700 /fifi-data/home /home/fifi
 mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
 
+# The optional model is persistent user data. Installer-era builds left this
+# tree root-owned, which let the UI find a model but prevented its unprivileged
+# server from writing state or starting. Refuse a redirected path, then migrate
+# the complete AI tree to the desktop identity.
+if [ ! -e /fifi-data/ai ] && [ ! -L /fifi-data/ai ]; then
+    mkdir -p /fifi-data/ai/models
+fi
+if [ -d /fifi-data/ai ] && [ ! -L /fifi-data/ai ]; then
+    chown -R 1000:1000 /fifi-data/ai
+    chmod 0700 /fifi-data/ai
+fi
+
 # Settings stores desktop preferences in one persistent file. Keep the data
 # directory root-owned, but let the desktop identity update this exact file.
 # Refuse an existing symlink so ownership changes cannot be redirected.
@@ -313,13 +324,20 @@ if [ -f /fifi-data/fifi-settings.conf ] &&
     chmod 0600 /fifi-data/fifi-settings.conf
 fi
 
-# Volume control is a normal desktop capability. Expose only ALSA mixer control
-# nodes to the desktop group; playback and raw hardware nodes keep their modes.
-for _audio_ctl in /dev/snd/controlC*; do
-    [ -c "$_audio_ctl" ] || continue
-    chown 0:1000 "$_audio_ctl"
-    chmod 0660 "$_audio_ctl"
+# Audio playback, capture, and mixer control are normal desktop capabilities.
+# PipeWire and every client run as uid 1000; grant only that local identity
+# access to ALSA devices instead of keeping an always-root audio daemon.
+for _audio_dev in /dev/snd/*; do
+    [ -c "$_audio_dev" ] || continue
+    chown 0:1000 "$_audio_dev"
+    chmod 0660 "$_audio_dev"
 done
+
+# Shared fonts are immutable, but fontconfig needs a private cache it can refresh
+# when an AppImage adds a face. Keep that cache owned by the desktop identity.
+mkdir -p /fifi-data/runtime/cache/fontconfig
+chown -R 1000:1000 /fifi-data/runtime/cache/fontconfig
+chmod 0700 /fifi-data/runtime/cache/fontconfig
 
 # Credentials written by older builds may have inherited a permissive umask.
 for _secret in /fifi-data/wifi.conf /fifi-data/wpa.conf \
@@ -348,8 +366,8 @@ chmod 0644 /fifi-data/wifi-scan.log /fifi-data/wifi.log \
 # for post-crash comparison. Root-owned fixed paths cannot be redirected through
 # persistent symlinks left by an older or compromised installation.
 for _boot_log in compositor.log compositor-supervisor.log xwayland.log \
-                 bluetooth.log pipewire.log pipewire-pulse.log network.log \
-                 doh.log tor.log; do
+                 bluetooth.log session-dbus.log pipewire.log wireplumber.log \
+                 pipewire-pulse.log network.log doh.log tor.log; do
     _current="/fifi-data/$_boot_log"
     _previous="$_current.previous"
     [ ! -L "$_current" ] || rm -f "$_current"
@@ -358,6 +376,17 @@ for _boot_log in compositor.log compositor-supervisor.log xwayland.log \
     : > "$_current"
     chmod 0644 "$_current"
 done
+
+# A real user-owned session bus keeps GTK, PipeWire, WirePlumber, and AppImages
+# from attempting fragile X11 autolaunches. It is a local Unix socket only and
+# carries no system privileges. Start it only after its per-boot log is ready.
+if [ -x /usr/bin/dbus-daemon ]; then
+    [ ! -S /tmp/fifi-session-bus ] || unlink /tmp/fifi-session-bus
+    /bin/fifi-user-exec /usr/bin/dbus-daemon --session \
+        --address=unix:path=/tmp/fifi-session-bus --fork --nopidfile \
+        >>/fifi-data/session-dbus.log 2>&1 || \
+        echo "session dbus: failed to start" >>/fifi-data/session-dbus.log
+fi
 
 # Keep GUI applications at the desktop UID. Administrative actions cross this
 # root-owned socket and are limited to the fixed verbs in fifi-admin.c. Start it
@@ -556,12 +585,11 @@ fi
                 fi
                 # Start DoH if enabled (dnscrypt-proxy listens on 127.0.0.1:53)
                 if [ -f /fifi-data/doh-enabled ] && [ -x /usr/bin/dnscrypt-proxy ]; then
-                    /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml \
-                        >>/fifi-data/doh.log 2>&1 &
-                    echo $! > /fifi-data/doh.pid
-                    sleep 1
-                    echo "nameserver 127.0.0.1" > /etc/resolv.conf
-                    echo "doh: started pid=$(cat /fifi-data/doh.pid)" >> /fifi-data/network.log
+                    if /bin/fifi-secctl doh on; then
+                        echo "doh: started pid=$(cat /fifi-data/doh.pid)" >> /fifi-data/network.log
+                    else
+                        echo "doh: failed to start" >> /fifi-data/network.log
+                    fi
                 fi
                 # Auto-connect WireGuard VPN if requested
                 if [ -f /fifi-data/vpn-autoconnect ] && [ -f /fifi-data/wg0.conf ]; then
@@ -682,7 +710,63 @@ fi
 # ── PipeWire audio daemon (multi-app mixing, PulseAudio-compatible) ──────────
 mkdir -p /tmp/pulse
 if [ -x /usr/bin/pipewire ]; then
-    /usr/bin/pipewire -c /usr/share/pipewire/fifi.conf >/fifi-data/pipewire.log 2>&1 &
+    # There is no udev/session-manager daemon in the compact FiFi image, so
+    # select a real ALSA PCM here and instantiate it directly in the graph.
+    # Prefer an analog duplex device, then any duplex/playback device.
+    _audio_pcm="$(sed -n '/Analog.*playback.*capture/{s/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*/\1,\2/p;q}' /proc/asound/pcm 2>/dev/null)"
+    [ -n "$_audio_pcm" ] || \
+        _audio_pcm="$(sed -n '/playback.*capture/{s/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*/\1,\2/p;q}' /proc/asound/pcm 2>/dev/null)"
+    [ -n "$_audio_pcm" ] || \
+        _audio_pcm="$(sed -n '/playback/{s/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*/\1,\2/p;q}' /proc/asound/pcm 2>/dev/null)"
+    if [ -n "$_audio_pcm" ]; then
+        _audio_card="$(expr "${_audio_pcm%,*}" + 0)"
+        _audio_device="$(expr "${_audio_pcm#*,}" + 0)"
+        _audio_path="hw:${_audio_card},${_audio_device}"
+        sed "s|@FIFI_ALSA_PATH@|$_audio_path|g" \
+            /usr/share/pipewire/fifi.conf > /tmp/fifi-pipewire.conf
+        chown 1000:1000 /tmp/fifi-pipewire.conf /tmp/pulse
+        chmod 0600 /tmp/fifi-pipewire.conf
+        echo "pipewire: using $_audio_path as desktop audio" > /fifi-data/pipewire.log
+        /bin/fifi-user-exec /usr/bin/pipewire -c /tmp/fifi-pipewire.conf \
+            >>/fifi-data/pipewire.log 2>&1 &
+        if [ -x /usr/bin/pipewire-pulse ]; then
+            # Most desktop applications speak the PulseAudio protocol. Keep the
+            # compatibility server unprivileged and on a fixed local socket.
+            (
+                _pulse_wait=0
+                while [ "$_pulse_wait" -lt 40 ] && [ ! -S /tmp/pipewire-0 ]; do
+                    sleep 0.1
+                    _pulse_wait=$((_pulse_wait + 1))
+                done
+                /bin/fifi-user-exec /usr/bin/pipewire-pulse \
+                    -c /usr/share/pipewire/pipewire-pulse.conf \
+                    >/fifi-data/pipewire-pulse.log 2>&1
+            ) &
+        else
+            echo "pipewire-pulse: compatibility server is unavailable" \
+                > /fifi-data/pipewire-pulse.log
+        fi
+        if [ -x /usr/bin/wireplumber ]; then
+            # FiFi's profile links application streams to its static ALSA
+            # nodes and monitors BlueZ, without duplicating ALSA devices.
+            (
+                _pw_wait=0
+                while [ "$_pw_wait" -lt 40 ] && [ ! -S /tmp/pipewire-0 ]; do
+                    sleep 0.1
+                    _pw_wait=$((_pw_wait + 1))
+                done
+                /bin/fifi-user-exec /usr/bin/wireplumber -p fifi \
+                    >/fifi-data/wireplumber.log 2>&1
+            ) &
+        else
+            echo "wireplumber: routing policy is unavailable" \
+                > /fifi-data/wireplumber.log
+        fi
+    else
+        echo "pipewire: no ALSA playback device found" > /fifi-data/pipewire.log
+        echo "wireplumber: not started without an ALSA device" \
+            > /fifi-data/wireplumber.log
+    fi
 fi
 
 # XWayland is started and owned by the compositor's XWM. Starting a second

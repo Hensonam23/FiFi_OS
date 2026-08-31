@@ -405,7 +405,13 @@ static int xwl_spawn(void) {
          * border). -wm gives XWayland our WM connection. xkb dir is the in-image
          * /usr/share/X11/xkb (the /fifi-data/runtime path is absent on a fresh
          * install, which aborted XWayland with "Failed to activate keyboard"). */
-        execl("/usr/bin/Xwayland", "Xwayland", ":0", "-wm", fds,
+        /* No Xauthority cookie is provisioned in the image. Permit clients on
+         * the local Unix socket (the only two accounts are root and fifi), but
+         * explicitly disable TCP so -ac never exposes an unauthenticated
+         * network listener. Namespace-root Steam is host uid 1000 and was
+         * otherwise rejected even though it reached /tmp/.X11-unix/X0. */
+        execl("/usr/bin/Xwayland", "Xwayland", ":0", "-nolisten", "tcp", "-ac",
+              "-wm", fds,
               "-geometry", geo,
               "-xkbdir", "/usr/share/X11/xkb", (char *)NULL);
         _exit(127);

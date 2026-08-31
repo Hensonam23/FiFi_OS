@@ -5,6 +5,10 @@
 # /fifi-data/ai/model.conf and runs it in conversation mode via llama.cpp's
 # llama-cli. Type `ai` in any FiFi terminal to start.
 
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 AI_DIR=/fifi-data/ai
 CONF="$AI_DIR/model.conf"
 

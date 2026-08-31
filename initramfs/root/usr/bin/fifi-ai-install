@@ -3,6 +3,10 @@
 # Same catalog as the installer; writes /fifi-data/ai/model.conf so `fifi-ai`
 # (type `ai`) picks it up. Run in a terminal: fifi-ai-install
 
+if [ "$(id -u)" = 0 ] && [ -x /bin/fifi-user-exec ]; then
+    exec /bin/fifi-user-exec "$0" "$@"
+fi
+
 AI_DIR=/fifi-data/ai
 HF=https://huggingface.co/bartowski
 . "${FIFI_VERIFY_LIB:-/usr/share/fifi/verified-download.sh}"

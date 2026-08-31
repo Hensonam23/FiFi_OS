@@ -471,6 +471,49 @@ static int g_ff_bx, g_ff_by, g_ff_bw, g_ff_bh;   /* family combo box */
 static int g_fs_bx, g_fs_by, g_fs_bw, g_fs_bh;   /* size combo box */
 static int g_dd_x, g_dd_y, g_dd_w, g_dd_rowh, g_dd_vis;  /* open list */
 
+/* Redraw only the visible family list in screen coordinates. Wheel input can
+ * arrive much faster than full-window frames; repainting the entire Settings
+ * page for every notch made a cached font list still feel sticky. */
+static void render_font_dropdown_region(uint32_t *fb) {
+    if (g_font_dd != 1 || g_font_n <= 0 || g_dd_vis <= 0) return;
+    if (g_font_dd_scroll > g_font_n - g_dd_vis)
+        g_font_dd_scroll = g_font_n - g_dd_vis;
+    if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
+
+    int old_offset = g_draw_y_offset;
+    int old_top = g_draw_clip_top, old_bottom = g_draw_clip_bottom;
+    g_draw_y_offset = 0;
+    g_draw_clip_top = g_dd_y;
+    g_draw_clip_bottom = g_dd_y + g_dd_rowh * g_dd_vis;
+
+    fill(fb, g_dd_x, g_dd_y, g_dd_w, g_dd_rowh * g_dd_vis, 0x00101a26u);
+    rect_border(fb, g_dd_x, g_dd_y, g_dd_w,
+                g_dd_rowh * g_dd_vis, C_WHITE);
+    int cur = font_cur_index();
+    for (int row = 0; row < g_dd_vis; row++) {
+        int idx = g_font_dd_scroll + row;
+        if (idx >= g_font_n) break;
+        int ry = g_dd_y + row * g_dd_rowh;
+        if (idx == cur)
+            fill(fb, g_dd_x + 1, ry, g_dd_w - 2, g_dd_rowh, g_accent);
+        font_preview_draw(fb, idx, g_dd_x + 8, ry + 4,
+                          C_WHITE, g_dd_w - 20);
+    }
+    if (g_font_n > g_dd_vis) {
+        int track = g_dd_rowh * g_dd_vis;
+        int thumb = track * g_dd_vis / g_font_n;
+        if (thumb < 14) thumb = 14;
+        int ty = g_dd_y + (track - thumb) * g_font_dd_scroll /
+                 (g_font_n - g_dd_vis);
+        fill(fb, g_dd_x + g_dd_w - 5, g_dd_y, 4, track, 0x00243448u);
+        fill(fb, g_dd_x + g_dd_w - 5, ty, 4, thumb, C_KEY);
+    }
+
+    g_draw_y_offset = old_offset;
+    g_draw_clip_top = old_top;
+    g_draw_clip_bottom = old_bottom;
+}
+
 /* Accent presets mirror the compositor's g_accent_presets[] (gui.c). */
 #define N_ACCENT FIFI_ACCENT_PRESET_COUNT
 static const uint32_t g_accent_presets[N_ACCENT] = FIFI_ACCENT_PRESETS;
@@ -1133,24 +1176,7 @@ static void render_personalize(uint32_t *fb) {
             dy = g_ff_by - rowh * vis;
         g_dd_x = dx; g_dd_y = dy - g_pers_scroll;
         g_dd_w = dw; g_dd_rowh = rowh; g_dd_vis = vis;
-        if (g_font_dd_scroll > g_font_n - vis) g_font_dd_scroll = g_font_n - vis;
-        if (g_font_dd_scroll < 0) g_font_dd_scroll = 0;
-        fill(fb, dx, dy, dw, rowh * vis, 0x00101a26u);
-        rect_border(fb, dx, dy, dw, rowh * vis, C_WHITE);
-        int cur = font_cur_index();
-        for (int r = 0; r < vis; r++) {
-            int idx = g_font_dd_scroll + r;
-            if (idx >= g_font_n) break;
-            int ry = dy + r * rowh;
-            if (idx == cur) fill(fb, dx + 1, ry, dw - 2, rowh, g_accent);
-            font_preview_draw(fb, idx, dx + 8, ry + 4, C_WHITE, dw - 20);
-        }
-        if (g_font_n > vis) {                       /* scrollbar */
-            int trk = rowh * vis, th = trk * vis / g_font_n; if (th < 14) th = 14;
-            int ty = dy + (trk - th) * g_font_dd_scroll / (g_font_n - vis);
-            fill(fb, dx + dw - 5, dy, 4, trk, 0x00243448u);
-            fill(fb, dx + dw - 5, ty, 4, th, C_KEY);
-        }
+        render_font_dropdown_region(fb);
     } else if (g_font_dd == 2) {
         int rowh = 28, vis = N_FONT_SIZES;
         int dw = g_fs_bw, dx = g_fs_bx, dy = g_fs_by + g_fs_bh;
@@ -1791,11 +1817,13 @@ int main(int argc, char **argv) {
         }
 
         if (dirty && running) {
-            render(fb);
-            if (font_dropdown_scrolled && g_font_dd == 1)
+            if (font_dropdown_scrolled && g_font_dd == 1) {
+                render_font_dropdown_region(fb);
                 send_font_dropdown(sock, fb);
-            else
+            } else {
+                render(fb);
                 send_frame(sock, fb);
+            }
         }
     }
 

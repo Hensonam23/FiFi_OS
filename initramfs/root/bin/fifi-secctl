@@ -44,9 +44,39 @@ case "$what" in
         echo "doh: dnscrypt-proxy is unavailable" > "$D/doh.log"
         exit 1
       }
-      : > "$D/doh-enabled"
+      if [ -s "$D/doh.pid" ] && kill -0 "$(cat "$D/doh.pid")" 2>/dev/null &&
+         /bin/timeout 2 /bin/nslookup example.com 127.0.0.1 >/dev/null 2>&1; then
+        : > "$D/doh-enabled"
+        printf '%s\n' 'nameserver 127.0.0.1' > /etc/resolv.conf
+        exit 0
+      fi
+      [ ! -L "$D/doh.log" ] || rm -f "$D/doh.log"
+      [ ! -L "$D/dnscrypt" ] || rm -f "$D/dnscrypt"
+      mkdir -p "$D/dnscrypt"
+      chown -R 1000:1000 "$D/dnscrypt"
+      chmod 0700 "$D/dnscrypt"
+      : > "$D/doh.log"
+      chown 1000:1000 "$D/doh.log"
+      chmod 0644 "$D/doh.log"
       /usr/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy.toml >/dev/null 2>&1 &
       echo $! > "$D/doh.pid"
+      _doh_ready=0
+      for _doh_try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if ! kill -0 "$(cat "$D/doh.pid")" 2>/dev/null; then break; fi
+        if /bin/timeout 2 /bin/nslookup example.com 127.0.0.1 >/dev/null 2>&1; then
+          _doh_ready=1
+          break
+        fi
+        sleep 0.5
+      done
+      if [ "$_doh_ready" != 1 ]; then
+        kill "$(cat "$D/doh.pid")" 2>/dev/null || true
+        rm -f "$D/doh-enabled" "$D/doh.pid"
+        printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 9.9.9.9' > /etc/resolv.conf
+        echo "doh: failed readiness check" >> "$D/doh.log"
+        exit 1
+      fi
+      : > "$D/doh-enabled"
       printf '%s\n' 'nameserver 127.0.0.1' > /etc/resolv.conf
     else
       [ -f "$D/doh.pid" ] && kill "$(cat "$D/doh.pid")" 2>/dev/null

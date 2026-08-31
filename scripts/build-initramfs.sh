@@ -413,6 +413,19 @@ for lib in libgtk-3.so.0 libgdk-3.so.0 libcairo.so.2 libcairo-gobject.so.2 \
         done
     done
 done
+
+# GTK/GdkPixbuf needs its loader registry and MIME database even when PNG/JPEG
+# decoders are compiled into the main library. Without these, browser window
+# controls and other resource icons log pixbuf failures and may render blank.
+if [ -x /usr/bin/gdk-pixbuf-query-loaders ]; then
+    mkdir -p "$STAGE/usr/lib/gdk-pixbuf-2.0/2.10.0"
+    /usr/bin/gdk-pixbuf-query-loaders \
+        > "$STAGE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+fi
+if [ -d /usr/share/mime ]; then
+    mkdir -p "$STAGE/usr/share/mime"
+    cp -a /usr/share/mime/. "$STAGE/usr/share/mime/"
+fi
 echo "[initramfs] GUI runtime libraries bundled"
 
 # ── Disk installer tools (parted, mkfs.ext4, mkfs.fat, blkid, grub-install) ──
@@ -691,9 +704,18 @@ mkdir -p "$STAGE/usr/lib/spa-0.2/support" "$STAGE/usr/lib/spa-0.2/audiomixer"
 mkdir -p "$STAGE/usr/lib/pipewire-0.3"
 mkdir -p "$STAGE/usr/share/pipewire"
 
+# libasound cannot open even a direct hw:N,M PCM without its base definitions.
+# PipeWire previously started with an empty graph because this data was absent.
+if [ -d /usr/share/alsa ]; then
+    mkdir -p "$STAGE/usr/share/alsa"
+    cp -a /usr/share/alsa/. "$STAGE/usr/share/alsa/"
+else
+    echo "[initramfs] WARNING: ALSA configuration data is unavailable"
+fi
+
 if [ -x /usr/bin/pipewire ] && [ -x /usr/bin/pipewire-pulse ]; then
-# Copy pipewire binaries
-for bin in pipewire pipewire-pulse; do
+# Copy the daemon plus small on-device diagnostics used by the acceptance pass.
+for bin in pipewire pipewire-pulse pw-play pw-cli; do
     [ -x "/usr/bin/$bin" ] && cp "/usr/bin/$bin" "$STAGE/usr/bin/$bin"
 done
 
@@ -702,6 +724,7 @@ for so in \
     /usr/lib/spa-0.2/alsa/libspa-alsa.so \
     /usr/lib/spa-0.2/audioconvert/libspa-audioconvert.so \
     /usr/lib/spa-0.2/support/libspa-support.so \
+    /usr/lib/spa-0.2/support/libspa-dbus.so \
     /usr/lib/spa-0.2/audiomixer/libspa-audiomixer.so; do
     dir=$(dirname "$so" | sed "s|/usr/lib|$STAGE/usr/lib|")
     [ -f "$so" ] && mkdir -p "$dir" && cp "$so" "$dir/"
@@ -712,6 +735,7 @@ for mod in \
     libpipewire-module-protocol-native.so \
     libpipewire-module-protocol-pulse.so \
     libpipewire-module-client-node.so \
+    libpipewire-module-client-device.so \
     libpipewire-module-adapter.so \
     libpipewire-module-link-factory.so \
     libpipewire-module-metadata.so \
@@ -724,19 +748,26 @@ for mod in \
     [ -f "$src" ] && cp "$src" "$STAGE/usr/lib/pipewire-0.3/"
 done
 
-# Copy pipewire-pulse config
-[ -f /usr/share/pipewire/pipewire-pulse.conf ] && \
-    cp /usr/share/pipewire/pipewire-pulse.conf "$STAGE/usr/share/pipewire/"
+# FiFi ships a small Pulse protocol config for its already-created hardware
+# graph. Host defaults try to load distribution Pulse modules that are not part
+# of this compact image and leave a misleading startup error.
+if [ ! -f "$STAGE/usr/share/pipewire/pipewire-pulse.conf" ]; then
+    echo "[initramfs] ERROR: FiFi PipeWire-Pulse configuration is missing" >&2
+    exit 1
+fi
 
 # Collect all unique shared library dependencies for pipewire + spa plugins
 PW_LIBS=$(
     {
         ldd /usr/bin/pipewire
         ldd /usr/bin/pipewire-pulse
+        [ ! -x /usr/bin/pw-play ] || ldd /usr/bin/pw-play
+        [ ! -x /usr/bin/pw-cli ] || ldd /usr/bin/pw-cli
         for f in \
             /usr/lib/spa-0.2/alsa/libspa-alsa.so \
             /usr/lib/spa-0.2/audioconvert/libspa-audioconvert.so \
             /usr/lib/spa-0.2/support/libspa-support.so \
+            /usr/lib/spa-0.2/support/libspa-dbus.so \
             /usr/lib/spa-0.2/audiomixer/libspa-audiomixer.so; do
             [ -f "$f" ] && ldd "$f"
         done
@@ -755,6 +786,31 @@ for lib in $PW_LIBS; do
     link_path="$STAGE/usr/lib/$link_name"
     [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
 done
+
+# PipeWire deliberately separates routing policy into a session manager. A
+# daemon without one accepts app streams but never links them to the ALSA sink.
+# Bundle WirePlumber and run its policy-only profile over FiFi's static devices.
+if [ -x /usr/bin/wireplumber ] && [ -d /usr/share/wireplumber ] &&
+   [ -d /usr/lib/wireplumber-0.5 ]; then
+    cp /usr/bin/wireplumber "$STAGE/usr/bin/"
+    cp -a /usr/share/wireplumber "$STAGE/usr/share/"
+    cp -a /usr/lib/wireplumber-0.5 "$STAGE/usr/lib/"
+    for _wp_seed in /usr/bin/wireplumber /usr/lib/wireplumber-0.5/*.so; do
+        [ -f "$_wp_seed" ] || continue
+        for _wp_lib in $(ldd "$_wp_seed" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/"); do
+            _wp_real="$(realpath "$_wp_lib" 2>/dev/null)" || continue
+            [ -f "$_wp_real" ] || continue
+            [ -f "$STAGE/usr/lib/$(basename "$_wp_real")" ] ||
+                cp "$_wp_real" "$STAGE/usr/lib/"
+            [ -e "$STAGE/usr/lib/$(basename "$_wp_lib")" ] ||
+                ln -sf "$(basename "$_wp_real")" \
+                    "$STAGE/usr/lib/$(basename "$_wp_lib")"
+        done
+    done
+    echo "[initramfs] WirePlumber audio routing policy bundled"
+else
+    echo "[initramfs] WARNING: WirePlumber unavailable; app audio cannot be routed"
+fi
 # ld-linux loader lives in lib64
 if [ -f /usr/lib64/ld-linux-x86-64.so.2 ]; then
     cp /usr/lib64/ld-linux-x86-64.so.2 "$STAGE/usr/lib64/"
@@ -794,6 +850,25 @@ if [ -x /usr/bin/Xwayland ]; then
         [ -e "$link_path" ] || ln -sf "$(basename "$real")" "$link_path"
     done
     echo "[initramfs] XWayland bundled ($(du -sh /usr/bin/Xwayland | cut -f1))"
+
+    # X11 toolkits request standard cursor names such as hand2. Without a real
+    # cursor theme they log failures and fall back inconsistently, so include
+    # the compact Adwaita cursor set plus the default theme alias.
+    if [ -d /usr/share/icons/Adwaita/cursors ] &&
+       [ -f /usr/share/icons/Adwaita/index.theme ] &&
+       [ -f /usr/share/icons/default/index.theme ]; then
+        mkdir -p "$STAGE/usr/share/icons/Adwaita" \
+                 "$STAGE/usr/share/icons/default"
+        cp -a /usr/share/icons/Adwaita/cursors \
+            "$STAGE/usr/share/icons/Adwaita/"
+        cp /usr/share/icons/Adwaita/index.theme \
+            "$STAGE/usr/share/icons/Adwaita/index.theme"
+        cp /usr/share/icons/default/index.theme \
+            "$STAGE/usr/share/icons/default/index.theme"
+        echo "[initramfs] X11 cursor theme bundled"
+    else
+        echo "[initramfs] WARNING: X11 cursor theme is unavailable"
+    fi
 
     # Helper: copy a lib + resolve its symlink chain into $STAGE/usr/lib.
     stage_lib() {
@@ -1242,6 +1317,10 @@ for b in bluetoothctl dbus-daemon dbus-uuidgen; do
     [ -x "$src" ] && cp "$src" "$STAGE/usr/bin/" || true
 done
 cp /usr/lib/spa-0.2/bluez5/*.so "$STAGE/usr/lib/spa-0.2/bluez5/" 2>/dev/null || true
+if [ -d /usr/share/spa-0.2/bluez5 ]; then
+    mkdir -p "$STAGE/usr/share/spa-0.2/bluez5"
+    cp -a /usr/share/spa-0.2/bluez5/. "$STAGE/usr/share/spa-0.2/bluez5/"
+fi
 # D-Bus system bus config: use FiFi's minimal single-user policy. Copying the
 # host's complete service policy emits errors for accounts FiFi intentionally
 # does not ship and makes a healthy Bluetooth service look broken.
@@ -1455,74 +1534,12 @@ echo "/usr/lib64" >> "$STAGE/etc/ld.so.conf.d/fifi.conf"
 # ld.so.cache — pre-generate inside stage
 ldconfig -r "$STAGE" 2>/dev/null || true
 
-# Write a FiFi-specific PipeWire config (no udev, no wireplumber required)
-cat > "$STAGE/usr/share/pipewire/fifi.conf" << 'PWCFG'
-context.properties = {
-    core.daemon = true
-    core.name   = pipewire-0
-    support.dbus = false
-    log.level = 2
-    link.max-buffers = 16
-    default.clock.rate = 48000
-    default.clock.quantum = 1024
-    default.clock.min-quantum = 32
+# The FiFi-specific, session-manager-free PipeWire graph is part of the root
+# overlay, so it is reviewable and testable rather than generated in this build.
+[ -f "$STAGE/usr/share/pipewire/fifi.conf" ] || {
+    echo "[initramfs] ERROR: FiFi PipeWire configuration is missing" >&2
+    exit 1
 }
-context.spa-libs = {
-    audio.convert.* = audioconvert/libspa-audioconvert
-    audio.adapt      = audioconvert/libspa-audioconvert
-    api.alsa.*       = alsa/libspa-alsa
-    support.*        = support/libspa-support
-    audio.mixer      = audiomixer/libspa-audiomixer
-}
-context.modules = [
-    { name = libpipewire-module-rt              flags = [ ifexists nofail ] }
-    { name = libpipewire-module-protocol-native }
-    { name = libpipewire-module-metadata        flags = [ ifexists nofail ] }
-    { name = libpipewire-module-spa-node-factory }
-    { name = libpipewire-module-spa-device-factory }
-    { name = libpipewire-module-client-node }
-    { name = libpipewire-module-access          flags = [ nofail ] }
-    { name = libpipewire-module-adapter }
-    { name = libpipewire-module-link-factory }
-    { name = libpipewire-module-protocol-pulse  flags = [ ifexists nofail ] }
-]
-context.objects = [
-    { factory = metadata
-        args = { metadata.name = default }
-    }
-    { factory = spa-node-factory
-        args = {
-            factory.name    = support.node.driver
-            node.name       = Dummy-Driver
-            node.group      = pipewire.dummy
-            priority.driver = 20000
-        }
-    }
-    { factory = spa-device-factory
-        args = {
-            factory.name = api.alsa.enum.udev
-            alsa.use-acp = true
-            device.object.properties = {
-                api.acp.auto-profile = true
-                api.acp.auto-port    = true
-                device.object.properties = {
-                    node.adapter = audio.adapt
-                    resample.disable = false
-                    adapter.auto-port-config = {
-                        mode = dsp
-                        monitor = false
-                        control = false
-                        position = preserve
-                    }
-                }
-            }
-        }
-    }
-]
-pulse.properties = {
-    server.address = [ "unix:native" ]
-}
-PWCFG
 
 # Ensure /init is executable
 chmod +x "$STAGE/init"

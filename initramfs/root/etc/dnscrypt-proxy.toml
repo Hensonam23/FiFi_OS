@@ -3,6 +3,8 @@
 ## Start with: dnscrypt-proxy -config /etc/dnscrypt-proxy.toml
 
 listen_addresses    = ['127.0.0.1:53']
+server_names        = ['cloudflare', 'quad9-doh-ip4-port443-filter-pri']
+user_name           = 'fifi'
 max_clients         = 250
 ipv4_servers        = true
 ipv6_servers        = false
@@ -30,5 +32,5 @@ netprobe_address    = '1.1.1.1:53'
     urls         = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md',
                     'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md']
     minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-    cache_file   = '/fifi-data/dnscrypt-resolvers.md'
+    cache_file   = '/fifi-data/dnscrypt/public-resolvers.md'
     refresh_delay = 72

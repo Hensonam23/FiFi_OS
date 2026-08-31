@@ -8,6 +8,10 @@ grep -Fq 'bool is_pointer = type == LIBINPUT_EVENT_POINTER_MOTION' \
     "$ROOT/fifi/platform/linux/input.c"
 grep -Fq 'libinput_event_pointer_get_axis_value(' \
     "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'dup2(nullfd, STDERR_FILENO)' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
+grep -Fq '"-p", "/var/run/wpa_supplicant"' \
+    "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq 'if (pointer_ci >= 0 && !g_wl_clients[pointer_ci].pointer_id)' \
     "$ROOT/fifi/platform/linux/wayland.c"
 grep -Fq 'replacement pointer receives a fresh' \
