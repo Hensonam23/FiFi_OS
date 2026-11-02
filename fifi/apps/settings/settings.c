@@ -942,6 +942,8 @@ static const char *signal_bars(int dbm) {
 static bool g_sec_fw_on, g_sec_doh_on, g_sec_vpn_on, g_sec_tor_on, g_sec_remote_on;
 static char g_sec_fw[96], g_sec_doh[96], g_sec_vpn[96], g_sec_tor[96], g_sec_remote[96];
 static int  g_sec_priv;
+static bool g_sec_apparmor_on, g_sec_luks_ready, g_sec_secure_boot_on;
+static char g_sec_apparmor[96], g_sec_luks[96], g_sec_secure_boot[96];
 static pid_t g_sec_pid = -1;
 static int g_sec_pipe = -1;
 static char g_sec_action[20] = "";
@@ -1005,6 +1007,33 @@ static void sec_update(void) {
                       !strstr(l,"localhost") && !strstr(l,"fifios")) g_sec_priv++;
                   if (!nl) break;
                   l = nl + 1; } } } }
+    /* AppArmor, encryption capability, and firmware Secure Boot state are
+     * important security facts, not specialist-only diagnostics. */
+    g_sec_apparmor_on = false;
+    snprintf(g_sec_apparmor, sizeof g_sec_apparmor, "Not available");
+    { int fd = open("/fifi-data/apparmor-status", O_RDONLY);
+      if (fd >= 0) { char b[160] = {0}; ssize_t n = read(fd, b, sizeof(b)-1); close(fd);
+          if (n > 0) { b[n] = '\0'; char *nl = strchr(b, '\n'); if (nl) *nl = '\0';
+              g_sec_apparmor_on = strstr(b, "loaded") != NULL;
+              snprintf(g_sec_apparmor, sizeof g_sec_apparmor, "%s", b); } } }
+    g_sec_luks_ready = access("/usr/bin/cryptsetup", X_OK) == 0;
+    snprintf(g_sec_luks, sizeof g_sec_luks, "%s", g_sec_luks_ready
+             ? "LUKS2 tools ready (encrypt with installer)"
+             : "LUKS2 tools unavailable on this boot");
+    g_sec_secure_boot_on = false;
+    snprintf(g_sec_secure_boot, sizeof g_sec_secure_boot, "Unknown");
+    { int fd = open("/sys/firmware/efi/efivars/"
+                    "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", O_RDONLY);
+      if (fd >= 0) { uint8_t v[5] = {0}; ssize_t n = read(fd, v, sizeof v); close(fd);
+          if (n == (ssize_t)sizeof v) {
+              g_sec_secure_boot_on = v[4] == 1;
+              snprintf(g_sec_secure_boot, sizeof g_sec_secure_boot,
+                       g_sec_secure_boot_on ? "Enabled" : "Disabled");
+          } } else if (access("/sys/firmware/efi", F_OK) != 0) {
+          snprintf(g_sec_secure_boot, sizeof g_sec_secure_boot, "Not an EFI boot");
+      } else {
+          snprintf(g_sec_secure_boot, sizeof g_sec_secure_boot, "Cannot read status");
+      } }
 }
 
 /* ── Content-pane renderers ──────────────────────────────────────────────── */
@@ -1403,6 +1432,18 @@ static void render_security(uint32_t *fb) {
       draw_str_clip(fb, pv, x + 16*CW, ty, C_VAL, g_win_w - (x+16*CW) - CPAD);
       y += ROW_H + 4;
     }
+#define SEC_STATUS(name, on, txt) do { \
+      fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_B); \
+      int ty = y + (ROW_H - g_glyph_h)/2; \
+      draw_str(fb, (on) ? "[ON] " : "[--]", x, ty, (on) ? C_GREEN : C_GREY); \
+      draw_str(fb, (name), x + 6*CW, ty, C_KEY); \
+      draw_str_clip(fb, (txt), x + 16*CW, ty, C_VAL, g_win_w - (x+16*CW) - CPAD); \
+      y += ROW_H + 4; \
+    } while (0)
+    SEC_STATUS("AppArmor", g_sec_apparmor_on, g_sec_apparmor);
+    SEC_STATUS("Encryption", g_sec_luks_ready, g_sec_luks);
+    SEC_STATUS("Secure Boot", g_sec_secure_boot_on, g_sec_secure_boot);
+#undef SEC_STATUS
     y += 10;
     draw_str_clip(fb, g_sec_note, x, y,
                   g_sec_pid > 0 ? C_YELLOW : (g_sec_note_ok ? C_GREEN : C_RED),
