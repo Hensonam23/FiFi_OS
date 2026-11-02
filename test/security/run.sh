@@ -194,6 +194,10 @@ broker_bin="$TMP/broker-bin"
 broker_socket="$TMP/fifi-admin.sock"
 broker_log="$TMP/admin.log"
 mkdir -p "$broker_bin"
+backlight_root="$TMP/backlight"
+mkdir -p "$backlight_root/panel0"
+printf '1000\n' > "$backlight_root/panel0/max_brightness"
+printf '500\n' > "$backlight_root/panel0/brightness"
 cat > "$broker_bin/fifi-secctl" <<'EOF'
 #!/bin/sh
 printf 'security %s %s\n' "$1" "$2" >> "$FIFI_TEST_ADMIN_LOG"
@@ -266,6 +270,7 @@ FIFI_UPDATE_ROLLBACK="$broker_bin/update-rollback" \
 FIFI_INSTALL_APPLY="$broker_bin/fifi-install.sh" \
 FIFI_INSTALL_ALLOWED=1 \
 FIFI_POWERCTL="$broker_bin/fifi-powerctl" \
+FIFI_BACKLIGHT_ROOT="$backlight_root" \
 FIFI_TEST_ADMIN_LOG="$broker_log" \
     "$TMP/fifi-admin" --daemon &
 broker_pid=$!
@@ -320,11 +325,19 @@ grep -Fxq 'update apply stable' "$broker_log"
 grep -Fxq 'update rollback' "$broker_log"
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" power reboot
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" power poweroff
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" power suspend
+FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" display brightness 73
 grep -Fxq 'power reboot' "$broker_log"
 grep -Fxq 'power poweroff' "$broker_log"
+grep -Fxq 'power suspend' "$broker_log"
+grep -Fxq '730' "$backlight_root/panel0/brightness"
 bad_power="$(FIFI_ADMIN_SOCKET="$broker_socket" \
-    "$TMP/fifi-admin" power suspend 2>&1 || true)"
+    "$TMP/fifi-admin" power hibernate 2>&1 || true)"
 grep -Fq 'operation is not allowed' <<<"$bad_power"
+bad_brightness="$(FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" display brightness 0 2>&1 || true)"
+grep -Fq 'operation is not allowed' <<<"$bad_brightness"
+grep -Fxq '730' "$backlight_root/panel0/brightness"
 if FIFI_ADMIN_SOCKET="$broker_socket" \
     "$TMP/fifi-admin" update usb >"$TMP/update-usb.out" 2>&1; then
     echo "failed privileged USB action reported success" >&2

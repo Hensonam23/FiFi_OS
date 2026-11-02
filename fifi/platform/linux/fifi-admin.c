@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -38,6 +40,17 @@ static int valid_interface(const char *name) {
 static int valid_channel(const char *channel) {
     return channel && (strcmp(channel, "stable") == 0 ||
                        strcmp(channel, "test") == 0);
+}
+
+static int parse_brightness(const char *value, int *percent) {
+    char *end = NULL;
+    long parsed;
+    if (!value || !*value) return 0;
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno || !end || *end || parsed < 5 || parsed > 100) return 0;
+    *percent = (int)parsed;
+    return 1;
 }
 
 static const char *socket_path(void) {
@@ -139,6 +152,95 @@ static void perform_power_action(const char *action) {
         dprintf(STDERR_FILENO, "fifi-admin: %s failed: %s\n", action,
                 strerror(errno));
     _exit(1);
+}
+
+static void finish_status(int status) {
+    dprintf(STDOUT_FILENO, "\nFIFI_ADMIN_STATUS %d\n", status);
+    _exit(0);
+}
+
+static int read_positive_int_at(int directory, const char *name, long *value) {
+    char buffer[64] = {0};
+    char *end = NULL;
+    int fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    ssize_t got = read(fd, buffer, sizeof(buffer) - 1u);
+    close(fd);
+    if (got <= 0) return -1;
+    errno = 0;
+    long parsed = strtol(buffer, &end, 10);
+    if (errno || end == buffer || parsed <= 0) return -1;
+    *value = parsed;
+    return 0;
+}
+
+static void perform_brightness(int percent) {
+    const char *root_path = getenv("FIFI_BACKLIGHT_ROOT");
+    if (!root_path || !*root_path) root_path = "/sys/class/backlight";
+    DIR *root = opendir(root_path);
+    if (!root) {
+        dprintf(STDERR_FILENO, "fifi-admin: display brightness unavailable: %s\n",
+                strerror(errno));
+        finish_status(1);
+    }
+
+    int result = 1;
+    errno = ENODEV;
+    struct dirent *entry;
+    while ((entry = readdir(root))) {
+        if (entry->d_name[0] == '.' || !valid_interface(entry->d_name)) continue;
+        int device = openat(dirfd(root), entry->d_name,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (device < 0) continue;
+        long maximum = 0;
+        if (read_positive_int_at(device, "max_brightness", &maximum) == 0) {
+            long requested = (maximum * percent + 50) / 100;
+            if (requested < 1) requested = 1;
+            char value[64];
+            int length = snprintf(value, sizeof(value), "%ld\n", requested);
+            int brightness = openat(device, "brightness",
+                                    O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+            if (brightness >= 0) {
+                ssize_t wrote = write(brightness, value, (size_t)length);
+                int saved = errno;
+                close(brightness);
+                errno = saved;
+                if (wrote == length) result = 0;
+            }
+        }
+        close(device);
+        if (result == 0) break;
+    }
+    closedir(root);
+    if (result != 0)
+        dprintf(STDERR_FILENO, "fifi-admin: could not set display brightness: %s\n",
+                strerror(errno));
+    finish_status(result);
+}
+
+static void perform_suspend(void) {
+    const char *tool = getenv("FIFI_POWERCTL");
+    if (tool && *tool) {
+        char *const power_argv[] = { (char *)tool, "suspend", NULL };
+        run_status_command(tool, power_argv);
+    }
+    int fd = open("/sys/power/state", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        dprintf(STDERR_FILENO, "fifi-admin: suspend unavailable: %s\n",
+                strerror(errno));
+        finish_status(1);
+    }
+    sync();
+    ssize_t wrote = write(fd, "mem\n", 4);
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    if (wrote != 4) {
+        dprintf(STDERR_FILENO, "fifi-admin: suspend failed: %s\n",
+                strerror(errno));
+        finish_status(1);
+    }
+    finish_status(0);
 }
 
 static void run_fixed_command(char *request) {
@@ -246,6 +348,17 @@ static void run_fixed_command(char *request) {
                (strcmp(args[1], "reboot") == 0 ||
                 strcmp(args[1], "poweroff") == 0)) {
         perform_power_action(args[1]);
+    } else if (argc == 2 && strcmp(args[0], "power") == 0 &&
+               strcmp(args[1], "suspend") == 0) {
+        perform_suspend();
+    } else if (argc == 3 && strcmp(args[0], "display") == 0 &&
+               strcmp(args[1], "brightness") == 0) {
+        int percent = 0;
+        if (!parse_brightness(args[2], &percent)) {
+            dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
+            _exit(64);
+        }
+        perform_brightness(percent);
     } else {
         dprintf(STDERR_FILENO, "fifi-admin: operation is not allowed\n");
         _exit(64);
@@ -445,6 +558,10 @@ static int client_main(int argc, char **argv) {
          (strcmp(argv[2], "scan") == 0 ||
           strcmp(argv[2], "disconnect") == 0)) ||
         (argc >= 3 && strcmp(argv[1], "update") == 0) ||
+        (argc == 4 && strcmp(argv[1], "display") == 0 &&
+         strcmp(argv[2], "brightness") == 0) ||
+        (argc == 3 && strcmp(argv[1], "power") == 0 &&
+         strcmp(argv[2], "suspend") == 0) ||
         (argc >= 3 && strcmp(argv[1], "install") == 0 &&
          strcmp(argv[2], "apply") == 0))
         return copy_update_response(sock);

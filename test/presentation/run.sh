@@ -44,6 +44,10 @@ grep -Fq 'uint64_t pw = gui_text_width(pills[i]) + 26u;' \
     "$ROOT/kernel/src/gui_render.c"
 grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "wifi")' \
     "$ROOT/kernel/src/gui.c"
+grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "power")' \
+    "$ROOT/kernel/src/gui.c"
+grep -Fq 'status_item == TRAY_CPU || status_item == TRAY_MEM' \
+    "$ROOT/kernel/src/gui.c"
 grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "system")' \
     "$ROOT/kernel/src/gui.c"
 grep -Fq 'g_vol_popup_open = !g_vol_popup_open;' "$ROOT/kernel/src/gui.c"

@@ -10,12 +10,14 @@
  *                 using the same boundary as the standalone fifi-wifi app.
  *   Network     : live interface / IP / RX-TX throughput (netmon logic).
  *   System      : live CPU freq / memory / uptime / load / processes + volume.
+ *   Power       : battery state, display brightness, and guarded suspend.
  *   Security    : live status and fixed-broker toggles for firewall / DoH /
  *                 VPN / Tor, plus read-only privacy-blocking status.
  *   About       : OS version + kernel (uname).
  *
  * Deep-linking: `fifi-settings <section>` opens straight on a tab, where
- * <section> is one of: personalize | wifi | network | system | security | about
+ * <section> is one of: personalize | wifi | network | system | power |
+ * security | about
  *
  * Build: gcc -O2 -static -o fifi-settings settings.c   (see Makefile)
  */
@@ -212,9 +214,9 @@ static void draw_btn(uint32_t *fb, int x, int y, int w, int h,
 }
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
-enum { TAB_PERS = 0, TAB_WIFI, TAB_NET, TAB_SYS, TAB_SEC, TAB_ABOUT, N_TABS };
+enum { TAB_PERS = 0, TAB_WIFI, TAB_NET, TAB_SYS, TAB_POWER, TAB_SEC, TAB_ABOUT, N_TABS };
 static const char *g_tab_labels[N_TABS] = {
-    "Personalize", "Wi-Fi", "Network", "System", "Security", "About"
+    "Personalize", "Wi-Fi", "Network", "System", "Power", "Security", "About"
 };
 static int g_tab = TAB_PERS;
 
@@ -616,6 +618,102 @@ static int   g_sl_x, g_sl_y, g_sl_w = 240, g_sl_h = 14;
 static int   g_mouse_sl_x, g_mouse_sl_y;
 static int   g_touchpad_sl_x, g_touchpad_sl_y;
 static int   g_pointer_sl_w = 240, g_pointer_sl_h = 14;
+static int   g_brightness = 100;
+static bool  g_backlight_available = false;
+static bool  g_suspend_available = false;
+static int   g_bright_sl_x, g_bright_sl_y, g_bright_sl_w = 240, g_bright_sl_h = 14;
+static int   g_suspend_x, g_suspend_y, g_suspend_w = 168, g_suspend_h = 34;
+static time_t g_suspend_armed = 0;
+static char  g_power_note[128] = "Brightness changes apply immediately.";
+
+static int read_number_file(const char *path, long *value) {
+    char buffer[64] = {0};
+    char *end = NULL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    ssize_t got = read(fd, buffer, sizeof(buffer) - 1u);
+    close(fd);
+    if (got <= 0) return -1;
+    errno = 0;
+    long parsed = strtol(buffer, &end, 10);
+    if (errno || end == buffer || parsed < 0) return -1;
+    *value = parsed;
+    return 0;
+}
+
+static void power_refresh(void) {
+    gather_info();
+    g_backlight_available = false;
+    DIR *root = opendir("/sys/class/backlight");
+    if (root) {
+        struct dirent *entry;
+        while ((entry = readdir(root))) {
+            if (entry->d_name[0] == '.') continue;
+            char path[320];
+            long current = 0, maximum = 0;
+            snprintf(path, sizeof(path), "/sys/class/backlight/%s/max_brightness",
+                     entry->d_name);
+            if (read_number_file(path, &maximum) != 0 || maximum <= 0) continue;
+            snprintf(path, sizeof(path),
+                     "/sys/class/backlight/%s/actual_brightness", entry->d_name);
+            if (read_number_file(path, &current) != 0) {
+                snprintf(path, sizeof(path),
+                         "/sys/class/backlight/%s/brightness", entry->d_name);
+                if (read_number_file(path, &current) != 0) continue;
+            }
+            g_brightness = (int)((current * 100 + maximum / 2) / maximum);
+            if (g_brightness < 0) g_brightness = 0;
+            if (g_brightness > 100) g_brightness = 100;
+            g_backlight_available = true;
+            break;
+        }
+        closedir(root);
+    }
+
+    g_suspend_available = false;
+    int fd = open("/sys/power/state", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        char states[128] = {0};
+        ssize_t got = read(fd, states, sizeof(states) - 1u);
+        close(fd);
+        if (got > 0) {
+            char *save = NULL;
+            for (char *state = strtok_r(states, " \t\r\n", &save); state;
+                 state = strtok_r(NULL, " \t\r\n", &save))
+                if (strcmp(state, "mem") == 0) g_suspend_available = true;
+        }
+    }
+}
+
+static int run_power_admin(const char *action, int value) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (quiet >= 0) {
+            dup2(quiet, STDOUT_FILENO);
+            dup2(quiet, STDERR_FILENO);
+            if (quiet > STDERR_FILENO) close(quiet);
+        }
+        for (int i = 3; i < 64; i++) close(i);
+        if (strcmp(action, "brightness") == 0) {
+            char percent[8];
+            snprintf(percent, sizeof(percent), "%d", value);
+            execl("/bin/fifi-admin", "fifi-admin", "display", "brightness",
+                  percent, (char *)NULL);
+        } else {
+            execl("/bin/fifi-admin", "fifi-admin", "power", "suspend",
+                  (char *)NULL);
+        }
+        _exit(127);
+    }
+    if (pid < 0) return -1;
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
 
 static void draw_speed_slider(uint32_t *fb, const char *label, int x, int y,
                               int value, int *slider_x, int *slider_y) {
@@ -1377,6 +1475,68 @@ static void render_system(uint32_t *fb) {
       else          draw_str(fb, "None", x + 11*CW, y + (ROW_H - g_glyph_h)/2, C_GREY); }
 }
 
+static void render_power(uint32_t *fb) {
+    int x = CX, y = CTOP;
+    hot_reset();
+    power_refresh();
+
+    y = section_hdr(fb, "Battery", x, y);
+    fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_A);
+    draw_str(fb, "Charge:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    draw_str(fb, g_info[6].val, x + 12*CW, y + (ROW_H - g_glyph_h)/2,
+             strcmp(g_info[6].val, "Not installed") == 0 ? C_GREY : C_VAL);
+    y += ROW_H;
+    fill(fb, SIDEBAR_W, y, g_win_w - SIDEBAR_W, ROW_H, C_ROW_B);
+    draw_str(fb, "Status:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    draw_str(fb, g_info[7].val, x + 12*CW, y + (ROW_H - g_glyph_h)/2, C_VAL);
+    y += ROW_H + 18;
+
+    y = section_hdr(fb, "Display", x, y);
+    draw_str(fb, "Brightness:", x, y + (ROW_H - g_glyph_h)/2, C_KEY);
+    g_bright_sl_x = x + 15*CW;
+    g_bright_sl_y = y + (ROW_H - g_bright_sl_h)/2;
+    fill(fb, g_bright_sl_x, g_bright_sl_y, g_bright_sl_w,
+         g_bright_sl_h, C_BORDER);
+    if (g_backlight_available) {
+        int filled = g_bright_sl_w * g_brightness / 100;
+        if (filled < 4) filled = 4;
+        fill(fb, g_bright_sl_x, g_bright_sl_y, filled,
+             g_bright_sl_h, g_accent);
+        fill(fb, g_bright_sl_x + filled - 4, g_bright_sl_y - 3, 8,
+             g_bright_sl_h + 6, C_WHITE);
+        char percent[12];
+        snprintf(percent, sizeof(percent), "%d%%", g_brightness);
+        draw_str(fb, percent, g_bright_sl_x + g_bright_sl_w + 10,
+                 y + (ROW_H - g_glyph_h)/2, C_VAL);
+    } else {
+        draw_str(fb, "Unavailable", g_bright_sl_x + 10,
+                 y + (ROW_H - g_glyph_h)/2, C_GREY);
+    }
+    y += ROW_H + 8;
+    draw_str_clip(fb, g_power_note, x, y, C_GREY, g_win_w - x - CPAD);
+    y += g_glyph_h + 22;
+
+    y = section_hdr(fb, "Sleep", x, y);
+    draw_str_clip(fb,
+                  "Suspend keeps your work in memory and enters low-power sleep.",
+                  x, y, C_VAL, g_win_w - x - CPAD);
+    y += g_glyph_h + 12;
+    g_suspend_x = x;
+    g_suspend_y = y;
+    bool armed = g_suspend_armed != 0 && time(NULL) - g_suspend_armed <= 6;
+    draw_btn(fb, g_suspend_x, g_suspend_y, g_suspend_w, g_suspend_h,
+             armed ? "Confirm suspend" : "Suspend", armed);
+    if (!g_suspend_available)
+        draw_str(fb, "Not supported by this system", g_suspend_x + g_suspend_w + 14,
+                 y + (g_suspend_h - g_glyph_h)/2, C_GREY);
+    else if (armed)
+        draw_str(fb, "Click again to sleep", g_suspend_x + g_suspend_w + 14,
+                 y + (g_suspend_h - g_glyph_h)/2, C_YELLOW);
+    else
+        draw_str(fb, "Requires confirmation", g_suspend_x + g_suspend_w + 14,
+                 y + (g_suspend_h - g_glyph_h)/2, C_GREY);
+}
+
 static void render_network(uint32_t *fb) {
     int x = CX, y = CTOP;
     y = section_hdr(fb, "Network Interfaces", x, y);
@@ -1578,6 +1738,7 @@ static void render(uint32_t *fb) {
         case TAB_WIFI:  render_wifi(fb);        break;
         case TAB_NET:   render_network(fb);     break;
         case TAB_SYS:   render_system(fb);      break;
+        case TAB_POWER: render_power(fb);       break;
         case TAB_SEC:   render_security(fb);    break;
         case TAB_ABOUT: render_about(fb);       break;
     }
@@ -1630,10 +1791,12 @@ static void msg_reset(MsgState *m) { free(m->pld); m->pld = NULL; m->hgot = 0; m
 static void switch_tab(int t) {
     if (t < 0 || t >= N_TABS) return;
     g_tab = t;
+    if (t != TAB_POWER) g_suspend_armed = 0;
     g_font_dd = 0;               /* close any open font dropdown */
     g_pw_mode = false; g_pw_len = 0;
     if (t == TAB_WIFI && !g_wifi_scanned) { g_wifi_scanned = true; wifi_scan_start(); }
     if (t == TAB_NET)  net_update();
+    if (t == TAB_POWER) power_refresh();
     if (t == TAB_SEC)  sec_update();
 }
 
@@ -1711,6 +1874,45 @@ static bool system_profile_click(int sock, int mx, int my) {
         return sent;
     }
     return false;
+}
+
+static void power_click(int mx, int my) {
+    if (g_backlight_available &&
+        my >= g_bright_sl_y - 8 && my <= g_bright_sl_y + g_bright_sl_h + 8 &&
+        mx >= g_bright_sl_x && mx < g_bright_sl_x + g_bright_sl_w) {
+        int percent = 5 + (mx - g_bright_sl_x) * 95 /
+                          (g_bright_sl_w > 1 ? g_bright_sl_w - 1 : 1);
+        if (percent < 5) percent = 5;
+        if (percent > 100) percent = 100;
+        g_brightness = percent;
+        if (run_power_admin("brightness", percent) == 0)
+            snprintf(g_power_note, sizeof(g_power_note),
+                     "Display brightness set to %d%%.", percent);
+        else
+            snprintf(g_power_note, sizeof(g_power_note),
+                     "Could not change display brightness.");
+        power_refresh();
+        return;
+    }
+    if (!g_suspend_available || mx < g_suspend_x ||
+        mx >= g_suspend_x + g_suspend_w || my < g_suspend_y ||
+        my >= g_suspend_y + g_suspend_h) return;
+
+    time_t now = time(NULL);
+    if (g_suspend_armed == 0 || now - g_suspend_armed > 6) {
+        g_suspend_armed = now;
+        snprintf(g_power_note, sizeof(g_power_note),
+                 "Suspend armed. Click Confirm suspend within 6 seconds.");
+        return;
+    }
+    g_suspend_armed = 0;
+    snprintf(g_power_note, sizeof(g_power_note), "Suspending...");
+    if (run_power_admin("suspend", 0) == 0)
+        snprintf(g_power_note, sizeof(g_power_note),
+                 "Resumed successfully from suspend.");
+    else
+        snprintf(g_power_note, sizeof(g_power_note), "Suspend failed.");
+    power_refresh();
 }
 
 /* ── Security click handling ─────────────────────────────────────────────── */
@@ -1821,6 +2023,7 @@ int main(int argc, char **argv) {
         if      (!strcmp(argv[1], "wifi"))        g_tab = TAB_WIFI;
         else if (!strcmp(argv[1], "network"))     g_tab = TAB_NET;
         else if (!strcmp(argv[1], "system"))      g_tab = TAB_SYS;
+        else if (!strcmp(argv[1], "power"))       g_tab = TAB_POWER;
         else if (!strcmp(argv[1], "security"))    g_tab = TAB_SEC;
         else if (!strcmp(argv[1], "about"))       g_tab = TAB_ABOUT;
         else if (!strcmp(argv[1], "personalize") ||
@@ -1832,6 +2035,7 @@ int main(int argc, char **argv) {
     alsa_init();
     cfg_load();
     system_profile_refresh();
+    power_refresh();
     font_list_scan();
     font_previews_build();
     g_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
@@ -1907,7 +2111,7 @@ int main(int argc, char **argv) {
                             } else if ((k == 0x08u || k == 0x7Fu) && g_pw_len > 0) g_pw_len--;
                             else if (k >= 0x20u && k < 0x7Fu && g_pw_len < 127) g_pw_buf[g_pw_len++] = (char)k;
                             dirty = true;
-                        } else if (k >= '1' && k <= '6') {
+                        } else if (k >= '1' && k <= '7') {
                             switch_tab(k - '1'); dirty = true;
                         } else if (k == 'q' || k == 'Q' || k == 0x1Bu) {
                             running = false;
@@ -1961,6 +2165,9 @@ int main(int argc, char **argv) {
                                 if (lb && !prev_lb) { pers_click(mx, my); dirty = true; }
                             }
                             else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }
+                            else if (g_tab == TAB_POWER && lb && !prev_lb) {
+                                power_click(mx, my); dirty = true;
+                            }
                             else if (g_tab == TAB_SYS && lb) {
                                 if (!prev_lb && system_profile_click(sock, mx, my)) {
                                     dirty = true;
@@ -2034,7 +2241,13 @@ int main(int argc, char **argv) {
             if (g_tab == TAB_NET) net_update();
             if (g_tab == TAB_SEC) sec_update();
             if (g_tab == TAB_SYS) system_profile_refresh();
-            if (g_tab == TAB_SYS || g_tab == TAB_NET || g_tab == TAB_SEC || g_tab == TAB_WIFI)
+            if (g_tab == TAB_POWER) {
+                if (g_suspend_armed != 0 && now - g_suspend_armed > 6)
+                    g_suspend_armed = 0;
+                power_refresh();
+            }
+            if (g_tab == TAB_SYS || g_tab == TAB_POWER || g_tab == TAB_NET ||
+                g_tab == TAB_SEC || g_tab == TAB_WIFI)
                 dirty = true;
         }
 

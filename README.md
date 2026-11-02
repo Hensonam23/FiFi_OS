@@ -310,7 +310,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 - [x] Desktop themes: optional theme system with selectable styles
 - [x] Built-in AI assistant: local model (llama.cpp), no internet required, completely offline; `ai`/`fifi-ai` chat, `fifi-agent` agentic mode, resident llama-server via `fifi-ai-serve`
 - [x] AI chat app: windowed "FiFi AI" GUI client for the offline model, in the launcher
-- [x] Unified Settings: single tabbed hub (Personalize, Wi-Fi, Network, System, Security, About) with a theme/wallpaper personalization tab; `fifi-settings <tab>` deep-links
+- [x] Unified Settings: single tabbed hub (Personalize, Wi-Fi, Network, System, Power, Security, About) with theme controls, battery state, backlight brightness, and guarded suspend; `fifi-settings <tab>` deep-links
 - [x] Modernized desktop: accent-themed titlebars/dock/launcher/menus, rounded corners, glass, centered dock
 - [x] Live trial: "Try FiFi OS (Live)" boot entry; LibreWolf + LibreOffice auto-provision on first boot
 - [x] Full-codebase audit + optimization pass: correctness bugs fixed (integer-overflow heap writes, use-after-free, resource leaks), dead code and redundant comments removed, across the compositor and every app
@@ -350,6 +350,8 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 - [ ] Desktop UX polish and settings parity
   - [x] Turn the top-bar labels into persisted General, Build, Research, and Play system profiles
   - [x] Make the FiFi menu, network, battery, volume, and clock controls interactive
+  - [x] Make CPU and memory indicators open System, and battery open dedicated Power settings
+  - [x] Add real laptop brightness control and confirmation-gated suspend
   - [x] Prevent proportional desktop fonts from overlapping adjacent characters
   - [ ] Complete the remaining settings and real-hardware behavior audit
 - [x] Smooth pointer and touchpad input on the real laptop

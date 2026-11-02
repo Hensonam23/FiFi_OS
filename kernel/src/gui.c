@@ -3155,7 +3155,8 @@ void gui_on_tick(void) {
             int32_t cx, cy; mouse_consume_click(&cx, &cy);
             return;
         }
-        if (status_item == TRAY_NET || status_item == TRAY_BATT) {
+        if (status_item == TRAY_NET || status_item == TRAY_BATT ||
+            status_item == TRAY_CPU || status_item == TRAY_MEM) {
             __attribute__((weak)) void gui_spawn_app_with_arg(const char *path,
                                                                const char *arg);
             g_launcher_open = false; g_launcher_hover = -1;
@@ -3163,6 +3164,9 @@ void gui_on_tick(void) {
             if (status_item == TRAY_NET) {
                 if (gui_spawn_app_with_arg)
                     gui_spawn_app_with_arg("/bin/fifi-settings", "wifi");
+            } else if (status_item == TRAY_BATT) {
+                if (gui_spawn_app_with_arg)
+                    gui_spawn_app_with_arg("/bin/fifi-settings", "power");
             } else if (gui_spawn_app_with_arg) {
                 gui_spawn_app_with_arg("/bin/fifi-settings", "system");
             }
