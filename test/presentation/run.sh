@@ -38,6 +38,10 @@ grep -Fq 'CONFIG_TRANSPARENT_HUGEPAGE=y' "$ROOT/linux/fifi.config"
 grep -Fq 'CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y' "$ROOT/linux/fifi.config"
 grep -Fq 'g_cell_w = n ? mx : (px_size / 2);' \
     "$ROOT/fifi/platform/linux/font_ttf.c"
+grep -Fq 'console_render_glyph_prop_fg_cp(x, py, cp, fg);' \
+    "$ROOT/kernel/src/gui_text_util.c"
+grep -Fq 'uint64_t pw = gui_text_width(pills[i]) + 26u;' \
+    "$ROOT/kernel/src/gui_render.c"
 grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "wifi")' \
     "$ROOT/kernel/src/gui.c"
 grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "system")' \
@@ -47,7 +51,8 @@ grep -Fq 'g_cal_popup_open = !g_cal_popup_open;' "$ROOT/kernel/src/gui.c"
 grep -Fq 'g_bar_brand_x = brand_start' "$ROOT/kernel/src/gui_render.c"
 
 echo "[presentation-test] KMS uses two synchronized scanouts with vblank page flips"
-echo "[presentation-test] proportional fonts reserve non-overlapping cells"
+echo "[presentation-test] terminals reserve safe cells while desktop text uses proportional advances"
+echo "[presentation-test] Horizon-bar controls size themselves from rendered text"
 echo "[presentation-test] workload profiles have kernel THP support"
 echo "[presentation-test] every visible Horizon-bar control has a real action"
 echo "[presentation-test] PASS"

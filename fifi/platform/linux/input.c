@@ -681,17 +681,40 @@ static void input_libinput_add_path(const char *path) {
 
 static void input_libinput_rescan(void) {
     if (!g_libinput) return;
+    bool removed = false;
     for (int i = 0; i < g_libinput_path_count; ) {
         struct stat st;
         libinput_path_t *tracked = &g_libinput_paths[i];
         if (stat(tracked->path, &st) < 0 || st.st_dev != tracked->devno ||
                 st.st_ino != tracked->inode) {
-            libinput_path_remove_device(tracked->device);
-            g_libinput_paths[i] = g_libinput_paths[--g_libinput_path_count];
-            g_libinput_pointer_count--;
+            removed = true;
+            break;
         } else {
             i++;
         }
+    }
+
+    /* Do not remove a vanished path from a live context. Device deletion can
+     * wake the pointer thread at the same time and libinput 1.32 may still have
+     * a queued event referring to that path; explicit removal followed by a
+     * dispatch then dereferences stale internal state. Rebuilding the path
+     * context under g_input_mx atomically drops the old queue and gives the
+     * pointer thread one new, self-consistent fd on its next poll cycle. */
+    if (removed) {
+        struct libinput *old = g_libinput;
+        g_libinput = NULL;
+        g_libinput_path_count = 0;
+        g_libinput_pointer_count = 0;
+        g_libinput_residual_x = 0.0;
+        g_libinput_residual_y = 0.0;
+        libinput_unref(old);
+        g_libinput = libinput_path_create_context(&g_libinput_interface, NULL);
+        if (!g_libinput) {
+            fprintf(stderr,
+                    "[input] libinput hotplug rebuild failed; raw input remains available\n");
+            return;
+        }
+        fprintf(stderr, "[input] rebuilt libinput context after device removal\n");
     }
     DIR *dir = opendir("/dev/input");
     if (!dir) return;

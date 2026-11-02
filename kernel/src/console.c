@@ -644,6 +644,52 @@ static void draw_glyph_ttf_cp(uint64_t px, uint64_t py, uint32_t cp,
     }
 }
 
+/* Draw a TTF glyph using its natural advance instead of the console cell.
+ * This path is for desktop chrome and labels only. The terminal deliberately
+ * stays fixed-cell so cursor columns, selection and PTY output remain exact. */
+static void draw_glyph_ttf_prop_cp(uint64_t px, uint64_t py, uint32_t cp,
+                                   uint32_t fg, uint32_t scale) {
+    if (scale == 0) scale = 1;
+    int w, h, xo, yt, adv;
+    const uint8_t *cov = ttf_glyph(cp, &w, &h, &xo, &yt, &adv);
+    if (!cov || w <= 0 || h <= 0) return;
+    int gx = (int)px + xo * (int)scale;
+    int gy = (int)py + (ttf_baseline() + yt) * (int)scale;
+    uint32_t *back = g_back;
+    if (back) {
+        g_dirty = true;
+        int y0 = gy < 0 ? 0 : gy;
+        int y1 = gy + h * (int)scale;
+        if (y1 > (int)con.h) y1 = (int)con.h;
+        if (y0 < y1) {
+            if ((uint32_t)y0 < g_dirty_y0) g_dirty_y0 = (uint32_t)y0;
+            if ((uint32_t)y1 > g_dirty_y1) g_dirty_y1 = (uint32_t)y1;
+        }
+    }
+    for (int yy = 0; yy < h; yy++) {
+        const uint8_t *crow = cov + (uint64_t)yy * (uint64_t)w;
+        for (uint32_t sy = 0; sy < scale; sy++) {
+            int dy = gy + yy * (int)scale + (int)sy;
+            if (dy < 0 || (uint64_t)dy >= con.h) continue;
+            for (int xx = 0; xx < w; xx++) {
+                uint8_t a = crow[xx];
+                if (!a) continue;
+                for (uint32_t sx = 0; sx < scale; sx++) {
+                    int dx = gx + xx * (int)scale + (int)sx;
+                    if (dx < 0 || (uint64_t)dx >= con.w) continue;
+                    if (back) {
+                        uint32_t *p = back + (uint64_t)dy * con.pitch32 + (uint64_t)dx;
+                        *p = cons_blend(*p, fg, a);
+                    } else {
+                        volatile uint32_t *p = con.pix + (uint64_t)dy * con.pitch32 + (uint64_t)dx;
+                        *p = cons_blend(*p, fg, a);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* Byte-glyph wrapper: maps a single console byte through CP437 to its codepoint. */
 static void draw_glyph_ttf(uint64_t px, uint64_t py, unsigned char uc,
                            uint32_t fg, uint32_t bg, bool fill_bg, uint32_t scale) {
@@ -1007,6 +1053,37 @@ void console_render_glyph_scaled_cp(uint64_t px, uint64_t py, uint32_t cp,
     if (ttf_is_active()) { draw_glyph_ttf_cp(px, py, cp, fg, bg, true, (uint32_t)scale); return; }
 #endif
     console_render_glyph_scaled(px, py, cp < 0x100u ? (unsigned char)cp : '?', scale, fg, bg);
+}
+
+uint32_t console_glyph_advance_cp(uint32_t cp) {
+#ifdef __linux__
+    if (ttf_is_active()) {
+        int w = 0, h = 0, xo = 0, yt = 0, adv = 0;
+        (void)ttf_glyph(cp, &w, &h, &xo, &yt, &adv);
+        if (adv > 0) return (uint32_t)adv;
+    }
+#endif
+    return g_fw ? g_fw : 1u;
+}
+
+void console_render_glyph_prop_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg) {
+    if (!con.initialized || py + g_fh > con.h || px >= con.w) return;
+#ifdef __linux__
+    if (ttf_is_active()) { draw_glyph_ttf_prop_cp(px, py, cp, fg, 1u); return; }
+#endif
+    console_render_glyph_fg_cp(px, py, cp, fg);
+}
+
+void console_render_glyph_prop_scaled_fg_cp(uint64_t px, uint64_t py, uint32_t cp,
+                                            uint64_t scale, uint32_t fg, uint32_t bg) {
+    if (!con.initialized || scale == 0 || px >= con.w || py >= con.h) return;
+#ifdef __linux__
+    if (ttf_is_active()) {
+        draw_glyph_ttf_prop_cp(px, py, cp, fg, (uint32_t)scale);
+        return;
+    }
+#endif
+    console_render_glyph_scaled_cp(px, py, cp, scale, fg, bg);
 }
 
 uint64_t console_fb_width(void)           { return con.w; }

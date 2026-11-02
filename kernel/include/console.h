@@ -32,6 +32,12 @@ void     console_render_glyph_scaled(uint64_t px, uint64_t py, unsigned char ch,
 void     console_render_glyph_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg, uint32_t bg);
 void     console_render_glyph_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg);
 void     console_render_glyph_scaled_cp(uint64_t px, uint64_t py, uint32_t cp, uint64_t scale, uint32_t fg, uint32_t bg);
+/* Proportional UI text. Terminals and editors keep using the fixed-cell APIs
+ * above; desktop labels and controls use the font's real glyph advances. */
+uint32_t console_glyph_advance_cp(uint32_t cp);
+void     console_render_glyph_prop_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg);
+void     console_render_glyph_prop_scaled_fg_cp(uint64_t px, uint64_t py, uint32_t cp,
+                                                uint64_t scale, uint32_t fg, uint32_t bg);
 uint64_t           console_fb_width(void);
 uint64_t           console_fb_height(void);
 uint64_t           console_cols(void);   /* visible character columns */

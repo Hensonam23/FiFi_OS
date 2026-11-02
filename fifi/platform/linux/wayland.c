@@ -4142,6 +4142,8 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
     extern void console_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c);
     extern void console_fill_vgrad(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t c0, uint32_t c1);
     extern void console_render_glyph_fg(uint64_t px, uint64_t py, unsigned char ch, uint32_t fg);
+    extern void console_render_glyph_prop_fg_cp(uint64_t px, uint64_t py, uint32_t cp, uint32_t fg);
+    extern uint32_t console_glyph_advance_cp(uint32_t cp);
     extern uint32_t console_font_width(void);
     extern uint32_t console_font_height(void);
     extern uint32_t gui_theme_accent(void);   /* thread the user's accent through the chrome */
@@ -4171,11 +4173,20 @@ static void ssd_draw_chrome(int ci, wl_surface_t *s, int32_t bx, int32_t by) {
                 ttl = &tbuf[j + 2];
         size_t tlen = 0; while (ttl[tlen]) tlen++;
         uint64_t max_px = w > 84u ? w - 84u : 0u;   /* keep clear of buttons */
-        if (tlen * fw > max_px) tlen = max_px / fw;
-        uint64_t tx = x + (w > tlen * fw ? (w - tlen * fw) / 2u : 8u);
+        uint64_t tw = 0u; size_t fit = 0u;
+        while (fit < tlen) {
+            uint64_t next = tw + console_glyph_advance_cp((unsigned char)ttl[fit]);
+            if (next > max_px) break;
+            tw = next; fit++;
+        }
+        tlen = fit;
+        uint64_t tx = x + (w > tw ? (w - tw) / 2u : 8u);
         uint64_t gy = ty + (SSD_TITLE_H > fh ? (SSD_TITLE_H - fh) / 2u : 0u);
-        for (size_t j = 0; j < tlen; j++, tx += fw)
-            console_render_glyph_fg(tx, gy, (unsigned char)ttl[j], 0x00e8eeffu);
+        for (size_t j = 0; j < tlen; j++) {
+            uint32_t cp = (unsigned char)ttl[j];
+            console_render_glyph_prop_fg_cp(tx, gy, cp, 0x00e8eeffu);
+            tx += console_glyph_advance_cp(cp);
+        }
     }
     /* Window buttons: conventional flat symbols (minimize / maximize / close),
      * NOT macOS traffic-light circles. Drawn from rectangles. */

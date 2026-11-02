@@ -703,6 +703,7 @@ uint32_t desktop_bg_at(uint64_t y);   /* wallpaper colour at row y (corner round
 void     gui_toast(const char *msg, uint32_t color);
 void     gui_draw_str(uint64_t px, uint64_t py, const char *s, uint32_t fg, uint32_t bg);
 void     gui_draw_str_fg(uint64_t px, uint64_t py, const char *s, uint32_t fg);
+uint64_t gui_text_width(const char *s);
 void     gui_draw_str_clip_fg(uint64_t px, uint64_t py, const char *s, uint32_t fg, uint64_t max_chars);
 void     gui_draw_str_scaled(uint64_t px, uint64_t py, const char *s, uint64_t scale, uint32_t fg, uint32_t bg);
 void     gui_draw_str_clip(uint64_t px, uint64_t py, const char *s, uint32_t fg, uint32_t bg, uint64_t max_chars);

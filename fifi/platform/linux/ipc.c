@@ -732,14 +732,24 @@ static void ipc_draw_chrome(ipc_client_t *c) {
         uint64_t text_end = right > (uint64_t)BTN_W * 3u + 4u
                           ? right - (uint64_t)BTN_W * 3u - 4u : 0u;
         uint64_t avail  = (text_end > c->win_x + 8u) ? text_end - (c->win_x + 8u) : 0u;
-        uint64_t max_ch = avail / fw;
+        uint64_t tw = 0u;
+        size_t fit = 0u;
+        while (fit < tlen) {
+            uint64_t next = tw + console_glyph_advance_cp((unsigned char)c->title[fit]);
+            if (next > avail) break;
+            tw = next;
+            fit++;
+        }
         uint64_t tx;
-        if ((uint64_t)tlen <= max_ch)
-            tx = c->win_x + (c->win_w - (uint64_t)tlen * fw) / 2u;   /* centered */
+        if (fit == tlen)
+            tx = c->win_x + (c->win_w - tw) / 2u;   /* centered */
         else
             tx = c->win_x + 8u;                                       /* left, will clip */
-        for (size_t j = 0; j < tlen && tx + fw <= text_end; j++, tx += fw)
-            console_render_glyph_fg(tx, gy, (unsigned char)c->title[j], C_TITLEFG);
+        for (size_t j = 0; j < fit && tx < text_end; j++) {
+            uint32_t cp = (unsigned char)c->title[j];
+            console_render_glyph_prop_fg_cp(tx, gy, cp, C_TITLEFG);
+            tx += console_glyph_advance_cp(cp);
+        }
     }
 
     /* Buttons: conventional flat symbols (minimize / maximize / close), NOT
@@ -1322,7 +1332,6 @@ int ipc_server_fd(void) { return g_srv_fd; }
 bool ipc_notify_draw(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t fb_h = console_fb_height();
-    uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
 
 #define NOTIFY_TASKBAR_H  32u
@@ -1347,7 +1356,9 @@ bool ipc_notify_draw(void) {
     /* Measure text */
     size_t tlen = strlen(g_notify_text);
     if (tlen > 60) tlen = 60;
-    uint64_t tw = (uint64_t)tlen * fw;
+    uint64_t tw = 0u;
+    for (size_t i = 0; i < tlen; i++)
+        tw += console_glyph_advance_cp((unsigned char)g_notify_text[i]);
     uint64_t bw = tw + NOTIFY_PAD_X * 2;
     uint64_t bh = fh + NOTIFY_PAD_Y * 2;
 
@@ -1368,10 +1379,11 @@ bool ipc_notify_draw(void) {
     /* Text */
     uint64_t tx = bx + NOTIFY_PAD_X;
     uint64_t ty = by + NOTIFY_PAD_Y;
-    for (size_t i = 0; i < tlen; i++)
-        console_render_glyph(tx + i * fw, ty,
-                             (unsigned char)g_notify_text[i],
-                             0xFFE0E8F0u, 0xFF101828u);
+    for (size_t i = 0; i < tlen; i++) {
+        uint32_t cp = (unsigned char)g_notify_text[i];
+        console_render_glyph_prop_fg_cp(tx, ty, cp, 0xFFE0E8F0u);
+        tx += console_glyph_advance_cp(cp);
+    }
     return true;
 }
 

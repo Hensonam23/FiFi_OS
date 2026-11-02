@@ -129,62 +129,85 @@ bool gui_streq(const char *a, const char *b) {
 
 void gui_draw_str(uint64_t px, uint64_t py, const char *s,
                          uint32_t fg, uint32_t bg) {
-    uint64_t fw = console_font_width();
-    uint64_t col = 0;
-    for (size_t i = 0; s[i]; col++)
-        console_render_glyph_cp(px + col * fw, py, utf8_next(s, &i), fg, bg);
+    uint64_t w = gui_text_width(s);
+    if (w) console_fill_rect(px, py, w, console_font_height(), bg);
+    gui_draw_str_fg(px, py, s, fg);
+}
+
+uint64_t gui_text_width(const char *s) {
+    uint64_t w = 0;
+    if (!s) return 0;
+    for (size_t i = 0; s[i]; )
+        w += console_glyph_advance_cp(utf8_next(s, &i));
+    return w;
 }
 
 /* Transparent-background string (only letter pixels drawn). For title-bar text so the
  * glyph cell background never paints beyond the title bar. */
 void gui_draw_str_fg(uint64_t px, uint64_t py, const char *s, uint32_t fg) {
-    uint64_t fw = console_font_width();
-    uint64_t col = 0;
-    for (size_t i = 0; s[i]; col++)
-        console_render_glyph_fg_cp(px + col * fw, py, utf8_next(s, &i), fg);
+    uint64_t x = px;
+    for (size_t i = 0; s[i]; ) {
+        uint32_t cp = utf8_next(s, &i);
+        console_render_glyph_prop_fg_cp(x, py, cp, fg);
+        x += console_glyph_advance_cp(cp);
+    }
 }
 
 void gui_draw_str_clip_fg(uint64_t px, uint64_t py, const char *s,
                                  uint32_t fg, uint64_t max_chars) {
-    uint64_t fw = console_font_width();
     if (gui_utf8_cols(s) <= max_chars) {
         gui_draw_str_fg(px, py, s, fg);
     } else if (max_chars >= 3) {
-        uint64_t col = 0; size_t i = 0;
-        while (s[i] && col < max_chars - 3) {
-            console_render_glyph_fg_cp(px + col * fw, py, utf8_next(s, &i), fg);
+        uint64_t col = 0, x = px; size_t i = 0;
+        while (s[i] && col < max_chars - 3u) {
+            uint32_t cp = utf8_next(s, &i);
+            console_render_glyph_prop_fg_cp(x, py, cp, fg);
+            x += console_glyph_advance_cp(cp);
             col++;
         }
         for (uint64_t k = 0; k < 3; k++)
-            console_render_glyph_fg(px + (col + k) * fw, py, '.', COL_FB_MUTED);
+        {
+            console_render_glyph_prop_fg_cp(x, py, '.', COL_FB_MUTED);
+            x += console_glyph_advance_cp('.');
+        }
     }
 }
 
 /* Draw str at integer scale (each glyph pixel = scale×scale block) */
 void gui_draw_str_scaled(uint64_t px, uint64_t py, const char *s,
                                  uint64_t scale, uint32_t fg, uint32_t bg) {
-    uint64_t fw = console_font_width();
-    uint64_t col = 0;
-    for (size_t i = 0; s[i]; col++)
-        console_render_glyph_scaled_cp(px + col * fw * scale, py,
-                                       utf8_next(s, &i), scale, fg, bg);
+    uint64_t w = gui_text_width(s) * scale;
+    if (w) console_fill_rect(px, py, w, console_font_height() * scale, bg);
+    uint64_t x = px;
+    for (size_t i = 0; s[i]; ) {
+        uint32_t cp = utf8_next(s, &i);
+        console_render_glyph_prop_scaled_fg_cp(x, py, cp, scale, fg, bg);
+        x += (uint64_t)console_glyph_advance_cp(cp) * scale;
+    }
 }
 
 /* Draw str clipped to max_chars wide */
 void gui_draw_str_clip(uint64_t px, uint64_t py, const char *s,
                                uint32_t fg, uint32_t bg, uint64_t max_chars) {
-    uint64_t fw = console_font_width();
     if (gui_utf8_cols(s) <= max_chars) {
         gui_draw_str(px, py, s, fg, bg);
     } else if (max_chars >= 3) {
         /* truncate with "..." */
-        uint64_t col = 0; size_t i = 0;
+        uint64_t col = 0, x = px; size_t i = 0;
         while (s[i] && col < max_chars - 3) {
-            console_render_glyph_cp(px + col * fw, py, utf8_next(s, &i), fg, bg);
+            uint32_t cp = utf8_next(s, &i);
+            uint32_t adv = console_glyph_advance_cp(cp);
+            console_fill_rect(x, py, adv, console_font_height(), bg);
+            console_render_glyph_prop_fg_cp(x, py, cp, fg);
+            x += adv;
             col++;
         }
-        for (uint64_t k = 0; k < 3; k++)
-            console_render_glyph(px + (col + k) * fw, py, '.', COL_FB_MUTED, bg);
+        for (uint64_t k = 0; k < 3; k++) {
+            uint32_t adv = console_glyph_advance_cp('.');
+            console_fill_rect(x, py, adv, console_font_height(), bg);
+            console_render_glyph_prop_fg_cp(x, py, '.', COL_FB_MUTED);
+            x += adv;
+        }
     }
 }
 

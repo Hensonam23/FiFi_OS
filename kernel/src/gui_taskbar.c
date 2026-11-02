@@ -199,10 +199,9 @@ void taskbar_pill(uint64_t bx, uint64_t ty, uint64_t tbw, const char *label_raw,
                           focused ? col_mix(g_theme.accent, 0x00ffffffu, 70u)
                                   : col_scale(g_theme.accent, 170u, 255u));
     }
-    uint64_t llen     = (uint64_t)gui_strlen(lbl);
     uint64_t max_ch   = tbw / fw;
-    uint64_t disp_len = llen < max_ch ? llen : max_ch;
-    uint64_t lpx      = bx + (tbw > disp_len * fw ? (tbw - disp_len * fw) / 2u : 0u);
+    uint64_t label_w  = gui_text_width(lbl);
+    uint64_t lpx      = bx + (tbw > label_w ? (tbw - label_w) / 2u : 0u);
     uint64_t lpy      = ty + (TASKBAR_H - fh) / 2u;
     gui_draw_str_clip_fg(lpx, lpy, lbl,
                          focused ? 0x00f0f6ffu : COL_TASKBTN_FG, max_ch);
@@ -225,7 +224,6 @@ void taskbar_draw_btn(int slot, const char *label) {
  *   [HH:MM] [mem bar] */
 void taskbar_draw_tray(void) {
     uint64_t fb_w = console_fb_width();
-    uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
 
@@ -247,7 +245,7 @@ void taskbar_draw_tray(void) {
     uint8_t rh = 0, rm = 0, rs = 0;
     rtc_get_time(&rh, &rm, &rs);
     { int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset; adj = ((adj % 24) + 24) % 24; rh = (uint8_t)adj; }
-    char clk[14]; int clk_chars;
+    char clk[14];
     if (g_theme.clock_12h) {
         const char *ampm = (rh < 12u) ? "AM" : "PM";
         uint8_t h12 = rh % 12u; if (h12 == 0u) h12 = 12u;
@@ -255,14 +253,12 @@ void taskbar_draw_tray(void) {
         gui_itoa_pad2(rm, clk + 3); clk[5] = ':';
         gui_itoa_pad2(rs, clk + 6); clk[8] = ' ';
         clk[9] = ampm[0]; clk[10] = ampm[1]; clk[11] = '\0';
-        clk_chars = 11;
     } else {
         gui_itoa_pad2(rh, clk + 0); clk[2] = ':';
         gui_itoa_pad2(rm, clk + 3); clk[5] = ':';
         gui_itoa_pad2(rs, clk + 6); clk[8] = '\0';
-        clk_chars = 8;
     }
-    uint64_t clk_w = (uint64_t)clk_chars * fw;
+    uint64_t clk_w = gui_text_width(clk);
 
     /* Volume */
     int vol = hda_is_ready() ? hda_get_volume() : -1;
@@ -271,14 +267,14 @@ void taskbar_draw_tray(void) {
     else if (vol >= 100) { vtxt[vi++]='1'; vtxt[vi++]='0'; vtxt[vi++]='0'; vtxt[vi++]='%'; }
     else { if (vol >= 10) vtxt[vi++]=(char)('0'+vol/10); vtxt[vi++]=(char)('0'+vol%10); vtxt[vi++]='%'; }
     vtxt[vi] = '\0';
-    uint64_t vol_w = (uint64_t)vi * fw;
+    uint64_t vol_w = gui_text_width(vtxt);
 
     /* Network */
     bool has_nic = net_nic_present();
     bool has_ip  = (net_ip != 0);
     const char *net_lbl = has_ip ? "LAN" : (has_nic ? "NIC" : "---");
     uint32_t net_fg = has_ip ? 0x0050e880u : (has_nic ? 0x00e07050u : COL_TASKBAR);
-    uint64_t net_w = 3u * fw;
+    uint64_t net_w = gui_text_width(net_lbl);
 
     /* Battery (laptops only) — a 24px glyph */
     bool has_batt = (battery_present && battery_present());
@@ -292,7 +288,7 @@ void taskbar_draw_tray(void) {
     extern bool gaming_mode_active(void);
     extern uint32_t compositor_fps(void);
     bool has_gp = input_gamepad_connected();
-    uint64_t gp_w = has_gp ? 2u * fw : 0u;
+    uint64_t gp_w = has_gp ? gui_text_width("GP") : 0u;
     bool has_fps = gaming_mode_active();
     char ftxt[8]; int flen = 0; uint32_t fps_col = 0x0050e880u;
     if (has_fps) {
@@ -304,7 +300,7 @@ void taskbar_draw_tray(void) {
         ftxt[flen++]='f'; ftxt[flen++]='p'; ftxt[flen++]='s'; ftxt[flen]='\0';
         fps_col = fc >= 60u ? 0x0050e880u : fc >= 30u ? 0x00e8c040u : 0x00e86040u;
     }
-    uint64_t fps_w = has_fps ? (uint64_t)flen * fw : 0u;
+    uint64_t fps_w = has_fps ? gui_text_width(ftxt) : 0u;
 
     /* Layout: order left→right = [fps][gp][battery][volume][network][clock]. */
     enum { K_FPS, K_GP, K_BATT, K_VOL, K_NET, K_CLK };

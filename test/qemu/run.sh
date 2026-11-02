@@ -33,6 +33,7 @@ BRAND_SCREENSHOT="$WORK/brand-menu.ppm"
 VOLUME_SCREENSHOT="$WORK/volume-popup.ppm"
 CLOCK_SCREENSHOT="$WORK/clock-popup.ppm"
 NETWORK_SCREENSHOT="$WORK/network-settings.ppm"
+HOTUNPLUG_SCREENSHOT="$WORK/pointer-hotunplug.ppm"
 QEMU_LOG="$WORK/qemu.log"
 PID=""
 
@@ -62,7 +63,8 @@ qemu-system-x86_64 \
     -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 panic=-1 fifi_live fifi_selftest" \
     -no-reboot -display none \
     -device virtio-vga,xres=1920,yres=1080 \
-    -device virtio-tablet-pci \
+    -device pcie-root-port,id=fifi-pointer-port,chassis=5,slot=5 \
+    -device virtio-tablet-pci,bus=fifi-pointer-port,id=fifi-test-pointer \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
     -serial "file:$SERIAL" \
     -qmp "unix:$QMP,server=on,wait=off" \
@@ -95,14 +97,15 @@ if [ "$RESULT" != pass ]; then
 fi
 
 python3 - "$QMP" "$SCREENSHOT" "$PROFILE_SCREENSHOT" "$BRAND_SCREENSHOT" \
-    "$VOLUME_SCREENSHOT" "$CLOCK_SCREENSHOT" "$NETWORK_SCREENSHOT" <<'PY'
+    "$VOLUME_SCREENSHOT" "$CLOCK_SCREENSHOT" "$NETWORK_SCREENSHOT" \
+    "$HOTUNPLUG_SCREENSHOT" <<'PY'
 import json
 import socket
 import sys
 import time
 
 (qmp, screenshot, profile_screenshot, brand_screenshot, volume_screenshot,
- clock_screenshot, network_screenshot) = sys.argv[1:]
+ clock_screenshot, network_screenshot, hotunplug_screenshot) = sys.argv[1:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(50):
     try:
@@ -183,6 +186,12 @@ capture(clock_screenshot)
 move_to(1717, 38)             # network
 click()
 capture(network_screenshot, 1.5)
+
+# A real laptop crash was found when a pointer disappeared while libinput still
+# had queued events. Remove QEMU's tablet and wait past the supervisor restart
+# delay; the open Settings window must remain, proving the compositor survived.
+command("device_del", {"id": "fifi-test-pointer"})
+capture(hotunplug_screenshot, 4.0)
 sock.close()
 PY
 
@@ -205,6 +214,8 @@ python3 "$ROOT/test/qemu/profile_click.py" "$SCREENSHOT" "$PROFILE_SCREENSHOT"
 python3 "$ROOT/test/qemu/status_click.py" "$PROFILE_SCREENSHOT" \
     "$BRAND_SCREENSHOT" "$VOLUME_SCREENSHOT" "$CLOCK_SCREENSHOT" \
     "$NETWORK_SCREENSHOT"
+python3 "$ROOT/test/qemu/hotunplug_survival.py" \
+    "$NETWORK_SCREENSHOT" "$HOTUNPLUG_SCREENSHOT"
 
 grep -a 'FIFI_SELFTEST PASS' "$SERIAL" | tail -1
 echo "[qemu-test] boot, top-bar controls, non-root app, and screenshot checks passed"

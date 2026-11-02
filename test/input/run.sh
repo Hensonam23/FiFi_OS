@@ -196,6 +196,11 @@ grep -Fq 'if (input_hotplug_pending())' "$ROOT/fifi/compositor/main.c"
 ! grep -Fq '_rescan_ticks' "$ROOT/fifi/compositor/main.c"
 echo "[input-test] device rescans happen only after hotplug notifications"
 
+grep -Fq 'rebuilt libinput context after device removal' \
+    "$ROOT/fifi/platform/linux/input.c"
+grep -Fq 'libinput_unref(old);' "$ROOT/fifi/platform/linux/input.c"
+echo "[input-test] libinput hot-unplug drops stale queued device state"
+
 grep -Fq 'input_remove_touchpad_abs_fallback(phys)' \
     "$ROOT/fifi/platform/linux/input.c"
 grep -Fq '[input] rescan: raw touchpad still skipped' \

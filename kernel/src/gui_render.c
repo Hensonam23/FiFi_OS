@@ -78,7 +78,7 @@ void draw_status_bar(void) {
     uint64_t brand_start = x;
     draw_fifi_star((int64_t)(x + 7u), (int64_t)midy, 7, g_theme.accent);
     x += 20u;
-    gui_draw_str_fg(x, cy, "FiFi", 0x00e9edf3u); x += 4u*fw + 12u;
+    gui_draw_str_fg(x, cy, "FiFi", 0x00e9edf3u); x += gui_text_width("FiFi") + 12u;
     g_bar_brand_x = brand_start > 6u ? brand_start - 6u : brand_start;
     g_bar_brand_w = x - g_bar_brand_x;
     g_bar_brand_y = by; g_bar_brand_h = bh;
@@ -93,8 +93,7 @@ void draw_status_bar(void) {
     uint64_t ph = 24u, py = by + (bh - ph)/2u;
     g_intent_y = py; g_intent_h = ph;
     for (int i = 0; i < FIFI_PROFILE_COUNT; i++) {
-        uint64_t plen = (uint64_t)gui_strlen(pills[i]);
-        uint64_t pw = plen*fw + 26u;
+        uint64_t pw = gui_text_width(pills[i]) + 26u;
         g_intent_x[i] = x; g_intent_w[i] = pw;
         if (i == active_profile) {
             console_fill_rect(x, py, pw, ph, g_theme.accent);
@@ -121,13 +120,14 @@ void draw_status_bar(void) {
     g_batt_present = false;
     uint8_t rh = 0, rm = 0, rsx = 0; rtc_get_time(&rh, &rm, &rsx);
     { int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset; adj = ((adj%24)+24)%24; rh = (uint8_t)adj; }
-    char clk[10]; int clen;
+    char clk[10];
     if (g_theme.clock_12h) {
         const char *ap = (rh < 12u) ? "AM" : "PM"; uint8_t h = rh % 12u; if (!h) h = 12u;
-        clk[0]='0'+h/10u; clk[1]='0'+h%10u; clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]=' '; clk[6]=ap[0]; clk[7]=ap[1]; clk[8]='\0'; clen=8;
-    } else { gui_itoa_pad2(rh, clk); clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]='\0'; clen=5; }
+        clk[0]='0'+h/10u; clk[1]='0'+h%10u; clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]=' '; clk[6]=ap[0]; clk[7]=ap[1]; clk[8]='\0';
+    } else { gui_itoa_pad2(rh, clk); clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]='\0'; }
     uint64_t item_right = rx;
-    rx -= (uint64_t)clen*fw; gui_draw_str_fg(rx, cy, clk, 0x00e9edf3u);
+    uint64_t clk_w = gui_text_width(clk);
+    rx -= clk_w; gui_draw_str_fg(rx, cy, clk, 0x00e9edf3u);
     g_clk_x = rx > 5u ? rx - 5u : rx;
     g_clk_w = item_right - g_clk_x + 5u;
     rx -= 14u;
@@ -139,7 +139,7 @@ void draw_status_bar(void) {
         if (pct >= 100) { pb[k++]='1'; pb[k++]='0'; pb[k++]='0'; }
         else { if (pct >= 10) pb[k++]=(char)('0'+pct/10); pb[k++]=(char)('0'+pct%10); }
         pb[k++]='%'; pb[k]='\0';
-        rx -= (uint64_t)k*fw; gui_draw_str_fg(rx, cy, pb, 0x00b6bcc6u); rx -= 7u;
+        rx -= gui_text_width(pb); gui_draw_str_fg(rx, cy, pb, 0x00b6bcc6u); rx -= 7u;
         uint64_t gw = 22u, gh = 11u, gyy = midy - gh/2u; rx -= (gw + 3u);
         uint32_t oc = 0x0099a2acu;
         console_fill_rect(rx, gyy, gw, 1u, oc); console_fill_rect(rx, gyy+gh-1u, gw, 1u, oc);
@@ -160,7 +160,7 @@ void draw_status_bar(void) {
     else if (vol >= 100) { vb[vn++]='1'; vb[vn++]='0'; vb[vn++]='0'; }
     else { if (vol >= 10) vb[vn++]=(char)('0'+vol/10); vb[vn++]=(char)('0'+vol%10); }
     vb[vn++]='%'; vb[vn]='\0';
-    rx -= (uint64_t)vn * fw;
+    rx -= gui_text_width(vb);
     gui_draw_str_fg(rx, cy, vb, 0x00b6bcc6u);
     rx -= 8u;
     rx -= 12u;
@@ -191,7 +191,7 @@ void draw_status_bar(void) {
         console_blend_rect(search_start, shy, g_bar_search_w, shh, 0x00ffffffu, focused ? 14u : 8u);
         if (focused && g_launch_qlen > 0) {
             gui_draw_str_fg(search_start + 12u, cy, g_launch_q, 0x00e9edf3u);
-            console_fill_rect(search_start + 12u + (uint64_t)g_launch_qlen*fw + 1u, cy, 2u, fh, g_theme.accent);
+            console_fill_rect(search_start + 12u + gui_text_width(g_launch_q) + 1u, cy, 2u, fh, g_theme.accent);
         } else {
             gui_draw_str_fg(search_start + 12u, cy, "Search", focused ? 0x009da6b0u : 0x006a707au);
             if (focused) console_fill_rect(search_start + 12u, cy, 2u, fh, g_theme.accent);
@@ -289,7 +289,6 @@ static icon_img_t *desk_icon_logo(int i) {
  * but nudged left just enough that the widest label can sit CENTERED under its
  * icon without running off the screen edge (so labels never right-align). */
 uint64_t desk_icon_col_x(void) {
-    uint64_t fw  = console_font_width();
     uint64_t fbw = desk_right();   /* usable right edge — clears a right-edge dock */
     uint64_t flush = (fbw > DESK_ICON_W + DESK_ICON_PAD) ? fbw - DESK_ICON_W - DESK_ICON_PAD : 0u;
     uint64_t maxlw = 0;
@@ -299,7 +298,7 @@ uint64_t desk_icon_col_x(void) {
                          ? g_desk_icons[i].label
                          : desk_icon_basename(g_desk_icons[i].path);
         char lb[24]; strncpy(lb, nm, sizeof(lb) - 1); lb[sizeof(lb) - 1] = '\0';
-        uint64_t w = (uint64_t)gui_strlen(lb) * fw;
+        uint64_t w = gui_text_width(lb);
         if (w > maxlw) maxlw = w;
     }
     uint64_t half = maxlw / 2u, edge = 6u;
@@ -328,7 +327,6 @@ void desk_icon_pos(int i, uint64_t *ox, uint64_t *oy) {
 }
 
 void draw_desktop_icons(void) {
-    uint64_t fw = console_font_width();
     uint64_t fh = console_font_height();
     uint64_t db = desk_bot();
 
@@ -383,8 +381,8 @@ void draw_desktop_icons(void) {
             console_fill_rect(iix,        iiy,        1u, isz, ibc);
             console_fill_rect(iix+isz-1u, iiy,        1u, isz, ibc);
             /* type label in center of icon */
-            uint64_t tl  = (uint64_t)gui_strlen(ic_txt);
-            uint64_t ttx = iix + (isz > tl * fw ? (isz - tl * fw) / 2u : 0u);
+            uint64_t tw  = gui_text_width(ic_txt);
+            uint64_t ttx = iix + (isz > tw ? (isz - tw) / 2u : 0u);
             uint64_t tty = iiy + (isz - fh) / 2u;
             gui_draw_str_fg(ttx, tty, ic_txt, 0x00d0e4f4u);
         }
@@ -395,8 +393,7 @@ void draw_desktop_icons(void) {
         char lbuf[24];
         strncpy(lbuf, name, sizeof(lbuf) - 1);
         lbuf[sizeof(lbuf) - 1] = '\0';
-        uint64_t llen  = (uint64_t)gui_strlen(lbuf);
-        uint64_t lwpx  = llen * fw;
+        uint64_t lwpx  = gui_text_width(lbuf);
         uint64_t ictr  = icon_x + DESK_ICON_W / 2u;
         uint64_t llx   = (ictr > lwpx / 2u) ? ictr - lwpx / 2u : 0u;
         if (llx + lwpx > console_fb_width())            /* clamp to right edge */
@@ -432,7 +429,6 @@ void draw_desktop_info(void) {
     if (!g_theme.desktop_info) return;
     uint64_t dbot = desk_bot();
     uint64_t dt   = desk_top();
-    uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
 
     /* Build info strings */
@@ -484,15 +480,16 @@ void draw_desktop_info(void) {
         { NULL, NULL }
     };
 
-    /* Measure widths — key col fixed, val col from actual content */
+    /* Measure actual proportional text widths, not console grid cells. */
     int nrows = 0; while (rows[nrows].key) nrows++;
-    uint64_t key_w = 9u * fw;   /* longest key "Network " = 8 + colon */
-    uint64_t max_val_chars = 20u;
+    uint64_t key_w = 0u, val_w = 0u;
     for (int _ri = 0; _ri < nrows; _ri++) {
-        uint64_t vl = (uint64_t)gui_strlen(rows[_ri].val);
-        if (vl > max_val_chars) max_val_chars = vl;
+        uint64_t kw = gui_text_width(rows[_ri].key);
+        uint64_t vw = gui_text_width(rows[_ri].val);
+        if (kw > key_w) key_w = kw;
+        if (vw > val_w) val_w = vw;
     }
-    uint64_t val_w = max_val_chars * fw;
+    key_w += 28u;
     uint64_t panel_w = key_w + val_w + 20u;
     uint64_t row_h2  = fh + 4u;
     uint64_t panel_h = (uint64_t)nrows * row_h2 + fh + 16u; /* title + rows + padding */
@@ -515,7 +512,7 @@ void draw_desktop_info(void) {
     uint64_t ty2 = py + 6u;
     gui_draw_str(tx, ty2, "FiFi OS", g_theme.accent, panel_bg);
     /* version dim text */
-    uint64_t ver_x = tx + 8u * fw;
+    uint64_t ver_x = tx + gui_text_width("FiFi OS") + 14u;
     gui_draw_str(ver_x, ty2, FIFI_OS_VERSION_STR, 0x00384858u, panel_bg);
 
     /* Separator */
@@ -1109,7 +1106,7 @@ void help_draw(void) {
     console_fill_rect(x + w - 1u, y, 1u, h, 0x00223048u);
 
     const char *title = "Keyboard Shortcuts";
-    uint64_t tlen = (uint64_t)gui_strlen(title) * fw;
+    uint64_t tlen = gui_text_width(title);
     gui_draw_str_fg(x + (w - tlen) / 2u, y + 14u, title, 0x006aaddcu);
     console_fill_rect(x + 24u, y + fh + 24u, w - 48u, 1u, 0x00223048u);
 
