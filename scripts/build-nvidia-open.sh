@@ -97,9 +97,29 @@ done
 copy_driver_libs() {
     local source_dir="$1" destination="$2" item
     [ -d "$source_dir" ] || return 0
-    for item in "$source_dir"/libnvidia*.so* \
-                "$source_dir"/libcuda*.so* \
-                "$source_dir"/libnvcuvid*.so* \
+    # Keep the complete graphics, video, monitoring, DLSS, and ray-tracing
+    # runtime, including its 32-bit Proton side. CUDA/OpenCL developer and
+    # debugger libraries are intentionally separate: including those optional
+    # compute stacks here nearly doubles the boot image and its RAM footprint.
+    for item in "$source_dir"/libnvidia-allocator.so* \
+                "$source_dir"/libnvidia-api.so* \
+                "$source_dir"/libnvidia-cfg.so* \
+                "$source_dir"/libnvidia-egl-*.so* \
+                "$source_dir"/libnvidia-eglcore.so* \
+                "$source_dir"/libnvidia-encode.so* \
+                "$source_dir"/libnvidia-fbc.so* \
+                "$source_dir"/libnvidia-glcore.so* \
+                "$source_dir"/libnvidia-glsi.so* \
+                "$source_dir"/libnvidia-glvkspirv.so* \
+                "$source_dir"/libnvidia-gpucomp.so* \
+                "$source_dir"/libnvidia-ml.so* \
+                "$source_dir"/libnvidia-ngx.so* \
+                "$source_dir"/libnvidia-opticalflow.so* \
+                "$source_dir"/libnvidia-present.so* \
+                "$source_dir"/libnvidia-rtcore.so* \
+                "$source_dir"/libnvidia-sandboxutils.so* \
+                "$source_dir"/libnvidia-tls.so* \
+                "$source_dir"/libnvcuvid.so* \
                 "$source_dir"/libGLX_nvidia*.so* \
                 "$source_dir"/libEGL_nvidia*.so* \
                 "$source_dir"/libGLES*nvidia*.so*; do
