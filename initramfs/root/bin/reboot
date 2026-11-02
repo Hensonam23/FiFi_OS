@@ -1,11 +1,11 @@
 #!/bin/sh
-# PID 1 and recovery code retain BusyBox's direct root-only behavior.
-if [ "$(id -u)" -eq 0 ]; then
-    exec /bin/busybox reboot "$@"
-fi
-
 if [ "$#" -ne 0 ]; then
     echo "usage: reboot" >&2
     exit 2
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    # FiFi has a small custom PID 1, not BusyBox init.  -f performs the kernel
+    # reboot syscall instead of sending PID 1 a signal it does not handle.
+    exec /bin/busybox reboot -f
 fi
 exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" power reboot

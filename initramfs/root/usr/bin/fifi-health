@@ -16,7 +16,7 @@ else bad 'Desktop compositor is not running'; fi
 for entry in \
     '/tmp/fifi-compositor.sock:Desktop IPC' \
     '/tmp/wayland-0:Wayland IPC' \
-    '/tmp/fifi-admin.sock:Administrative broker'; do
+    '/run/fifi-admin.sock:Administrative broker'; do
     path=${entry%%:*}; label=${entry#*:}
     if [ -S "$path" ]; then pass "$label is available"; else bad "$label socket is missing"; fi
 done

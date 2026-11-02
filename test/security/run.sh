@@ -45,6 +45,8 @@ grep -Fq '/bin/fifi-*        ix,' \
 
 echo "[test-security] offline agent uses FiFi-native health evidence"
 test -x "$ROOT/initramfs/root/usr/bin/fifi-health"
+grep -Fq "'/run/fifi-admin.sock:Administrative broker'" \
+    "$ROOT/initramfs/root/usr/bin/fifi-health"
 grep -Fq 'FiFi OS does not use systemd' "$ROOT/initramfs/root/usr/bin/fifi-agent"
 grep -Fq 'fifi-health|top' "$ROOT/initramfs/root/usr/bin/fifi-agent"
 grep -Fq 'Run it? [Y/N]:' "$ROOT/initramfs/root/usr/bin/fifi-agent"
@@ -569,6 +571,8 @@ test -x "$ROOT/initramfs/root/bin/reboot"
 test -x "$ROOT/initramfs/root/bin/poweroff"
 grep -Fq 'fifi-admin}" power reboot' "$ROOT/initramfs/root/bin/reboot"
 grep -Fq 'fifi-admin}" power poweroff' "$ROOT/initramfs/root/bin/poweroff"
+grep -Fq 'busybox reboot -f' "$ROOT/initramfs/root/bin/reboot"
+grep -Fq 'busybox poweroff -f' "$ROOT/initramfs/root/bin/poweroff"
 grep -Fq 'busybox|bash|blkid|reboot|poweroff' \
     "$ROOT/scripts/build-initramfs.sh"
 power_wrapper_log="$TMP/power-wrapper.log"
