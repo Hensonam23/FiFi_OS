@@ -475,6 +475,12 @@ grep -Fq '$dir/usr/bin/librewolf-bin' \
 grep -Fq 'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'runtime/cache/fontconfig' "$ROOT/initramfs/root/init"
+grep -Fq '<dir>/usr/share/fonts/fifi</dir>' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-fonts.conf"
+grep -Fq '_junest_fonts=/fifi-data/home/.fonts' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'FONTCONFIG_FILE="$RT/etc/fonts/fonts.conf"' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'runtime/share/icons/.fifi-adwaita-build' "$ROOT/initramfs/root/init"
 grep -Fq 'XCURSOR_PATH="$RT/share/icons:/usr/share/icons"' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
@@ -488,6 +494,25 @@ grep -Fq '/root/.steam/steam.pid /root/.steam/starting' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'trap cleanup_steam_session EXIT HUP INT TERM' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'chown 0:1000 "$_drm_dev"' "$ROOT/initramfs/root/init"
+grep -Fq 'SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", GROUP="1000", MODE="0660"' \
+    "$ROOT/initramfs/root/usr/lib/udev/rules.d/70-fifi-desktop-devices.rules"
+! grep -Eq '^export LIBGL_ALWAYS_SOFTWARE=1$' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'user_pref("widget.dmabuf.enabled", false)' \
+    "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
+grep -Fq 'Vulkan can use ${gpu_name:-$render_node} as the desktop user' \
+    "$ROOT/initramfs/root/usr/bin/fifi-health"
+grep -Fq "Application user namespaces are enabled" \
+    "$ROOT/initramfs/root/usr/bin/fifi-health"
+grep -Fq 'segmentation fault|segfault|panic|fatal:' \
+    "$ROOT/initramfs/root/usr/bin/fifi-health"
+! grep -Fq "grep -Eiq 'segfault|panic|fatal|crash'" \
+    "$ROOT/initramfs/root/usr/bin/fifi-health"
+grep -Fq 'bundling desktop media codecs (FFmpeg)' \
+    "$ROOT/scripts/build-initramfs.sh"
+grep -Fq 'complete FFmpeg runtime unavailable' \
+    "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'TAR_OPTIONS=--no-same-owner LD_LIBRARY_PATH=' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run"
 grep -Fq 'FIFI_APP_HELPERS:-/usr/share/fifi' \
@@ -666,7 +691,8 @@ echo "[test-security] Steam container cannot retain host-root privileges"
 steam_block="$TMP/steam-block"
 sed -n '/# Steam (ivan-hc RunImage)/,/# Other RunImage\/sharun bundles/p' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run" > "$steam_block"
-grep -Fq 'exec /bin/fifi-user-exec busybox unshare -r -m --' "$steam_block"
+grep -Fq 'exec /bin/fifi-user-exec busybox unshare -r -m -p -f --' "$steam_block"
+grep -Fq 'mount -t proc -o nosuid,nodev,noexec proc "$R/proc"' "$steam_block"
 ! grep -Eq '^[[:space:]]*exec busybox unshare' "$steam_block"
 grep -Fq 'HOME=/root USER=root LOGNAME=root' "$steam_block"
 

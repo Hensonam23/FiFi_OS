@@ -136,6 +136,8 @@ if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
         >>/run/udev.log 2>&1
     /usr/bin/udevadm trigger --subsystem-match=input --action=add \
         >>/run/udev.log 2>&1 || true
+    /usr/bin/udevadm trigger --subsystem-match=drm --action=add \
+        >>/run/udev.log 2>&1 || true
     /usr/bin/udevadm settle --timeout=10 >>/run/udev.log 2>&1 || true
 fi
 
@@ -336,6 +338,16 @@ for _audio_dev in /dev/snd/*; do
     chmod 0660 "$_audio_dev"
 done
 
+# Direct rendering is a normal desktop capability. The compositor owns the KMS
+# card as root, while applications and games use the render node as uid 1000.
+# Some firmware creates both nodes as 0600 root:root before udev starts, so
+# enforce the desktop group here as well as in the hotplug udev rule.
+for _drm_dev in /dev/dri/card* /dev/dri/renderD*; do
+    [ -c "$_drm_dev" ] || continue
+    chown 0:1000 "$_drm_dev"
+    chmod 0660 "$_drm_dev"
+done
+
 # Shared fonts are immutable, but fontconfig needs a private cache it can refresh
 # when an AppImage adds a face. Keep that cache owned by the desktop identity.
 mkdir -p /fifi-data/runtime/cache/fontconfig
@@ -534,11 +546,13 @@ fi
 # (which scans /fonts -> /fifi-data/fonts) has fonts on a fresh install. The
 # mounted data partition shadows the baked copy, so seed onto it here.
 mkdir -p /fifi-data/fonts
-if [ -d /usr/share/fifi/fonts ]; then
+if [ -d /usr/share/fonts/fifi ]; then
     # .psf too: the App Store + other FiFi apps load /fifi-data/fonts/ter16b.psf;
     # without it their text renders blank (they fall back to an empty glyph set).
-    for ft in /usr/share/fifi/fonts/*.ttf /usr/share/fifi/fonts/*.otf \
-              /usr/share/fifi/fonts/*.ttc /usr/share/fifi/fonts/*.psf; do
+    for ft in /usr/share/fonts/fifi/*.ttf /usr/share/fonts/fifi/*.otf \
+              /usr/share/fonts/fifi/*.ttc /usr/share/fonts/fifi/*.TTF \
+              /usr/share/fonts/fifi/*.OTF /usr/share/fonts/fifi/*.TTC \
+              /usr/share/fonts/fifi/*.psf; do
         [ -f "$ft" ] || continue
         b=$(basename "$ft")
         [ -f "/fifi-data/fonts/$b" ] || cp "$ft" "/fifi-data/fonts/$b" 2>/dev/null || true

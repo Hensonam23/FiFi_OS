@@ -63,6 +63,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 | PTY terminal: real shell in a FiFi window, multiple instances, full UTF-8 | **Working** |
 | Pointer input: dedicated event-driven mouse/touchpad thread and hardware cursor remain responsive independently of rendering, apps, terminal output, and hotplug work | **Working** |
 | DRM/KMS display: direct GPU, no polling lag | **Working** |
+| Desktop GPU access: Intel Mesa OpenGL/Vulkan available to Steam, Proton, and apps without root | **Working** |
 | Audio: ALSA + PipeWire volume and routing | **Working** |
 | Gamepad: evdev HID input routed to focused IPC app | **Working** |
 | Gaming mode: CPU governor switch, uncapped frame rate | **Working** |
@@ -89,6 +90,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 
 Recent work:
 
+- **Fonts, media, GPU, and Steam.** System fonts now live on the standard sandbox-visible path, with a shared user-font bridge for containerized apps, so Google and LibreOffice render complete text. The shared app runtime includes FFmpeg AAC/H.264 media codecs. Desktop apps can use the Intel Mesa render node and Vulkan without root, while LibreWolf keeps a targeted software fallback for its incompatible dmabuf surface. Steam receives a private PID namespace and procfs, so its current runtime passes the user-namespace check and detects the Intel GPU.
 - **App window controls.** LibreOffice (rootful XWayland) now gets a real FiFi titlebar with working close and minimize buttons above its menu bar, and the top bar auto-hides while it is maximized. LibreWolf draws its own titlebar with minimize/maximize/close. Steam stays borderless with its own chrome. Window buttons are large and easy to hit.
 - **Update from the terminal.** Plain `update` now applies an in-place OS update from the selected stable or test channel. `fifi update` remains the check-only command and `fifi upgrade` applies app and OS updates together. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
 - **One managed browser copy.** Browser Setup and App Store now share the same LibreWolf/Firefox installation and verified update metadata; older Browser Setup copies migrate automatically, and LibreWolf updates come from its current Codeberg releases.

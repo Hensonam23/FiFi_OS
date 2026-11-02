@@ -30,6 +30,36 @@ else note 'Audio service is not running'; fi
 if pidof bluetoothd >/dev/null 2>&1; then pass 'Bluetooth service is running';
 else note 'Bluetooth service is not running'; fi
 
+render_node=''
+for node in /dev/dri/renderD*; do
+    [ -c "$node" ] || continue
+    render_node="$node"
+    break
+done
+if [ -n "$render_node" ]; then
+    if [ "$(id -u)" = 0 ]; then
+        gpu_result=$(/bin/fifi-user-exec /usr/bin/vulkaninfo --summary 2>/dev/null || true)
+    else
+        gpu_result=$(/usr/bin/vulkaninfo --summary 2>/dev/null || true)
+    fi
+    if printf '%s\n' "$gpu_result" | grep -q '^GPU[0-9][0-9]*:'; then
+        gpu_name=$(printf '%s\n' "$gpu_result" |
+            sed -n 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p' | head -1)
+        pass "Vulkan can use ${gpu_name:-$render_node} as the desktop user"
+    else
+        bad "Vulkan cannot use $render_node as the desktop user"
+    fi
+else
+    bad 'No GPU render node was detected'
+fi
+
+if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 0)" = 1 ] &&
+   [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; then
+    pass 'Application user namespaces are enabled'
+else
+    bad 'Application user namespaces are disabled'
+fi
+
 ssid=$(cat /fifi-data/wifi-ssid 2>/dev/null || true)
 if [ -n "$ssid" ]; then
     if ip route 2>/dev/null | grep -q '^default '; then pass "Wi-Fi is connected to $ssid";
@@ -61,7 +91,8 @@ if [ "$denied" -eq 0 ] 2>/dev/null; then pass 'No AppArmor denials this boot';
 else note "$denied AppArmor denials need review"; fi
 
 if [ -f /fifi-data/compositor.log ] && \
-   grep -Eiq 'segfault|panic|fatal|crash' /fifi-data/compositor.log; then
+   grep -Eiq '(^|\])[[:space:]]+(segmentation fault|segfault|panic|fatal:|crash(ed|ing)?([ :]|$))' \
+       /fifi-data/compositor.log; then
     note 'Compositor log contains a severe error marker'
 else pass 'No severe compositor error markers'; fi
 

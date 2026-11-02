@@ -31,6 +31,7 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # via CSD; close with Ctrl+Q / its menu / Alt+F4.
 export XKB_CONFIG_ROOT="$RT/share/X11/xkb"
 export FONTCONFIG_PATH="$RT/etc/fonts"
+export FONTCONFIG_FILE="$RT/etc/fonts/fonts.conf"
 export XCURSOR_PATH="$RT/share/icons:/usr/share/icons"
 export XCURSOR_THEME="${XCURSOR_THEME:-Adwaita}"
 export XDG_DATA_DIRS="$RT/share:$BROWSER/sysroot/usr/share:/usr/share"
@@ -39,9 +40,11 @@ export LD_LIBRARY_PATH="$RT/lib:$BROWSER/squashfs-root:$BROWSER/sysroot/usr/lib$
 # Keep accessibility bridges optional while sharing FiFi's local user bus.
 export NO_AT_BRIDGE=1 GTK_A11Y=none GNOME_ACCESSIBILITY=0 QT_ACCESSIBILITY=0
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/tmp/fifi-session-bus}"
-# software rendering (no GPU stack on the box yet)
-export LIBGL_ALWAYS_SOFTWARE=1
-# steer every toolkit to Wayland
+# Mesa, Vulkan, and the compositor's dmabuf path are bundled. Do not globally
+# force llvmpipe: it makes every browser, office app, and game CPU-render even
+# when a working GPU is present. Individual apps can still opt into software
+# rendering for diagnosis with LIBGL_ALWAYS_SOFTWARE=1.
+# Steer every toolkit to Wayland.
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
 export MOZ_ENABLE_WAYLAND=1
@@ -188,8 +191,7 @@ launch_dir() {
             chown -R 1000:1000 "$HOME/.config/discord" 2>/dev/null || true
             export LD_LIBRARY_PATH="$(dirname "$exe"):$LD_LIBRARY_PATH"
             _sb_pid=1   # Electron keeps its main process alive
-            sandbox_exec "$exe" --ozone-platform=wayland \
-                --disable-gpu --in-process-gpu "$@"
+            sandbox_exec "$exe" --ozone-platform=wayland "$@"
         fi
         echo "fifi-run: Discord bootstrap failed (see /tmp/discord-install.log)" >&2
         exit 1
@@ -273,6 +275,28 @@ launch_dir() {
         chmod 0700 /fifi-data/home /home/fifi 2>/dev/null || true
         mountpoint -q /home/fifi 2>/dev/null || \
             mount --bind /fifi-data/home /home/fifi 2>/dev/null || true
+        # JuNest replaces /usr, so it cannot see FiFi's system fonts. Its own
+        # fontconfig does scan ~/.fonts, however. Hard-link the shared faces
+        # into that persistent home (same data filesystem, no duplicated font
+        # payload); fall back to a copy if a filesystem rejects hard links.
+        # This fixes missing-glyph boxes in LibreOffice and every other JuNest
+        # application without weakening the app namespace.
+        _junest_fonts=/fifi-data/home/.fonts
+        _font_marker="$_junest_fonts/.fifi-fonts-$(cat /etc/fifi-build-id 2>/dev/null || echo current)"
+        if [ ! -e "$_font_marker" ]; then
+            mkdir -p "$_junest_fonts"
+            for _font in /fifi-data/fonts/*.ttf /fifi-data/fonts/*.otf \
+                         /fifi-data/fonts/*.ttc /fifi-data/fonts/*.TTF \
+                         /fifi-data/fonts/*.OTF /fifi-data/fonts/*.TTC; do
+                [ -f "$_font" ] || continue
+                _font_dst="$_junest_fonts/$(basename "$_font")"
+                [ -f "$_font_dst" ] || ln "$_font" "$_font_dst" 2>/dev/null || \
+                    cp "$_font" "$_font_dst" 2>/dev/null || true
+            done
+            rm -rf /fifi-data/home/.cache/fontconfig 2>/dev/null || true
+            : > "$_font_marker"
+            chown -RhP 1000:1000 "$_junest_fonts" 2>/dev/null || true
+        fi
         # JuNest replaces /usr, so the host cursor theme is otherwise invisible
         # and resize/drag pointers fall back with a warning. Seed the immutable
         # theme into this extracted, user-owned app root once.
@@ -284,7 +308,7 @@ launch_dir() {
             cp -a /usr/share/icons/Adwaita "$_junest_icons/Adwaita"
             chown -RhP 1000:1000 "$_junest_icons/Adwaita" 2>/dev/null || true
         fi
-        unset XDG_DATA_DIRS FONTCONFIG_PATH XKB_CONFIG_ROOT LD_LIBRARY_PATH
+        unset XDG_DATA_DIRS FONTCONFIG_PATH FONTCONFIG_FILE XKB_CONFIG_ROOT LD_LIBRARY_PATH
         export HOME=/home/fifi USER=fifi LOGNAME=fifi
         exec /bin/fifi-user-exec busybox unshare -r -- "$dir/AppRun" "$@"
     fi
@@ -358,7 +382,7 @@ STEOF
         # namespace maps host uid 1000 to root only inside this private mount
         # namespace, which keeps chroot/mount available without giving Steam or
         # its runtime host-root privileges.
-        exec /bin/fifi-user-exec busybox unshare -r -m -- busybox sh -c '
+        exec /bin/fifi-user-exec busybox unshare -r -m -p -f -- busybox sh -c '
             R="$1"
             busybox mount --make-rprivate /
             busybox mount --bind "$R" "$R"
@@ -372,8 +396,11 @@ STEOF
                 busybox mount --make-rslave "$R/$d" || exit 1
             done
             busybox mkdir -p "$R/proc" "$R/run"
-            busybox mount --rbind /proc "$R/proc" || exit 1
-            busybox mount --make-rslave "$R/proc" || exit 1
+            # A host /proc bind exposes mountinfo with the host superblock
+            # permission context. Steam bwrap then gets EACCES and reports the
+            # misleading "user namespaces disabled" error. A fresh procfs tied
+            # to this new PID/user namespace gives bwrap the view it expects.
+            busybox mount -t proc -o nosuid,nodev,noexec proc "$R/proc" || exit 1
             busybox mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$R/run" || exit 1
             busybox mkdir -p "$R/run/user/0"
             busybox chmod 0700 "$R/run/user/0"
@@ -405,6 +432,12 @@ STEOF
        [ -e "$dir/firefox-bin" ]  || [ -e "$dir/firefox" ] || \
        [ -e "$dir/usr/bin/librewolf-bin" ] || [ -e "$dir/usr/bin/librewolf" ] || \
        [ -e "$dir/usr/bin/firefox-bin" ]  || [ -e "$dir/usr/bin/firefox" ]; then
+        # Firefox selects a non-mappable/tiled GPU buffer on this compositor
+        # even though FiFi advertises only linear dmabuf modifiers, producing a
+        # full black surface. Keep this one known-incompatible Wayland client on
+        # software rendering; XWayland, Vulkan, Steam, and compatible apps retain
+        # direct GPU access instead of penalizing the entire desktop.
+        export LIBGL_ALWAYS_SOFTWARE=1
         mkdir -p /fifi-data/home 2>/dev/null || true
         export HOME=/fifi-data/home
         # Give Firefox's integrated (CSD) titlebar the min/max/close buttons. It
@@ -460,6 +493,12 @@ STEOF
           printf 'user_pref("font.name.sans-serif.x-western", "DejaVu Sans");\n'
           printf 'user_pref("font.name.serif.x-western", "DejaVu Serif");\n'
           printf 'user_pref("font.name.monospace.x-western", "DejaVu Sans Mono");\n'
+          printf 'user_pref("layers.acceleration.disabled", true);\n'
+          printf 'user_pref("gfx.webrender.software", true);\n'
+          printf 'user_pref("widget.dmabuf.enabled", false);\n'
+          printf 'user_pref("widget.dmabuf.force-enabled", false);\n'
+          printf 'user_pref("widget.dmabuf-webgl.enabled", false);\n'
+          printf 'user_pref("media.ffmpeg.vaapi.enabled", false);\n'
           printf 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);\n'
           printf 'user_pref("browser.startup.page", 0);\n'
         } > "$prof/fifi.js"
@@ -468,7 +507,7 @@ STEOF
             # || true: grep exits 1 when it filters out EVERY line (profile had only
             # FiFi prefs); under `set -e` that non-zero would abort fifi-run before
             # the browser ever launches.
-            grep -vE 'inTitlebar|drawInTitlebar|non-native-titlebar-buttons|warnOn(Quit|Close)|tabs.warnOnClose|sessionstore.warnOnQuit|font.name.(sans-serif|serif|monospace).x-western|legacyUserProfileCustomizations.stylesheets|browser.startup.page' \
+            grep -vE 'inTitlebar|drawInTitlebar|non-native-titlebar-buttons|warnOn(Quit|Close)|tabs.warnOnClose|sessionstore.warnOnQuit|font.name.(sans-serif|serif|monospace).x-western|layers.acceleration.disabled|gfx.webrender.software|widget.dmabuf|media.ffmpeg.vaapi.enabled|legacyUserProfileCustomizations.stylesheets|browser.startup.page' \
                 "$prof/user.js" 2>/dev/null >> "$prof/fifi.js" || true
         fi
         mv "$prof/fifi.js" "$prof/user.js"
@@ -517,7 +556,7 @@ CSSEOF
         sandbox_exec "$dir/AppRun" --no-remote -profile "$prof" "$@"
     fi
     if [ -f "$dir/chrome-sandbox" ] || ls "$dir"/resources/*.asar >/dev/null 2>&1; then
-        set -- --ozone-platform=wayland --disable-gpu --in-process-gpu "$@"
+        set -- --ozone-platform=wayland "$@"
         _sb_pid=1   # Electron keeps its main process alive → safe for a PID namespace
     fi
     if [ -x "$dir/AppRun" ]; then export APPDIR="$dir"; cd "$dir"; diag_libs "$dir/AppRun"; sandbox_exec "$dir/AppRun" "$@"; fi

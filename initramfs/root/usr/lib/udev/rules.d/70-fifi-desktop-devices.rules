@@ -1,0 +1,4 @@
+# Permit the unprivileged FiFi desktop identity to use GPU render nodes.
+# Numeric group 1000 is intentional: udev starts with name resolution disabled.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", GROUP="1000", MODE="0660"
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", GROUP="1000", MODE="0660"

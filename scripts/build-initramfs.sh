@@ -437,6 +437,38 @@ for lib in libnss3 libnssutil3 libsmime3 libssl3 libnspr4 libplc4 libplds4 \
 done
 echo "[initramfs] app-support libraries bundled"
 
+# Firefox deliberately relies on the operating system FFmpeg ABI for patent
+# and distro-managed media codecs. AppImages do not carry it, so without these
+# libraries common AAC/H.264 MP4 streams fail with "no decoder found" even
+# though video and audio output otherwise work. Resolve through ldconfig so the
+# build works on both Arch-style /usr/lib and multiarch build hosts, then stage
+# each SONAME plus the complete dynamic dependency closure.
+echo "[initramfs] bundling desktop media codecs (FFmpeg)..."
+_fifi_media_found=0
+for _media_soname in libavcodec.so libavformat.so libavutil.so libswresample.so; do
+    _media_src="$(ldconfig -p 2>/dev/null | awk -v n="$_media_soname" \
+        '$1 == n || index($1, n ".") == 1 { print $NF; exit }')"
+    [ -f "$_media_src" ] || continue
+    _fifi_media_found=$((_fifi_media_found + 1))
+    _media_real="$(readlink -f "$_media_src" 2>/dev/null || printf '%s' "$_media_src")"
+    _media_name="$(objdump -p "$_media_real" 2>/dev/null |
+        awk '/SONAME/{print $2; exit}')"
+    [ -n "$_media_name" ] || _media_name="$(basename "$_media_src")"
+    cp -L "$_media_real" "$STAGE/usr/lib/$_media_name"
+    ldd "$_media_real" 2>/dev/null | awk '/=> \/.*\(/{print $3}' |
+        while read -r _media_dep; do
+            [ -f "$_media_dep" ] || continue
+            _media_dep_name="$(basename "$_media_dep")"
+            [ -f "$STAGE/usr/lib/$_media_dep_name" ] ||
+                cp -L "$_media_dep" "$STAGE/usr/lib/$_media_dep_name"
+        done
+done
+if [ "$_fifi_media_found" -lt 4 ]; then
+    echo "[initramfs] ERROR: complete FFmpeg runtime unavailable (found $_fifi_media_found/4 libraries)" >&2
+    exit 1
+fi
+echo "[initramfs] desktop media codecs bundled"
+
 # ── GUI runtime libraries (GTK3 / cairo / X11) ───────────────────────────────
 # Apps like LibreWolf and LibreOffice expect the GTK3/cairo/X11 stack FROM the
 # system (they don't bundle it), so a from-scratch image can't launch them.
@@ -587,8 +619,8 @@ if [ -d "$FONT_SRC" ]; then
     # Also into the seed source: the mounted data partition shadows the baked
     # /fifi-data on an installed system, so /init re-seeds .psf from here (the App
     # Store loads ter16b.psf; missing it = blank text).
-    mkdir -p "$STAGE/usr/share/fifi/fonts"
-    cp "$FONT_SRC"/*.psf "$STAGE/usr/share/fifi/fonts/" 2>/dev/null || true
+    mkdir -p "$STAGE/usr/share/fonts/fifi"
+    cp "$FONT_SRC"/*.psf "$STAGE/usr/share/fonts/fifi/" 2>/dev/null || true
     echo "[initramfs] included fonts from $FONT_SRC"
 fi
 
@@ -609,14 +641,14 @@ else
 fi
 
 # Scalable TTF/OTF fonts for the Settings font picker. gui_font_scan() reads
-# /fonts (-> /fifi-data/fonts); we bake a broad set into /usr/share/fifi/fonts
+# /fonts (-> /fifi-data/fonts); we bake a broad set into /usr/share/fonts/fifi
 # and /init seeds them onto the data partition on first boot. The set spans the
 # platform "looks" (Windows via Liberation/Carlito/Caladea metric-compat,
 # Android via Roboto, macOS/iOS via Inter, Linux via DejaVu/Ubuntu/Cantarell)
 # plus the Noto CHARACTER-COVERAGE fonts the compositor's fallback chain uses
 # (font_ttf.c fb_load_all): NotoSans / NotoSansSymbols2 / NotoSansCJK so any
 # script/CJK renders even when the chosen UI font lacks the glyph.
-FIFI_FONT_DST="$STAGE/usr/share/fifi/fonts"
+FIFI_FONT_DST="$STAGE/usr/share/fonts/fifi"
 mkdir -p "$FIFI_FONT_DST"
 for fdir in /usr/share/fonts/TTF \
             /usr/share/fonts/liberation \
