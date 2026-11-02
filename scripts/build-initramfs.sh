@@ -223,13 +223,17 @@ for binary in "$UDEVADM_BIN" "$UDEVD_BIN"; do
         cp -L "$lib" "$STAGE/usr/lib/$(basename "$lib")"
     done
 done
-for rule in 60-evdev.rules 60-input-id.rules 60-persistent-input.rules \
+for rule in 60-drm.rules 60-evdev.rules 60-input-id.rules 60-persistent-input.rules \
             70-touchpad.rules 80-libinput-device-groups.rules \
             90-libinput-fuzz-override.rules; do
-    [ -f "/usr/lib/udev/rules.d/$rule" ] && \
-        cp "/usr/lib/udev/rules.d/$rule" "$STAGE/usr/lib/udev/rules.d/"
+    for rules_root in /usr/lib/udev/rules.d /run/host/usr/lib/udev/rules.d; do
+        if [ -f "$rules_root/$rule" ]; then
+            cp "$rules_root/$rule" "$STAGE/usr/lib/udev/rules.d/"
+            break
+        fi
+    done
 done
-echo "[initramfs] udev input discovery bundled"
+echo "[initramfs] udev input and DRM discovery bundled"
 
 # ── Build and include fifi-compositor ────────────────────────────────────────
 echo "[initramfs] building fifi-compositor..."
@@ -1379,6 +1383,55 @@ for tool in vulkaninfo glxinfo eglinfo; do
     done
 done
 echo "[initramfs] Mesa GL/Vulkan bundled ($(du -sh "$STAGE/usr/lib" | cut -f1) total usr/lib)"
+
+# NVIDIA's current open driver must match the exact FiFi kernel and its userspace
+# libraries must match the module version. scripts/build-nvidia-open.sh stages
+# that verified pair in build-linux; this packaging step deliberately never
+# reaches into an arbitrary host driver installation on its own.
+NVIDIA_STAGE="$REPO_ROOT/build-linux/nvidia-open"
+if [ -f "$NVIDIA_STAGE/driver.version" ] &&
+   [ -f "$NVIDIA_STAGE/kernel.release" ]; then
+    NVIDIA_VERSION="$(cat "$NVIDIA_STAGE/driver.version")"
+    NVIDIA_KERNEL="$(cat "$NVIDIA_STAGE/kernel.release")"
+    FIFI_KERNEL_SRC="${FIFI_LINUX_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/fifi-os/linux-src}"
+    if [ ! -s "$FIFI_KERNEL_SRC/include/config/kernel.release" ] &&
+       [ -s "$HOME/.cache/fifi-os/linux-src/include/config/kernel.release" ]; then
+        FIFI_KERNEL_SRC="$HOME/.cache/fifi-os/linux-src"
+    fi
+    FIFI_KERNEL="$(cat "$FIFI_KERNEL_SRC/include/config/kernel.release" 2>/dev/null || true)"
+    [ "$NVIDIA_KERNEL" = "$FIFI_KERNEL" ] || {
+        echo "[initramfs] ERROR: staged NVIDIA modules target $NVIDIA_KERNEL, not $FIFI_KERNEL" >&2
+        exit 1
+    }
+    for module in nvidia nvidia-modeset nvidia-uvm nvidia-drm; do
+        [ -f "$NVIDIA_STAGE/modules/$module.ko" ] || {
+            echo "[initramfs] ERROR: staged NVIDIA module $module.ko is missing" >&2
+            exit 1
+        }
+    done
+    mkdir -p "$STAGE/usr/lib/fifi/nvidia/modules" \
+             "$STAGE/usr/lib/fifi/nvidia/64" "$STAGE/usr/lib/fifi/nvidia/32" \
+             "$STAGE/lib/firmware/nvidia/$NVIDIA_VERSION"
+    cp "$NVIDIA_STAGE/modules/"*.ko "$STAGE/usr/lib/fifi/nvidia/modules/"
+    cp -a "$NVIDIA_STAGE/lib/." "$STAGE/usr/lib/fifi/nvidia/64/"
+    cp -a "$NVIDIA_STAGE/lib32/." "$STAGE/usr/lib/fifi/nvidia/32/"
+    cp -a "$NVIDIA_STAGE/firmware/." \
+          "$STAGE/lib/firmware/nvidia/$NVIDIA_VERSION/"
+    cp -a "$NVIDIA_STAGE/share/." "$STAGE/usr/share/"
+    cp "$NVIDIA_STAGE/bin/"* "$STAGE/usr/bin/"
+    printf '%s\n' "$NVIDIA_VERSION" > "$STAGE/usr/lib/fifi/nvidia/version"
+    # Make the 64-bit driver visible to the system Vulkan/GLVND loaders. The
+    # dedicated source directory remains available for Steam rootfs seeding.
+    for lib in "$STAGE/usr/lib/fifi/nvidia/64/"*; do
+        [ -e "$lib" ] || continue
+        name="$(basename "$lib")"
+        [ -e "$STAGE/usr/lib/$name" ] ||
+            ln -s "fifi/nvidia/64/$name" "$STAGE/usr/lib/$name"
+    done
+    echo "[initramfs] NVIDIA open driver $NVIDIA_VERSION bundled for $NVIDIA_KERNEL"
+else
+    echo "[initramfs] NOTE: NVIDIA stack not staged; run scripts/build-nvidia-open.sh"
+fi
 
 # ── Bluetooth: BlueZ (bluetoothd + bluetoothctl) over a root-mode system D-Bus;
 #    A2DP audio via PipeWire's bluez5 plugin. Kernel BT is enabled in fifi.config.

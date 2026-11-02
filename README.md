@@ -93,6 +93,7 @@ Recent work:
 - **Fonts, media, GPU, and Steam.** System fonts now live on the standard sandbox-visible path, with a shared user-font bridge for containerized apps, so Google and LibreOffice render complete text. The shared app runtime includes FFmpeg AAC/H.264 media codecs. Desktop apps can use the Intel Mesa render node and Vulkan without root, while LibreWolf keeps a targeted software fallback for its incompatible dmabuf surface. Steam receives a private PID namespace and procfs, so its current runtime passes the user-namespace check and detects the Intel GPU.
 - **Game launch audio.** Steam forwards launch arguments and FiFi's PipeWire/Pulse socket into its runtime, so native games and Proton titles inherit working desktop audio instead of falling back to a silent ALSA device.
 - **Fullscreen X11 games.** SDL and Unity games that use override-redirect fullscreen windows now keep XWayland visible instead of running behind the desktop.
+- **Hybrid NVIDIA gaming.** FiFi builds NVIDIA's open modules against its exact kernel, bundles matching 64-bit and 32-bit GL/Vulkan userspace, and leaves Intel in charge of the desktop. The Play profile sends Steam games to the discrete GPU while other profiles allow the RTX GPU to runtime-suspend.
 - **App window controls.** LibreOffice (rootful XWayland) now gets a real FiFi titlebar with working close and minimize buttons above its menu bar, and the top bar auto-hides while it is maximized. LibreWolf draws its own titlebar with minimize/maximize/close. Steam stays borderless with its own chrome. Window buttons are large and easy to hit.
 - **Update from the terminal.** Plain `update` now applies an in-place OS update from the selected stable or test channel. `fifi update` remains the check-only command and `fifi upgrade` applies app and OS updates together. An `xdg-open` shim lets apps open links in the browser (this also fixed LibreOffice's Download button).
 - **One managed browser copy.** Browser Setup and App Store now share the same LibreWolf/Firefox installation and verified update metadata; older Browser Setup copies migrate automatically, and LibreWolf updates come from its current Codeberg releases.
@@ -379,7 +380,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [ ] Boots on any x86-64 machine without configuration
 - [ ] Full desktop: browser, terminal, file manager, text editor, settings, system monitor
-- [ ] Steam and Proton gaming on NVIDIA and AMD hardware
+- [ ] Steam and Proton gaming on NVIDIA and AMD hardware (NVIDIA RTX render offload works; AMD remains to be tested)
 - [ ] USB installer: one click to install to disk
 - [ ] Default encrypted, default private, default hardened
 - [ ] Public release at GitHub Releases

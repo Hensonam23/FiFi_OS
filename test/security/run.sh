@@ -696,8 +696,18 @@ grep -Fq 'mount -t proc -o nosuid,nodev,noexec proc "$R/proc"' "$steam_block"
 grep -Fq 'PULSE_SERVER=unix:/tmp/pulse/native PULSE_RUNTIME_PATH=/tmp/pulse' "$steam_block"
 grep -Fq '/bin/sh /fifi-steam-launch.sh "$@"' "$steam_block"
 grep -Fq "' _ \"\$dir/rootfs\" \"\$@\"" "$steam_block"
+grep -Fq 'for _nv_lib in /usr/lib/fifi/nvidia/32/*' "$steam_block"
+grep -Fq '__NV_PRIME_RENDER_OFFLOAD=1' "$steam_block"
+grep -Fq '__VK_LAYER_NV_optimus=NVIDIA_only' "$steam_block"
 ! grep -Eq '^[[:space:]]*exec busybox unshare' "$steam_block"
 grep -Fq 'HOME=/root USER=root LOGNAME=root' "$steam_block"
+
+echo "[test-security] NVIDIA driver is kernel-matched and loaded without host privileges"
+grep -Fq 'strings "$src" | grep -F "vermagic=$KERNEL_RELEASE "' \
+    "$ROOT/scripts/build-nvidia-open.sh"
+grep -Fq 'insmod "$_nvidia_modules/nvidia-drm.ko" modeset=1' \
+    "$ROOT/initramfs/root/init"
+grep -Fq '60-drm.rules' "$ROOT/scripts/build-initramfs.sh"
 
 echo "[test-security] ignored legacy key is removed from staged images"
 stage="$TMP/stage"

@@ -128,8 +128,36 @@ export GTK_A11Y=none
 export GNOME_ACCESSIBILITY=0
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/fifi-session-bus
 
+# Load the matching NVIDIA open modules when an NVIDIA display controller is
+# present. Intel remains the desktop/KMS owner on hybrid laptops; the discrete
+# GPU is exposed as a render-offload device and can runtime-suspend outside Play.
+_nvidia_present=0
+for _pci in /sys/bus/pci/devices/*; do
+    [ "$(cat "$_pci/vendor" 2>/dev/null)" = 0x10de ] || continue
+    case "$(cat "$_pci/class" 2>/dev/null)" in 0x03*) _nvidia_present=1 ;; esac
+done
+_nvidia_modules=/usr/lib/fifi/nvidia/modules
+if [ "$_nvidia_present" = 1 ] && [ -f "$_nvidia_modules/nvidia.ko" ]; then
+    if insmod "$_nvidia_modules/nvidia.ko" >>/run/nvidia.log 2>&1 &&
+       insmod "$_nvidia_modules/nvidia-modeset.ko" >>/run/nvidia.log 2>&1 &&
+       insmod "$_nvidia_modules/nvidia-uvm.ko" >>/run/nvidia.log 2>&1 &&
+       insmod "$_nvidia_modules/nvidia-drm.ko" modeset=1 >>/run/nvidia.log 2>&1; then
+        /usr/bin/nvidia-modprobe -c 0 >>/run/nvidia.log 2>&1 || true
+        /usr/bin/nvidia-modprobe -m >>/run/nvidia.log 2>&1 || true
+        /usr/bin/nvidia-modprobe -u >>/run/nvidia.log 2>&1 || true
+        [ -c /dev/nvidiactl ] || mknod /dev/nvidiactl c 195 255
+        chmod 0666 /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset \
+            /dev/nvidia-uvm /dev/nvidia-uvm-tools 2>/dev/null || true
+        echo "nvidia: open driver loaded" >>/run/nvidia.log
+    else
+        echo "nvidia: module load failed" >>/run/nvidia.log
+    fi
+fi
+unset _nvidia_present _nvidia_modules _pci
+
 # Populate the standard input-device metadata consumed by libinput. This is a
 # focused udev service, not a replacement for FiFi's custom PID 1 supervision.
+# DRM path metadata lets GL/Vulkan correlate every render node with its PCI GPU.
 mkdir -p /run/udev
 if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
     /usr/lib/systemd/systemd-udevd --daemon --resolve-names=never \

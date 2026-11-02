@@ -340,6 +340,40 @@ launch_dir() {
                 [ -n "$_src" ] && cp "$_src" "$dir/rootfs/usr/lib/$_need" 2>/dev/null || true
             fi
         done
+        # Seed the exact NVIDIA userspace paired with FiFi's kernel module into
+        # Steam's Arch rootfs. Pressure Vessel can then import both 64-bit and
+        # 32-bit GL/Vulkan drivers for native games and Proton. A version marker
+        # makes this a one-time copy per OS driver update, not per launch.
+        _nv_version=$(cat /usr/lib/fifi/nvidia/version 2>/dev/null || true)
+        if [ -n "$_nv_version" ] &&
+           [ "$(cat "$dir/rootfs/.fifi-nvidia-version" 2>/dev/null)" != "$_nv_version" ]; then
+            mkdir -p "$dir/rootfs/usr/lib" "$dir/rootfs/usr/lib32" \
+                     "$dir/rootfs/usr/share/vulkan/icd.d" \
+                     "$dir/rootfs/usr/share/vulkan/implicit_layer.d" \
+                     "$dir/rootfs/usr/share/glvnd/egl_vendor.d" \
+                     "$dir/rootfs/usr/share/nvidia"
+            # RunImage ships placeholder NVIDIA symlinks ending in 000.00.00.
+            # BusyBox cp refuses to replace those dangling links, so replace
+            # only the exact driver filenames FiFi is about to install.
+            for _nv_lib in /usr/lib/fifi/nvidia/64/*; do
+                _nv_name=$(basename "$_nv_lib")
+                rm -f "$dir/rootfs/usr/lib/$_nv_name"
+                cp -a "$_nv_lib" "$dir/rootfs/usr/lib/$_nv_name"
+            done
+            for _nv_lib in /usr/lib/fifi/nvidia/32/*; do
+                _nv_name=$(basename "$_nv_lib")
+                rm -f "$dir/rootfs/usr/lib32/$_nv_name"
+                cp -a "$_nv_lib" "$dir/rootfs/usr/lib32/$_nv_name"
+            done
+            cp -a /usr/share/vulkan/icd.d/nvidia_icd.json \
+                  "$dir/rootfs/usr/share/vulkan/icd.d/"
+            cp -a /usr/share/vulkan/implicit_layer.d/nvidia_layers.json \
+                  "$dir/rootfs/usr/share/vulkan/implicit_layer.d/"
+            cp -a /usr/share/glvnd/egl_vendor.d/10_nvidia.json \
+                  "$dir/rootfs/usr/share/glvnd/egl_vendor.d/"
+            cp -a /usr/share/nvidia/. "$dir/rootfs/usr/share/nvidia/"
+            printf '%s\n' "$_nv_version" > "$dir/rootfs/.fifi-nvidia-version"
+        fi
         cp /etc/resolv.conf "$dir/rootfs/etc/resolv.conf" 2>/dev/null || true
         # Inner launch script (kept in the rootfs; avoids deep nested quoting):
         # bring up a per-session bus, run native Steam, and reap both on exit.
@@ -407,7 +441,13 @@ STEOF
             busybox chmod 0700 "$R/run/user/0"
             busybox mkdir -p /fifi-data/home "$R/root"
             busybox mount --bind /fifi-data/home "$R/root"
+            _gpu_env=
+            if [ "$(cat /fifi-data/system-profile 2>/dev/null)" = play ] &&
+               [ -c "$R/dev/nvidia0" ]; then
+                _gpu_env="__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only"
+            fi
             exec chroot "$R" /usr/bin/env -i \
+                $_gpu_env \
                 HOME=/root USER=root LOGNAME=root \
                 DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/0 SDL_VIDEODRIVER=x11 \
                 PULSE_SERVER=unix:/tmp/pulse/native PULSE_RUNTIME_PATH=/tmp/pulse \

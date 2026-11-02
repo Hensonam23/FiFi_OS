@@ -53,6 +53,28 @@ else
     bad 'No GPU render node was detected'
 fi
 
+nvidia_pci=''
+for pci in /sys/bus/pci/devices/*; do
+    [ "$(cat "$pci/vendor" 2>/dev/null)" = 0x10de ] || continue
+    case "$(cat "$pci/class" 2>/dev/null)" in
+        0x03*) nvidia_pci="$pci"; break ;;
+    esac
+done
+if [ -n "$nvidia_pci" ]; then
+    nvidia_driver=$(basename "$(readlink "$nvidia_pci/driver" 2>/dev/null)" 2>/dev/null)
+    if [ "$nvidia_driver" = nvidia ] &&
+       DISPLAY=:0 /usr/bin/nvidia-smi -L 2>/dev/null | grep -q '^GPU 0:'; then
+        pass 'NVIDIA discrete GPU uses the open driver'
+    else
+        bad "NVIDIA discrete GPU driver is ${nvidia_driver:-not loaded}"
+    fi
+    if printf '%s\n' "$gpu_result" | grep -Eq 'driverName[[:space:]]*=[[:space:]]*NVIDIA'; then
+        pass 'NVIDIA Vulkan render offload is available to apps and games'
+    else
+        bad 'NVIDIA Vulkan render offload is unavailable'
+    fi
+fi
+
 if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 0)" = 1 ] &&
    [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; then
     pass 'Application user namespaces are enabled'
