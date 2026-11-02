@@ -1410,24 +1410,26 @@ if [ -f "$NVIDIA_STAGE/driver.version" ] &&
         }
     done
     mkdir -p "$STAGE/usr/lib/fifi/nvidia/modules" \
-             "$STAGE/usr/lib/fifi/nvidia/64" "$STAGE/usr/lib/fifi/nvidia/32" \
-             "$STAGE/lib/firmware/nvidia/$NVIDIA_VERSION"
+             "$STAGE/lib/firmware/nvidia/$NVIDIA_VERSION" \
+             "$STAGE/usr/share/fifi"
     cp "$NVIDIA_STAGE/modules/"*.ko "$STAGE/usr/lib/fifi/nvidia/modules/"
-    cp -a "$NVIDIA_STAGE/lib/." "$STAGE/usr/lib/fifi/nvidia/64/"
-    cp -a "$NVIDIA_STAGE/lib32/." "$STAGE/usr/lib/fifi/nvidia/32/"
     cp -a "$NVIDIA_STAGE/firmware/." \
           "$STAGE/lib/firmware/nvidia/$NVIDIA_VERSION/"
-    cp -a "$NVIDIA_STAGE/share/." "$STAGE/usr/share/"
     cp "$NVIDIA_STAGE/bin/"* "$STAGE/usr/bin/"
-    printf '%s\n' "$NVIDIA_VERSION" > "$STAGE/usr/lib/fifi/nvidia/version"
-    # Make the 64-bit driver visible to the system Vulkan/GLVND loaders. The
-    # dedicated source directory remains available for Steam rootfs seeding.
-    for lib in "$STAGE/usr/lib/fifi/nvidia/64/"*; do
-        [ -e "$lib" ] || continue
-        name="$(basename "$lib")"
-        [ -e "$STAGE/usr/lib/$name" ] ||
-            ln -s "fifi/nvidia/64/$name" "$STAGE/usr/lib/$name"
-    done
+    NVIDIA_ARCHIVE_ROOT="$(mktemp -d)"
+    mkdir -p "$NVIDIA_ARCHIVE_ROOT/usr/lib/fifi/nvidia/64" \
+             "$NVIDIA_ARCHIVE_ROOT/usr/lib/fifi/nvidia/32" \
+             "$NVIDIA_ARCHIVE_ROOT/usr/share"
+    cp -a "$NVIDIA_STAGE/lib/." \
+          "$NVIDIA_ARCHIVE_ROOT/usr/lib/fifi/nvidia/64/"
+    cp -a "$NVIDIA_STAGE/lib32/." \
+          "$NVIDIA_ARCHIVE_ROOT/usr/lib/fifi/nvidia/32/"
+    cp -a "$NVIDIA_STAGE/share/." "$NVIDIA_ARCHIVE_ROOT/usr/share/"
+    printf '%s\n' "$NVIDIA_VERSION" > \
+        "$NVIDIA_ARCHIVE_ROOT/usr/lib/fifi/nvidia/version"
+    tar -C "$NVIDIA_ARCHIVE_ROOT" -czf \
+        "$STAGE/usr/share/fifi/nvidia-userspace.tar.gz" usr
+    rm -rf "$NVIDIA_ARCHIVE_ROOT"
     echo "[initramfs] NVIDIA open driver $NVIDIA_VERSION bundled for $NVIDIA_KERNEL"
 else
     echo "[initramfs] NOTE: NVIDIA stack not staged; run scripts/build-nvidia-open.sh"

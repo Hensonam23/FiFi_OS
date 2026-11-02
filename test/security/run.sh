@@ -707,6 +707,9 @@ grep -Fq 'strings "$src" | grep -F "vermagic=$KERNEL_RELEASE "' \
     "$ROOT/scripts/build-nvidia-open.sh"
 grep -Fq 'insmod "$_nvidia_modules/nvidia-drm.ko" modeset=1' \
     "$ROOT/initramfs/root/init"
+grep -Fq 'tar -xzf "$_nvidia_userspace" -C /' \
+    "$ROOT/initramfs/root/init"
+grep -Fq 'nvidia-userspace.tar.gz' "$ROOT/scripts/build-initramfs.sh"
 grep -Fq '60-drm.rules' "$ROOT/scripts/build-initramfs.sh"
 
 echo "[test-security] ignored legacy key is removed from staged images"

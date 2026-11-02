@@ -138,6 +138,21 @@ for _pci in /sys/bus/pci/devices/*; do
 done
 _nvidia_modules=/usr/lib/fifi/nvidia/modules
 if [ "$_nvidia_present" = 1 ] && [ -f "$_nvidia_modules/nvidia.ko" ]; then
+    # The 32/64-bit graphics runtime stays compressed in the generic boot image
+    # so Intel/AMD and 4 GB machines do not pay NVIDIA's large RAM cost. Expand
+    # it into the tmpfs root only on hardware that can actually use it.
+    _nvidia_userspace=/usr/share/fifi/nvidia-userspace.tar.gz
+    if [ -f "$_nvidia_userspace" ] &&
+       [ ! -f /usr/lib/fifi/nvidia/version ]; then
+        tar -xzf "$_nvidia_userspace" -C / >>/run/nvidia.log 2>&1 ||
+            echo "nvidia: userspace extraction failed" >>/run/nvidia.log
+    fi
+    for _nvidia_lib in /usr/lib/fifi/nvidia/64/*; do
+        [ -e "$_nvidia_lib" ] || continue
+        _nvidia_name="$(basename "$_nvidia_lib")"
+        [ -e "/usr/lib/$_nvidia_name" ] ||
+            ln -s "fifi/nvidia/64/$_nvidia_name" "/usr/lib/$_nvidia_name"
+    done
     if insmod "$_nvidia_modules/nvidia.ko" >>/run/nvidia.log 2>&1 &&
        insmod "$_nvidia_modules/nvidia-modeset.ko" >>/run/nvidia.log 2>&1 &&
        insmod "$_nvidia_modules/nvidia-uvm.ko" >>/run/nvidia.log 2>&1 &&
@@ -153,7 +168,8 @@ if [ "$_nvidia_present" = 1 ] && [ -f "$_nvidia_modules/nvidia.ko" ]; then
         echo "nvidia: module load failed" >>/run/nvidia.log
     fi
 fi
-unset _nvidia_present _nvidia_modules _pci
+unset _nvidia_present _nvidia_modules _nvidia_userspace _nvidia_lib \
+      _nvidia_name _pci
 
 # Populate the standard input-device metadata consumed by libinput. This is a
 # focused udev service, not a replacement for FiFi's custom PID 1 supervision.
