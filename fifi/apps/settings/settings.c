@@ -942,6 +942,13 @@ static const char *signal_bars(int dbm) {
 static bool g_sec_fw_on, g_sec_doh_on, g_sec_vpn_on, g_sec_tor_on, g_sec_remote_on;
 static char g_sec_fw[96], g_sec_doh[96], g_sec_vpn[96], g_sec_tor[96], g_sec_remote[96];
 static int  g_sec_priv;
+static pid_t g_sec_pid = -1;
+static int g_sec_pipe = -1;
+static char g_sec_action[20] = "";
+static char g_sec_note[128] = "Toggle each protection above. Changes apply immediately.";
+static bool g_sec_note_ok = true;
+static char g_sec_output[1024];
+static size_t g_sec_output_len = 0;
 
 static bool pid_alive(const char *pidfile) {
     int fd = open(pidfile, O_RDONLY);
@@ -1374,8 +1381,8 @@ static void render_security(uint32_t *fb) {
         draw_str(fb, (on) ? "[ON] " : "[OFF]", x, ty, (on) ? C_GREEN : C_RED); \
         draw_str(fb, (name), x + 6*CW, ty, C_KEY); \
         draw_str_clip(fb, (txt), x + 16*CW, ty, C_VAL, btn_x - (x+16*CW) - 8); \
-        draw_btn(fb, btn_x, y + 4, btn_w, btn_h, (on) ? "Disable" : "Enable", false); \
-        add_hot(btn_x, y + 4, btn_w, btn_h, (act), (on) ? 0 : 1); \
+        draw_btn(fb, btn_x, y + 4, btn_w, btn_h, g_sec_pid > 0 ? "Working..." : ((on) ? "Disable" : "Enable"), false); \
+        if (g_sec_pid <= 0) add_hot(btn_x, y + 4, btn_w, btn_h, (act), (on) ? 0 : 1); \
         y += ROW_H + 4; \
     } while (0)
 
@@ -1397,8 +1404,9 @@ static void render_security(uint32_t *fb) {
       y += ROW_H + 4;
     }
     y += 10;
-    draw_str_clip(fb, "Toggle each protection above. Changes apply immediately.",
-                  x, y, C_GREY, g_win_w - x - CPAD);
+    draw_str_clip(fb, g_sec_note, x, y,
+                  g_sec_pid > 0 ? C_YELLOW : (g_sec_note_ok ? C_GREEN : C_RED),
+                  g_win_w - x - CPAD);
 }
 
 static void render_about(uint32_t *fb) {
@@ -1584,13 +1592,85 @@ static void pers_click(int mx, int my) {
 
 /* ── Security click handling ─────────────────────────────────────────────── */
 static void secctl(const char *what, int on) {
+    if (g_sec_pid > 0) return;
+    int pfd[2];
+    if (pipe(pfd) != 0) {
+        snprintf(g_sec_note, sizeof(g_sec_note), "Could not start %s action", what);
+        g_sec_note_ok = false;
+        return;
+    }
     pid_t pid = fork();
     if (pid == 0) {
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        close(pfd[1]);
         for (int i = 3; i < 64; i++) close(i);
         execl("/bin/fifi-admin", "fifi-admin", "security", what,
               on ? "on" : "off", (char *)NULL);
-        _exit(1);
+        _exit(127);
     }
+    close(pfd[1]);
+    if (pid < 0) {
+        close(pfd[0]);
+        snprintf(g_sec_note, sizeof(g_sec_note), "Could not start %s action", what);
+        g_sec_note_ok = false;
+        return;
+    }
+    g_sec_pid = pid;
+    g_sec_pipe = pfd[0];
+    fcntl(g_sec_pipe, F_SETFL, O_NONBLOCK);
+    g_sec_output_len = 0;
+    g_sec_output[0] = '\0';
+    snprintf(g_sec_action, sizeof(g_sec_action), "%s", what);
+    snprintf(g_sec_note, sizeof(g_sec_note), "Applying %s change...", what);
+    g_sec_note_ok = true;
+}
+
+static void secctl_drain(void) {
+    if (g_sec_pipe < 0) return;
+    char chunk[256];
+    ssize_t got;
+    while ((got = read(g_sec_pipe, chunk, sizeof(chunk))) > 0) {
+        size_t take = (size_t)got;
+        if (take > sizeof(g_sec_output) - 1 - g_sec_output_len)
+            take = sizeof(g_sec_output) - 1 - g_sec_output_len;
+        if (take) {
+            memcpy(g_sec_output + g_sec_output_len, chunk, take);
+            g_sec_output_len += take;
+            g_sec_output[g_sec_output_len] = '\0';
+        }
+    }
+    if (got == 0 || (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        close(g_sec_pipe);
+        g_sec_pipe = -1;
+    }
+}
+
+static bool secctl_poll(void) {
+    if (g_sec_pid <= 0) return false;
+    secctl_drain();
+    int status = 0;
+    pid_t done = waitpid(g_sec_pid, &status, WNOHANG);
+    if (done == 0 || done < 0) return false;
+    secctl_drain();
+    if (g_sec_pipe >= 0) { close(g_sec_pipe); g_sec_pipe = -1; }
+    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    sec_update();
+    if (ok) {
+        snprintf(g_sec_note, sizeof(g_sec_note), "%s setting updated.", g_sec_action);
+    } else {
+        size_t length = strcspn(g_sec_output, "\r\n");
+        if (length > 72) length = 72;
+        char detail[73] = "";
+        memcpy(detail, g_sec_output, length);
+        detail[length] = '\0';
+        snprintf(g_sec_note, sizeof(g_sec_note), "Could not update %s%s%s.",
+                 g_sec_action, detail[0] ? ": " : "", detail);
+    }
+    g_sec_note_ok = ok;
+    g_sec_pid = -1;
+    return true;
 }
 static void sec_click(int mx, int my) {
     for (int i = 0; i < g_nhots; i++) {
@@ -1655,10 +1735,11 @@ int main(int argc, char **argv) {
     struct timespec last_conn = {0,0}; clock_gettime(CLOCK_MONOTONIC, &last_conn);
 
     while (running) {
-        struct pollfd pfds[2];
+        struct pollfd pfds[3];
         pfds[0].fd = sock;                                    pfds[0].events = POLLIN;
         pfds[1].fd = g_scan_pipe >= 0 ? g_scan_pipe : -1;     pfds[1].events = POLLIN;
-        poll(pfds, 2, 150);
+        pfds[2].fd = g_sec_pipe >= 0 ? g_sec_pipe : -1;       pfds[2].events = POLLIN;
+        poll(pfds, 3, 150);
 
         bool dirty = false, font_dropdown_scrolled = false;
 
@@ -1667,6 +1748,11 @@ int main(int argc, char **argv) {
             bool was = (g_wstate == ST_SCANNING);
             wifi_scan_poll();
             if (was && g_wstate != ST_SCANNING) dirty = true;
+        }
+
+        if (g_sec_pid > 0) {
+            if (pfds[2].revents & (POLLIN|POLLHUP|POLLERR)) secctl_drain();
+            if (secctl_poll()) dirty = true;
         }
 
         /* Wi-Fi connection progress */

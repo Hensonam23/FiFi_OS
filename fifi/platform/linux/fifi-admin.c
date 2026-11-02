@@ -171,7 +171,13 @@ static void run_fixed_command(char *request) {
         } else {
             const char *tool = getenv("FIFI_SECCTL");
             if (!tool || !*tool) tool = "/bin/fifi-secctl";
-            execl(tool, "fifi-secctl", args[1], args[2], (char *)NULL);
+            char *const security_argv[] = {
+                (char *)tool, args[1], args[2], NULL
+            };
+            /* Preserve the real privileged exit status for every Settings
+             * security toggle.  The desktop must not report success merely
+             * because it reached the broker. */
+            run_status_command(tool, security_argv);
         }
     } else if (argc == 1 && strcmp(args[0], "capture") == 0) {
         const char *tool = getenv("FIFI_TCPDUMP");
@@ -434,8 +440,7 @@ static int client_main(int argc, char **argv) {
 
     if ((argc == 3 && strcmp(argv[1], "diagnostics") == 0 &&
          strcmp(argv[2], "export") == 0) ||
-        (argc == 4 && strcmp(argv[1], "security") == 0 &&
-         strcmp(argv[2], "remote") == 0) ||
+        (argc == 4 && strcmp(argv[1], "security") == 0) ||
         (argc == 4 && strcmp(argv[1], "wifi") == 0 &&
          (strcmp(argv[2], "scan") == 0 ||
           strcmp(argv[2], "disconnect") == 0)) ||

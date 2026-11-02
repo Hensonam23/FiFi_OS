@@ -197,6 +197,10 @@ mkdir -p "$broker_bin"
 cat > "$broker_bin/fifi-secctl" <<'EOF'
 #!/bin/sh
 printf 'security %s %s\n' "$1" "$2" >> "$FIFI_TEST_ADMIN_LOG"
+if [ "$1" = doh ] && [ "$2" = on ]; then
+    echo 'mock protected setting failure'
+    exit 17
+fi
 EOF
 cat > "$broker_bin/tcpdump" <<'EOF'
 #!/bin/sh
@@ -272,6 +276,15 @@ done
 [[ -S "$broker_socket" ]]
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security firewall on
 grep -Fxq 'security firewall on' "$broker_log"
+if FIFI_ADMIN_SOCKET="$broker_socket" \
+    "$TMP/fifi-admin" security doh on >"$TMP/security-failure.out" 2>&1; then
+    echo "failed protected setting reported success" >&2
+    exit 1
+else
+    test "$?" -eq 17
+fi
+grep -Fxq 'mock protected setting failure' "$TMP/security-failure.out"
+! grep -Fq 'FIFI_ADMIN_STATUS' "$TMP/security-failure.out"
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security remote on
 FIFI_ADMIN_SOCKET="$broker_socket" "$TMP/fifi-admin" security remote off
 grep -Fxq 'remote enable' "$broker_log"

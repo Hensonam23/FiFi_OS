@@ -73,6 +73,9 @@ grep -Fq 'open_public_status("/fifi-data/wifi-ssid")' \
     "$ROOT/fifi/platform/linux/fifi-wifi-ctl.c"
 grep -Fq '/fifi-data/wifi-saved-ssid' "$SETTINGS"
 grep -Fq 'Refresh delayed -- showing %d previous network%s' "$SETTINGS"
+grep -Fq 'g_sec_note' "$SETTINGS"
+grep -Fq 'secctl_poll()' "$SETTINGS"
+grep -Fq 'Working...' "$SETTINGS"
 grep -Fq 'cp "$WPA_CLI_BIN" "$STAGE/usr/bin/wpa_cli"' \
     "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'CONFIG_RTW89_8922AE=y' "$ROOT/linux/fifi.config"
