@@ -124,25 +124,22 @@ bool ttf_load(const char *path, int px_size) {
     if (g_cell_h < px_size) g_cell_h = px_size;
     if (g_baseline < 1) g_baseline = px_size * 4 / 5;
 
-    /* Cell advance for the monospace grid. Sampling the average glyph width (not
-     * the widest) keeps proportional fonts from looking double-spaced; a true
-     * monospace font has zero spread so the cell equals its exact advance. Each
-     * glyph is then centred in its cell by the renderer. */
+    /* The desktop layout is a fixed-cell grid even when the user selects a
+     * proportional face. Use the widest common advance: an average-width cell
+     * made wide glyphs such as Arial O and W intrude into the following cell,
+     * visibly merging labels such as "FiFi OS". */
     static const char sample[] =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    long total = 0; int n = 0, mn = 1 << 30, mx = 0;
+    int n = 0, mx = 0;
     for (const char *p = sample; *p; p++) {
         int adv = 0, lsb = 0;
         stbtt_GetCodepointHMetrics(&g_info, (int)(unsigned char)*p, &adv, &lsb);
         int apx = (int)(adv * g_scale + 0.5f);
         if (apx <= 0) continue;
-        total += apx; n++;
-        if (apx < mn) mn = apx;
+        n++;
         if (apx > mx) mx = apx;
     }
-    int avg = n ? (int)(total / n) : (px_size / 2);
-    /* spread <= 1px → monospace: use the exact advance; else the average. */
-    g_cell_w = (n && mx - mn <= 1) ? mx : avg;
+    g_cell_w = n ? mx : (px_size / 2);
     if (g_cell_w < 1) g_cell_w = (px_size / 2 > 0 ? px_size / 2 : 1);
     g_active = true;
     return true;

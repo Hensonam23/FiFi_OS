@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <drm/drm.h>
@@ -19,12 +20,23 @@
 
 #include "limine.h"
 
+typedef struct {
+    uint32_t fb_id;
+    uint32_t handle;
+    uint32_t pitch;
+    void *map;
+    size_t map_size;
+} drm_scanout_t;
+
 static int      g_fd      = -1;
-static uint32_t g_fb_id   = 0;
-static void    *g_map_ptr = NULL;
-static size_t   g_map_sz  = 0;
-static uint32_t g_handle  = 0;
+static drm_scanout_t g_scanout[2];
+static unsigned g_front_index = 0;
+static unsigned g_draw_index = 1;
 static uint32_t g_crtc_id = 0;
+static uint32_t g_connector_id = 0;
+static struct drm_mode_modeinfo g_mode;
+static bool g_page_flip_supported = true;
+static uint64_t g_flip_sequence = 0;
 static uint32_t g_cursor_handle = 0;
 static void    *g_cursor_map = NULL;
 static size_t   g_cursor_map_sz = 0;
@@ -37,6 +49,107 @@ static int drm_do_ioctl(int fd, unsigned long req, void *arg) {
     int r;
     do { r = ioctl(fd, req, arg); } while (r < 0 && errno == EINTR);
     return r;
+}
+
+static bool create_scanout(uint32_t width, uint32_t height,
+                           drm_scanout_t *out) {
+    struct drm_mode_create_dumb dumb = {0};
+    dumb.width = width;
+    dumb.height = height;
+    dumb.bpp = 32;
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0)
+        return false;
+
+    struct drm_mode_fb_cmd fb = {0};
+    fb.width = width;
+    fb.height = height;
+    fb.pitch = dumb.pitch;
+    fb.bpp = 32;
+    fb.depth = 24;
+    fb.handle = dumb.handle;
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_ADDFB, &fb) < 0) {
+        struct drm_mode_destroy_dumb destroy = { .handle = dumb.handle };
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+        return false;
+    }
+
+    struct drm_mode_map_dumb map = { .handle = dumb.handle };
+    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+        uint32_t id = fb.fb_id;
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &id);
+        struct drm_mode_destroy_dumb destroy = { .handle = dumb.handle };
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+        return false;
+    }
+
+    void *pixels = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, g_fd, (off_t)map.offset);
+    if (pixels == MAP_FAILED) {
+        uint32_t id = fb.fb_id;
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &id);
+        struct drm_mode_destroy_dumb destroy = { .handle = dumb.handle };
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+        return false;
+    }
+
+    memset(pixels, 0, dumb.size);
+    out->fb_id = fb.fb_id;
+    out->handle = dumb.handle;
+    out->pitch = dumb.pitch;
+    out->map = pixels;
+    out->map_size = dumb.size;
+    return true;
+}
+
+static void destroy_scanout(drm_scanout_t *buffer) {
+    if (buffer->map) munmap(buffer->map, buffer->map_size);
+    if (buffer->fb_id) {
+        uint32_t id = buffer->fb_id;
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &id);
+    }
+    if (buffer->handle) {
+        struct drm_mode_destroy_dumb destroy = { .handle = buffer->handle };
+        drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    }
+    memset(buffer, 0, sizeof(*buffer));
+}
+
+static void dirty_scanout(const drm_scanout_t *buffer) {
+    if (!buffer->fb_id) return;
+    struct drm_mode_fb_dirty_cmd dirty = {0};
+    dirty.fb_id = buffer->fb_id;
+    dirty.num_clips = 0;
+    drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+}
+
+static bool wait_for_flip(uint64_t sequence) {
+    for (;;) {
+        struct pollfd pfd = { .fd = g_fd, .events = POLLIN };
+        int ready;
+        do { ready = poll(&pfd, 1, 1000); } while (ready < 0 && errno == EINTR);
+        if (ready <= 0 || !(pfd.revents & POLLIN)) return false;
+
+        uint8_t events[4096];
+        ssize_t length;
+        do { length = read(g_fd, events, sizeof events); }
+        while (length < 0 && errno == EINTR);
+        if (length <= 0) return false;
+
+        size_t offset = 0;
+        while (offset + sizeof(struct drm_event) <= (size_t)length) {
+            struct drm_event *event = (struct drm_event *)(events + offset);
+            if (event->length < sizeof(*event) ||
+                offset + event->length > (size_t)length)
+                return false;
+            if (event->type == DRM_EVENT_FLIP_COMPLETE &&
+                event->length >= sizeof(struct drm_event_vblank)) {
+                struct drm_event_vblank *flip =
+                    (struct drm_event_vblank *)event;
+                if (flip->user_data == sequence) return true;
+            }
+            offset += event->length;
+        }
+    }
 }
 
 /* Open DRM device, set up dumb buffer + CRTC.
@@ -148,6 +261,8 @@ struct limine_framebuffer *drm_open(void) {
     }
     if (!crtc_id && res.count_crtcs > 0) crtc_id = crtc_ids[0];
     g_crtc_id = crtc_id;
+    g_connector_id = conn_id;
+    g_mode = mode;
     free(crtc_ids);
 
     uint32_t w = mode.hdisplay, h = mode.vdisplay;
@@ -155,41 +270,26 @@ struct limine_framebuffer *drm_open(void) {
             w, h, mode.vrefresh, crtc_id, conn_id);
 
     /* ── Dumb buffer (software-rendered pixel store) ─────────────────── */
-    struct drm_mode_create_dumb dumb = {0};
-    dumb.width = w; dumb.height = h; dumb.bpp = 32;
-    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0) {
-        fprintf(stderr, "[drm] CREATE_DUMB failed errno=%d\n", errno); goto fail;
+    if (!create_scanout(w, h, &g_scanout[0]) ||
+        !create_scanout(w, h, &g_scanout[1])) {
+        fprintf(stderr, "[drm] double scanout allocation failed errno=%d\n", errno);
+        goto fail;
     }
-    g_handle = dumb.handle;
+    if (g_scanout[0].pitch != g_scanout[1].pitch) {
+        fprintf(stderr, "[drm] scanout pitches do not match\n");
+        goto fail;
+    }
 
     /* ── Register as KMS framebuffer ─────────────────────────────────── */
-    struct drm_mode_fb_cmd fb = {0};
-    fb.width = w; fb.height = h;
-    fb.pitch = dumb.pitch; fb.bpp = 32; fb.depth = 24;
-    fb.handle = dumb.handle;
-    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_ADDFB, &fb) < 0) {
-        fprintf(stderr, "[drm] ADDFB failed errno=%d\n", errno); goto fail;
-    }
-    g_fb_id = fb.fb_id;
+    /* Both dumb buffers were registered by create_scanout(). */
 
     /* ── Map dumb buffer to userspace ────────────────────────────────── */
-    struct drm_mode_map_dumb map = {0};
-    map.handle = dumb.handle;
-    if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
-        fprintf(stderr, "[drm] MAP_DUMB failed errno=%d\n", errno); goto fail;
-    }
-    g_map_sz  = dumb.size;
-    g_map_ptr = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED, g_fd, (off_t)map.offset);
-    if (g_map_ptr == MAP_FAILED) {
-        fprintf(stderr, "[drm] mmap failed errno=%d\n", errno); g_map_ptr = NULL; goto fail;
-    }
-    memset(g_map_ptr, 0, dumb.size);
+    /* Both dumb buffers were mapped by create_scanout(). */
 
     /* ── Set display mode (attaches framebuffer to CRTC) ─────────────── */
     struct drm_mode_crtc set = {0};
     set.crtc_id            = crtc_id;
-    set.fb_id              = g_fb_id;
+    set.fb_id              = g_scanout[g_front_index].fb_id;
     set.set_connectors_ptr = (uint64_t)(uintptr_t)&conn_id;
     set.count_connectors   = 1;
     set.mode               = mode;
@@ -256,45 +356,96 @@ struct limine_framebuffer *drm_open(void) {
     /* ── Initial DIRTYFB to activate the virtio-gpu scanout in QEMU ─────── */
     {
         struct drm_mode_fb_dirty_cmd dirty = {0};
-        dirty.fb_id     = g_fb_id;
+        dirty.fb_id     = g_scanout[g_front_index].fb_id;
         dirty.num_clips = 0;
         drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
     }
 
-    g_lmfb.address = (uint32_t *)g_map_ptr;
+    g_lmfb.address = (uint32_t *)g_scanout[g_draw_index].map;
     g_lmfb.width   = w;
     g_lmfb.height  = h;
-    g_lmfb.pitch   = dumb.pitch;
+    g_lmfb.pitch   = g_scanout[g_draw_index].pitch;
     g_lmfb.bpp     = 32;
 
-    fprintf(stderr, "[drm] ready: fb=%u pitch=%u addr=%p\n",
-            g_fb_id, dumb.pitch, g_map_ptr);
+    fprintf(stderr,
+            "[drm] double-buffered scanout ready: front=%u draw=%u pitch=%u\n",
+            g_scanout[g_front_index].fb_id, g_scanout[g_draw_index].fb_id,
+            g_scanout[g_draw_index].pitch);
     return &g_lmfb;
 
 fail:
-    if (g_map_ptr && g_map_ptr != MAP_FAILED)
-        munmap(g_map_ptr, g_map_sz);
-    if (g_fb_id) {
-        uint32_t id = g_fb_id;
-        ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &id);
-    }
-    if (g_handle) {
-        struct drm_mode_destroy_dumb dd = { .handle = g_handle };
-        ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
-    }
+    destroy_scanout(&g_scanout[0]);
+    destroy_scanout(&g_scanout[1]);
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
-    g_map_ptr = NULL; g_fb_id = 0; g_handle = 0; g_crtc_id = 0;
+    g_crtc_id = 0;
+    g_connector_id = 0;
     return NULL;
 }
 
-/* Tell virtio-gpu the framebuffer has changed — triggers an immediate
- * VIRTIO_GPU_CMD_RESOURCE_FLUSH to QEMU instead of waiting for the poll timer. */
+/* Present the completed hidden buffer on vertical blank. The render thread
+ * calls this outside the compositor mutex so input remains responsive while
+ * KMS owns the frame boundary. */
 void drm_flush(void) {
-    if (g_fd < 0 || !g_fb_id) return;
-    struct drm_mode_fb_dirty_cmd dirty = {0};
-    dirty.fb_id     = g_fb_id;
-    dirty.num_clips = 0;   /* 0 = entire framebuffer */
-    drm_do_ioctl(g_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+    if (g_fd < 0 || !g_scanout[g_draw_index].fb_id) return;
+    dirty_scanout(&g_scanout[g_draw_index]);
+
+    bool presented = false;
+    if (g_page_flip_supported) {
+        uint64_t sequence = ++g_flip_sequence;
+        struct drm_mode_crtc_page_flip flip = {
+            .crtc_id = g_crtc_id,
+            .fb_id = g_scanout[g_draw_index].fb_id,
+            .flags = DRM_MODE_PAGE_FLIP_EVENT,
+            .user_data = sequence,
+        };
+        if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_PAGE_FLIP, &flip) == 0 &&
+            wait_for_flip(sequence)) {
+            presented = true;
+        } else {
+            fprintf(stderr,
+                    "[drm] page flip unavailable errno=%d; using modeset fallback\n",
+                    errno);
+            g_page_flip_supported = false;
+        }
+    }
+
+    if (!presented) {
+        struct drm_mode_crtc set = {0};
+        set.crtc_id = g_crtc_id;
+        set.fb_id = g_scanout[g_draw_index].fb_id;
+        set.set_connectors_ptr = (uint64_t)(uintptr_t)&g_connector_id;
+        set.count_connectors = 1;
+        set.mode = g_mode;
+        set.mode_valid = 1;
+        if (drm_do_ioctl(g_fd, DRM_IOCTL_MODE_SETCRTC, &set) < 0) {
+            fprintf(stderr, "[drm] fallback SETCRTC failed errno=%d\n", errno);
+            return;
+        }
+    }
+
+    g_front_index = g_draw_index;
+    g_draw_index = 1u - g_front_index;
+    dirty_scanout(&g_scanout[g_front_index]);
+}
+
+uint32_t *drm_draw_buffer(void) {
+    return g_fd >= 0 ? (uint32_t *)g_scanout[g_draw_index].map : NULL;
+}
+
+/* Copy the canonical rows into the newly hidden buffer after a swap. Both KMS
+ * buffers therefore remain equivalent except for the transient software cursor. */
+void drm_sync_draw_buffer(const uint32_t *canonical, uint64_t pitch32,
+                          uint32_t y0, uint32_t y1) {
+    drm_scanout_t *draw = &g_scanout[g_draw_index];
+    if (!canonical || !draw->map || pitch32 == 0) return;
+    uint64_t height = g_lmfb.height;
+    if (y0 > height) y0 = (uint32_t)height;
+    if (y1 > height) y1 = (uint32_t)height;
+    if (y0 >= y1 || draw->pitch / sizeof(uint32_t) != pitch32) return;
+    size_t offset = (size_t)y0 * draw->pitch;
+    size_t length = (size_t)(y1 - y0) * draw->pitch;
+    memcpy((uint8_t *)draw->map + offset,
+           (const uint8_t *)canonical + offset, length);
 }
 
 bool drm_cursor_enabled(void) {
@@ -336,9 +487,12 @@ int drm_fd(void) { return g_fd; }
 
 /* Fill the DRM frontbuffer with black and flush — used for screen blanking. */
 void drm_blank_display(void) {
-    if (!g_map_ptr || g_map_sz == 0) return;
-    memset(g_map_ptr, 0, g_map_sz);
-    drm_flush();
+    if (g_fd < 0) return;
+    for (size_t i = 0; i < 2; i++) {
+        if (!g_scanout[i].map) continue;
+        memset(g_scanout[i].map, 0, g_scanout[i].map_size);
+        dirty_scanout(&g_scanout[i]);
+    }
 }
 
 void drm_close(void) {
@@ -357,13 +511,8 @@ void drm_close(void) {
     }
     atomic_store_explicit(&g_cursor_enabled, false, memory_order_release);
     atomic_store_explicit(&g_cursor_visible, false, memory_order_release);
-    if (g_map_ptr) { munmap(g_map_ptr, g_map_sz); g_map_ptr = NULL; }
-    if (g_fb_id)   { ioctl(g_fd, DRM_IOCTL_MODE_RMFB, &g_fb_id); g_fb_id = 0; }
-    if (g_handle) {
-        struct drm_mode_destroy_dumb dd = { .handle = g_handle };
-        ioctl(g_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
-        g_handle = 0;
-    }
+    destroy_scanout(&g_scanout[0]);
+    destroy_scanout(&g_scanout[1]);
     close(g_fd);
     g_fd = -1;
 }

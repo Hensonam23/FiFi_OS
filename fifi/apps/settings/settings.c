@@ -527,7 +527,7 @@ static const char *g_panel_names[4] = { "Bottom", "Top", "Left", "Right" };
 
 /* ── System info (sysmon-style, reused from the original settings app) ───── */
 typedef struct { char key[16]; char val[64]; } InfoRow;
-#define N_INFO 6
+#define N_INFO 8
 static InfoRow g_info[N_INFO];
 static int g_system_profile_view = FIFI_PROFILE_GENERAL;
 
@@ -574,6 +574,36 @@ static void gather_info(void) {
     snprintf(g_info[5].key, sizeof g_info[5].key, "Time");
     time_t now = time(NULL); struct tm *t = localtime(&now);
     snprintf(g_info[5].val, sizeof g_info[5].val, "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+
+    snprintf(g_info[6].key, sizeof g_info[6].key, "Battery");
+    snprintf(g_info[6].val, sizeof g_info[6].val, "Not installed");
+    snprintf(g_info[7].key, sizeof g_info[7].key, "Power");
+    snprintf(g_info[7].val, sizeof g_info[7].val, "AC / desktop");
+    DIR *power = opendir("/sys/class/power_supply");
+    if (power) {
+        struct dirent *entry;
+        while ((entry = readdir(power))) {
+            if (entry->d_name[0] == '.' || strncmp(entry->d_name, "BAT", 3) != 0)
+                continue;
+            char path[320], capacity[16] = {0}, status[32] = {0};
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity",
+                     entry->d_name);
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) { read(fd, capacity, sizeof capacity - 1u); close(fd); }
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/status",
+                     entry->d_name);
+            fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) { read(fd, status, sizeof status - 1u); close(fd); }
+            capacity[strcspn(capacity, "\r\n")] = '\0';
+            status[strcspn(status, "\r\n")] = '\0';
+            if (capacity[0])
+                snprintf(g_info[6].val, sizeof g_info[6].val, "%s%%", capacity);
+            snprintf(g_info[7].val, sizeof g_info[7].val, "%s",
+                     status[0] ? status : "Battery");
+            break;
+        }
+        closedir(power);
+    }
 }
 
 /* ── ALSA volume (direct ioctl, from the original settings app) ──────────── */

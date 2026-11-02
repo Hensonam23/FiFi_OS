@@ -169,7 +169,10 @@ void launcher_open_reset(void) {
             if (strncmp(nm, "fifi-",     5) == 0) continue;
             char base[40]; int bl = l - 3; if (bl > 39) bl = 39;
             for (int k = 0; k < bl; k++) base[k] = nm[k]; base[bl] = '\0';
-            char path[192]; snprintf(path, sizeof(path), "/fifi-data/apps/%s", nm);
+            char path[192];
+            if ((size_t)l + sizeof("/fifi-data/apps/") > sizeof path) continue;
+            memcpy(path, "/fifi-data/apps/", sizeof("/fifi-data/apps/") - 1u);
+            memcpy(path + sizeof("/fifi-data/apps/") - 1u, nm, (size_t)l + 1u);
             launch_add(base, path, -1, 0);
         }
         closedir(d);

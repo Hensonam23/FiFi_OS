@@ -1355,12 +1355,11 @@ static void wl_handle_msg(wl_client_t *c, uint32_t obj_id, uint16_t opcode,
     wl_obj_t *obj = wl_find_obj(c, obj_id);
     /* Firefox reconnects and sends ops for objects from previous connections.
      * If not found in current client, search all other slots (active or zombie). */
-    wl_client_t *obj_owner = c;
     if (!obj && obj_id != 1) {
         for (int _zi = 0; _zi < MAX_WL_CLIENTS; _zi++) {
             if (&g_wl_clients[_zi] == c || g_wl_clients[_zi].n_objs == 0) continue;
             wl_obj_t *_zo = wl_find_obj(&g_wl_clients[_zi], obj_id);
-            if (_zo) { obj = _zo; obj_owner = &g_wl_clients[_zi]; break; }
+            if (_zo) { obj = _zo; break; }
         }
     }
     obj_type_t type = obj ? obj->type : (obj_id == 1 ? OBJ_DISPLAY : OBJ_NONE);
@@ -4379,13 +4378,21 @@ int wayland_server_fd(void) { return g_wl_fd; }
 bool wayland_init(void) {
     const char *xdg = getenv("XDG_RUNTIME_DIR");
     static char fallback_dir[64];
+    struct sockaddr_un addr = {0};
     if (!xdg || !xdg[0]) {
         snprintf(fallback_dir, sizeof(fallback_dir), "/tmp/fifi-runtime-%d", (int)getuid());
         if (mkdir(fallback_dir, 0700) == 0 || errno == EEXIST)
             chmod(fallback_dir, 0700);
         xdg = fallback_dir;
     }
-    snprintf(g_sock_path, sizeof(g_sock_path), "%s/wayland-0", xdg);
+    int socket_path_len = snprintf(g_sock_path, sizeof(g_sock_path),
+                                   "%s/wayland-0", xdg);
+    if (socket_path_len < 0 ||
+        (size_t)socket_path_len >= sizeof(g_sock_path) ||
+        (size_t)socket_path_len >= sizeof(addr.sun_path)) {
+        fprintf(stderr, "[wayland] XDG_RUNTIME_DIR path is too long\n");
+        return false;
+    }
 
     unlink(g_sock_path);  /* remove stale socket */
 
@@ -4395,9 +4402,8 @@ bool wayland_init(void) {
         return false;
     }
 
-    struct sockaddr_un addr = {0};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, g_sock_path, sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, g_sock_path, (size_t)socket_path_len + 1u);
 
     if (bind(g_wl_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "[wayland] bind %s failed: %s\n", g_sock_path, strerror(errno));

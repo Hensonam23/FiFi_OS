@@ -43,6 +43,7 @@ jobs:
           make linux-package-test
           make linux-settings-test
           make linux-profile-test
+          make linux-presentation-test
           make linux-release-test
 
       - name: Configure and build Linux

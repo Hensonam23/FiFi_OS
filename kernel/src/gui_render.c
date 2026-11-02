@@ -28,8 +28,15 @@ void draw_status_bar(void) {
      * redrawn as an overlay (g_statusbar_overlay) only while the cursor rests at the
      * very top edge. Zero the hit rects so a click on the covered area does nothing. */
     if (!statusbar_bottom() && any_window_maximized() && !g_statusbar_overlay) {
+        g_bar_brand_x = 0; g_bar_brand_w = 0;
         g_bar_search_x = 0; g_bar_search_w = 0;
         for (int i = 0; i < FIFI_PROFILE_COUNT; i++) g_intent_w[i] = 0;
+        g_clk_x = g_clk_w = 0;
+        g_batt_x = g_batt_w = 0;
+        g_vol_tray_x = g_vol_tray_w = 0;
+        g_net_tray_x = g_net_tray_w = 0;
+        g_batt_present = false;
+        g_tray_hit_h = 0;
         return;
     }
     uint64_t fb_w = console_fb_width();
@@ -67,10 +74,14 @@ void draw_status_bar(void) {
     uint64_t cy   = by + (bh > fh ? (bh - fh)/2u : 0u);
     uint64_t x    = bx + 16u;
 
-    /* Brand: coral star + "FiFi". */
+    /* Brand: coral star + "FiFi". It doubles as the app-menu button. */
+    uint64_t brand_start = x;
     draw_fifi_star((int64_t)(x + 7u), (int64_t)midy, 7, g_theme.accent);
     x += 20u;
     gui_draw_str_fg(x, cy, "FiFi", 0x00e9edf3u); x += 4u*fw + 12u;
+    g_bar_brand_x = brand_start > 6u ? brand_start - 6u : brand_start;
+    g_bar_brand_w = x - g_bar_brand_x;
+    g_bar_brand_y = by; g_bar_brand_h = bh;
     console_blend_rect(x, by + (bh - 18u)/2u, 1u, 18u, 0x00ffffffu, 26u); x += 12u;
 
     /* System profile pills: each one changes real machine and compositor policy. */
@@ -98,8 +109,16 @@ void draw_status_bar(void) {
     }
     uint64_t search_start = x + 6u;   /* empty middle begins after the pills */
 
-    /* Right cluster, laid out from the right edge inward: clock · battery · wifi. */
+    /* Right cluster, laid out from the right edge inward. Every displayed
+     * status item owns a real hit region: clock/calendar, battery/power,
+     * volume control, and Wi-Fi/network management. */
     uint64_t rx = bx + bw - 16u;
+    g_tray_hit_y = by; g_tray_hit_h = bh;
+    g_clk_x = g_clk_w = 0;
+    g_batt_x = g_batt_w = 0;
+    g_vol_tray_x = g_vol_tray_w = 0;
+    g_net_tray_x = g_net_tray_w = 0;
+    g_batt_present = false;
     uint8_t rh = 0, rm = 0, rsx = 0; rtc_get_time(&rh, &rm, &rsx);
     { int32_t adj = (int32_t)rh + (int32_t)g_theme.utc_offset; adj = ((adj%24)+24)%24; rh = (uint8_t)adj; }
     char clk[10]; int clen;
@@ -107,9 +126,14 @@ void draw_status_bar(void) {
         const char *ap = (rh < 12u) ? "AM" : "PM"; uint8_t h = rh % 12u; if (!h) h = 12u;
         clk[0]='0'+h/10u; clk[1]='0'+h%10u; clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]=' '; clk[6]=ap[0]; clk[7]=ap[1]; clk[8]='\0'; clen=8;
     } else { gui_itoa_pad2(rh, clk); clk[2]=':'; gui_itoa_pad2(rm, clk+3); clk[5]='\0'; clen=5; }
+    uint64_t item_right = rx;
     rx -= (uint64_t)clen*fw; gui_draw_str_fg(rx, cy, clk, 0x00e9edf3u);
+    g_clk_x = rx > 5u ? rx - 5u : rx;
+    g_clk_w = item_right - g_clk_x + 5u;
     rx -= 14u;
     if (battery_present && battery_present()) {
+        item_right = rx;
+        g_batt_present = true;
         int pct = battery_percent ? battery_percent() : -1; if (pct < 0) pct = 0; if (pct > 100) pct = 100;
         char pb[6]; int k = 0;
         if (pct >= 100) { pb[k++]='1'; pb[k++]='0'; pb[k++]='0'; }
@@ -124,11 +148,37 @@ void draw_status_bar(void) {
         uint64_t fwid = (uint64_t)pct*(gw-4u)/100u;
         if (fwid) console_fill_rect(rx+2u, gyy+2u, fwid, gh-4u, pct <= 15 ? 0x00e05050u : 0x00b6bcc6u);
         rx -= 12u;
+        g_batt_x = rx;
+        g_batt_w = item_right - rx;
     }
+
+    /* Volume: compact speaker mark plus the current hardware percentage. */
+    item_right = rx;
+    int vol = hda_is_ready() ? hda_get_volume() : -1;
+    char vb[5]; int vn = 0;
+    if (vol < 0) { vb[vn++]='-'; vb[vn++]='-'; }
+    else if (vol >= 100) { vb[vn++]='1'; vb[vn++]='0'; vb[vn++]='0'; }
+    else { if (vol >= 10) vb[vn++]=(char)('0'+vol/10); vb[vn++]=(char)('0'+vol%10); }
+    vb[vn++]='%'; vb[vn]='\0';
+    rx -= (uint64_t)vn * fw;
+    gui_draw_str_fg(rx, cy, vb, 0x00b6bcc6u);
+    rx -= 8u;
+    rx -= 12u;
+    uint32_t vc = hda_is_ready() ? 0x00e9edf3u : 0x005a626cu;
+    console_fill_rect(rx, midy - 3u, 4u, 7u, vc);
+    console_fill_rect(rx + 4u, midy - 5u, 2u, 11u, vc);
+    console_fill_rect(rx + 8u, midy - 3u, 2u, 7u, vc);
+    g_vol_tray_x = rx > 5u ? rx - 5u : rx;
+    g_vol_tray_w = item_right - g_vol_tray_x;
+    rx = g_vol_tray_x > 12u ? g_vol_tray_x - 12u : 0u;
+
+    item_right = rx;
     { uint32_t wc = (net_ip != 0) ? 0x00e9edf3u : 0x005a626cu; rx -= 13u;
       console_fill_rect(rx,     midy+2u, 3u, 5u,  wc);
       console_fill_rect(rx+5u,  midy-1u, 3u, 8u,  wc);
       console_fill_rect(rx+10u, midy-5u, 3u, 12u, wc); }
+    g_net_tray_x = rx > 7u ? rx - 7u : rx;
+    g_net_tray_w = item_right - g_net_tray_x;
 
     /* Search field in the empty middle — click opens the app launcher/search. */
     uint64_t search_end = rx > 14u ? rx - 14u : search_start;

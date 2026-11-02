@@ -131,6 +131,11 @@ bool g_help_open     = false;   /* Super+/ keyboard-shortcuts overlay */
 bool g_statusbar_reveal  = false;  /* cursor at top edge: reveal the auto-hidden top bar */
 bool g_statusbar_overlay = false;  /* draw_status_bar over windows (skip wallpaper repaint) */
 
+static void redraw_status_cluster(void) {
+    if (g_theme.statusbar) draw_status_bar();
+    else taskbar_draw_tray();
+}
+
 int      g_settings_scroll    = 0;
 uint32_t g_gui_raise_z        = 2;
 
@@ -202,7 +207,14 @@ void gui_font_scan(void) {
         if (nl) *nl = '\0';
         if (*p && (fnt_suffix_ci(p, ".ttf") || fnt_suffix_ci(p, ".otf") || fnt_suffix_ci(p, ".ttc"))) {
             font_entry_t *e = &g_fonts[g_font_count];
-            snprintf(e->path, sizeof e->path, "/fonts/%s", p);
+            size_t name_len = strlen(p);
+            if (name_len + sizeof("/fonts/") > sizeof e->path) {
+                if (!nl) break;
+                p = nl + 1;
+                continue;
+            }
+            memcpy(e->path, "/fonts/", sizeof("/fonts/") - 1u);
+            memcpy(e->path + sizeof("/fonts/") - 1u, p, name_len + 1u);
             if (!ttf_family_name(e->path, e->name, (int)sizeof e->name) || !e->name[0]) {
                 int i = 0;
                 for (; p[i] && i < (int)sizeof(e->name) - 1; i++) { if (p[i] == '.') break; e->name[i] = p[i]; }
@@ -527,7 +539,11 @@ void gui_settings_load(void) {
         else if (strncmp(line, FIFI_THEME_KEY_FONT_FILE "=", sizeof(FIFI_THEME_KEY_FONT_FILE)) == 0) {
             char *val = line + sizeof(FIFI_THEME_KEY_FONT_FILE);
             char *nl = strchr(val, '\n'); if (nl) *nl = '\0';
-            if (val[0]) { snprintf(g_font_saved_path, sizeof g_font_saved_path, "%s", val); g_font_from_config = true; }
+            size_t val_len = strlen(val);
+            if (val_len > 0u && val_len < sizeof g_font_saved_path) {
+                memcpy(g_font_saved_path, val, val_len + 1u);
+                g_font_from_config = true;
+            }
         }
         else if (sscanf(line, FIFI_THEME_KEY_FONT_PX "=%d", &v) == 1)       { if (v >= 6 && v <= 96) { g_font_px = v; g_font_from_config = true; } }
         else if (sscanf(line, FIFI_INPUT_KEY_MOUSE_SPEED "=%d", &v) == 1)   { if (v >= -100 && v <= 100) g_settings_mouse_speed = v; }
@@ -1466,6 +1482,7 @@ void gui_on_tick(void) {
                 if ((uint8_t)ch == KEY_F11) {
                     int v = hda_get_volume() - 5; if (v < 0) v = 0;
                     hda_set_volume(v);
+                    redraw_status_cluster();
                     char _vm[24]; snprintf(_vm, sizeof(_vm), "Volume: %d%%", v);
                     gui_toast_extern(_vm, 0x0060a0e0u);
                     if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
@@ -1474,6 +1491,7 @@ void gui_on_tick(void) {
                 if ((uint8_t)ch == KEY_F12) {
                     int v = hda_get_volume() + 5; if (v > 100) v = 100;
                     hda_set_volume(v);
+                    redraw_status_cluster();
                     char _vm[24]; snprintf(_vm, sizeof(_vm), "Volume: %d%%", v);
                     gui_toast_extern(_vm, 0x0060a0e0u);
                     if (g_wins[2].active && g_wins[2].state != WIN_HIDDEN) tick_redraw();
@@ -3108,8 +3126,66 @@ void gui_on_tick(void) {
         }
     }
 
-    /* ── Horizon bar (top) clicks: intent pills + search field ── */
-    if (btn_pressed && g_theme.statusbar && !statusbar_bottom()) {
+    /* ── Horizon bar clicks: profiles, search, and every status item ── */
+    if (btn_pressed && g_theme.statusbar) {
+        int status_item = tray_item_at(mx, my);
+        if (status_item == TRAY_VOL) {
+            g_launcher_open = false; g_launcher_hover = -1;
+            g_cal_popup_open = false;
+            g_vol_popup_open = !g_vol_popup_open;
+            popup_glass_invalidate();
+            if (g_vol_popup_open) { full_redraw(); vol_popup_draw(); }
+            else full_redraw();
+            int32_t cx, cy; mouse_consume_click(&cx, &cy);
+            return;
+        }
+        if (status_item == TRAY_CLK) {
+            g_launcher_open = false; g_launcher_hover = -1;
+            g_vol_popup_open = false;
+            g_cal_popup_open = !g_cal_popup_open;
+            popup_glass_invalidate();
+            if (g_cal_popup_open) {
+                uint8_t d = 1, month = 1; uint16_t year = 2026;
+                rtc_get_date(&d, &month, &year);
+                g_cal_view_mon = (month >= 1 && month <= 12) ? month : 1;
+                g_cal_view_year = year ? year : 2026;
+                g_cal_pick_open = false;
+                full_redraw(); cal_popup_draw();
+            } else full_redraw();
+            int32_t cx, cy; mouse_consume_click(&cx, &cy);
+            return;
+        }
+        if (status_item == TRAY_NET || status_item == TRAY_BATT) {
+            __attribute__((weak)) void gui_spawn_app_with_arg(const char *path,
+                                                               const char *arg);
+            g_launcher_open = false; g_launcher_hover = -1;
+            g_vol_popup_open = false; g_cal_popup_open = false;
+            if (status_item == TRAY_NET) {
+                if (gui_spawn_app_with_arg)
+                    gui_spawn_app_with_arg("/bin/fifi-settings", "wifi");
+            } else if (gui_spawn_app_with_arg) {
+                gui_spawn_app_with_arg("/bin/fifi-settings", "system");
+            }
+            full_redraw();
+            int32_t cx, cy; mouse_consume_click(&cx, &cy);
+            return;
+        }
+        if (g_bar_brand_w > 0u &&
+            (uint64_t)mx >= g_bar_brand_x &&
+            (uint64_t)mx < g_bar_brand_x + g_bar_brand_w &&
+            (uint64_t)my >= g_bar_brand_y &&
+            (uint64_t)my < g_bar_brand_y + g_bar_brand_h) {
+            g_vol_popup_open = false; g_cal_popup_open = false;
+            g_launcher_open = !g_launcher_open;
+            g_launcher_top = false;
+            if (g_launcher_open) launcher_open_reset();
+            else { g_launcher_hover = -1; g_launch_qlen = 0; g_launch_q[0] = '\0'; }
+            popup_glass_invalidate();
+            full_redraw();
+            if (g_launcher_open) launcher_draw();
+            int32_t cx, cy; mouse_consume_click(&cx, &cy);
+            return;
+        }
         if ((uint64_t)my >= g_intent_y && (uint64_t)my < g_intent_y + g_intent_h) {
             for (int i = 0; i < FIFI_PROFILE_COUNT; i++) {
                 if (g_intent_w[i] > 0u && (uint64_t)mx >= g_intent_x[i] &&
@@ -3619,7 +3695,7 @@ void gui_on_tick(void) {
                 if (v < 0) v = 0;
                 hda_set_volume(v);
                 vol_popup_draw();
-                taskbar_draw_tray();
+                redraw_status_cluster();
             /* [+] button */
             } else if (g_vol_pop_btn_w > 0u &&
                 (uint64_t)mx >= g_vol_pop_plus_x &&
@@ -3630,7 +3706,7 @@ void gui_on_tick(void) {
                 if (v > 100) v = 100;
                 hda_set_volume(v);
                 vol_popup_draw();
-                taskbar_draw_tray();
+                redraw_status_cluster();
             /* Slider track — click sets volume proportionally */
             } else if (g_vol_pop_slid_w > 0u &&
                 (uint64_t)mx >= g_vol_pop_slid_x &&
@@ -3641,7 +3717,7 @@ void gui_on_tick(void) {
                 if (v > 100) v = 100;
                 hda_set_volume(v);
                 vol_popup_draw();
-                taskbar_draw_tray();
+                redraw_status_cluster();
             }
             mouse_consume_click(&cx, &cy);
             return;
@@ -4904,8 +4980,7 @@ void gui_on_tick(void) {
                 struct tm *lt = localtime(&now);
                 if (lt) {
                     snprintf(timebuf, sizeof(timebuf), "%02d:%02d", lt->tm_hour, lt->tm_min);
-                    snprintf(datebuf, sizeof(datebuf), "%04d-%02d-%02d",
-                             lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+                    strftime(datebuf, sizeof(datebuf), "%Y-%m-%d", lt);
                 }
 #else
                 char timebuf[8] = "--:--";

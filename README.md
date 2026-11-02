@@ -349,6 +349,9 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 
 - [ ] Desktop UX polish and settings parity
   - [x] Turn the top-bar labels into persisted General, Build, Research, and Play system profiles
+  - [x] Make the FiFi menu, network, battery, volume, and clock controls interactive
+  - [x] Prevent proportional desktop fonts from overlapping adjacent characters
+  - [ ] Complete the remaining settings and real-hardware behavior audit
 - [x] Smooth pointer and touchpad input on the real laptop
   - [x] Preserve unchanged evdev axes and multitouch slots across poll batches
   - [x] Prevent slow compositor frames from starving all pointer input
@@ -358,7 +361,9 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [x] Add independent, live mouse and touchpad speed controls
   - [x] Re-test the laptop and tune acceleration/smoothing from hardware feedback
 - [x] App framework/SDK and a verifying package manager ([developer guide](docs/NATIVE_APP_SDK.md))
-- [ ] Gaming presentation rework: the compositor is CPU-only software compositing today; it needs GPU-accelerated scanout/page-flip with vsync
+- [ ] Gaming presentation rework
+  - [x] Double-buffer KMS scanout and present frames with vblank-synchronized page flips
+  - [ ] Add GPU composition and direct scanout instead of CPU-only software compositing
 - [x] Pointer-constraints and relative-pointer protocols (required for FPS mouselook)
 - [ ] Ship Desktop/Laptop v1.0, the first real release (checklist below)
 

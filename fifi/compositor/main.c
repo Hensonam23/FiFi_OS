@@ -44,6 +44,9 @@ void pmm_init(struct limine_memmap_response *mm, uint64_t hhdm);
 /* DRM/KMS backend (drm.c) — try first, fall back to /dev/fb0 */
 struct limine_framebuffer *drm_open(void);
 void drm_flush(void);
+uint32_t *drm_draw_buffer(void);
+void drm_sync_draw_buffer(const uint32_t *canonical, uint64_t pitch32,
+                          uint32_t y0, uint32_t y1);
 bool drm_cursor_enabled(void);
 void drm_cursor_move(int32_t x, int32_t y);
 void drm_cursor_set_visible(bool visible);
@@ -163,7 +166,13 @@ static bool     g_blanked     = false;
 static bool     g_locked      = false;
 static int      g_lock_timeout_s = 0;
 static struct timespec g_last_input;
-#define BLANK_TIMEOUT_S 3600  /* 1 hour — extended for browser testing */
+#define BLANK_TIMEOUT_S 300   /* five minutes; Play profile inhibits blanking */
+
+static void wake_display(void) {
+    if (!g_blanked) return;
+    g_blanked = false;
+    console_mark_dirty_rows(0, (uint32_t)g_lmfb.height);
+}
 
 /* ── Lock screen PIN state ───────────────────────────────────────────────── */
 static char g_lock_buf[64];
@@ -179,7 +188,7 @@ int system_profile_active(void)      { return (int)g_system_profile; }
 bool gaming_mode_active(void)        { return g_system_profile == FIFI_PROFILE_PLAY; }
 uint32_t compositor_fps(void)        { return g_fps_current; }
 bool compositor_locked(void)         { return g_locked; }
-void compositor_lock(void)           { g_locked = true; g_blanked = false; g_lock_buf_len = 0; g_lock_bad = false; }
+void compositor_lock(void)           { wake_display(); g_locked = true; g_lock_buf_len = 0; g_lock_bad = false; }
 void compositor_unlock(void)         { g_locked = false; g_lock_buf_len = 0; g_lock_bad = false; }
 void compositor_set_lock_timeout(int s) { g_lock_timeout_s = s; }
 static bool write_profile_knob(const char *path, const char *value) {
@@ -504,6 +513,8 @@ static void *render_thread_fn(void *arg)
         last_render = now;
 
         bool do_flush = false;
+        bool flipped = false;
+        uint32_t flip_y0 = 0u, flip_y1 = 0u;
 
         if (!g_blanked) {
             gui_on_tick();
@@ -562,7 +573,9 @@ static void *render_thread_fn(void *arg)
                     console_mark_dirty_rows(0, (uint32_t)g_lmfb.height);
                 s_wl_prev = wl_now;
             }
-            bool flipped = console_flip_if_dirty();
+            flipped = console_flip_if_dirty();
+            if (flipped && g_using_drm)
+                (void)console_last_flip_rows(&flip_y0, &flip_y1);
             if (!hw_cursor && !pointer_locked &&
                 (flipped || cursor_moved || lock_changed)) {
                 mouse_cursor_update();
@@ -604,6 +617,15 @@ static void *render_thread_fn(void *arg)
             pthread_mutex_unlock(&g_mx);
             drm_flush();
             pthread_mutex_lock(&g_mx);
+            if (flipped) {
+                uint32_t *draw = drm_draw_buffer();
+                uint64_t pitch32 = console_backbuf_pitch32();
+                drm_sync_draw_buffer(console_backbuf_ptr(), pitch32,
+                                     flip_y0, flip_y1);
+                console_set_scanout_ptr(draw);
+                input_set_fb(draw, pitch32, (int32_t)g_lmfb.width,
+                             (int32_t)g_lmfb.height);
+            }
         }
 
         /* A slow software-composited frame can exceed the next deadline.  In
@@ -928,7 +950,7 @@ int main(void) {
         if (had_input)
             clock_gettime(CLOCK_MONOTONIC, &g_last_input);
         if (g_blanked && had_input)
-            g_blanked = false;
+            wake_display();
 
         /* ── Keyboard routing ───────────────────────────────────────────── */
         {
@@ -977,7 +999,7 @@ int main(void) {
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                    if (g_blanked) { g_blanked = false; break; }
+                    if (g_blanked) { wake_display(); break; }
                     uint8_t uc = (uint8_t)c;
                     if (uc == 0x96u) { take_screenshot(); continue; }
                     if (uc == 0x97u) { close_focused_window(); continue; }
@@ -1005,7 +1027,7 @@ int main(void) {
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                    if (g_blanked) { g_blanked = false; break; }
+                    if (g_blanked) { wake_display(); break; }
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x97u) { close_focused_window(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }
@@ -1028,7 +1050,7 @@ int main(void) {
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                    if (g_blanked) { g_blanked = false; break; }
+                    if (g_blanked) { wake_display(); break; }
                     /* Only allow screenshot/lock/snap shortcuts, not app launchers */
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x9Cu) { compositor_lock(); continue; }
@@ -1043,7 +1065,7 @@ int main(void) {
                 int c;
                 while ((c = keyboard_try_getchar()) != -1) {
                     clock_gettime(CLOCK_MONOTONIC, &g_last_input);
-                    if (g_blanked) { g_blanked = false; break; }
+                    if (g_blanked) { wake_display(); break; }
                     if ((uint8_t)c == 0x96u) { take_screenshot(); continue; }
                     if ((uint8_t)c == 0x97u) { close_focused_window(); continue; }
                     if ((uint8_t)c == 0x89u) { ipc_cycle_focus(); continue; }

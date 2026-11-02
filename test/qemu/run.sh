@@ -29,6 +29,10 @@ QMP="$WORK/qmp.sock"
 SERIAL="$WORK/serial.log"
 SCREENSHOT="$WORK/desktop.ppm"
 PROFILE_SCREENSHOT="$WORK/profile-play.ppm"
+BRAND_SCREENSHOT="$WORK/brand-menu.ppm"
+VOLUME_SCREENSHOT="$WORK/volume-popup.ppm"
+CLOCK_SCREENSHOT="$WORK/clock-popup.ppm"
+NETWORK_SCREENSHOT="$WORK/network-settings.ppm"
 QEMU_LOG="$WORK/qemu.log"
 PID=""
 
@@ -58,7 +62,7 @@ qemu-system-x86_64 \
     -append "console=tty0 console=ttyS0,115200 quiet loglevel=3 panic=-1 fifi_live fifi_selftest" \
     -no-reboot -display none \
     -device virtio-vga,xres=1920,yres=1080 \
-    -device virtio-mouse-pci \
+    -device virtio-tablet-pci \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
     -serial "file:$SERIAL" \
     -qmp "unix:$QMP,server=on,wait=off" \
@@ -90,13 +94,15 @@ if [ "$RESULT" != pass ]; then
     exit 1
 fi
 
-python3 - "$QMP" "$SCREENSHOT" "$PROFILE_SCREENSHOT" <<'PY'
+python3 - "$QMP" "$SCREENSHOT" "$PROFILE_SCREENSHOT" "$BRAND_SCREENSHOT" \
+    "$VOLUME_SCREENSHOT" "$CLOCK_SCREENSHOT" "$NETWORK_SCREENSHOT" <<'PY'
 import json
 import socket
 import sys
 import time
 
-qmp, screenshot, profile_screenshot = sys.argv[1:]
+(qmp, screenshot, profile_screenshot, brand_screenshot, volume_screenshot,
+ clock_screenshot, network_screenshot) = sys.argv[1:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(50):
     try:
@@ -109,54 +115,84 @@ else:
 
 stream = sock.makefile("rwb", buffering=0)
 stream.readline()
-for command in (
-    {"execute": "qmp_capabilities"},
-    {"execute": "screendump", "arguments": {"filename": screenshot}},
-):
-    stream.write(json.dumps(command).encode() + b"\n")
-    while True:
-        reply = json.loads(stream.readline())
-        if "return" in reply:
-            break
-        if "error" in reply:
-            raise SystemExit(f"QMP command failed: {reply['error']}")
 
-# Exercise the real top-bar Play pill at 1920x1080. The synthetic pointer starts
-# in the screen center, so this relative move lands at the Play pill. A press and
-# release must reach gui_on_tick and the compositor profile controller. The
-# second screenshot verifies that Play became the selected profile.
-for events in (
-    [
-        {"type": "rel", "data": {"axis": "x", "value": -515}},
-        {"type": "rel", "data": {"axis": "y", "value": -502}},
-    ],
-    [{"type": "btn", "data": {"down": True, "button": "left"}}],
-    [{"type": "btn", "data": {"down": False, "button": "left"}}],
-):
-    stream.write(json.dumps({"execute": "input-send-event",
-                             "arguments": {"events": events}}).encode() + b"\n")
+
+def command(execute, arguments=None):
+    message = {"execute": execute}
+    if arguments is not None:
+        message["arguments"] = arguments
+    stream.write(json.dumps(message).encode() + b"\n")
     while True:
         reply = json.loads(stream.readline())
         if "return" in reply:
-            break
+            return
         if "error" in reply:
-            raise SystemExit(f"QMP input failed: {reply['error']}")
+            raise SystemExit(f"QMP {execute} failed: {reply['error']}")
+
+
+def move_to(x, y):
+    # QEMU absolute axes use 0..32767. The virtio tablet avoids libinput's
+    # acceleration of enormous synthetic relative deltas between controls.
+    ax = round(x * 32767 / 1919)
+    ay = round(y * 32767 / 1079)
+    command("input-send-event", {"events": [
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+    ]})
     time.sleep(0.15)
-time.sleep(0.5)
-stream.write(json.dumps({"execute": "screendump",
-                         "arguments": {"filename": profile_screenshot}}).encode() + b"\n")
-while True:
-    reply = json.loads(stream.readline())
-    if "return" in reply:
-        break
-    if "error" in reply:
-        raise SystemExit(f"QMP profile screenshot failed: {reply['error']}")
+
+
+def click():
+    for down in (True, False):
+        command("input-send-event", {"events": [
+            {"type": "btn", "data": {"down": down, "button": "left"}}
+        ]})
+        time.sleep(0.15)
+
+
+def capture(path, delay=0.5):
+    time.sleep(delay)
+    command("screendump", {"filename": path})
+
+
+for execute, arguments in (
+    ("qmp_capabilities", None),
+    ("screendump", {"filename": screenshot}),
+):
+    command(execute, arguments)
+
+# Exercise the real top-bar Play pill at 1920x1080. A press and release must
+# reach gui_on_tick and the compositor profile controller. The
+# second screenshot verifies that Play became the selected profile.
+move_to(445, 38)
+click()
+capture(profile_screenshot)
+
+# Exercise every interactive cluster in the Horizon bar. These coordinates are
+# centers of real hit regions at the gate's fixed 1920x1080 resolution.
+move_to(65, 38)               # FiFi brand/app menu
+click()
+capture(brand_screenshot)
+click()                       # close app menu before opening status popups
+move_to(1782, 38)             # volume
+click()
+capture(volume_screenshot)
+move_to(1860, 38)             # clock
+click()
+capture(clock_screenshot)
+move_to(1717, 38)             # network
+click()
+capture(network_screenshot, 1.5)
 sock.close()
 PY
 
 if [ -n "${FIFI_QEMU_SCREENSHOT_OUT:-}" ]; then
     cp "$SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT"
     cp "$PROFILE_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.profile.ppm"
+    cp "$BRAND_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.brand.ppm"
+    cp "$VOLUME_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.volume.ppm"
+    cp "$CLOCK_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.clock.ppm"
+    cp "$NETWORK_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.network.ppm"
     echo "[qemu-test] screenshot saved: $FIFI_QEMU_SCREENSHOT_OUT"
 fi
 
@@ -166,6 +202,9 @@ else
     python3 "$ROOT/test/qemu/screenshot_diff.py" check "$SCREENSHOT" "$BASELINE"
 fi
 python3 "$ROOT/test/qemu/profile_click.py" "$SCREENSHOT" "$PROFILE_SCREENSHOT"
+python3 "$ROOT/test/qemu/status_click.py" "$PROFILE_SCREENSHOT" \
+    "$BRAND_SCREENSHOT" "$VOLUME_SCREENSHOT" "$CLOCK_SCREENSHOT" \
+    "$NETWORK_SCREENSHOT"
 
 grep -a 'FIFI_SELFTEST PASS' "$SERIAL" | tail -1
-echo "[qemu-test] boot, non-root app, and screenshot checks passed"
+echo "[qemu-test] boot, top-bar controls, non-root app, and screenshot checks passed"

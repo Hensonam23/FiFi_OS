@@ -226,6 +226,8 @@ static uint32_t *g_back     = NULL;
 static bool      g_dirty    = false;
 static uint32_t  g_dirty_y0 = 0xFFFFFFFFu;  /* min dirty row */
 static uint32_t  g_dirty_y1 = 0u;            /* max dirty row (exclusive) */
+static uint32_t  g_last_flip_y0 = 0u;
+static uint32_t  g_last_flip_y1 = 0u;
 
 /* ── Terminal scrollback ring buffer ────────────────────────────────────── */
 static uint8_t  g_tsb_ring[CONSOLE_TSB_CAP];
@@ -628,6 +630,7 @@ static void draw_glyph_ttf_cp(uint64_t px, uint64_t py, uint32_t cp,
                 for (uint32_t sx = 0; sx < scale; sx++) {
                     int dx = gx + xx * (int)scale + (int)sx;
                     if (dx < 0 || (uint64_t)dx >= con.w) continue;
+                    if (dx < (int)px || (uint64_t)dx >= px + cw) continue;
                     if (back) {
                         uint32_t *p = back + (uint64_t)dy * con.pitch32 + dx;
                         *p = cons_blend(*p, fg, a);
@@ -1634,10 +1637,22 @@ void console_mark_dirty_rows(uint32_t y0, uint32_t y1) {
 
 uint32_t *console_backbuf_ptr(void)     { return g_back; }
 uint64_t  console_backbuf_pitch32(void) { return g_back ? con.pitch32 : 0; }
+void console_set_scanout_ptr(uint32_t *pixels) {
+    if (pixels) con.pix = pixels;
+}
+bool console_last_flip_rows(uint32_t *y0, uint32_t *y1) {
+    if (g_last_flip_y0 >= g_last_flip_y1) return false;
+    if (y0) *y0 = g_last_flip_y0;
+    if (y1) *y1 = g_last_flip_y1;
+    return true;
+}
 
 /* Copy only dirty rows of backbuf → VRAM.  Returns true when a flip happened. */
 bool console_flip_if_dirty(void) {
-    if (!g_back || !g_dirty) return false;
+    if (!g_back || !g_dirty) {
+        g_last_flip_y0 = g_last_flip_y1 = 0u;
+        return false;
+    }
     g_dirty = false;
     uint32_t y0 = g_dirty_y0, y1 = g_dirty_y1;
     g_dirty_y0 = 0xFFFFFFFFu; g_dirty_y1 = 0u;
@@ -1646,6 +1661,8 @@ bool console_flip_if_dirty(void) {
      * only y1 would then make (y1 - y0) underflow into a huge OOB memcpy. */
     if (y0 > (uint32_t)con.h) y0 = (uint32_t)con.h;
     if (y1 > (uint32_t)con.h) y1 = (uint32_t)con.h;
+    g_last_flip_y0 = y0;
+    g_last_flip_y1 = y1;
     if (y0 >= y1) return true;
     uint64_t n = (uint64_t)(y1 - y0) * con.pitch32;
     const uint32_t *src = g_back + (uint64_t)y0 * con.pitch32;

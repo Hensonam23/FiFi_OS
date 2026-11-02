@@ -504,12 +504,14 @@ extern uint64_t g_tray_left_x;   /* left edge of the taskbar system tray */
 extern uint64_t g_cpu_tray_x, g_cpu_tray_w;
 extern uint64_t g_net_tray_x, g_net_tray_w;
 extern uint64_t g_mem_tray_x, g_mem_tray_w;
+extern uint64_t g_tray_hit_y, g_tray_hit_h;
 extern int      g_tray_hover;           /* TRAY_* id under cursor, or TRAY_NONE */
 int      tray_item_at(int32_t mx, int32_t my);
 
 /* Horizon-bar interactive regions (set by draw_status_bar each frame). */
 extern uint64_t g_intent_x[FIFI_PROFILE_COUNT], g_intent_w[FIFI_PROFILE_COUNT];
 extern uint64_t g_intent_y, g_intent_h;
+extern uint64_t g_bar_brand_x, g_bar_brand_w, g_bar_brand_y, g_bar_brand_h;
 extern uint64_t g_bar_search_x, g_bar_search_w, g_bar_search_y, g_bar_search_h;
 void     tray_tip_draw(void);
 /* platform battery/cpu (weak — Linux-only) */

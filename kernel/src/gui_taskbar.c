@@ -236,9 +236,8 @@ void taskbar_draw_tray(void) {
      * group background is drawn, then each item is placed left→right on it. */
     /* The horizon (top) bar owns the status cluster — draw no dock tray then. */
     if (g_theme.statusbar) {
-        g_tray_total_w = 0; g_batt_present = false;
-        g_clk_x = 0; g_clk_w = 0; g_vol_tray_x = 0; g_vol_tray_w = 0;
-        g_net_tray_x = 0; g_net_tray_w = 0; g_batt_x = 0; g_batt_w = 0;
+        /* draw_status_bar() owns both rendering and hit regions in this mode. */
+        g_tray_total_w = 0;
         g_tray_left_x = fb_w > 8u ? fb_w - 8u : 0u;
         return;
     }
@@ -344,6 +343,7 @@ void taskbar_draw_tray(void) {
     g_batt_present = has_batt; g_batt_x = 0; g_batt_w = 0;
     g_vol_tray_x = 0; g_vol_tray_w = 0; g_net_tray_x = 0; g_net_tray_w = 0;
     g_clk_x = 0; g_clk_w = 0; g_cpu_tray_x = 0; g_cpu_tray_w = 0; g_mem_tray_x = 0; g_mem_tray_w = 0;
+    g_tray_hit_y = ty; g_tray_hit_h = TASKBAR_H;
 
     uint64_t x = gleft + TPAD;
     for (int i = 0; i < n; i++) {
@@ -401,10 +401,12 @@ uint64_t g_tray_left_x = 0;   /* left edge of the tray run (set each frame) */
 uint64_t g_cpu_tray_x = 0, g_cpu_tray_w = 0;
 uint64_t g_net_tray_x = 0, g_net_tray_w = 0;
 uint64_t g_mem_tray_x = 0, g_mem_tray_w = 0;
+uint64_t g_tray_hit_y = 0, g_tray_hit_h = 0;
 int      g_tray_hover = TRAY_NONE;
 uint64_t g_intent_x[FIFI_PROFILE_COUNT] = {0};
 uint64_t g_intent_w[FIFI_PROFILE_COUNT] = {0};
 uint64_t g_intent_y = 0, g_intent_h = 0;
+uint64_t g_bar_brand_x = 0, g_bar_brand_w = 0, g_bar_brand_y = 0, g_bar_brand_h = 0;
 uint64_t g_bar_search_x = 0, g_bar_search_w = 0, g_bar_search_y = 0, g_bar_search_h = 0;
 
 static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
@@ -420,10 +422,10 @@ static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
 }
 
 int tray_item_at(int32_t mx, int32_t my) {
-    if (g_theme.panel_autohide && !g_panel_revealed) return TRAY_NONE;
-    if (panel_is_vertical()) return TRAY_NONE;   /* vertical dock has no tray */
-    uint64_t ty = panel_y();
-    if ((uint64_t)my < ty || (uint64_t)my >= ty + TASKBAR_H) return TRAY_NONE;
+    if (!g_theme.statusbar && g_theme.panel_autohide && !g_panel_revealed) return TRAY_NONE;
+    if (!g_theme.statusbar && panel_is_vertical()) return TRAY_NONE;
+    if (g_tray_hit_h == 0u || (uint64_t)my < g_tray_hit_y ||
+        (uint64_t)my >= g_tray_hit_y + g_tray_hit_h) return TRAY_NONE;
     static const int ids[6] = { TRAY_BATT, TRAY_CPU, TRAY_NET, TRAY_MEM, TRAY_VOL, TRAY_CLK };
     for (int k = 0; k < 6; k++) {
         if (ids[k] == TRAY_BATT && !g_batt_present) continue;
@@ -479,7 +481,6 @@ void tray_tip_draw(void) {
     char buf[96]; tray_tip_text(g_tray_hover, buf, (int)sizeof buf);
     if (!buf[0]) return;
     uint64_t fw = console_font_width(), fh = console_font_height();
-    uint64_t ty = panel_y();
     uint64_t tlen = (uint64_t)gui_strlen(buf);
     uint64_t tw = tlen * fw + 16u, th = fh + 10u;
     uint64_t ix, iw; tray_item_region(g_tray_hover, &ix, &iw);
@@ -487,8 +488,12 @@ void tray_tip_draw(void) {
     uint64_t px = center > tw / 2u ? center - tw / 2u : 0u;
     uint64_t fbw = console_fb_width();
     if (px + tw > fbw) px = fbw > tw ? fbw - tw : 0u;
-    uint64_t py = (g_theme.panel_edge == PANEL_TOP) ? ty + TASKBAR_H + 6u
-                                                    : (ty > th + 6u ? ty - th - 6u : 0u);
+    bool opens_down = g_theme.statusbar
+                    ? !statusbar_bottom()
+                    : g_theme.panel_edge == PANEL_TOP;
+    uint64_t py = opens_down ? g_tray_hit_y + g_tray_hit_h + 6u
+                             : (g_tray_hit_y > th + 6u
+                                ? g_tray_hit_y - th - 6u : 0u);
     console_fill_rect(px, py, tw, th, 0x000e1622u);
     console_fill_rect(px, py, tw, 1u, 0x00304a70u);
     console_fill_rect(px, py + th - 1u, tw, 1u, 0x00223048u);
@@ -760,7 +765,6 @@ void taskbar_draw(void) {
     /* Left/right edges use the vertical dock layout instead. */
     if (panel_is_vertical()) { taskbar_draw_vertical(); return; }
     uint64_t fb_w = console_fb_width();
-    uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
     uint64_t ty   = panel_y();
     g_dock_tray_left = 0u;   /* default: tray right-anchored; floating dock sets it below */
@@ -939,7 +943,6 @@ void vol_popup_draw(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = panel_y();
 
     /* Height: top-pad + title + gap + btn-row + bot-pad */
     uint64_t btn_h  = fh + 4u;
@@ -950,9 +953,13 @@ void vol_popup_draw(void) {
     uint64_t pop_right = (g_vol_tray_w > 0u) ? (g_vol_tray_x + g_vol_tray_w) : (fb_w - 4u);
     uint64_t px = (pop_right > VOL_POP_W) ? (pop_right - VOL_POP_W) : 0u;
     if (px + VOL_POP_W > fb_w) px = fb_w - VOL_POP_W;
-    uint64_t py = (g_theme.panel_edge == PANEL_TOP)
-                    ? ty + TASKBAR_H + 4u                            /* top panel: open downward */
-                    : ((ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u);  /* bottom: open upward */
+    bool opens_down = g_theme.statusbar
+                    ? !statusbar_bottom()
+                    : g_theme.panel_edge == PANEL_TOP;
+    uint64_t py = opens_down
+                    ? g_tray_hit_y + g_tray_hit_h + 4u
+                    : ((g_tray_hit_y > pop_h + 4u)
+                       ? (g_tray_hit_y - pop_h - 4u) : 0u);
     g_vol_pop_x = px;
     g_vol_pop_y = py;
 
@@ -1065,7 +1072,6 @@ void cal_popup_draw(void) {
     uint64_t fb_w = console_fb_width();
     uint64_t fw   = console_font_width();
     uint64_t fh   = console_font_height();
-    uint64_t ty   = panel_y();
 
     uint8_t td = 1, tmon = 1; uint16_t tyr = 2026;
     rtc_get_date(&td, &tmon, &tyr);
@@ -1086,9 +1092,13 @@ void cal_popup_draw(void) {
     uint64_t pop_right = (g_clk_w > 0u) ? (g_clk_x + g_clk_w) : (fb_w - 4u);
     uint64_t px = (pop_right > pop_w) ? (pop_right - pop_w) : 0u;
     if (px + pop_w > fb_w) px = fb_w - pop_w;
-    uint64_t py = (g_theme.panel_edge == PANEL_TOP)
-                    ? ty + TASKBAR_H + 4u                            /* top panel: open downward */
-                    : ((ty > pop_h + 4u) ? (ty - pop_h - 4u) : 0u);  /* bottom: open upward */
+    bool opens_down = g_theme.statusbar
+                    ? !statusbar_bottom()
+                    : g_theme.panel_edge == PANEL_TOP;
+    uint64_t py = opens_down
+                    ? g_tray_hit_y + g_tray_hit_h + 4u
+                    : ((g_tray_hit_y > pop_h + 4u)
+                       ? (g_tray_hit_y - pop_h - 4u) : 0u);
     g_cal_pop_x = px; g_cal_pop_y = py; g_cal_pop_w = pop_w; g_cal_pop_h = pop_h;
 
     /* Background (frosted glass) + accent border */
