@@ -394,10 +394,6 @@ Goals in the order they unlock, each defined by the milestone that proves it. Mo
 - [ ] **FiFi Phone.** Goal: FiFi making calls and sending texts on real hardware, proven on a repairable phone (PinePhone Pro / Fairphone) first, then the custom CM5 carrier from the hardware plan below. Needs cellular modem integration, a phone/SMS framework, call audio routing, and the sensor stack. No built-in AI on the phone; mobile builds omit the local model.
 - [ ] **Future bare-metal project.** Goal: eventually build the from-scratch kernel into a complete FiFi platform. This is intentionally deferred until the Linux version is mature, polished, and reliably shipping; it is not part of the current Linux roadmap or release gates.
 
-### Hardware plan (the CM5 handheld/phone)
-
-Target SoC is the Raspberry Pi Compute Module 5 (hourglass, when back in stock): the official IO board for bring-up, then a compact carrier for the handheld. The honest hard part is the display: a 2K, sunlight-readable (1000+ nit), small, capacitive DSI panel does not exist off-the-shelf in the hobby channel, so the plan is a 5-7" 1080p high-brightness panel first (get the software right), then chase a premium 6" 1440p 1000+ nit OLED via a DSI bridge for the phone. Power is LiPo + a PMIC/charge board with a fuel gauge; suspend/resume (the tablet goal above) is what makes the battery last. Bring-up order on real hardware: display + touch, then power, Wi-Fi/BT, audio, sensors, and (phone only) the modem.
-
 A technical assessment of the longer-term platform plan lives in [`docs/PLATFORM_REVIEW.md`](docs/PLATFORM_REVIEW.md). Its bare-metal findings describe future work, while the root roadmap defines current Linux priorities. The intended next-generation desktop shell design is in [`docs/design/`](docs/design/).
 
 ---
