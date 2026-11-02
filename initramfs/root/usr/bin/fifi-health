@@ -1,0 +1,69 @@
+#!/bin/sh
+# Read-only FiFi OS health report for people and the offline assistant.
+
+ok=0 warn=0 fail=0
+pass() { ok=$((ok + 1)); printf '[OK]   %s\n' "$*"; }
+note() { warn=$((warn + 1)); printf '[WARN] %s\n' "$*"; }
+bad() { fail=$((fail + 1)); printf '[FAIL] %s\n' "$*"; }
+
+version=$(cat /etc/fifi-version 2>/dev/null || echo unknown)
+build=$(cat /etc/fifi-build-id 2>/dev/null || echo unknown)
+printf 'FiFi OS health — %s (%s)\n' "$version" "$build"
+
+if pidof fifi-compositor >/dev/null 2>&1; then pass 'Desktop compositor is running';
+else bad 'Desktop compositor is not running'; fi
+
+for entry in \
+    '/tmp/fifi-compositor.sock:Desktop IPC' \
+    '/tmp/wayland-0:Wayland IPC' \
+    '/tmp/fifi-admin.sock:Administrative broker'; do
+    path=${entry%%:*}; label=${entry#*:}
+    if [ -S "$path" ]; then pass "$label is available"; else bad "$label socket is missing"; fi
+done
+
+input=$(cat /tmp/fifi-input-backend 2>/dev/null || true)
+if [ "$input" = libinput ]; then pass 'Mouse and touchpad use libinput';
+else note "Input backend is ${input:-unknown}, not libinput"; fi
+
+if pidof pipewire >/dev/null 2>&1; then pass 'Audio service is running';
+else note 'Audio service is not running'; fi
+if pidof bluetoothd >/dev/null 2>&1; then pass 'Bluetooth service is running';
+else note 'Bluetooth service is not running'; fi
+
+ssid=$(cat /fifi-data/wifi-ssid 2>/dev/null || true)
+if [ -n "$ssid" ]; then
+    if ip route 2>/dev/null | grep -q '^default '; then pass "Wi-Fi is connected to $ssid";
+    else note "Wi-Fi remembers $ssid but has no default route"; fi
+else note 'Wi-Fi is not connected'; fi
+
+if df -P /fifi-data >/dev/null 2>&1; then
+    usage=$(df -P /fifi-data | awk 'NR==2 {print $5}')
+    pct=$(printf '%s' "$usage" | tr -d '%')
+    case "$pct" in
+        ''|*[!0-9]*) note 'Could not read persistent storage usage' ;;
+        *) if [ "$pct" -ge 90 ]; then note "Persistent storage is $usage full";
+           else pass "Persistent storage is $usage full"; fi ;;
+    esac
+else bad 'Persistent storage is unavailable'; fi
+
+battery=''
+for bat in /sys/class/power_supply/BAT*; do
+    [ -d "$bat" ] || continue
+    capacity=$(cat "$bat/capacity" 2>/dev/null || echo '?')
+    status=$(cat "$bat/status" 2>/dev/null || echo unknown)
+    battery="$capacity% ($status)"
+    break
+done
+if [ -n "$battery" ]; then pass "Battery is $battery"; else note 'No battery was detected'; fi
+
+denied=$(dmesg 2>/dev/null | grep -c 'apparmor="DENIED"' || true)
+if [ "$denied" -eq 0 ] 2>/dev/null; then pass 'No AppArmor denials this boot';
+else note "$denied AppArmor denials need review"; fi
+
+if [ -f /fifi-data/compositor.log ] && \
+   grep -Eiq 'segfault|panic|fatal|crash' /fifi-data/compositor.log; then
+    note 'Compositor log contains a severe error marker'
+else pass 'No severe compositor error markers'; fi
+
+printf 'Summary: %d OK, %d warnings, %d failures\n' "$ok" "$warn" "$fail"
+[ "$fail" -eq 0 ]

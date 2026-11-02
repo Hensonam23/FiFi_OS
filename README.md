@@ -353,6 +353,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
   - [x] Make CPU and memory indicators open System, and battery open dedicated Power settings
   - [x] Add real laptop brightness control and confirmation-gated suspend
   - [x] Prevent proportional desktop fonts from overlapping adjacent characters
+  - [x] Reflow terminal output on resize and make offline health checks FiFi-aware
   - [ ] Complete the remaining settings and real-hardware behavior audit
 - [x] Smooth pointer and touchpad input on the real laptop
   - [x] Preserve unchanged evdev axes and multitouch slots across poll batches

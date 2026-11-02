@@ -37,6 +37,17 @@ grep -Fxq 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux
 grep -Fq '/usr/sbin/nft list table inet fifi_filter' "$ROOT/initramfs/root/init"
 grep -Fq '/sys/module/apparmor/parameters/enabled' "$ROOT/initramfs/root/init"
 grep -Fq '/sys/kernel/security/apparmor/profiles' "$ROOT/initramfs/root/init"
+grep -Fq '/etc/resolv.conf   r,' \
+    "$ROOT/initramfs/root/etc/apparmor.d/fifi-compositor"
+grep -Fq '/bin/fifi-*        ix,' \
+    "$ROOT/initramfs/root/etc/apparmor.d/fifi-compositor"
+! grep -Fq 'Px,' "$ROOT/initramfs/root/etc/apparmor.d/fifi-compositor"
+
+echo "[test-security] offline agent uses FiFi-native health evidence"
+test -x "$ROOT/initramfs/root/usr/bin/fifi-health"
+grep -Fq 'FiFi OS does not use systemd' "$ROOT/initramfs/root/usr/bin/fifi-agent"
+grep -Fq 'fifi-health|top' "$ROOT/initramfs/root/usr/bin/fifi-agent"
+grep -Fq 'Run it? [Y/N]:' "$ROOT/initramfs/root/usr/bin/fifi-agent"
 
 echo "[test-security] Wi-Fi diagnostics describe only the current boot"
 grep -Fq "'=== current boot ===' > /fifi-data/wifi.log" \

@@ -27,6 +27,9 @@ gcc "${common[@]}" -Wno-unused-parameter -Wno-misleading-indentation \
     -c "$ROOT/kernel/src/gui_render.c" -o "$TMP/gui_render.o"
 gcc "${common[@]}" -Wno-unused-parameter -Wno-misleading-indentation \
     -c "$ROOT/kernel/src/gui_taskbar.c" -o "$TMP/gui_taskbar.o"
+gcc -std=c11 -O2 -Wall -Wextra -Werror \
+    "$ROOT/fifi/apps/terminal/terminal.c" -o "$TMP/fifi-terminal"
+"$TMP/fifi-terminal" --reflow-test
 
 grep -Fq 'DRM_IOCTL_MODE_PAGE_FLIP' "$ROOT/fifi/platform/linux/drm.c"
 grep -Fq 'DRM_MODE_PAGE_FLIP_EVENT' "$ROOT/fifi/platform/linux/drm.c"
@@ -59,4 +62,5 @@ echo "[presentation-test] terminals reserve safe cells while desktop text uses p
 echo "[presentation-test] Horizon-bar controls size themselves from rendered text"
 echo "[presentation-test] workload profiles have kernel THP support"
 echo "[presentation-test] every visible Horizon-bar control has a real action"
+echo "[presentation-test] terminal output reflows into wider windows"
 echo "[presentation-test] PASS"

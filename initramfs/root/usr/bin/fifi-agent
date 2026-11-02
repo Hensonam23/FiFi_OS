@@ -64,6 +64,11 @@ Rules:
 - Inspect with safe read-only commands before changing anything.
 - NEVER invent command output; if you have not run a command you do not know its result.
 - This is FiFi OS, a custom minimal Linux. There is NO pacman/apt/dnf; never use a package manager.
+- FiFi OS does not use systemd. Never run journalctl. Use fifi-health first for a
+  general health check, then dmesg and logs under /fifi-data for details.
+- AppArmor currently runs in complain mode. apparmor="ALLOWED" is an audit-only
+  event, not a blocked action. Only apparmor="DENIED" or a demonstrated failure
+  is an AppArmor problem.
 - Do not attempt to update, downgrade, or reinstall the kernel or bootloader.
 
 Example of the REQUIRED format:
@@ -97,7 +102,7 @@ classify() {
         sensors|vulkaninfo|glxinfo|eglinfo|dmidecode|getconf|\
         wc|sort|uniq|readlink|realpath|\
         sha1sum|md5sum|ss|netstat|env|printenv|which|type|file|hostname|nproc|\
-        dmesg|journalctl|top|vmstat|cut|awk|sed|find|test|xxd|od|strings|ldd)
+        dmesg|fifi-health|top|vmstat|cut|awk|sed|find|test|xxd|od|strings|ldd)
             # sed/find can still mutate; flag those specific forms as mutating.
             case "$c" in *"sed -i"*|*" -delete"*|*"-exec"*|*">"*|*">>"*) echo mut; return;; esac
             echo ro; return;;
@@ -123,7 +128,7 @@ run_cmd() {
         # like "scan my hardware" completes on its own.
         echo >&2
         echo "  AI wants to run: $cmd" >&2
-        printf "  Run it? [y/N]: " >&2
+        printf "  Run it? [Y/N]: " >&2
         read ans
         case "$ans" in y|Y|yes|YES) ;; *) echo "  (skipped)" >&2; echo "OUTPUT: [declined by user - command not run]"; return;; esac
     else

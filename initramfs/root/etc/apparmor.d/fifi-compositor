@@ -14,6 +14,7 @@
   /fifi-data/**      rw,
   /tmp/**            rw,
   /var/run/**        rw,
+  /etc/resolv.conf   r,
 
   # Proc and sys for system info
   /proc/**           r,
@@ -24,10 +25,10 @@
   /tmp/wayland-*     rw,
 
   # Spawn child apps
-  /bin/fifi-*        Px,
-  /usr/bin/steam     Px,
-  /usr/bin/Xwayland  Px,
-  /usr/bin/pipewire  Px,
+  /bin/fifi-*        ix,
+  /usr/bin/steam     ix,
+  /usr/bin/Xwayland  ix,
+  /usr/bin/pipewire  ix,
 
   # Network (for network status reading)
   network,

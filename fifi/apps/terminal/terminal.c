@@ -93,6 +93,8 @@ typedef struct { uint32_t cp; uint32_t fg; uint32_t bg; } Cell;
 typedef struct {
     Cell     cells[MAX_ROWS][MAX_COLS];
     Cell     scrollback[SCROLLBACK][MAX_COLS];
+    bool     soft_wrap[MAX_ROWS];
+    bool     sb_soft_wrap[SCROLLBACK];
     int      sb_w, sb_n, sb_off;  /* ring write ptr, line count, scroll offset */
     int      rows, cols, cx, cy;
     bool     wrap;   /* VT100 deferred wrap: last column written, wrap before next glyph */
@@ -207,18 +209,25 @@ static void tab_clear_region(Tab *t, int r0, int c0, int r1, int c1) {
             t->cells[r][c] = (Cell){ ' ', t->fg, t->bg };
 }
 
-static void tab_clear_all(Tab *t) { tab_clear_region(t, 0, 0, t->rows - 1, t->cols); }
+static void tab_clear_all(Tab *t) {
+    tab_clear_region(t, 0, 0, t->rows - 1, t->cols);
+    memset(t->soft_wrap, 0, sizeof(t->soft_wrap));
+}
 
 static void tab_scroll_up(Tab *t) {
     memcpy(t->scrollback[t->sb_w], t->cells[0], sizeof(Cell) * MAX_COLS);
+    t->sb_soft_wrap[t->sb_w] = t->soft_wrap[0];
     t->sb_w = (t->sb_w + 1) % SCROLLBACK;
     if (t->sb_n < SCROLLBACK) t->sb_n++;
     memmove(&t->cells[0], &t->cells[1], sizeof(Cell) * MAX_COLS * (t->rows - 1));
+    memmove(&t->soft_wrap[0], &t->soft_wrap[1], sizeof(bool) * (t->rows - 1));
     for (int c = 0; c < t->cols; c++)
         t->cells[t->rows - 1][c] = (Cell){ ' ', t->fg, t->bg };
+    t->soft_wrap[t->rows - 1] = false;
 }
 
 static void tab_newline(Tab *t) {
+    t->soft_wrap[t->cy] = false;
     t->cx = 0; t->cy++;
     if (t->cy >= t->rows) { t->cy = t->rows - 1; tab_scroll_up(t); }
 }
@@ -406,7 +415,11 @@ static void tab_putc(Tab *t, uint8_t c) {
         if (!t->in_csi && c == 'M') {
             t->in_esc = false;
             if (t->cy > 0) { t->cy--; }
-            else { memmove(&t->cells[1], &t->cells[0], sizeof(Cell)*MAX_COLS*(t->rows-1)); tab_clear_region(t,0,0,0,t->cols); }
+            else {
+                memmove(&t->cells[1], &t->cells[0], sizeof(Cell)*MAX_COLS*(t->rows-1));
+                memmove(&t->soft_wrap[1], &t->soft_wrap[0], sizeof(bool)*(t->rows-1));
+                tab_clear_region(t,0,0,0,t->cols); t->soft_wrap[0] = false;
+            }
             return;
         }
         if (!t->in_csi && (c=='7'||c=='s')) { t->svx=t->cx; t->svy=t->cy; t->in_esc=false; return; }
@@ -453,10 +466,12 @@ static void tab_putc(Tab *t, uint8_t c) {
                 int w = cp_width(t->utf8cp);
                 if (w != 0) {
                     if (t->wrap) {   /* deferred wrap from the previous glyph */
+                        t->soft_wrap[t->cy] = true;
                         t->cx = 0; t->wrap = false;
                         if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
                     }
                     if (w == 2 && t->cx + 1 >= t->cols) {   /* wide glyph won't fit last col */
+                        t->soft_wrap[t->cy] = true;
                         t->cx = 0;
                         if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
                     }
@@ -477,6 +492,7 @@ static void tab_putc(Tab *t, uint8_t c) {
 
     /* Plain ASCII */
     if (t->wrap) {   /* deferred wrap from the previous glyph at the last column */
+        t->soft_wrap[t->cy] = true;
         t->cx = 0; t->wrap = false;
         if (++t->cy >= t->rows) { t->cy = t->rows-1; tab_scroll_up(t); }
     }
@@ -729,6 +745,81 @@ static void send_frame(int fd) {
 /* ── Font size change ────────────────────────────────────────────────────── */
 static void font_change(int delta);  /* forward decl */
 
+/* Reflow rows joined by an automatic terminal wrap when the window grows.
+ * Explicit newlines remain separate logical lines.  This is what lets prose
+ * already printed by fifi-agent use newly available horizontal space. */
+static void tab_reflow_wider(Tab *t, int new_cols, int new_rows) {
+    Cell out[MAX_ROWS][MAX_COLS];
+    bool out_soft[MAX_ROWS] = {0};
+    Cell blank = { ' ', t->fg, t->bg };
+    int out_rows = 0, mapped_cx = 0, mapped_cy = 0;
+    bool cursor_mapped = false;
+
+    for (int r = 0; r < MAX_ROWS; r++)
+        for (int c = 0; c < MAX_COLS; c++) out[r][c] = blank;
+
+    for (int start = 0; start < t->rows && out_rows < MAX_ROWS; ) {
+        Cell logical[MAX_ROWS * MAX_COLS];
+        int logical_n = 0, cursor_off = -1, end = start;
+        for (;;) {
+            int used = 0;
+            for (int c = t->cols - 1; c >= 0; c--) {
+                if (t->cells[end][c].cp != ' ' && t->cells[end][c].cp != 0) {
+                    used = c + 1; break;
+                }
+            }
+            if (t->soft_wrap[end]) used = t->cols;
+            if (end == t->cy) {
+                cursor_off = logical_n + t->cx;
+                if (used < t->cx) used = t->cx;
+            }
+            if (logical_n + used > (int)(MAX_ROWS * MAX_COLS))
+                used = (int)(MAX_ROWS * MAX_COLS) - logical_n;
+            if (used > 0) {
+                memcpy(&logical[logical_n], t->cells[end], sizeof(Cell) * (size_t)used);
+                logical_n += used;
+            }
+            if (!t->soft_wrap[end] || end + 1 >= t->rows) break;
+            end++;
+        }
+
+        int physical = logical_n > 0 ? (logical_n + new_cols - 1) / new_cols : 1;
+        if (physical > MAX_ROWS - out_rows) physical = MAX_ROWS - out_rows;
+        for (int i = 0; i < logical_n && i < physical * new_cols; i++)
+            out[out_rows + i / new_cols][i % new_cols] = logical[i];
+        for (int i = 0; i + 1 < physical; i++) out_soft[out_rows + i] = true;
+        if (cursor_off >= 0) {
+            mapped_cy = out_rows + cursor_off / new_cols;
+            mapped_cx = cursor_off % new_cols;
+            if (mapped_cy >= out_rows + physical) mapped_cy = out_rows + physical - 1;
+            cursor_mapped = true;
+        }
+        out_rows += physical;
+        start = end + 1;
+    }
+
+    int drop = out_rows > new_rows ? out_rows - new_rows : 0;
+    int kept = out_rows - drop;
+    for (int r = 0; r < new_rows; r++) {
+        if (r < kept) {
+            memcpy(t->cells[r], out[r + drop], sizeof(Cell) * MAX_COLS);
+            t->soft_wrap[r] = out_soft[r + drop];
+        } else {
+            for (int c = 0; c < MAX_COLS; c++) t->cells[r][c] = blank;
+            t->soft_wrap[r] = false;
+        }
+    }
+    for (int r = new_rows; r < MAX_ROWS; r++) t->soft_wrap[r] = false;
+    if (cursor_mapped) {
+        t->cy = mapped_cy - drop;
+        t->cx = mapped_cx;
+    }
+    if (t->cy < 0) t->cy = 0;
+    if (t->cy >= new_rows) t->cy = new_rows - 1;
+    if (t->cx >= new_cols) t->cx = new_cols - 1;
+    t->wrap = false;
+}
+
 /* ── Tab grid recalculation ──────────────────────────────────────────────── */
 static void tab_recalc_grid(Tab *t) {
     int cw = g_font.advance, ch = g_font.height + 1;
@@ -740,16 +831,19 @@ static void tab_recalc_grid(Tab *t) {
     if (new_rows > MAX_ROWS) new_rows  = MAX_ROWS;
     if (new_cols == t->cols && new_rows == t->rows) return;
 
-    if (t->cx >= new_cols) t->cx = new_cols - 1;
-    if (t->cy >= new_rows) t->cy = new_rows - 1;
-    /* Fill any newly exposed cells */
     int old_cols = t->cols, old_rows = t->rows;
-    t->cols = new_cols; t->rows = new_rows;
-    for (int r = 0; r < t->rows; r++) {
-        int c0 = (r < old_rows) ? old_cols : 0;
-        for (int c = c0; c < t->cols; c++)
-            t->cells[r][c] = (Cell){ ' ', t->fg, t->bg };
+    if (new_cols > old_cols) {
+        tab_reflow_wider(t, new_cols, new_rows);
+    } else {
+        if (t->cx >= new_cols) t->cx = new_cols - 1;
+        if (t->cy >= new_rows) t->cy = new_rows - 1;
+        for (int r = 0; r < new_rows; r++) {
+            int c0 = (r < old_rows) ? old_cols : 0;
+            for (int c = c0; c < new_cols; c++)
+                t->cells[r][c] = (Cell){ ' ', t->fg, t->bg };
+        }
     }
+    t->cols = new_cols; t->rows = new_rows;
     /* Update PTY window size */
     if (t->pty >= 0) {
         struct winsize ws = { .ws_row=(uint16_t)t->rows, .ws_col=(uint16_t)t->cols };
@@ -952,7 +1046,27 @@ static void key_to_pty(Tab *t, uint8_t k) {
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
-int main(void) {
+static int reflow_selftest(void) {
+    Tab t = {0};
+    t.rows = 3; t.cols = 8; t.cx = 2; t.cy = 1;
+    t.fg = COL_FG_DEF; t.bg = COL_BG_DEF;
+    for (int r = 0; r < t.rows; r++)
+        for (int c = 0; c < t.cols; c++)
+            t.cells[r][c] = (Cell){ ' ', t.fg, t.bg };
+    for (int c = 0; c < 8; c++) t.cells[0][c].cp = (uint32_t)('a' + c);
+    t.cells[1][0].cp = 'i'; t.cells[1][1].cp = 'j';
+    t.soft_wrap[0] = true;
+    tab_reflow_wider(&t, 12, 3);
+    for (int c = 0; c < 10; c++)
+        if (t.cells[0][c].cp != (uint32_t)('a' + c)) return 1;
+    if (t.soft_wrap[0] || t.cx != 10 || t.cy != 0) return 1;
+    puts("[terminal-test] resize reflows soft-wrapped output");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--reflow-test") == 0)
+        return reflow_selftest();
     /* Load default font */
     if (!font_load(&g_font, FONT_PATHS[g_font_idx])) {
         /* Try falling back to PSF1 */
