@@ -28,6 +28,12 @@ grep -Fq 'FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-}}"' \
     "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'git -C "$REPO_ROOT" rev-parse --short=12 HEAD' \
     "$ROOT/scripts/build-initramfs.sh"
+grep -Fq '$(BUILD)/comp/gui_render.o: ../../kernel/src/gui_render.c ../../VERSION' \
+    "$ROOT/fifi/compositor/Makefile"
+grep -Fq '$(BUILD)/sdl/gui_render.o: ../../../VERSION' \
+    "$ROOT/fifi/platform/sdl/Makefile"
+grep -Fq 'grep -aFq "FiFi OS V$FIFI_OS_VERSION" "$COMP_BIN"' \
+    "$ROOT/scripts/build-initramfs.sh"
 
 REPO="$TMP/repo"
 MOCK_BIN="$TMP/bin"

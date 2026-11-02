@@ -125,7 +125,7 @@ $(BUILD)/comp/gui_files.o: ../../kernel/src/gui_files.c | $(BUILD)/comp
 $(BUILD)/comp/gui_text.o: ../../kernel/src/gui_text.c | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/comp/gui_render.o: ../../kernel/src/gui_render.c | $(BUILD)/comp
+$(BUILD)/comp/gui_render.o: ../../kernel/src/gui_render.c ../../VERSION | $(BUILD)/comp
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/comp/console.o: ../../kernel/src/console.c | $(BUILD)/comp

@@ -243,6 +243,10 @@ rm -f "$COMP_BIN"
     echo "[initramfs] ERROR: compositor build produced no executable" >&2
     exit 1
 }
+grep -aFq "FiFi OS V$FIFI_OS_VERSION" "$COMP_BIN" || {
+    echo "[initramfs] ERROR: compositor does not contain V$FIFI_OS_VERSION" >&2
+    exit 1
+}
 if ldd "$COMP_BIN" 2>&1 | grep -q 'not found'; then
     echo "[initramfs] ERROR: compositor has an unresolved runtime library" >&2
     ldd "$COMP_BIN" >&2 || true

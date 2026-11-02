@@ -74,6 +74,10 @@ $(BUILD)/sdl/gui.o: ../../../kernel/src/gui.c | $(BUILD)/sdl
 $(BUILD)/sdl/gui_%.o: ../../../kernel/src/gui_%.c | $(BUILD)/sdl
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# gui_render.c embeds the visible OS version, so a version-only release must
+# rebuild it even when none of the C sources changed.
+$(BUILD)/sdl/gui_render.o: ../../../VERSION
+
 $(BUILD)/sdl/png.o: ../linux/png.c | $(BUILD)/sdl
 	$(CC) $(CFLAGS) -I../linux/vendor -c $< -o $@
 
