@@ -115,7 +115,7 @@ chmod +x "$STAGE/bin/busybox"
 # Querying `busybox --list` guarantees nothing the binary provides is missing.
 # Excluded: 'busybox' itself (the real binary), 'bash'/'blkid', which get real
 # binaries bundled later, and the reboot/poweroff wrappers, which send desktop
-# requests through the narrow root broker while retaining BusyBox for UID 0.
+# requests through the narrow root broker for every caller.
 for applet in $("$BUSYBOX_BIN" --list 2>/dev/null); do
     case "$applet" in
         busybox|bash|blkid|reboot|poweroff) continue ;;

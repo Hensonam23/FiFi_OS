@@ -573,6 +573,10 @@ grep -Fq 'fifi-admin}" power reboot' "$ROOT/initramfs/root/bin/reboot"
 grep -Fq 'fifi-admin}" power poweroff' "$ROOT/initramfs/root/bin/poweroff"
 ! grep -Fq 'busybox reboot' "$ROOT/initramfs/root/bin/reboot"
 ! grep -Fq 'busybox poweroff' "$ROOT/initramfs/root/bin/poweroff"
+grep -Fq 'case "$_a" in reboot|poweroff) continue ;; esac' \
+    "$ROOT/initramfs/root/init"
+grep -Fq 'ln -sf /bin/reboot /usr/bin/reboot' "$ROOT/initramfs/root/init"
+grep -Fq 'ln -sf /bin/poweroff /usr/bin/poweroff' "$ROOT/initramfs/root/init"
 grep -Fq 'busybox|bash|blkid|reboot|poweroff' \
     "$ROOT/scripts/build-initramfs.sh"
 power_wrapper_log="$TMP/power-wrapper.log"

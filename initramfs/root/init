@@ -429,8 +429,11 @@ chmod 0644 /fifi-data/wifi-hardware
 # Apps expect standard tools in /usr/bin (#!/usr/bin/env shebangs, uname, etc.):
 # link every busybox applet there unless a real binary already exists.
 for _a in $(busybox --list); do
+    case "$_a" in reboot|poweroff) continue ;; esac
     [ -e "/usr/bin/$_a" ] || ln -sf /bin/busybox "/usr/bin/$_a"
 done
+ln -sf /bin/reboot /usr/bin/reboot
+ln -sf /bin/poweroff /usr/bin/poweroff
 
 # ── App platform: writable library, immutable helpers, and keymap ─────────────
 # Persistent user storage must not redirect boot-time root ownership changes.
