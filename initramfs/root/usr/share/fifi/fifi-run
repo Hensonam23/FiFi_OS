@@ -368,9 +368,9 @@ trap cleanup_steam_session EXIT HUP INT TERM
 sleep 1
 if [ -x /root/.local/share/Steam/steam.sh ]; then
     /root/.local/share/Steam/steam.sh \
-        -no-cef-sandbox -cef-disable-gpu-sandbox &
+        -no-cef-sandbox -cef-disable-gpu-sandbox "$@" &
 else
-    /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox &
+    /usr/bin/steam -no-cef-sandbox -cef-disable-gpu-sandbox "$@" &
 fi
 _steam_client_pid=$!
 wait "$_steam_client_pid"
@@ -384,6 +384,7 @@ STEOF
         # its runtime host-root privileges.
         exec /bin/fifi-user-exec busybox unshare -r -m -p -f -- busybox sh -c '
             R="$1"
+            shift
             busybox mount --make-rprivate /
             busybox mount --bind "$R" "$R"
             busybox mount --make-rprivate "$R"
@@ -409,11 +410,13 @@ STEOF
             exec chroot "$R" /usr/bin/env -i \
                 HOME=/root USER=root LOGNAME=root \
                 DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/0 SDL_VIDEODRIVER=x11 \
+                PULSE_SERVER=unix:/tmp/pulse/native PULSE_RUNTIME_PATH=/tmp/pulse \
+                PIPEWIRE_RUNTIME_DIR=/tmp LANG=C.UTF-8 LC_ALL=C.UTF-8 \
                 TAR_OPTIONS=--no-same-owner LD_LIBRARY_PATH= \
                 PATH=/usr/bin:/usr/local/bin:/bin TERM=xterm \
                 DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/steam-session-bus \
-                /bin/sh /fifi-steam-launch.sh
-        ' _ "$dir/rootfs"
+                /bin/sh /fifi-steam-launch.sh "$@"
+        ' _ "$dir/rootfs" "$@"
     fi
     # Other RunImage/sharun bundles (non-Steam): run their AppRun directly.
     if [ -d "$dir/rootfs" ] && [ -x "$dir/AppRun" ]; then

@@ -693,6 +693,9 @@ sed -n '/# Steam (ivan-hc RunImage)/,/# Other RunImage\/sharun bundles/p' \
     "$ROOT/initramfs/root/usr/share/fifi/fifi-run" > "$steam_block"
 grep -Fq 'exec /bin/fifi-user-exec busybox unshare -r -m -p -f --' "$steam_block"
 grep -Fq 'mount -t proc -o nosuid,nodev,noexec proc "$R/proc"' "$steam_block"
+grep -Fq 'PULSE_SERVER=unix:/tmp/pulse/native PULSE_RUNTIME_PATH=/tmp/pulse' "$steam_block"
+grep -Fq '/bin/sh /fifi-steam-launch.sh "$@"' "$steam_block"
+grep -Fq "' _ \"\$dir/rootfs\" \"\$@\"" "$steam_block"
 ! grep -Eq '^[[:space:]]*exec busybox unshare' "$steam_block"
 grep -Fq 'HOME=/root USER=root LOGNAME=root' "$steam_block"
 

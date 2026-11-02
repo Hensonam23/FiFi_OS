@@ -20,6 +20,8 @@ gcc "${common[@]}" -c "$ROOT/fifi/platform/linux/font_ttf.c" -o "$TMP/font.o"
 gcc "${common[@]}" -DFIFI_OS_VERSION_STR='"Vtest"' \
     -Wno-unused-parameter -Wno-misleading-indentation \
     -c "$ROOT/fifi/compositor/main.c" -o "$TMP/main.o"
+gcc "${common[@]}" -Wno-unused-parameter -Wno-misleading-indentation \
+    -c "$ROOT/fifi/platform/linux/xwm.c" -o "$TMP/xwm.o"
 gcc "${common[@]}" -DFIFI_OS_VERSION_STR='"Vtest"' \
     -Wno-unused-parameter -Wno-misleading-indentation \
     -c "$ROOT/kernel/src/gui.c" -o "$TMP/gui.o"
@@ -56,6 +58,8 @@ grep -Fq 'gui_spawn_app_with_arg("/bin/fifi-settings", "system")' \
 grep -Fq 'g_vol_popup_open = !g_vol_popup_open;' "$ROOT/kernel/src/gui.c"
 grep -Fq 'g_cal_popup_open = !g_cal_popup_open;' "$ROOT/kernel/src/gui.c"
 grep -Fq 'g_bar_brand_x = brand_start' "$ROOT/kernel/src/gui_render.c"
+grep -Fq 'w->w >= s_screen_w * 2 / 5 && w->h >= s_screen_h * 2 / 5' \
+    "$ROOT/fifi/platform/linux/xwm.c"
 
 echo "[presentation-test] KMS uses two synchronized scanouts with vblank page flips"
 echo "[presentation-test] terminals reserve safe cells while desktop text uses proportional advances"
@@ -63,4 +67,5 @@ echo "[presentation-test] Horizon-bar controls size themselves from rendered tex
 echo "[presentation-test] workload profiles have kernel THP support"
 echo "[presentation-test] every visible Horizon-bar control has a real action"
 echo "[presentation-test] terminal output reflows into wider windows"
+echo "[presentation-test] fullscreen X11 games keep the XWayland surface visible"
 echo "[presentation-test] PASS"

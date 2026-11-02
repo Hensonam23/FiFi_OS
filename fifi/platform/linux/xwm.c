@@ -762,13 +762,24 @@ static int x_process_one(void) {
 bool xwm_active(void) { return X.up; }
 int  xwm_fd(void)     { return X.up ? X.fd : -1; }
 
-/* Number of mapped, non-override X windows. The compositor hides the rootful
- * XWayland screen window when this is 0 (no X app = nothing to show). */
+/* Number of mapped X windows which need the rootful XWayland screen visible.
+ * Most override-redirect windows are short-lived menus/tooltips and must not
+ * keep an otherwise empty black X root on the desktop. Fullscreen SDL/Unity
+ * games are different: they intentionally map one large override-redirect
+ * toplevel and never create a conventional managed window. Ignoring that
+ * window made the game render normally while FiFi hid the entire XWayland
+ * surface behind the desktop. Count large override-redirect windows as real
+ * app content while continuing to ignore small popups. */
 int xwm_x_window_count(void) {
     if (!X.up) return 0;
     int n = 0;
-    for (int i = 0; i < XWM_MAX_WINS; i++)
-        if (X.wins[i].window && X.wins[i].mapped && !X.wins[i].override_redirect) n++;
+    for (int i = 0; i < XWM_MAX_WINS; i++) {
+        xwin_t *w = &X.wins[i];
+        if (!w->window || !w->mapped) continue;
+        if (!w->override_redirect ||
+            (w->w >= s_screen_w * 2 / 5 && w->h >= s_screen_h * 2 / 5))
+            n++;
+    }
     return n;
 }
 
