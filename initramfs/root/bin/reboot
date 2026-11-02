@@ -3,9 +3,7 @@ if [ "$#" -ne 0 ]; then
     echo "usage: reboot" >&2
     exit 2
 fi
-if [ "$(id -u)" -eq 0 ]; then
-    # FiFi has a small custom PID 1, not BusyBox init.  -f performs the kernel
-    # reboot syscall instead of sending PID 1 a signal it does not handle.
-    exec /bin/busybox reboot -f
-fi
+# The broker's daemon owns the one proven kernel reboot syscall path.  Use it
+# for root and desktop callers alike; BusyBox reports success under FiFi's
+# custom init without actually rebooting this hardware.
 exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" power reboot

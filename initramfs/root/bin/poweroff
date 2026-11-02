@@ -3,9 +3,6 @@ if [ "$#" -ne 0 ]; then
     echo "usage: poweroff" >&2
     exit 2
 fi
-if [ "$(id -u)" -eq 0 ]; then
-    # FiFi has a small custom PID 1, not BusyBox init.  -f performs the kernel
-    # poweroff syscall instead of sending PID 1 a signal it does not handle.
-    exec /bin/busybox poweroff -f
-fi
+# Keep poweroff on the same brokered kernel syscall path as reboot.  This is
+# reliable with FiFi's custom init and has identical behavior for every caller.
 exec "${FIFI_ADMIN_CLIENT:-fifi-admin}" power poweroff
