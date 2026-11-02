@@ -432,6 +432,14 @@ static void ipc_dispatch(ipc_client_t *c, uint32_t type,
         }
         break;
     }
+    case IPC_SYSTEM_PROFILE: {
+        if (pld_len == 1u && pld[0] < 4u) {
+            extern void system_profile_set(int profile);
+            system_profile_set((int)pld[0]);
+            g_ipc_needs_redraw = true;
+        }
+        break;
+    }
     case IPC_DRAG_START: {
         if (pld_len > 0 && pld_len < IPC_DRAG_FILE_MAX) {
             memcpy(g_file_drag_path, pld, pld_len);

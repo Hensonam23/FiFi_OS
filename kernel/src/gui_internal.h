@@ -20,6 +20,7 @@
 #include "rtc.h"
 #include "hda.h"
 #include "../../fifi/shared/theme.h"
+#include "../../fifi/shared/system_profile.h"
 
 /* ── Layout ──────────────────────────────────────────────────────────── */
 /* Reserved top strip for the floating "horizon bar" (16px margin + 44px card
@@ -507,8 +508,8 @@ extern int      g_tray_hover;           /* TRAY_* id under cursor, or TRAY_NONE 
 int      tray_item_at(int32_t mx, int32_t my);
 
 /* Horizon-bar interactive regions (set by draw_status_bar each frame). */
-extern int      g_active_intent;         /* 0=Build 1=Research 2=Play */
-extern uint64_t g_intent_x[3], g_intent_w[3], g_intent_y, g_intent_h;
+extern uint64_t g_intent_x[FIFI_PROFILE_COUNT], g_intent_w[FIFI_PROFILE_COUNT];
+extern uint64_t g_intent_y, g_intent_h;
 extern uint64_t g_bar_search_x, g_bar_search_w, g_bar_search_y, g_bar_search_h;
 void     tray_tip_draw(void);
 /* platform battery/cpu (weak — Linux-only) */

@@ -22,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install build and QEMU dependencies
         run: |
@@ -40,6 +42,7 @@ jobs:
           make linux-input-test
           make linux-package-test
           make linux-settings-test
+          make linux-profile-test
           make linux-release-test
 
       - name: Configure and build Linux

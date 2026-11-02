@@ -33,5 +33,6 @@
 #define IPC_DROP_FILE     0x1Du /* path bytes */
 #define IPC_SET_WALLPAPER 0x1Eu /* app to compositor: path bytes */
 #define IPC_ADD_DESK_ICON 0x1Fu /* app to compositor: path NUL label */
+#define IPC_SYSTEM_PROFILE 0x20u /* app to compositor: uint8_t profile */
 
 #endif

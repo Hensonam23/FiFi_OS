@@ -31,6 +31,9 @@ for action in FW DOH VPN TOR; do
     grep -Fq "ACT_${action}" "$SETTINGS"
     grep -Fq "case ACT_${action}:" "$SETTINGS"
 done
+grep -Fq 'ACT_PROFILE' "$SETTINGS"
+grep -Fq 'IPC_SYSTEM_PROFILE' "$SETTINGS"
+grep -Fq 'Workload Profile' "$SETTINGS"
 grep -Fq 'alsa_set_vol(' "$SETTINGS"
 grep -Fq 'FIFI_INPUT_KEY_MOUSE_SPEED' "$SETTINGS"
 grep -Fq 'FIFI_INPUT_KEY_TOUCHPAD_SPEED' "$SETTINGS"

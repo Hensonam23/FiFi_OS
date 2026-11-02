@@ -3,7 +3,8 @@
 This document freezes the first public contract between the FiFi compositor,
 native desktop applications, and Settings. The canonical definitions are
 `fifi/shared/ipc.h`, `fifi/shared/app_ipc.h`, `fifi/shared/app_ui.h`, and
-`fifi/shared/theme.h`.
+`fifi/shared/theme.h`, plus the workload policy in
+`fifi/shared/system_profile.h`.
 
 ## Compatibility rules
 
@@ -44,6 +45,7 @@ Application-to-compositor messages:
 | `IPC_DRAG_START` | Path bytes |
 | `IPC_SET_WALLPAPER` | Path bytes |
 | `IPC_ADD_DESK_ICON` | Path, NUL, label |
+| `IPC_SYSTEM_PROFILE` | One profile byte (`0` General through `3` Play) |
 
 Compositor-to-application messages:
 
@@ -78,6 +80,16 @@ Stable value ranges are:
 Boolean keys use `0` or `1`. Accent values are unsigned `0x00RRGGBB` values
 written in decimal. Unknown keys are ignored when read. Storage ownership,
 atomicity, and permissions remain Linux platform responsibilities.
+
+## Workload profiles
+
+`system_profile.h` assigns stable values to General (`0`), Build (`1`),
+Research (`2`), and Play (`3`). It centralizes the governor, energy preference,
+GPU state, transparent-hugepage mode, swappiness, compositor frame interval,
+event polling interval, and display-blanking policy used by the top bar,
+Settings, and compositor. The compositor validates the enum, applies supported
+kernel knobs best-effort, and atomically persists the selection at
+`/fifi-data/system-profile`.
 
 ## Native bitmap UI foundation version 1
 

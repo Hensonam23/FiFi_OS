@@ -169,6 +169,7 @@ manifest_value() {
 
 manifest_version=$(manifest_value format)
 manifest_channel=$(manifest_value channel)
+os_version=$(manifest_value version)
 build_id=$(manifest_value build)
 kernel_sha=$(manifest_value kernel_sha256)
 initramfs_sha=$(manifest_value initramfs_sha256)
@@ -197,7 +198,11 @@ printf '%s\n' "$initramfs_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || {
 
 installed_build=""
 [ -s "$BUILD_FILE" ] && read -r installed_build < "$BUILD_FILE"
-echo "Available: $tag ($build_id)"
+if [ -n "$os_version" ]; then
+    echo "Available: $os_version ($build_id)"
+else
+    echo "Available: $tag ($build_id)"
+fi
 
 if [ "$installed_build" = "$build_id" ]; then
     echo "OS is already on the newest $channel build."

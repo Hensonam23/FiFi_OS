@@ -32,6 +32,11 @@ BUILD_ID="${FIFI_BUILD_ID:-$(git -C "$ROOT" rev-parse HEAD)}"
     echo "[package-update] invalid build identifier: $BUILD_ID" >&2
     exit 1
 }
+OS_VERSION="$(tr -d '\r\n' < "$ROOT/VERSION")"
+[[ "$OS_VERSION" =~ ^1\.[0-9]{3,}$ ]] || {
+    echo "[package-update] invalid VERSION: $OS_VERSION" >&2
+    exit 1
+}
 
 mkdir -p "$OUT"
 rm -f "$OUT/fifi-bootstrap-update"
@@ -44,6 +49,7 @@ initramfs_sha="$(sha256sum "$OUT/initramfs.cpio.gz" | awk '{print $1}')"
 {
     printf 'format=1\n'
     printf 'channel=%s\n' "$CHANNEL"
+    printf 'version=V%s\n' "$OS_VERSION"
     printf 'build=%s\n' "$BUILD_ID"
     printf 'kernel_sha256=%s\n' "$kernel_sha"
     printf 'initramfs_sha256=%s\n' "$initramfs_sha"
@@ -66,5 +72,6 @@ openssl pkeyutl -verify -pubin \
 
 echo "[package-update] ready: $OUT"
 echo "[package-update] build: $BUILD_ID"
+echo "[package-update] version: V$OS_VERSION"
 echo "[package-update] channel: $CHANNEL"
 echo "[package-update] manifest signature verified"

@@ -14,6 +14,7 @@ _Static_assert(FIFI_IPC_MAX_PAYLOAD == 64u * 1024u * 1024u, "payload limit chang
 _Static_assert(IPC_APP_CONNECT == 0x01u, "application IDs changed");
 _Static_assert(IPC_WIN_CREATED == 0x10u, "compositor IDs changed");
 _Static_assert(IPC_ADD_DESK_ICON == 0x1fu, "message range changed");
+_Static_assert(IPC_SYSTEM_PROFILE == 0x20u, "profile message changed");
 int main(void) { return 0; }
 EOF
 gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
@@ -226,6 +227,22 @@ EOF
 gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
     "$TMP/theme-contract.c" -o "$TMP/theme-contract"
 "$TMP/theme-contract"
+
+echo "[test-shared-api] shared workload profile policy compiles"
+cat > "$TMP/profile-contract.c" <<'EOF'
+#include "fifi/shared/system_profile.h"
+_Static_assert(FIFI_PROFILE_GENERAL == 0, "general profile changed");
+_Static_assert(FIFI_PROFILE_PLAY == 3, "play profile changed");
+_Static_assert(FIFI_PROFILE_COUNT == 4, "profile count changed");
+int main(void) {
+    return fifi_system_profile_policy(FIFI_PROFILE_PLAY).event_poll_ms == 2 ? 0 : 1;
+}
+EOF
+gcc -std=c11 -Wall -Wextra -Werror -I"$ROOT" \
+    "$TMP/profile-contract.c" -o "$TMP/profile-contract"
+"$TMP/profile-contract"
+grep -Fq '../../shared/system_profile.h' "$ROOT/fifi/apps/settings/Makefile"
+grep -Fq '../shared/system_profile.h' "$ROOT/fifi/compositor/Makefile"
 grep -Fq '#include "../../fifi/shared/theme.h"' \
     "$ROOT/kernel/src/gui_internal.h"
 grep -Fq '#include "../../shared/theme.h"' \

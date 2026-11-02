@@ -11,6 +11,7 @@ TEST_ISO="${FIFI_UPDATE_TEST_ISO:-$ROOT/build-linux/fifi-linux.iso}"
 ISO_RELEASE_INFO="${FIFI_UPDATE_ISO_RELEASE_INFO:-$TEST_ISO.release-info}"
 PUBLIC_KEY="${FIFI_RELEASE_PUBLIC_KEY:-$ROOT/security/release-signing-public.pem}"
 BUILD_ID="$(git -C "$ROOT" rev-parse HEAD)"
+OS_VERSION="$(tr -d '\r\n' < "$ROOT/VERSION")"
 MODE=publish
 
 case "${1:-}" in
@@ -54,6 +55,13 @@ manifest_build="$(sed -n 's/^build=//p' "$ASSET_DIR/fifi-update.manifest")"
     echo "current:  $BUILD_ID" >&2
     exit 1
 }
+manifest_version="$(sed -n 's/^version=//p' "$ASSET_DIR/fifi-update.manifest")"
+[[ "$OS_VERSION" =~ ^1\.[0-9]{3,}$ && "$manifest_version" == "V$OS_VERSION" ]] || {
+    echo "[publish-update] manifest version does not match VERSION" >&2
+    echo "manifest: $manifest_version" >&2
+    echo "source:   V$OS_VERSION" >&2
+    exit 1
+}
 
 manifest_format="$(sed -n 's/^format=//p' "$ASSET_DIR/fifi-update.manifest")"
 manifest_channel="$(sed -n 's/^channel=//p' "$ASSET_DIR/fifi-update.manifest")"
@@ -90,11 +98,13 @@ gzip -t "$ASSET_DIR/initramfs.cpio.gz" || {
 
 if [[ -s "$TEST_ISO" && -s "$ISO_RELEASE_INFO" ]]; then
     iso_format="$(sed -n 's/^format=//p' "$ISO_RELEASE_INFO")"
+    iso_version="$(sed -n 's/^version=//p' "$ISO_RELEASE_INFO")"
     iso_build="$(sed -n 's/^build=//p' "$ISO_RELEASE_INFO")"
     iso_kernel_sha="$(sed -n 's/^kernel_sha256=//p' "$ISO_RELEASE_INFO")"
     iso_initramfs_sha="$(sed -n 's/^initramfs_sha256=//p' "$ISO_RELEASE_INFO")"
     iso_sha="$(sed -n 's/^iso_sha256=//p' "$ISO_RELEASE_INFO")"
-    [[ "$iso_format" == 1 && "$iso_build" == "$BUILD_ID" &&
+    [[ "$iso_format" == 1 && "$iso_version" == "V$OS_VERSION" &&
+       "$iso_build" == "$BUILD_ID" &&
        "$iso_kernel_sha" == "$kernel_sha" &&
        "$iso_initramfs_sha" == "$initramfs_sha" &&
        "$iso_sha" =~ ^[0-9a-fA-F]{64}$ ]] || {
@@ -136,12 +146,12 @@ if ! "${GH[@]}" api --silent "repos/$REPO/commits/$BUILD_ID" >/dev/null 2>&1; th
 fi
 
 if [[ "$MODE" == check ]]; then
-    echo "[publish-update] preflight passed for build $BUILD_ID"
+    echo "[publish-update] preflight passed for V$OS_VERSION build $BUILD_ID"
     echo "[publish-update] no release was changed"
     exit 0
 fi
 
-notes="Automated FiFi OS linux-desktop test-channel build.
+notes="Automated FiFi OS linux-desktop test-channel build V$OS_VERSION.
 
 Commit: $BUILD_ID
 
@@ -153,7 +163,7 @@ if "${GH[@]}" release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
         --clobber --repo "$REPO"
     "${GH[@]}" release edit "$TAG" \
         --target "$BUILD_ID" \
-        --title "FiFi OS Linux Desktop Test" \
+        --title "FiFi OS V$OS_VERSION Linux Desktop Test" \
         --notes "$notes" \
         --prerelease --latest=false \
         --repo "$REPO"
@@ -161,10 +171,10 @@ else
     "${GH[@]}" release create "$TAG" \
         "${ASSETS[@]}" \
         --target "$BUILD_ID" \
-        --title "FiFi OS Linux Desktop Test" \
+        --title "FiFi OS V$OS_VERSION Linux Desktop Test" \
         --notes "$notes" \
         --prerelease --latest=false \
         --repo "$REPO"
 fi
 
-echo "[publish-update] test channel now points to build $BUILD_ID"
+echo "[publish-update] test channel now points to V$OS_VERSION build $BUILD_ID"

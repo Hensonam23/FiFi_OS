@@ -3111,10 +3111,11 @@ void gui_on_tick(void) {
     /* ── Horizon bar (top) clicks: intent pills + search field ── */
     if (btn_pressed && g_theme.statusbar && !statusbar_bottom()) {
         if ((uint64_t)my >= g_intent_y && (uint64_t)my < g_intent_y + g_intent_h) {
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < FIFI_PROFILE_COUNT; i++) {
                 if (g_intent_w[i] > 0u && (uint64_t)mx >= g_intent_x[i] &&
                     (uint64_t)mx < g_intent_x[i] + g_intent_w[i]) {
-                    g_active_intent = i;
+                    extern void system_profile_set(int profile);
+                    system_profile_set(i);
                     int32_t cx, cy; mouse_consume_click(&cx, &cy);
                     full_redraw();
                     return;

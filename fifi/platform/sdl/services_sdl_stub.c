@@ -22,6 +22,11 @@ int      wayland_toplevel_count(void)           { return 0; }
 bool     input_gamepad_connected(void)          { return false; }
 bool     mouse_consume_rclick(int32_t *x, int32_t *y) { (void)x; (void)y; return false; }
 
-bool     gaming_mode_active(void)               { return false; }
-void     gaming_mode_set(bool on)               { (void)on; }
+static int g_system_profile = 0;
+bool     gaming_mode_active(void)               { return g_system_profile == 3; }
+void     gaming_mode_set(bool on)               { g_system_profile = on ? 3 : 0; }
+int      system_profile_active(void)             { return g_system_profile; }
+void     system_profile_set(int profile)         {
+    if (profile >= 0 && profile < 4) g_system_profile = profile;
+}
 uint32_t compositor_fps(void)                   { return 0; }

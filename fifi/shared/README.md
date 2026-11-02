@@ -26,3 +26,9 @@ Settings app. It also owns the persisted configuration's keys and defaults so
 both consumers show the same state before the file exists. The key/value file
 carries `theme_format=1`; readers remain compatible with older files that omit
 it. Storage and file permissions remain Linux platform responsibilities.
+
+`system_profile.h` is the shared workload-policy contract. General keeps CPU
+and GPU power adaptive, Build favors CPU throughput, Research sustains CPU/GPU
+and large-memory work, and Play selects low-latency compositor and input pacing
+alongside maximum CPU/GPU policy. The compositor owns privileged application
+and persistence; Settings and the top bar select the same enum.

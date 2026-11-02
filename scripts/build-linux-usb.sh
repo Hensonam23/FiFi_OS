@@ -124,11 +124,13 @@ kernel_sha="$(sha256sum "$BZIMAGE" | awk '{print $1}')"
 initramfs_sha="$(sha256sum "$INITRAMFS" | awk '{print $1}')"
 iso_sha="$(sha256sum "$OUT_ISO" | awk '{print $1}')"
 build_id="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+os_version="$(tr -d '\r\n' < "$REPO_ROOT/VERSION")"
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]; then
     build_id="$build_id-dirty"
 fi
 {
     printf 'format=1\n'
+    printf 'version=V%s\n' "$os_version"
     printf 'build=%s\n' "$build_id"
     printf 'kernel_sha256=%s\n' "$kernel_sha"
     printf 'initramfs_sha256=%s\n' "$initramfs_sha"

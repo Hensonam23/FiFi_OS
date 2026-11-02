@@ -828,7 +828,8 @@ void settings_render(window_t *w) {
             cy += gm_btn_h + 4u;
             SADVBOT;
 
-            /* Gaming Mode toggle button */
+            /* Play profile compatibility toggle. The horizon bar exposes all
+             * four profiles; this legacy control still maps cleanly to Play. */
             {
                 extern bool gaming_mode_active(void);
                 bool gm_on = gaming_mode_active();
@@ -839,7 +840,7 @@ void settings_render(window_t *w) {
                     uint64_t gbx = val_x;
                     console_fill_rect(ix, SCY, iw, gm_btn_h, COL_SET_BG);
                     gui_draw_str(cx, (uint64_t)(cy + (int64_t)((gm_btn_h - fh) / 2u)),
-                                 "Gaming Mode:", COL_SET_KEY_FG, COL_SET_BG);
+                                 "Play Profile:", COL_SET_KEY_FG, COL_SET_BG);
                     uint32_t gm_bg = gm_on ? 0x00103820u : 0x00182838u;
                     uint32_t gm_fg = gm_on ? 0x0050e880u : 0x0060a0e0u;
                     console_fill_rect(gbx, SCY, gbw, gm_btn_h, gm_bg);

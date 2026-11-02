@@ -70,38 +70,41 @@ echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
 # ── Hostname ──────────────────────────────────────────────────────────────────
 echo "FiFiOS" > /proc/sys/kernel/hostname 2>/dev/null || true
 
-# ── Performance: use the whole machine, don't idle at the frequency floor ─────
-# Stock governors (powersave, or an unavailable "schedutil") pinned the CPU at
-# its ~800MHz minimum. FiFi targets full performance, so put every CPU policy on
-# the "performance" governor (always present on intel_pstate/amd_pstate/acpi),
-# lift the max to the hardware ceiling, unlock turbo/boost, and bias energy hints
-# toward performance. Everything is best-effort so it is a no-op on any machine
-# that lacks a given knob ("no matter the system"). Runs before the desktop so
-# boot itself is fast too.
+# ── Balanced boot baseline; the desktop applies the saved workload profile ────
+# Start balanced while the machine boots, then let the compositor restore the
+# user's General/Build/Research/Play profile once persistent storage is mounted.
+# Turbo remains available in every mode; the profile controls governor, energy,
+# GPU, memory, frame pacing, input polling, and idle-display behavior together.
 set_knob() {
     [ -e "$1" ] || return 0
     (printf '%s\n' "$2" > "$1") 2>/dev/null || true
 }
 for _pol in /sys/devices/system/cpu/cpu*/cpufreq; do
     [ -d "$_pol" ] || continue
-    set_knob "$_pol/scaling_governor" performance
+    _boot_governor=performance
+    if [ -r "$_pol/scaling_available_governors" ]; then
+        case " $(cat "$_pol/scaling_available_governors") " in
+            *" schedutil "*) _boot_governor=schedutil ;;
+            *" powersave "*) _boot_governor=powersave ;;
+        esac
+    fi
+    set_knob "$_pol/scaling_governor" "$_boot_governor"
     [ -r "$_pol/cpuinfo_max_freq" ] && \
         set_knob "$_pol/scaling_max_freq" "$(cat "$_pol/cpuinfo_max_freq")"
-    set_knob "$_pol/energy_performance_preference" performance
+    set_knob "$_pol/energy_performance_preference" balance_performance
 done
 # Turbo / boost (knob name differs by driver)
 set_knob /sys/devices/system/cpu/intel_pstate/no_turbo 0
 set_knob /sys/devices/system/cpu/intel_pstate/max_perf_pct 100
 set_knob /sys/devices/system/cpu/cpufreq/boost 1
-# GPU: request the top power/performance state where the driver exposes it
-# (amdgpu/nvidia sysfs). Best-effort; native GPU apps benefit even while the
-# compositor itself is still software-rendered.
+# GPU: stay adaptive until the saved Research or Play profile requests high.
 for _g in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
-    set_knob "$_g" high
+    set_knob "$_g" auto
 done
-# Memory: keep working sets in RAM (this box has plenty), enable THP for big apps
-set_knob /proc/sys/vm/swappiness 10
+# General profile memory baseline.
+set_knob /proc/sys/vm/swappiness 30
 set_knob /sys/kernel/mm/transparent_hugepage/enabled madvise
+unset _boot_governor
 unset -f set_knob 2>/dev/null || true
 
 # ── PATH ──────────────────────────────────────────────────────────────────────

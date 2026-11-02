@@ -341,6 +341,8 @@ FIFI_RELEASE_SIGNING_KEY="$FIXTURES/test-signing-key.pem" \
 FIFI_RELEASE_PUBLIC_KEY="$ETC/fifi-release-signing.pub" \
     bash "$ROOT/scripts/package-update.sh" test
 grep -Fxq channel=test "$PACKAGE_BUILD/update-test/fifi-update.manifest"
+grep -Fxq "version=V$(tr -d '\r\n' < "$ROOT/VERSION")" \
+    "$PACKAGE_BUILD/update-test/fifi-update.manifest"
 grep -Fxq build=build-004 "$PACKAGE_BUILD/update-test/fifi-update.manifest"
 cmp "$FIXTURES/bzImage" "$PACKAGE_BUILD/update-test/bzImage"
 test ! -e "$PACKAGE_BUILD/update-test/fifi-bootstrap-update"

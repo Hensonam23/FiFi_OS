@@ -23,6 +23,7 @@
 #include "mouse.h"
 #include "xwm.h"     /* rootless-XWayland window manager */
 #include "event_handoff.h"
+#include "../shared/system_profile.h"
 
 /* Linux platform functions */
 void input_init(void);
@@ -156,7 +157,7 @@ static uint32_t *g_fb_mem = NULL;
 static size_t   g_fb_size = 0;
 static struct   limine_framebuffer g_lmfb;
 static bool     g_using_drm  = false;
-static bool     g_gaming_mode = false;
+static fifi_system_profile_t g_system_profile = FIFI_PROFILE_GENERAL;
 static uint32_t g_fps_current = 0;
 static bool     g_blanked     = false;
 static bool     g_locked      = false;
@@ -174,50 +175,117 @@ int  compositor_lock_pin_len(void)   { return g_lock_buf_len; }
 bool compositor_lock_bad_pin(void)   { return g_lock_bad; }
 bool compositor_lock_pin_dirty(void) { bool v = g_lock_pin_dirty; g_lock_pin_dirty = false; return v; }
 
-bool gaming_mode_active(void)        { return g_gaming_mode; }
+int system_profile_active(void)      { return (int)g_system_profile; }
+bool gaming_mode_active(void)        { return g_system_profile == FIFI_PROFILE_PLAY; }
 uint32_t compositor_fps(void)        { return g_fps_current; }
 bool compositor_locked(void)         { return g_locked; }
 void compositor_lock(void)           { g_locked = true; g_blanked = false; g_lock_buf_len = 0; g_lock_bad = false; }
 void compositor_unlock(void)         { g_locked = false; g_lock_buf_len = 0; g_lock_bad = false; }
 void compositor_set_lock_timeout(int s) { g_lock_timeout_s = s; }
-void gaming_mode_set(bool on)        {
-    g_gaming_mode = on;
-    fprintf(stderr, "[compositor] gaming mode %s\n", on ? "ON" : "OFF");
-    const char *gov = on ? "performance" : "schedutil";
-    int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
-    if (ncpus < 1) ncpus = 8;
-    for (int cpu = 0; cpu < ncpus; cpu++) {
-        char path[80];
-        snprintf(path, sizeof(path),
-                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
-        int fd = open(path, O_WRONLY);
-        if (fd >= 0) { write(fd, gov, strlen(gov)); close(fd); }
-    }
+static bool write_profile_knob(const char *path, const char *value) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    size_t len = strlen(value);
+    bool ok = write(fd, value, len) == (ssize_t)len;
+    close(fd);
+    return ok;
 }
 
-/* Put the machine on the "performance" governor and unlock turbo at startup so
- * the desktop never idles at the CPU's minimum frequency (the stock powersave
- * governor pinned it at ~800MHz). This mirrors the boot-init perf block for the
- * common case where only the compositor binary is redeployed (no image rebuild).
- * All best-effort: a missing knob is simply skipped ("no matter the system"). */
-static void apply_perf_defaults(void) {
+static bool governor_available(const char *cpufreq_dir, const char *governor) {
+    char path[160], buf[256];
+    snprintf(path, sizeof path, "%s/scaling_available_governors", cpufreq_dir);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, buf, sizeof buf - 1u);
+    close(fd);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    char *save = NULL;
+    for (char *word = strtok_r(buf, " \t\r\n", &save); word;
+         word = strtok_r(NULL, " \t\r\n", &save))
+        if (strcmp(word, governor) == 0) return true;
+    return false;
+}
+
+static void apply_system_profile(fifi_system_profile_t profile) {
+    fifi_system_profile_policy_t policy = fifi_system_profile_policy(profile);
     int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpus < 1) ncpus = 8;
     for (int cpu = 0; cpu < ncpus; cpu++) {
-        char path[96]; int fd;
-        snprintf(path, sizeof path,
-                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
-        fd = open(path, O_WRONLY);
-        if (fd >= 0) { write(fd, "performance", 11); close(fd); }
-        snprintf(path, sizeof path,
-                 "/sys/devices/system/cpu/cpu%d/cpufreq/energy_performance_preference", cpu);
-        fd = open(path, O_WRONLY);
-        if (fd >= 0) { write(fd, "performance", 11); close(fd); }
+        char dir[128], path[176];
+        snprintf(dir, sizeof dir, "/sys/devices/system/cpu/cpu%d/cpufreq", cpu);
+        const char *governor = governor_available(dir, policy.governor)
+                             ? policy.governor : policy.governor_fallback;
+        snprintf(path, sizeof path, "%s/scaling_governor", dir);
+        write_profile_knob(path, governor);
+        snprintf(path, sizeof path, "%s/energy_performance_preference", dir);
+        write_profile_knob(path, policy.energy_preference);
     }
-    int fd = open("/sys/devices/system/cpu/intel_pstate/no_turbo", O_WRONLY);
-    if (fd >= 0) { write(fd, "0", 1); close(fd); }
-    fd = open("/sys/devices/system/cpu/cpufreq/boost", O_WRONLY);
-    if (fd >= 0) { write(fd, "1", 1); close(fd); }
+    write_profile_knob("/sys/devices/system/cpu/intel_pstate/no_turbo", "0");
+    write_profile_knob("/sys/devices/system/cpu/intel_pstate/max_perf_pct", "100");
+    write_profile_knob("/sys/devices/system/cpu/cpufreq/boost", "1");
+
+    for (int card = 0; card < 16; card++) {
+        char path[160];
+        snprintf(path, sizeof path,
+                 "/sys/class/drm/card%d/device/power_dpm_force_performance_level", card);
+        write_profile_knob(path, policy.gpu_preference);
+        snprintf(path, sizeof path,
+                 "/sys/class/drm/card%d/device/power/control", card);
+        write_profile_knob(path,
+            strcmp(policy.gpu_preference, "high") == 0 ? "on" : "auto");
+    }
+    {
+        char value[16];
+        snprintf(value, sizeof value, "%d", policy.swappiness);
+        write_profile_knob("/proc/sys/vm/swappiness", value);
+    }
+    write_profile_knob("/sys/kernel/mm/transparent_hugepage/enabled",
+                       policy.transparent_hugepages);
+}
+
+static void persist_system_profile(fifi_system_profile_t profile) {
+    char tmp[96];
+    snprintf(tmp, sizeof tmp, "/fifi-data/.system-profile.%ld.tmp", (long)getpid());
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
+    if (fd < 0) return;
+    fchmod(fd, 0644);
+    const char *name = fifi_system_profile_policy(profile).storage_name;
+    bool ok = write(fd, name, strlen(name)) == (ssize_t)strlen(name) &&
+              write(fd, "\n", 1) == 1 && fsync(fd) == 0;
+    close(fd);
+    if (!ok || rename(tmp, "/fifi-data/system-profile") != 0) unlink(tmp);
+}
+
+void system_profile_set(int requested) {
+    if (!fifi_system_profile_valid(requested)) return;
+    g_system_profile = (fifi_system_profile_t)requested;
+    apply_system_profile(g_system_profile);
+    persist_system_profile(g_system_profile);
+    fprintf(stderr, "[compositor] %s system profile active\n",
+            fifi_system_profile_policy(g_system_profile).name);
+}
+
+void gaming_mode_set(bool on) {
+    if (on) system_profile_set(FIFI_PROFILE_PLAY);
+    else if (gaming_mode_active()) system_profile_set(FIFI_PROFILE_GENERAL);
+}
+
+static void system_profile_init(void) {
+    char name[32] = {0};
+    int fd = open("/fifi-data/system-profile", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        ssize_t n = read(fd, name, sizeof name - 1u);
+        close(fd);
+        if (n > 0) {
+            name[n] = '\0';
+            name[strcspn(name, "\r\n \t")] = '\0';
+            g_system_profile = fifi_system_profile_parse(name);
+        }
+    }
+    apply_system_profile(g_system_profile);
+    fprintf(stderr, "[compositor] restored %s system profile\n",
+            fifi_system_profile_policy(g_system_profile).name);
 }
 
 /* ── Threading: event thread (main) + render thread ────────────────────── */
@@ -403,7 +471,9 @@ static void *render_thread_fn(void *arg)
          * Deadline is anchored to last_render so early signals don't cause us
          * to render again before the next frame window is up.
          */
-        long frame_ns = g_gaming_mode ? 4000000L : 16666666L;
+        fifi_system_profile_policy_t profile_policy =
+            fifi_system_profile_policy(g_system_profile);
+        long frame_ns = profile_policy.frame_interval_ns;
         struct timespec deadline;
         long next_ns = last_render.tv_nsec + frame_ns;
         deadline.tv_sec  = last_render.tv_sec  + next_ns / 1000000000L;
@@ -430,7 +500,7 @@ static void *render_thread_fn(void *arg)
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed_ms = (now.tv_sec  - last_render.tv_sec)  * 1000L
                         + (now.tv_nsec - last_render.tv_nsec) / 1000000L;
-        if (!g_gaming_mode && elapsed_ms < 14) continue;
+        if (g_system_profile != FIFI_PROFILE_PLAY && elapsed_ms < 14) continue;
         last_render = now;
 
         bool do_flush = false;
@@ -555,7 +625,7 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGUSR1, shot_sig_handler);
 
-    apply_perf_defaults();   /* full CPU frequency from the first frame */
+    system_profile_init();
 
     write(STDOUT_FILENO, "\033[?25l", 6);
 
@@ -694,7 +764,9 @@ int main(void) {
          * Never use timeout 0: that made gaming mode busy-poll a whole core for
          * no benefit (the render thread paces frames itself; input wakes poll
          * immediately regardless). 2ms = 500Hz input sampling in gaming. */
-        poll(pfd, (nfds_t)nfds, g_gaming_mode ? 2 : 4);
+        int profile_poll_ms =
+            fifi_system_profile_policy(g_system_profile).event_poll_ms;
+        poll(pfd, (nfds_t)nfds, profile_poll_ms);
 
         bool pb_l = routed_l;
         bool had_input = false;
@@ -703,7 +775,7 @@ int main(void) {
         while (pthread_mutex_trylock(&g_mx) != 0) {
             const struct timespec input_pause = {
                 .tv_sec = 0,
-                .tv_nsec = g_gaming_mode ? 2000000 : 4000000,
+                .tv_nsec = profile_poll_ms * 1000000L,
             };
             nanosleep(&input_pause, NULL);
         }
@@ -1008,7 +1080,9 @@ int main(void) {
                 compositor_lock();
                 fprintf(stderr, "[compositor] auto-locked (idle %lds)\n", idle_s);
             }
-            if (!g_blanked && !g_gaming_mode && idle_s >= BLANK_TIMEOUT_S) {
+            bool inhibit_blanking = fifi_system_profile_policy(g_system_profile)
+                                    .inhibit_display_blanking;
+            if (!g_blanked && !inhibit_blanking && idle_s >= BLANK_TIMEOUT_S) {
                 g_blanked = true;
                 if (g_using_drm) drm_blank_display();
                 else if (g_fb_mem) memset(g_fb_mem, 0, g_fb_size);

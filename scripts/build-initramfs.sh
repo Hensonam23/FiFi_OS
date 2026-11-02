@@ -43,6 +43,7 @@ cp "$REPO_ROOT/fifi/shared/ipc.h" \
    "$REPO_ROOT/fifi/shared/app_ui.h" \
    "$REPO_ROOT/fifi/shared/wifi_scan.h" \
    "$REPO_ROOT/fifi/shared/theme.h" \
+   "$REPO_ROOT/fifi/shared/system_profile.h" \
    "$STAGE/usr/include/fifi/"
 cp "$REPO_ROOT/sdk/fifi-sdk" "$STAGE/usr/bin/fifi-sdk"
 chmod 0755 "$STAGE/usr/bin/fifi-sdk" "$STAGE/bin/fifi-pkg"
@@ -59,6 +60,11 @@ case "$FIFI_UPDATE_CHANNEL" in
         exit 1
         ;;
 esac
+FIFI_OS_VERSION="$(tr -d '\r\n' < "$REPO_ROOT/VERSION")"
+[[ "$FIFI_OS_VERSION" =~ ^1\.[0-9]{3,}$ ]] || {
+    echo "[initramfs] ERROR: VERSION must use the 1.xxx format" >&2
+    exit 1
+}
 FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-}}"
 if [ -z "$FIFI_BUILD_ID" ]; then
     FIFI_BUILD_ID="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
@@ -70,9 +76,22 @@ printf '%s\n' "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-update-channel"
 printf '%s\n' "$FIFI_BUILD_ID" > "$STAGE/etc/fifi-build-id"
 FIFI_BUILD_SHORT="${FIFI_BUILD_ID:0:12}"
 case "$FIFI_BUILD_ID" in *-dirty) FIFI_BUILD_SHORT="${FIFI_BUILD_SHORT}-dirty" ;; esac
-printf 'FiFi OS linux-desktop Beta 1.0 (build %s, %s channel)\n' \
-    "$FIFI_BUILD_SHORT" "$FIFI_UPDATE_CHANNEL" > "$STAGE/etc/fifi-version"
-echo "[initramfs] update channel: $FIFI_UPDATE_CHANNEL  build: $FIFI_BUILD_ID"
+printf 'FiFi OS linux-desktop V%s (build %s, %s channel)\n' \
+    "$FIFI_OS_VERSION" "$FIFI_BUILD_SHORT" "$FIFI_UPDATE_CHANNEL" \
+    > "$STAGE/etc/fifi-version"
+cat > "$STAGE/etc/fifi-release" <<EOF
+NAME="FiFi OS"
+VERSION="linux-desktop V$FIFI_OS_VERSION"
+VERSION_ID="$FIFI_OS_VERSION"
+ID=fifios
+ID_LIKE=arch
+PRETTY_NAME="FiFi OS (linux-desktop V$FIFI_OS_VERSION)"
+HOME_URL="https://github.com/Hensonam23/FiFi_OS"
+BUILD_BRANCH="linux-desktop"
+EOF
+sed "s/linux-desktop  --  .*/linux-desktop  --  V$FIFI_OS_VERSION/" \
+    "$ROOT_DIR/etc/fifi-banner" > "$STAGE/etc/fifi-banner"
+echo "[initramfs] version: V$FIFI_OS_VERSION  channel: $FIFI_UPDATE_CHANNEL  build: $FIFI_BUILD_ID"
 
 # Embed the kernel in the initramfs so fifi-install.sh can always find it
 # without having to locate and mount the USB EFI partition

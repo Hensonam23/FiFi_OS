@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../../shared/theme.h"
+#include "../../shared/system_profile.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -224,7 +225,7 @@ static int g_tab = TAB_PERS;
 enum { ACT_ACCENT = 1, ACT_WALL, ACT_PANEL, ACT_GLASS, ACT_SHADOW, ACT_RADIUS, ACT_DOCK, ACT_STATUS,
        ACT_FONT_FAM, ACT_FONT_SZ, ACT_DESKINFO, ACT_ALIGN, ACT_AUTOHIDE,
        ACT_TBSIZE, ACT_CLOCK, ACT_WALLFIT,
-       ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR, ACT_REMOTE };
+       ACT_FW, ACT_DOH, ACT_VPN, ACT_TOR, ACT_REMOTE, ACT_PROFILE };
 typedef struct { int x, y, w, h, act, arg; } Hot;
 #define MAX_HOTS 64
 static Hot g_hots[MAX_HOTS];
@@ -528,6 +529,19 @@ static const char *g_panel_names[4] = { "Bottom", "Top", "Left", "Right" };
 typedef struct { char key[16]; char val[64]; } InfoRow;
 #define N_INFO 6
 static InfoRow g_info[N_INFO];
+static int g_system_profile_view = FIFI_PROFILE_GENERAL;
+
+static void system_profile_refresh(void) {
+    char profile_name[32] = {0};
+    int fd = open("/fifi-data/system-profile", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) { g_system_profile_view = FIFI_PROFILE_GENERAL; return; }
+    ssize_t n = read(fd, profile_name, sizeof profile_name - 1u);
+    close(fd);
+    if (n <= 0) { g_system_profile_view = FIFI_PROFILE_GENERAL; return; }
+    profile_name[n] = '\0';
+    profile_name[strcspn(profile_name, "\r\n \t")] = '\0';
+    g_system_profile_view = (int)fifi_system_profile_parse(profile_name);
+}
 
 static void gather_info(void) {
     struct sysinfo si; sysinfo(&si);
@@ -1260,7 +1274,32 @@ static void render_personalize(uint32_t *fb) {
 
 static void render_system(uint32_t *fb) {
     int x = CX, y = CTOP;
+    hot_reset();
     gather_info();
+    int active_profile = g_system_profile_view;
+    y = section_hdr(fb, "Workload Profile", x, y);
+    int profile_gap = 8;
+    int profile_w = (g_win_w - x - CPAD - profile_gap * 3) / 4;
+    if (profile_w > 120) profile_w = 120;
+    for (int i = 0; i < FIFI_PROFILE_COUNT; i++) {
+        fifi_system_profile_policy_t policy =
+            fifi_system_profile_policy((fifi_system_profile_t)i);
+        int bx = x + i * (profile_w + profile_gap);
+        draw_btn(fb, bx, y, profile_w, ROW_H - 6, policy.name,
+                 i == active_profile);
+        add_hot(bx, y, profile_w, ROW_H - 6, ACT_PROFILE, i);
+    }
+    y += ROW_H;
+    static const char *profile_help[FIFI_PROFILE_COUNT] = {
+        "Balanced CPU and GPU behavior for everyday desktop work.",
+        "Maximum CPU throughput while leaving graphics power adaptive.",
+        "Sustained CPU, GPU, and large-memory performance for analysis.",
+        "Maximum gaming power, 250 Hz input/render loop, and no display blanking."
+    };
+    draw_str_clip(fb, profile_help[active_profile], x, y, C_GREY,
+                  g_win_w - x - CPAD);
+    y += g_glyph_h + 16;
+
     y = section_hdr(fb, "System Information", x, y);
     for (int i = 0; i < N_INFO; i++) {
         uint32_t bg = (i & 1) ? C_ROW_B : C_ROW_A;
@@ -1631,6 +1670,19 @@ static void pers_click(int mx, int my) {
     }
 }
 
+static bool system_profile_click(int sock, int mx, int my) {
+    for (int i = 0; i < g_nhots; i++) {
+        Hot *h = &g_hots[i];
+        if (h->act != ACT_PROFILE || mx < h->x || mx >= h->x + h->w ||
+            my < h->y || my >= h->y + h->h) continue;
+        uint8_t profile = (uint8_t)h->arg;
+        bool sent = fifi_app_ipc_send(sock, IPC_SYSTEM_PROFILE, &profile, 1u);
+        if (sent) g_system_profile_view = h->arg;
+        return sent;
+    }
+    return false;
+}
+
 /* ── Security click handling ─────────────────────────────────────────────── */
 static void secctl(const char *what, int on) {
     if (g_sec_pid > 0) return;
@@ -1749,6 +1801,7 @@ int main(int argc, char **argv) {
         fifi_ui_font_init_blank(&g_font, 256, 8, 16);
     alsa_init();
     cfg_load();
+    system_profile_refresh();
     font_list_scan();
     font_previews_build();
     g_accent = cfg_get_uint(FIFI_THEME_KEY_ACCENT, FIFI_THEME_DEFAULT_ACCENT);
@@ -1879,7 +1932,9 @@ int main(int argc, char **argv) {
                             }
                             else if (g_tab == TAB_SEC && lb && !prev_lb) { sec_click(mx, my); dirty = true; }
                             else if (g_tab == TAB_SYS && lb) {
-                                if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
+                                if (!prev_lb && system_profile_click(sock, mx, my)) {
+                                    dirty = true;
+                                } else if (my >= g_sl_y - 6 && my <= g_sl_y + g_sl_h + 6 &&
                                     mx >= g_sl_x && mx < g_sl_x + g_sl_w) {
                                     int nv = (mx - g_sl_x) * 100 / g_sl_w;
                                     alsa_set_vol(nv < 0 ? 0 : nv > 100 ? 100 : nv);
@@ -1948,6 +2003,7 @@ int main(int argc, char **argv) {
             last_refresh = now;
             if (g_tab == TAB_NET) net_update();
             if (g_tab == TAB_SEC) sec_update();
+            if (g_tab == TAB_SYS) system_profile_refresh();
             if (g_tab == TAB_SYS || g_tab == TAB_NET || g_tab == TAB_SEC || g_tab == TAB_WIFI)
                 dirty = true;
         }

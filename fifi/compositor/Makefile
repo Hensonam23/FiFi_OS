@@ -1,6 +1,7 @@
 CC      := gcc
 OUT     := fifi-compositor
 BUILD   := ../../build-linux
+OS_VERSION := $(shell tr -d '\r\n' < ../../VERSION)
 .DEFAULT_GOAL := all
 
 # Shadow headers must come FIRST to override kernel headers
@@ -14,6 +15,7 @@ CFLAGS := \
     -Wno-unused-parameter \
     -Wno-misleading-indentation \
     -D_GNU_SOURCE \
+    -DFIFI_OS_VERSION_STR='"V$(OS_VERSION)"' \
     $(INCLUDES)
 
 LIBINPUT_CFLAGS := $(shell pkg-config --cflags libinput 2>/dev/null)
@@ -47,7 +49,7 @@ SRCS := \
 
 OBJS := $(patsubst %.c,$(BUILD)/comp/%.o,$(notdir $(SRCS)))
 
-$(OBJS): ../shared/theme.h
+$(OBJS): ../shared/theme.h ../shared/system_profile.h
 
 .PHONY: all clean
 

@@ -1,6 +1,7 @@
 CC    := gcc
 OUT   := fifi-compositor-sdl
 BUILD := ../../../build-sdl
+OS_VERSION := $(shell tr -d '\r\n' < ../../../VERSION)
 
 SDL_CFLAGS := $(shell sdl2-config --cflags)
 SDL_LIBS   := $(shell sdl2-config --libs)
@@ -13,6 +14,7 @@ CFLAGS := \
     -std=c11 -O3 -march=native -pipe -Wall -Wextra \
     -Wno-unused-parameter -Wno-misleading-indentation \
     -D_GNU_SOURCE -DVFS_ROOT='"fifi-data"' \
+    -DFIFI_OS_VERSION_STR='"V$(OS_VERSION)"' \
     $(SDL_CFLAGS) \
     $(INCLUDES)
 

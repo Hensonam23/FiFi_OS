@@ -1,5 +1,9 @@
 #include "gui_internal.h"
 
+#ifndef FIFI_OS_VERSION_STR
+#define FIFI_OS_VERSION_STR "V1"
+#endif
+
 /* ── Status bar (top strip, 0..STATUS_H-1) ───────────────────────────── */
 
 /* Slim 4-point FiFi star (logo mark) centered at (cx,cy), arm length r. */
@@ -15,7 +19,7 @@ static void draw_fifi_star(int64_t cx, int64_t cy, int64_t r, uint32_t col) {
 }
 
 /* Horizon bar: a floating glass card at the top holding the FiFi mark, intent
- * workspace pills (Build/Research/Play), and a right status cluster
+ * system-profile pills (General/Build/Research/Play), and a right status cluster
  * (wifi · battery · clock). Matches the FiFi design language. */
 void draw_status_bar(void) {
     if (!g_theme.statusbar) return;
@@ -25,7 +29,7 @@ void draw_status_bar(void) {
      * very top edge. Zero the hit rects so a click on the covered area does nothing. */
     if (!statusbar_bottom() && any_window_maximized() && !g_statusbar_overlay) {
         g_bar_search_x = 0; g_bar_search_w = 0;
-        g_intent_w[0] = g_intent_w[1] = g_intent_w[2] = 0;
+        for (int i = 0; i < FIFI_PROFILE_COUNT; i++) g_intent_w[i] = 0;
         return;
     }
     uint64_t fb_w = console_fb_width();
@@ -69,15 +73,19 @@ void draw_status_bar(void) {
     gui_draw_str_fg(x, cy, "FiFi", 0x00e9edf3u); x += 4u*fw + 12u;
     console_blend_rect(x, by + (bh - 18u)/2u, 1u, 18u, 0x00ffffffu, 26u); x += 12u;
 
-    /* Intent workspace pills (clickable — switch the active intent). */
-    static const char *pills[3] = { "Build", "Research", "Play" };
+    /* System profile pills: each one changes real machine and compositor policy. */
+    static const char *pills[FIFI_PROFILE_COUNT] = {
+        "General", "Build", "Research", "Play"
+    };
+    extern int system_profile_active(void);
+    int active_profile = system_profile_active();
     uint64_t ph = 24u, py = by + (bh - ph)/2u;
     g_intent_y = py; g_intent_h = ph;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < FIFI_PROFILE_COUNT; i++) {
         uint64_t plen = (uint64_t)gui_strlen(pills[i]);
         uint64_t pw = plen*fw + 26u;
         g_intent_x[i] = x; g_intent_w[i] = pw;
-        if (i == g_active_intent) {
+        if (i == active_profile) {
             console_fill_rect(x, py, pw, ph, g_theme.accent);
             console_fill_rect(x + 9u, midy - 2u, 5u, 5u, 0x000a0d12u);
             gui_draw_str_fg(x + 18u, cy, pills[i], 0x000a0d12u);
@@ -417,7 +425,7 @@ void draw_desktop_info(void) {
     const char *kern_str = (platform_kernel_str && platform_kernel_str())
                          ? platform_kernel_str() : "freestanding";
     struct { const char *key; const char *val; } rows[] = {
-        { "OS",       "FiFi OS Beta 1.0"   },
+        { "OS",       "FiFi OS " FIFI_OS_VERSION_STR },
         { "Arch",     "x86_64"             },
         { "Kernel",   kern_str             },
         { "Memory",   mem_str              },
@@ -458,7 +466,7 @@ void draw_desktop_info(void) {
     gui_draw_str(tx, ty2, "FiFi OS", g_theme.accent, panel_bg);
     /* version dim text */
     uint64_t ver_x = tx + 8u * fw;
-    gui_draw_str(ver_x, ty2, "Beta 1.0", 0x00384858u, panel_bg);
+    gui_draw_str(ver_x, ty2, FIFI_OS_VERSION_STR, 0x00384858u, panel_bg);
 
     /* Separator */
     console_fill_rect(px + 4u, ty2 + fh + 2u, panel_w - 8u, 1u, 0x00182838u);

@@ -85,7 +85,7 @@ The FiFi compositor is a native, static C program that takes exclusive control o
 
 ## Current state
 
-**Beta 1.0.** The build phases (Linux foundation, compositor, shell/terminal, display/gaming, security/privacy, full system) are all complete, followed by a full-codebase audit and optimization pass. The desktop runs on real hardware with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 apps (Steam, LibreOffice, browsers), WiFi through one wpa_supplicant control path, and a full security suite.
+**V1 beta series.** The build phases (Linux foundation, compositor, shell/terminal, display/gaming, security/privacy, full system) are all complete, followed by a full-codebase audit and optimization pass. The desktop runs on real hardware with DRM/KMS display, ALSA + PipeWire audio, XWayland for X11 apps (Steam, LibreOffice, browsers), WiFi through one wpa_supplicant control path, and a full security suite. Every published source commit advances the tracked V1.xxx version while the full commit hash remains the exact update identity.
 
 Recent work:
 
@@ -248,7 +248,7 @@ What was built at each stage, and what still has to happen for v1.0 and beyond. 
 - [x] ALSA volume control: volume slider in FiFi taskbar controls real system audio
 - [x] ALSA test tone: test button plays a real sine wave at current volume via PCM ioctls
 - [x] Gamepad input: evdev HID events detected, normalized, routed to focused IPC app
-- [x] Gaming mode toggle: Settings panel button switches CPU governor and uncaps frame rate
+- [x] Workload profiles: General, Build, Research, and Play switch CPU/GPU/memory, compositor latency, and idle policy from the top bar or Settings
 - [x] FPS counter: live frame rate shown in taskbar tray when gaming mode is active
 - [x] Gamepad visualizer app: shows live button/axis state
 - [x] Launcher spawns apps: FiFi, Files, Settings, Gamepad launchable from taskbar
@@ -348,6 +348,7 @@ Phases 1 through 6 put the project at **Beta 1.0**. The phases below are what re
 #### Phase 9: Desktop/Laptop v1.0
 
 - [ ] Desktop UX polish and settings parity
+  - [x] Turn the top-bar labels into persisted General, Build, Research, and Play system profiles
 - [x] Smooth pointer and touchpad input on the real laptop
   - [x] Preserve unchanged evdev axes and multitouch slots across poll batches
   - [x] Prevent slow compositor frames from starving all pointer input

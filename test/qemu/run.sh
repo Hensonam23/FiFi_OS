@@ -28,6 +28,7 @@ WORK="$(mktemp -d)"
 QMP="$WORK/qmp.sock"
 SERIAL="$WORK/serial.log"
 SCREENSHOT="$WORK/desktop.ppm"
+PROFILE_SCREENSHOT="$WORK/profile-play.ppm"
 QEMU_LOG="$WORK/qemu.log"
 PID=""
 
@@ -89,13 +90,13 @@ if [ "$RESULT" != pass ]; then
     exit 1
 fi
 
-python3 - "$QMP" "$SCREENSHOT" <<'PY'
+python3 - "$QMP" "$SCREENSHOT" "$PROFILE_SCREENSHOT" <<'PY'
 import json
 import socket
 import sys
 import time
 
-qmp, screenshot = sys.argv[1:]
+qmp, screenshot, profile_screenshot = sys.argv[1:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(50):
     try:
@@ -119,14 +120,52 @@ for command in (
             break
         if "error" in reply:
             raise SystemExit(f"QMP command failed: {reply['error']}")
+
+# Exercise the real top-bar Play pill at 1920x1080. The synthetic pointer starts
+# in the screen center, so this relative move lands at the Play pill. A press and
+# release must reach gui_on_tick and the compositor profile controller. The
+# second screenshot verifies that Play became the selected profile.
+for events in (
+    [
+        {"type": "rel", "data": {"axis": "x", "value": -515}},
+        {"type": "rel", "data": {"axis": "y", "value": -502}},
+    ],
+    [{"type": "btn", "data": {"down": True, "button": "left"}}],
+    [{"type": "btn", "data": {"down": False, "button": "left"}}],
+):
+    stream.write(json.dumps({"execute": "input-send-event",
+                             "arguments": {"events": events}}).encode() + b"\n")
+    while True:
+        reply = json.loads(stream.readline())
+        if "return" in reply:
+            break
+        if "error" in reply:
+            raise SystemExit(f"QMP input failed: {reply['error']}")
+    time.sleep(0.15)
+time.sleep(0.5)
+stream.write(json.dumps({"execute": "screendump",
+                         "arguments": {"filename": profile_screenshot}}).encode() + b"\n")
+while True:
+    reply = json.loads(stream.readline())
+    if "return" in reply:
+        break
+    if "error" in reply:
+        raise SystemExit(f"QMP profile screenshot failed: {reply['error']}")
 sock.close()
 PY
+
+if [ -n "${FIFI_QEMU_SCREENSHOT_OUT:-}" ]; then
+    cp "$SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT"
+    cp "$PROFILE_SCREENSHOT" "$FIFI_QEMU_SCREENSHOT_OUT.profile.ppm"
+    echo "[qemu-test] screenshot saved: $FIFI_QEMU_SCREENSHOT_OUT"
+fi
 
 if [ "$MODE" = record ]; then
     python3 "$ROOT/test/qemu/screenshot_diff.py" record "$SCREENSHOT" "$BASELINE"
 else
     python3 "$ROOT/test/qemu/screenshot_diff.py" check "$SCREENSHOT" "$BASELINE"
 fi
+python3 "$ROOT/test/qemu/profile_click.py" "$SCREENSHOT" "$PROFILE_SCREENSHOT"
 
 grep -a 'FIFI_SELFTEST PASS' "$SERIAL" | tail -1
 echo "[qemu-test] boot, non-root app, and screenshot checks passed"

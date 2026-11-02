@@ -8,6 +8,20 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "[test-release] CI embeds the exact workflow commit in release images"
+version="$(tr -d '\r\n' < "$ROOT/VERSION")"
+[[ "$version" =~ ^1\.([0-9]{3,})$ ]]
+if previous="$(git -C "$ROOT" show HEAD^:VERSION 2>/dev/null)"; then
+    previous="${previous//$'\r'/}"; previous="${previous//$'\n'/}"
+    [[ "$previous" =~ ^1\.([0-9]{3,})$ ]]
+    previous_build=$((10#${BASH_REMATCH[1]}))
+    current_build=$((10#${version#1.}))
+    (( current_build > previous_build )) || {
+        echo "VERSION must advance in every commit (V$previous -> V$version)" >&2
+        exit 1
+    }
+fi
+grep -Fq 'FIFI_OS_VERSION="$(tr -d' "$ROOT/scripts/build-initramfs.sh"
+grep -Fq "FiFi OS linux-desktop V%s" "$ROOT/scripts/build-initramfs.sh"
 grep -Fq 'FIFI_BUILD_ID: ${{ github.sha }}' \
     "$ROOT/.github/workflows/linux-desktop.yml"
 grep -Fq 'FIFI_BUILD_ID="${FIFI_BUILD_ID:-${GITHUB_SHA:-}}"' \
@@ -21,6 +35,7 @@ LOG="$TMP/gh.log"
 mkdir -p "$REPO/scripts" "$REPO/security" "$REPO/build-linux/update-test" \
     "$MOCK_BIN"
 cp "$ROOT/scripts/publish-test-update.sh" "$REPO/scripts/"
+cp "$ROOT/VERSION" "$REPO/VERSION"
 printf '/build-linux/\n' > "$REPO/.gitignore"
 
 openssl genpkey -algorithm ED25519 \
@@ -32,7 +47,7 @@ git -C "$REPO" init -q
 git -C "$REPO" config user.name 'FiFi release test'
 git -C "$REPO" config user.email 'release-test@invalid'
 printf 'release test\n' > "$REPO/README"
-git -C "$REPO" add .gitignore README scripts/publish-test-update.sh \
+git -C "$REPO" add .gitignore README VERSION scripts/publish-test-update.sh \
     security/release-signing-public.pem
 git -C "$REPO" commit -qm 'Create release test fixture'
 BUILD_ID="$(git -C "$REPO" rev-parse HEAD)"
@@ -45,6 +60,7 @@ initramfs_sha="$(sha256sum "$REPO/build-linux/update-test/initramfs.cpio.gz" | a
 cat > "$REPO/build-linux/update-test/fifi-update.manifest" <<EOF
 format=1
 channel=test
+version=V$version
 build=$BUILD_ID
 kernel_sha256=$kernel_sha
 initramfs_sha256=$initramfs_sha
@@ -110,6 +126,7 @@ git -C "$REPO" checkout -q -- build-linux/update-test/bzImage 2>/dev/null || \
 iso_sha="$(sha256sum "$REPO/build-linux/fifi-linux.iso" | awk '{print $1}')"
 cat > "$REPO/build-linux/fifi-linux.iso.release-info" <<EOF
 format=1
+version=V$version
 build=$BUILD_ID
 kernel_sha256=$kernel_sha
 initramfs_sha256=$initramfs_sha

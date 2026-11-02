@@ -402,8 +402,9 @@ uint64_t g_cpu_tray_x = 0, g_cpu_tray_w = 0;
 uint64_t g_net_tray_x = 0, g_net_tray_w = 0;
 uint64_t g_mem_tray_x = 0, g_mem_tray_w = 0;
 int      g_tray_hover = TRAY_NONE;
-int      g_active_intent = 0;
-uint64_t g_intent_x[3] = {0,0,0}, g_intent_w[3] = {0,0,0}, g_intent_y = 0, g_intent_h = 0;
+uint64_t g_intent_x[FIFI_PROFILE_COUNT] = {0};
+uint64_t g_intent_w[FIFI_PROFILE_COUNT] = {0};
+uint64_t g_intent_y = 0, g_intent_h = 0;
 uint64_t g_bar_search_x = 0, g_bar_search_w = 0, g_bar_search_y = 0, g_bar_search_h = 0;
 
 static void tray_item_region(int id, uint64_t *x, uint64_t *w) {
